@@ -153,8 +153,10 @@ on:
   # binary's contract (`crates/sceneworks-memory-adapter/src/bin/{candle,mlx}.rs` read them
   # via `required_env`), so renaming them would break the five-rung capture at runtime.
   #
-  # GitHub caps workflow_dispatch at 10 inputs. Renaming rather than adding a parallel
-  # provision_* family keeps the generalized provisioning and terminal profiles within that cap.
+  # GitHub caps workflow_dispatch at 25 inputs (it was 10 when this block was written; the old cap
+  # is gone -- memory-catalog-campaign.yml declares 14 and was dispatched with them, e.g. run
+  # 34790766133). Renaming rather than adding a parallel provision_* family still keeps one
+  # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
       run_five_rung_reference:
@@ -201,6 +203,11 @@ on:
         default: false
       run_epic_20738_terminal_cuda:
         description: "Run the frozen SC-20945 19-cell terminal CUDA profile once"
+        required: false
+        type: boolean
+        default: false
+      run_yue2_terminal_cuda:
+        description: "Run the sc-23002 YuE2 terminal acceptance matrix and memory profile once (needs inference_revision = the Cargo pin)"
         required: false
         type: boolean
         default: false
@@ -309,8 +316,10 @@ concurrency:
 
 jobs:
   candle-worker:
-    # Same-repo only — never execute untrusted fork code on the self-hosted runner.
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
+    # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
+    # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) }}
     # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
     # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
     # runs retain a unique group and therefore the full four-listener pool.
@@ -1417,3 +1426,133 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1
+
+  # SC-23002 (epic 22988) terminal evidence for YuE2 on CUDA: the acceptance matrix through the real
+  # app (the release API built with backend-candle, a worker from the same binary, the registered
+  # `yue2` provider on this card) and, once, the memory-profile campaign through the job path.
+  # Dispatch only, at the frozen feature head:
+  #   gh workflow run windows-candle.yml --ref <branch> -f run_yue2_terminal_cuda=true -f inference_revision=<Cargo pin>
+  # The app state (a FRESH per-run Hugging Face home the cold install downloads into (~11 GB), the
+  # derived q8/q4 tiers, projects -- and the CC BY-NC 4.0 audio) lives on E: under a per-run directory
+  # and is NEVER uploaded; the artifact carries records, receipts, hashes and logs only. The shared
+  # E:\huggingface\hub is never touched: a preseeded hub is not cold-install evidence. Remove
+  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. A `pass-with-blockers`
+  # acceptance verdict (the blocked AT2 transcription path) exits non-zero and fails this job: an
+  # open owner decision is never reported green.
+  # Runbook: docs/epic-22988-yue2-terminal.md.
+  yue2-terminal-cuda:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    # One release build, the acceptance matrix (a cold install with q8/q4 derivation and a few dozen
+    # short renders) and five profile captures, strictly serial on one card.
+    timeout-minutes: 720
+    env:
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      YUE2_TERMINAL_STATE: 'E:\sceneworks-terminal\sc-23002-yue2\${{ github.run_id }}-${{ github.run_attempt }}'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate the YuE2 terminal dispatch
+        shell: powershell
+        env:
+          INFERENCE_REVISION: ${{ inputs.inference_revision }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+        run: |
+          if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true') {
+            throw 'the YuE2 terminal profile cannot share a dispatch with another measurement flag'
+          }
+          if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
+            throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          $pin = Select-String -Path 'Cargo.toml' -Pattern 'SceneWorks/inference", rev = "([0-9a-f]{40})"' | Select-Object -First 1
+          if (-not $pin -or $pin.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
+            throw 'inference_revision must equal the Cargo.toml inference pin this build links'
+          }
+          if (Test-Path -LiteralPath $env:YUE2_TERMINAL_STATE) {
+            throw "the terminal state directory $env:YUE2_TERMINAL_STATE already exists; the acceptance run starts cold"
+          }
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the YuE2 terminal build
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for the YuE2 terminal harnesses
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the YuE2 terminal build
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned inference release for the YuE2 terminal build
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      # The profile harness derives the `candle:yue2` closure digest from this exact source.
+      - name: Check out the exact YuE2 terminal inference source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_revision }}
+          path: .terminal/inference
+          persist-credentials: false
+      - name: Build the release API with backend-candle
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          echo .terminal/>>.git\info\exclude
+          cargo build --release --locked -p sceneworks-rust-api --features backend-candle
+      - name: Run the YuE2 terminal acceptance matrix (CUDA)
+        id: yue2_acceptance
+        continue-on-error: true
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe
+      # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
+      # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
+      - name: Run the YuE2 memory profile campaign (CUDA)
+        id: yue2_profile
+        continue-on-error: true
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          set HF_HUB_CACHE=
+          set HUGGINGFACE_HUB_CACHE=
+          set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
+          node scripts\yue2-memory-profile.mjs run --backend cuda --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+      - name: Upload the YuE2 terminal records and receipts (no audio)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sc-23002-yue2-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/acceptance/evidence/
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/case.json
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/admission.json
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/stages.jsonl
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/outcome.json
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/record.json
+            !**/*.wav
+          if-no-files-found: error
+      - name: Enforce the YuE2 terminal verdict after receipt upload
+        if: ${{ always() }}
+        shell: powershell
+        env:
+          ACCEPTANCE_OUTCOME: ${{ steps.yue2_acceptance.outcome }}
+          PROFILE_OUTCOME: ${{ steps.yue2_profile.outcome }}
+        run: |
+          if ($env:ACCEPTANCE_OUTCOME -ne 'success' -or $env:PROFILE_OUTCOME -ne 'success') {
+            throw "YuE2 terminal evidence failed after upload: acceptance $env:ACCEPTANCE_OUTCOME, profile $env:PROFILE_OUTCOME"
+          }

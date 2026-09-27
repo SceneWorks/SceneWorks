@@ -522,8 +522,8 @@ function dispatchInputs(workflow) {
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
-    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
-    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    // helper backs the input-cap check. A narrower pattern would silently skip an input and let a
+    // workflow GitHub rejects sail through under the cap.
     const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
     if (header) {
       current = header[1];
@@ -541,10 +541,10 @@ test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", a
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
 
-  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
-  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
-  // a future story that adds an input needs the headroom this preserves.
-  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+  // GitHub rejects a workflow_dispatch with more than 25 inputs (the cap was 10 when the Krea
+  // inputs were RENAMED rather than shadowed; memory-catalog-campaign.yml now dispatches with 14,
+  // e.g. run 34790766133). One provisioning path is enforced below, independently of the cap.
+  assert.ok(names.length <= 25, `workflow_dispatch allows at most 25 inputs, found ${names.length}`);
 
   for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
     assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
@@ -920,7 +920,7 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
   const workflow = await source(".github/workflows/windows-candle.yml");
   const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the imported NVFP4 smoke job");
-  const job = workflow.slice(at);
+  const job = jobBlock(workflow, at);
 
   assert.match(job, /^ {4}needs: candle-worker$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
@@ -939,6 +939,79 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
     /cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1/,
   );
   assert.doesNotMatch(job, /continue-on-error:/);
+});
+
+// One job's text: from its header to the next top-level job header (or the end of the file), so a
+// job added after it is never read as part of it.
+function jobBlock(workflow, at) {
+  const rest = workflow.slice(at + 1);
+  const next = rest.search(/\n  [A-Za-z0-9_-]+:\n/);
+  return workflow.slice(at, next === -1 ? undefined : at + 1 + next + 1);
+}
+
+// SC-23002: the YuE2 terminal CUDA evidence job. Dispatch-only, one real-weights card shared with the
+// other GPU-measuring jobs, the release app built with backend-candle, the acceptance driver and the
+// profile campaign, receipts uploaded before the verdict -- and never the CC BY-NC audio.
+test("windows-candle runs the YuE2 terminal acceptance and profile only on dispatch, on the real-weights card", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision"));
+  assert.equal(defaults.run_yue2_terminal_cuda, "false");
+  const at = workflow.indexOf("  yue2-terminal-cuda:\n");
+  assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
+  const job = jobBlock(workflow, at);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda \}\}$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {6}cancel-in-progress: false$/m);
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+  // A fresh per-run Hugging Face home: the shared runner hub is never cold-install evidence, so no
+  // line of code in this job names it or pins HF_HUB_CACHE.
+  const jobCode = job.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  assert.doesNotMatch(jobCode, /huggingface\\hub/);
+  assert.doesNotMatch(jobCode, /HF_HUB_CACHE: /);
+  // The ordinary lane stands down for this dispatch: it would share the measured GPU.
+  const candleWorker = jobBlock(workflow, workflow.indexOf("  candle-worker:\n"));
+  assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda\)/m);
+
+  const step = (name) => {
+    const start = job.indexOf(`      - name: ${name}\n`);
+    assert.ok(start >= 0, `the YuE2 terminal job must keep a step named ${name}`);
+    const next = job.indexOf("\n      - ", start + 1);
+    return job.slice(start, next === -1 ? undefined : next);
+  };
+  const validate = step("Validate the YuE2 terminal dispatch");
+  assert.match(validate, /throw 'the YuE2 terminal profile cannot share a dispatch with another measurement flag'/);
+  assert.match(validate, /inference_revision must equal the Cargo\.toml inference pin/);
+  assert.match(step("Disable unstable sccache wrapper for the YuE2 terminal build"), /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
+  const inference = step("Check out the exact YuE2 terminal inference source");
+  assert.match(inference, /repository: SceneWorks\/inference/);
+  assert.match(inference, /ref: \$\{\{ inputs\.inference_revision \}\}/);
+  assert.match(inference, /persist-credentials: false/);
+  const vcvars = /call "C:\\Program Files \(x86\)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64\.bat"\n {10}set NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64/;
+  const build = step("Build the release API with backend-candle");
+  assert.match(build, vcvars);
+  assert.match(build, /cargo build --release --locked -p sceneworks-rust-api --features backend-candle/);
+  const acceptance = step("Run the YuE2 terminal acceptance matrix (CUDA)");
+  assert.match(acceptance, vcvars);
+  assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-home "%YUE2_TERMINAL_STATE%\\hf-home" --api-bin target\\release\\sceneworks-rust-api\.exe/);
+  const profile = step("Run the YuE2 memory profile campaign (CUDA)");
+  assert.match(profile, vcvars);
+  // The profile resolves the acceptance run's installed weights from the same per-run HF home.
+  assert.match(profile, /set HF_HUB_CACHE=\n {10}set HUGGINGFACE_HUB_CACHE=\n {10}set HF_HOME=%YUE2_TERMINAL_STATE%\\hf-home\n/);
+  assert.match(profile, /node scripts\\yue2-memory-profile\.mjs run --backend cuda .*--inference-repo "%GITHUB_WORKSPACE%\\\.terminal\\inference" --data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
+  assert.match(job, /^ {6}YUE2_TERMINAL_STATE: 'E:\\/m);
+  // Receipts only: the app state (which holds the audio) is never an upload path, and audio is excluded.
+  const upload = step("Upload the YuE2 terminal records and receipts (no audio)");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /!\*\*\/\*\.wav/);
+  assert.doesNotMatch(upload, /YUE2_TERMINAL_STATE|app-data|E:\\/);
+  // The verdict is enforced only after the receipts are uploaded, and covers both harnesses.
+  const verdict = step("Enforce the YuE2 terminal verdict after receipt upload");
+  assert.ok(job.indexOf("Upload the YuE2 terminal records") < job.indexOf("Enforce the YuE2 terminal verdict"));
+  assert.match(verdict, /steps\.yue2_acceptance\.outcome/);
+  assert.match(verdict, /steps\.yue2_profile\.outcome/);
+  assert.match(verdict, /if \(\$env:ACCEPTANCE_OUTCOME -ne 'success' -or \$env:PROFILE_OUTCOME -ne 'success'\) \{/);
+  assert.match(verdict, /throw "YuE2 terminal evidence failed after upload/);
 });
 
 test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
