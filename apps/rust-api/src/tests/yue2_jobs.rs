@@ -172,6 +172,9 @@ async fn a_create_batch_queues_serial_takes_with_their_own_runs_and_seeds() {
         assert_eq!(payload["modelManifestEntry"]["id"], "yue2");
         assert_eq!(payload["commercialUse"], false);
         assert_eq!(payload["usagePolicy"]["nonCommercial"], true);
+        // The catalog's declared licence identifier travels in the policy (sc-22988 review item
+        // 15). Mutation that reds this: removing `license` from the builtin yue2 entry.
+        assert_eq!(payload["usagePolicy"]["license"]["license"], "CC-BY-NC-4.0");
         assert_eq!(
             payload["usagePolicy"]["commercialUse"]["verdict"],
             "refused"

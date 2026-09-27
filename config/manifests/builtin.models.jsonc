@@ -27370,6 +27370,7 @@
       "experimental": true,
       "nonCommercial": true,
       "requiresLicenseAcknowledgment": true,
+      "license": "CC-BY-NC-4.0",
       "licenseNotice": "YuE2 is an EXPERIMENTAL model offered for NONCOMMERCIAL use only. Its weights (YuE2-3B and the YuE2-Vae / YuE2-Vae-legacy decoders, by Multimodal Art Projection) are licensed under Creative Commons Attribution-NonCommercial 4.0 International (CC BY-NC 4.0): the licence grants use for NonCommercial purposes only — \"not primarily intended for or directed towards commercial advantage or monetary compensation\" — and requires attribution whenever the material is shared. The qwen.tiktoken text tokenizer in the same repository is Alibaba Cloud's Qwen tokenizer under the Tongyi Qianwen License Agreement, which the weight licence does not replace. SceneWorks downloads these files directly from the upstream m-a-p repositories (it does not re-host them); a q8 or q4 tier is derived on this machine from that original. For commercial use, choose YuE1 (the separate YuE lyrics-to-song models) instead; that choice concerns the model weights only and does not clear rights in your lyrics, reference recordings or generated audio.",
       "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca688d6ae5d7f0feb88573fec89920fcd19/LICENSE",
       "commercialUse": {
@@ -28530,7 +28531,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "75972d2382ba9bb415e9c3e2d260f5093c17669337f299eeb67729e476e3408c",
+              "sha256": "2d4f3f11a3b9788aea43e46a068e2758cace68babd246ce58ba6a3cd33731286",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28649,8 +28650,8 @@
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
-                  "byteSize": 160048,
-                  "sha256": "e2e407f975f2e1b5fee9b7fb4601f4d06517fc58e2748a46ceee3fd3d5a62b7c"
+                  "byteSize": 160436,
+                  "sha256": "39cf875680250b26f0ce91996f039ee3e5ab013cd1c81115057a4070a15aee1a"
                 },
                 {
                   "path": "release/starvector-terminal-campaign-v1.json",

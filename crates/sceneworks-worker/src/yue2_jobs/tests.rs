@@ -83,7 +83,7 @@ async fn spawn_api(state: ApiState) -> String {
     async fn eligibility(State(s): State<ApiState>) -> Response {
         s.eligibility_calls.fetch_add(1, Ordering::SeqCst);
         match *s.refusal.lock().unwrap() {
-            None => Json(json!({"eligible": true, "usagePolicy": {"modelId": "yue2", "nonCommercial": true, "checkedAt": "execution"}})).into_response(),
+            None => Json(json!({"eligible": true, "usagePolicy": {"modelId": "yue2", "nonCommercial": true, "checkedAt": "execution", "license": {"license": "CC-BY-NC-4.0"}}})).into_response(),
             Some((status, code)) => (
                 HttpStatus::from_u16(status).unwrap(),
                 Json(json!({"detail": format!("refused: {code}"), "code": code})),
@@ -753,6 +753,11 @@ async fn a_create_job_maps_every_setting_and_publishes_a_library_asset() {
     assert!(
         text.contains("NONCOMMERCIAL USE ONLY"),
         "the WAV names its noncommercial licence"
+    );
+    // ICOP is built from the granted policy's declared licence identifier.
+    assert!(
+        text.contains("Generated with YuE2 (weights: CC-BY-NC-4.0)"),
+        "the WAV's ICOP names the policy's licence"
     );
     let decoded = crate::audio_jobs::read_wav_pcm16(&media).expect("the tagged WAV still decodes");
     assert_eq!(decoded.sample_rate, 48_000);
@@ -2317,18 +2322,30 @@ mod real_weights {
 
 /// The INFO tags are read from the granted policy: a noncommercial policy says so; a policy that
 /// does not declare it does not. Mutation that reds this: dropping the `nonCommercial` check.
+/// The licence is the policy's declared identifier (`license.license`, from the catalog's
+/// `license`), never parsed out of the notice prose.
 #[test]
 fn wav_licence_info_follows_the_usage_policy() {
     let noncommercial = json!({
         "nonCommercial": true,
         "experimental": true,
-        "license": {"license": null, "notice": "licensed under (CC BY-NC 4.0): terms", "url": "https://x/LICENSE"}
+        "license": {"license": "CC-BY-NC-4.0", "notice": "licensed under (CC BY-NC 4.0): terms", "url": "https://x/LICENSE"}
     });
     let tags = super::wav_licence_info(&noncommercial);
     assert_eq!(&tags[0].0, b"ICOP");
     assert_eq!(
         tags[0].1,
-        "Generated with YuE2 (weights: CC BY-NC 4.0). NONCOMMERCIAL USE ONLY"
+        "Generated with YuE2 (weights: CC-BY-NC-4.0). NONCOMMERCIAL USE ONLY"
+    );
+    // No declared identifier: the notice is not mined for one.
+    // Mutation that reds this: restoring the notice-parsing fallback.
+    let undeclared = json!({
+        "nonCommercial": true,
+        "license": {"license": null, "notice": "licensed under (CC BY-NC 4.0): terms"}
+    });
+    assert_eq!(
+        super::wav_licence_info(&undeclared)[0].1,
+        "Generated with YuE2 (weights: see the model licence). NONCOMMERCIAL USE ONLY"
     );
     assert_eq!(
         tags[1].1,
