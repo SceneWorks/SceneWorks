@@ -874,9 +874,17 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(record.usagePolicy).toEqual(POLICY);
     expect(record.effectiveSettings).toEqual({ seed: 7, tier: "q8", decoder: "standard" });
     expect(record.audio[0].usagePolicy).toEqual(POLICY);
-    expect(await readBlob(blobs[1])).toBe("X:1\nK:C\nC4|");
+    const abc = await readBlob(blobs[1]);
+    // The exported score names its licence on its first line, then the score unchanged.
+    expect(abc.split("\n")[0]).toBe(
+      "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY · experimental model",
+    );
+    expect(abc.split("\n").slice(1).join("\n")).toBe("X:1\nK:C\nC4|");
     expect(anchors).toContain("yue2-run-job_trunc-noncommercial.json");
     expect(anchors).toContain("yue2-score-job_trunc-noncommercial.abc");
+    // The take downloads under the licence-marked name, never its style text.
+    const audioLink = [...card.querySelectorAll("a[download]")].map((anchor) => anchor.getAttribute("download"));
+    expect(audioLink).toEqual(["yue2-song-asset_song-noncommercial.wav"]);
   });
 
   it("decodes a finished song again with the chosen decoder", async () => {
@@ -920,14 +928,18 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("saves presets that visibly retain the model version and licence", async () => {
     await openEnabledLab();
     await typeText(byLabel(lab(), "Style"), "shoegaze");
+    await choose(byLabel(lab(), "Tier"), "q8");
     await type(byLabel(lab(), "Preset name"), "Wall of sound");
     await click(buttonStarting(lab(), "Save preset"));
     const presets = lab().querySelector('[data-testid="yue2-presets"]');
     expect(presets.textContent).toContain("Wall of sound");
     expect(presets.textContent).toContain("YuE2 (v2) · CC BY-NC 4.0 · Noncommercial");
     await typeText(byLabel(lab(), "Style"), "changed");
+    await choose(byLabel(lab(), "Tier"), "bf16");
     await click(buttonWithText(presets, "Wall of sound"));
-    expect(byLabel(lab(), "Style").value).toBe("shoegaze");
+    // A preset restores controls; free text (style, lyrics, scores) is never part of a preset.
+    expect(byLabel(lab(), "Tier").value).toBe("q8");
+    expect(byLabel(lab(), "Style").value).toBe("changed");
   });
 
   it("installs a derived tier through the deriver when YuE2 is not installed", async () => {
@@ -948,5 +960,282 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     // Nothing can run until it is installed.
     await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
     expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+  });
+  // ---- fix pass: E2 downloads, seeds, disabled controls, ack mirror, badges, drafts ------------
+
+  it("names a version's exported score with its licence on the first line", async () => {
+    const blobs = [];
+    vi.spyOn(URL, "createObjectURL").mockImplementation((blob) => {
+      blobs.push(blob);
+      return "blob:x";
+    });
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const names = [];
+    const realClick = window.HTMLAnchorElement.prototype.click;
+    vi.spyOn(window.HTMLAnchorElement.prototype, "click").mockImplementation(function recordClick() {
+      names.push(this.download);
+      return realClick.call(this);
+    });
+    await openEnabledLab();
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle();
+    await click(buttonStarting(lab().querySelector('[data-testid="yue2-score-workbench"]'), "Score (.abc)"));
+    const abc = await readBlob(blobs.at(-1));
+    expect(abc.split("\n")[0]).toContain("NONCOMMERCIAL USE ONLY");
+    expect(abc.split("\n")[0]).toContain("CC BY-NC 4.0");
+    expect(abc.split("\n")[1]).toBe("X:1");
+    expect(names.at(-1)).toBe("yue2-score-ver_1-noncommercial.abc");
+  });
+
+  it("strips the export header when an exported score is pasted back in", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await click(buttonWithText(lab(), "Supply an ABC score"));
+    await typeText(
+      byLabel(lab(), "Supplied ABC score"),
+      "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY\nX:1\nK:C\nC4|",
+    );
+    await click(buttonWithText(lab(), "Generate song"));
+    await settle();
+    expect(lastJobBody().score).toBe("X:1\nK:C\nC4|");
+  });
+
+  it("sends a seed of 2^53 - 1 exactly and refuses a larger one", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await click(buttonStarting(lab(), "Advanced"));
+    await type(byLabel(lab(), "Seed"), "9007199254740991");
+    await click(buttonWithText(lab(), "Generate song"));
+    await settle();
+    expect(calls("/yue2/jobs").at(-1)[2].body).toContain('"seed":9007199254740991');
+    expect(lastJobBody().seed).toBe(Number.MAX_SAFE_INTEGER);
+    const sent = calls("/yue2/jobs").length;
+    await type(byLabel(lab(), "Seed"), "9007199254740993");
+    const generate = buttonWithText(lab(), "Generate song");
+    expect(generate.disabled).toBe(true);
+    expect(lab().querySelector('[data-testid="yue2-compose"]').textContent).toContain(
+      "The seed must be a whole number from 0 to 9007199254740991.",
+    );
+    expect(calls("/yue2/jobs").length).toBe(sent);
+  });
+
+  it("refuses an import seed beyond 2^53 - 1 with a sentence, sending nothing", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(buttonStarting(lab(), "Import ABC"));
+    await typeText(byLabel(lab(), "ABC score to import"), "X:1\nK:C\nC4|");
+    await type(byLabel(lab(), "Import seed"), "9007199254740993");
+    await click(buttonWithText(lab(), "Save version"));
+    await settle();
+    expect(lab().querySelector('[data-testid="yue2-import-error"]').textContent).toContain(
+      "The seed must be a whole number from 0 to 9007199254740991.",
+    );
+    expect(calls("/yue2/score-versions", "POST")).toHaveLength(0);
+  });
+
+  it("disables the controls a restored-plan render does not read, with the reason", async () => {
+    const plan = {
+      id: "job_plan",
+      type: "audio_generate",
+      status: "completed",
+      projectId: "project_1",
+      createdAt: "2026-09-01T00:00:00Z",
+      payload: { yue2: { kind: "plan", style: "folk" }, usagePolicy: POLICY },
+      result: { yue2: { run: { kind: "plan", dir: "yue2/runs/x", identity: "ab", planIdentity: "cd" }, usagePolicy: POLICY } },
+    };
+    await openEnabledLab(context({ jobs: [plan] }));
+    await click(buttonStarting(lab(), "Advanced"));
+    await type(byLabel(lab(), "Takes"), "3");
+    await type(byLabel(lab(), "Seed"), "42");
+    expect(byLabel(lab(), "Takes").disabled).toBe(false);
+    await click(buttonWithText(lab(), "Restore a saved plan"));
+    for (const [label, reason] of [
+      ["Takes", "Not used by a From saved plan job: a restored plan, a score version and a cached decode render the same take every time."],
+      ["Seed", "Not used by a From saved plan job: a saved plan fixes it (an edited plan is a new request)."],
+      ["Guidance", "Not used by a From saved plan job: a saved plan fixes it (an edited plan is a new request)."],
+    ]) {
+      expect(byLabel(lab(), label).disabled, label).toBe(true);
+      expect(byLabel(lab(), label).title, label).toBe(reason);
+    }
+    // Plan-only: synthesis controls are disabled with the plan-only reason.
+    await click(buttonWithText(lab(), "Sample a new plan"));
+    await click(lab().querySelector('[data-testid="yue2-compose"] input[type="checkbox"]'));
+    expect(byLabel(lab(), "ODE steps").disabled).toBe(true);
+    expect(byLabel(lab(), "ODE steps").title).toBe(
+      "Not used by a Plan only job: a plan-only job stops after planning the score.",
+    );
+    expect(byLabel(lab(), "Offload").disabled).toBe(true);
+    expect(byLabel(lab(), "Stage residency").disabled).toBe(true);
+    expect(byLabel(lab(), "Semantic sampling Temperature").closest("fieldset").disabled).toBe(true);
+    expect(byLabel(lab(), "Seed").disabled).toBe(false);
+  });
+
+  it("clears the browser licence flag when the server says the acceptance lapsed", async () => {
+    window.localStorage.setItem("sceneworks-license-ack:yue2", "true");
+    apiFetchMock.mockImplementation(router({ ack: false }));
+    seedLab();
+    await render(context());
+    expect(container.querySelector('[data-testid="yue2-gate"]')).toBeTruthy();
+    expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBeNull();
+  });
+
+  it("clears the browser licence flag on a license_acknowledgment_required refusal", async () => {
+    await openEnabledLab(context(), {
+      ack: true,
+      handle: async (path, method) => {
+        if (path.endsWith("/yue2/jobs") && method === "POST") {
+          throw new ApiError("requires accepting its license", { status: 403, code: "license_acknowledgment_required" });
+        }
+        return undefined;
+      },
+    });
+    expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBe("true");
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await click(buttonWithText(lab(), "Generate song"));
+    await settle();
+    expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBeNull();
+  });
+
+  it("marks a completed but truncated run, and a truncated version render, as such", async () => {
+    await openEnabledLab(context({ jobs: [TRUNCATED], assets: [SONG_ASSET] }));
+    const badge = container.querySelector('[data-testid="yue2-run-status"]');
+    expect(badge.textContent).toBe("completed · truncated");
+    expect(badge.className).toBe("status-badge warning");
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle();
+    // ver_1's render in the router is not truncated: plain completed.
+    expect(lab().querySelector('[data-testid="yue2-render-status"]').textContent).toBe("completed");
+  });
+
+  it("marks a completed run whose truncation is unknown", async () => {
+    const unknown = { ...TRUNCATED, id: "job_unknown", result: { ...TRUNCATED.result, yue2: { ...TRUNCATED.result.yue2, truncated: null } } };
+    await openEnabledLab(context({ jobs: [unknown], assets: [SONG_ASSET] }));
+    const badge = container.querySelector('[data-testid="yue2-run-status"]');
+    expect(badge.textContent).toBe("completed · truncation unknown");
+  });
+
+  it("keeps a supplied score too large to restore visibly session-only, with the durable way out", async () => {
+    await openEnabledLab();
+    await click(buttonWithText(lab(), "Supply an ABC score"));
+    const huge = `X:1\n${"C4|".repeat(6000)}`;
+    await typeText(byLabel(lab(), "Supplied ABC score"), huge);
+    const note = lab().querySelector('[data-testid="yue2-session-only-note"]');
+    expect(note.textContent).toContain("Kept for this session only");
+    await click(buttonWithText(note, "Import it as a score version"));
+    await settle();
+    expect(byLabel(lab(), "ABC score to import").value).toBe(huge);
+  });
+
+  it("keeps an in-progress edit draft across a tab change", async () => {
+    await openEnabledLab();
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle();
+    await choose(byLabel(lab(), "Edit operation"), "set_style");
+    await type(byLabel(lab(), "Edit brief"), "moodier");
+    await click(buttonWithText(lab(), "Compose"));
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    expect(byLabel(lab(), "Edit operation").value).toBe("set_style");
+    expect(byLabel(lab(), "Edit brief").value).toBe("moodier");
+    await wait(500);
+    expect(persistMock.mock.calls.at(-1)[0].advancedStudio.project_1.yue2lab.editDraft.brief).toBe("moodier");
+  });
+
+  it("refuses to submit without a workspace, saying so", async () => {
+    seedStudioSettingsFromServer({ default: { audio: { songLab: true }, yue2lab: ENABLED_SETTINGS } });
+    apiFetchMock.mockImplementation(router({ ack: true }));
+    await render(context({ activeProject: null }));
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+    expect(lab().querySelector('[data-testid="yue2-compose"]').textContent).toContain("Open or create a workspace first.");
+  });
+
+  it("sends strip_chords with the core's capitalised voice name", async () => {
+    let editBody = null;
+    await openEnabledLab(context(), {
+      ack: true,
+      handle: async (path, method, options) => {
+        if (path.endsWith("/edits") && method === "POST") {
+          editBody = JSON.parse(options.body);
+          return { dryRun: true, renderNotice: NOTICE, version: { id: "v", edit: { invariants: { match: true, checks: [], violations: [] } } } };
+        }
+        return undefined;
+      },
+    });
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle();
+    await choose(byLabel(lab(), "Edit operation"), "strip_chords");
+    await choose(lab().querySelector('[data-testid="yue2-edit-panel"] .yue2-edit-fields select'), "Vocal");
+    await type(byLabel(lab(), "Edit brief"), "melody only");
+    await click(buttonWithText(lab(), "Check edit"));
+    await settle();
+    expect(editBody.operation).toEqual({ op: "strip_chords", keepVoice: "Vocal" });
+  });
+
+  it("refreshes the compare render picker when a render finishes", async () => {
+    let renders = [];
+    const ctx = context();
+    await openEnabledLab(ctx, {
+      ack: true,
+      handle: async (path) => {
+        if (path === "/api/v1/projects/project_1/yue2/score-versions/ver_2") {
+          return { version: { ...VERSION_RECORD, id: "ver_2" }, renders };
+        }
+        return undefined;
+      },
+    });
+    await click(buttonWithText(lab(), "Compare"));
+    await settle();
+    await choose(byLabel(lab(), "Version B"), "ver_2");
+    await settle();
+    expect([...byLabel(lab(), "Render B").options].map((option) => option.value)).toEqual([""]);
+    renders = [{ id: "rnd_new", status: "completed", audioAssetId: "asset_song", truncated: { abc: false, semantic: false } }];
+    const done = {
+      id: "job_render_done",
+      type: "audio_generate",
+      status: "completed",
+      projectId: "project_1",
+      createdAt: "2026-09-04T00:00:00Z",
+      payload: { yue2: { kind: "renderVersion", versionId: "ver_2" }, usagePolicy: POLICY },
+      result: { yue2: { renderRecordId: "rnd_new", usagePolicy: POLICY } },
+    };
+    await render({ ...ctx, jobs: [done] });
+    await settle();
+    expect([...byLabel(lab(), "Render B").options].map((option) => option.value)).toEqual(["", "rnd_new"]);
+  });
+
+  it("offers the standard models' downloads on the standard surface when only YuE2 is installed", async () => {
+    const offerable = { ...KOKORO, installState: "missing", recommended: true };
+    const ctx = context({ models: [offerable, YUE1, yue2Entry()] });
+    await render(ctx);
+    // The studio opens (the Song Lab is reachable) …
+    expect(container.querySelector('[data-testid="yue2-lab-tab"]')).toBeTruthy();
+    // … and the standard surface still offers the recommended standard download.
+    const form = container.querySelector("form.studio-shell");
+    expect(form.hidden).toBe(false);
+    expect(form.textContent).toContain("No standard audio model installed");
+    await click(buttonWithText(form, "Download"));
+    expect(ctx.createModelDownloadJob).toHaveBeenCalledWith(offerable);
+  });
+  it("labels a YuE2 take in the standard results with version and licence, and downloads it marked", async () => {
+    const song = { ...SONG_ASSET, recipe: { model: "yue2", prompt: "ballad" }, extra: { yue2: {}, usagePolicy: POLICY } };
+    await render(context({ recentAudioAssets: [song], assets: [song] }));
+    const group = container.querySelector('[data-testid="audio-run-group"]');
+    expect(group.textContent).toContain("YuE2 · Experimental");
+    expect(group.textContent).toContain("YuE2 (v2)");
+    expect(group.textContent).toContain("CC BY-NC 4.0");
+    expect(group.querySelector('[data-testid="audio-take-card"] a[download]').getAttribute("download")).toBe(
+      "yue2-song-asset_song-noncommercial.wav",
+    );
   });
 });

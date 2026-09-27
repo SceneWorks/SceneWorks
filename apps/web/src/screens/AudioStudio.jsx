@@ -864,6 +864,23 @@ export function AudioStudio() {
               </div>
             </div>
 
+            {/* sc-23000: the studio opens for a YuE2-only install (so the Song Lab is reachable), but
+                the standard modes still need a standard model — keep offering the same recommended
+                downloads the availability gate would, right here on the standard surface. */}
+            {!modelReady ? (
+              <ModelAvailabilityGate
+                ready={false}
+                title="No standard audio model installed"
+                description="Speech, Music, Sound FX and Voice Clone need a standard audio model. The experimental Song Lab (YuE2) is separate and does not serve them."
+                offers={modelOffers}
+                downloadJobs={modelDownloadJobs}
+                onDownload={createModelDownloadJob}
+                onOpenModels={() => setActiveView("Models")}
+                onOpenQueue={onOpenQueue}
+                onCancelJob={onCancelJob}
+              />
+            ) : null}
+
             <div className="prompt-input-row">
               {/* Multi-speaker / long-form dialogue (sc-13676): the plain prompt is replaced by a
                   segmented-script editor ONLY when the selected model advertises

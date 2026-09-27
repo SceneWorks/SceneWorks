@@ -130,6 +130,10 @@ export function defaultYue2Settings() {
     compareRenderA: "",
     compareRenderB: "",
     compareNotes: "",
+    // The score workbench's drafts live with the lab settings, so a tab change, a surface switch or
+    // a relaunch does not lose an in-progress edit (bounded by the durable byte budget).
+    editDraft: defaultEditDraft(),
+    importDraft: defaultImportDraft(),
     presets: [],
   };
 }
@@ -151,6 +155,8 @@ export function restoreYue2Settings(saved) {
       out[key] = { ...emptySampling(), ...pickStrings(restored, Object.keys(value)) };
     } else if (key === "presets") {
       out.presets = Array.isArray(restored) ? restored.filter(isPreset) : [];
+    } else if (key === "editDraft" || key === "importDraft") {
+      out[key] = restored && typeof restored === "object" && !Array.isArray(restored) ? { ...value, ...restored } : value;
     } else if (typeof value === typeof restored) {
       out[key] = restored;
     }
@@ -261,7 +267,7 @@ export function composeKind(settings) {
  */
 export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = undefined) {
   const s = settings ?? defaultYue2Settings();
-  const suppliedScore = s.planSource === "supplied" ? trimmed(s.suppliedScore) : undefined;
+  const suppliedScore = s.planSource === "supplied" ? trimmed(stripYue2ExportHeader(s.suppliedScore)) : undefined;
   const samplesPlan = s.planSource === "sample" && s.planning !== "off";
   const count = intOrUndefined(s.count);
   const candidates = {
@@ -310,7 +316,7 @@ function coverBody(s) {
     const id = trimmed(s.coverVersionId);
     if (id) cover.versionId = id;
   } else {
-    const score = trimmed(s.coverScore);
+    const score = trimmed(stripYue2ExportHeader(s.coverScore));
     if (score) cover.score = score;
   }
   if (s.coverMode) cover.mode = s.coverMode;
@@ -326,9 +332,16 @@ function coverBody(s) {
  * internal field names). Empty ⇒ submittable. The server re-validates everything; this only keeps
  * the obviously incomplete request from being sent.
  */
-export function yue2RequestProblems(kind, settings, target = {}) {
+export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
   const s = settings ?? defaultYue2Settings();
   const problems = [];
+  if (context.hasProject === false) {
+    problems.push("Open or create a workspace first.");
+  }
+  if (YUE2_FIELD_KINDS.seed.includes(kind)) {
+    const seedProblem = seedValueProblem(s.seed);
+    if (seedProblem) problems.push(seedProblem);
+  }
   const needsLyrics = kind === "create" || kind === "plan" || kind === "cover";
   if (needsLyrics && !trimmed(s.lyrics)) {
     problems.push("Write the lyrics the song sings.");
@@ -387,6 +400,49 @@ export function yue2RequestProblems(kind, settings, target = {}) {
     problems.push(`Takes must be between 1 and ${MAX_TAKES}.`);
   }
   return problems;
+}
+
+// A seed is shown, recorded and exported through JavaScript, where a Number is exact only up to
+// 2^53 - 1: a larger typed seed would silently become a different one, so it is refused.
+export const MAX_SAFE_SEED = Number.MAX_SAFE_INTEGER;
+
+export function seedValueProblem(raw) {
+  if (raw === "" || raw === null || raw === undefined) {
+    return null;
+  }
+  const text = String(raw).trim();
+  const value = Number(text);
+  if (!/^\d+$/.test(text) || !Number.isSafeInteger(value)) {
+    return `The seed must be a whole number from 0 to ${MAX_SAFE_SEED}.`;
+  }
+  return null;
+}
+
+// Why a control does nothing for a job kind — core `why_not`, in user terms. Null when the kind
+// reads the field (or when there is no job to submit, `kind` null).
+export function yue2FieldDisabledReason(field, kind) {
+  if (!kind || !YUE2_FIELD_KINDS[field] || YUE2_FIELD_KINDS[field].includes(kind)) {
+    return null;
+  }
+  let reason;
+  if (["seed", "cfgScale", "planning", "score", "scoreSampling"].includes(field) && kind === "fromPlan") {
+    reason = "a saved plan fixes it (an edited plan is a new request)";
+  } else if (kind === "renderVersion") {
+    reason = "the score version fixes its style, lyrics, planning, seed and guidance; edit the version to change them";
+  } else if (kind === "decode") {
+    reason = "a cached decode re-renders the source run's latents and generates nothing";
+  } else if (kind === "plan") {
+    reason = "a plan-only job stops after planning the score";
+  } else if (kind === "cover") {
+    reason = "a cover plans from its own reviewed score in its own mode";
+  } else if (kind === "transcribe") {
+    reason = "transcription takes only the source recording";
+  } else if (field === "count") {
+    reason = "a restored plan, a score version and a cached decode render the same take every time";
+  } else {
+    reason = "this kind does not read it";
+  }
+  return `Not used by a ${YUE2_KIND_LABELS[kind] ?? kind} job: ${reason}.`;
 }
 
 // ---- model / licence ------------------------------------------------------------------------
@@ -629,6 +685,44 @@ export function yue2ExportStem(prefix, id, policy) {
   return `${prefix}-${safe}${policy?.nonCommercial ? "-noncommercial" : ""}`;
 }
 
+// Exported .abc files open with a `%` comment naming the licence, so a score file that leaves the
+// app keeps the noncommercial distinction (E2). The native YuE2 dialect requires `X:1` on the
+// first line, so the lab strips this header again whenever a score is pasted back in.
+export const ABC_EXPORT_MARKER = "% SceneWorks YuE2 export:";
+
+export function yue2AbcExportHeader(policy) {
+  const license = policy?.license?.license || licenseFromNotice(policy?.license?.notice) || "see the model licence";
+  const parts = [`${ABC_EXPORT_MARKER} weights licence ${license}`];
+  if (policy?.nonCommercial !== false) {
+    parts.push("NONCOMMERCIAL USE ONLY");
+  }
+  if (policy?.experimental !== false) {
+    parts.push("experimental model");
+  }
+  return parts.join(" · ");
+}
+
+export function yue2AbcExport(abc, policy) {
+  return `${yue2AbcExportHeader(policy)}\n${stripYue2ExportHeader(abc ?? "")}`;
+}
+
+export function stripYue2ExportHeader(abc) {
+  if (typeof abc !== "string") {
+    return abc;
+  }
+  const lines = abc.split("\n");
+  let index = 0;
+  while (index < lines.length && lines[index].startsWith(ABC_EXPORT_MARKER)) {
+    index += 1;
+  }
+  return index ? lines.slice(index).join("\n") : abc;
+}
+
+// A YuE2 take's download name: never the style text, always the licence-marked export stem.
+export function yue2TakeFilename(asset, policy = null) {
+  return `${yue2ExportStem("yue2-song", asset?.id ?? "take", asset?.extra?.usagePolicy ?? policy)}.wav`;
+}
+
 // ---- score edits ----------------------------------------------------------------------------
 
 export const EDIT_OPERATIONS = Object.freeze([
@@ -640,6 +734,10 @@ export const EDIT_OPERATIONS = Object.freeze([
   { op: "set_style", label: "Set style" },
   { op: "replace_score", label: "Replace score" },
 ]);
+
+export function defaultImportDraft() {
+  return { open: false, abc: "", cot: "full", seed: "", cfgScale: "" };
+}
 
 export function defaultEditDraft() {
   return {
@@ -726,7 +824,7 @@ export function buildEditOperation(draft) {
           toBar: to,
         };
       }
-      const op = { op: "replace_score", abc: d.abc };
+      const op = { op: "replace_score", abc: stripYue2ExportHeader(d.abc) };
       if (Object.keys(allow).length) op.allow = allow;
       if (text(d.lyrics)) op.lyrics = text(d.lyrics);
       if (text(d.style)) op.style = text(d.style);

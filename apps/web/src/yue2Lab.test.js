@@ -7,6 +7,10 @@ import {
   defaultEditDraft,
   defaultYue2Settings,
   installJobStatusLabel,
+  seedValueProblem,
+  stripYue2ExportHeader,
+  yue2AbcExport,
+  yue2FieldDisabledReason,
   restoreYue2Settings,
   usagePolicyChips,
   yue2ModelIdentity,
@@ -369,5 +373,65 @@ describe("YuE2 score edit operations (sc-23000)", () => {
 
   it("names what is missing instead of sending an empty operation", () => {
     expect(buildEditOperation({ ...defaultEditDraft(), op: "set_tempo" }).error).toBe("Give the new tempo in BPM.");
+  });
+});
+
+describe("YuE2 fix pass (sc-23000)", () => {
+  it("exports a seed of 2^53 - 1 exactly", () => {
+    const job = {
+      id: "j",
+      status: "completed",
+      payload: { yue2: { kind: "create", seed: 9007199254740991 } },
+      result: { yue2: { effectiveSettings: { seed: 9007199254740991 } } },
+    };
+    const exported = JSON.parse(JSON.stringify(yue2RunExport(job, [], "t")));
+    expect(exported.effectiveSettings.seed).toBe(9007199254740991);
+    expect(exported.submitted.seed).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it("refuses a typed seed JavaScript cannot hold exactly", () => {
+    expect(seedValueProblem("9007199254740991")).toBeNull();
+    expect(seedValueProblem("")).toBeNull();
+    for (const bad of ["9007199254740992", "9007199254740993", "-1", "1.5", "1e3"]) {
+      expect(seedValueProblem(bad), bad).toBe("The seed must be a whole number from 0 to 9007199254740991.");
+    }
+    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), lyrics: "x", seed: "9007199254740993" })).toEqual([
+      "The seed must be a whole number from 0 to 9007199254740991.",
+    ]);
+    // A kind that does not read the seed does not complain about it.
+    expect(yue2RequestProblems("renderVersion", { ...defaultYue2Settings(), seed: "9007199254740993" }, { versionId: "v" })).toEqual([]);
+  });
+
+  it("says a workspace is needed", () => {
+    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), lyrics: "x" }, {}, { hasProject: false })).toEqual([
+      "Open or create a workspace first.",
+    ]);
+  });
+
+  it("gives core's reason for a control a kind does not read, and none for one it does", () => {
+    expect(yue2FieldDisabledReason("count", "fromPlan")).toBe(
+      "Not used by a From saved plan job: a restored plan, a score version and a cached decode render the same take every time.",
+    );
+    expect(yue2FieldDisabledReason("seed", "fromPlan")).toBe(
+      "Not used by a From saved plan job: a saved plan fixes it (an edited plan is a new request).",
+    );
+    expect(yue2FieldDisabledReason("steps", "plan")).toBe(
+      "Not used by a Plan only job: a plan-only job stops after planning the score.",
+    );
+    expect(yue2FieldDisabledReason("seed", "decode")).toBe(
+      "Not used by a Cached decode job: a cached decode re-renders the source run's latents and generates nothing.",
+    );
+    expect(yue2FieldDisabledReason("seed", "create")).toBeNull();
+    expect(yue2FieldDisabledReason("seed", null)).toBeNull();
+  });
+
+  it("round-trips an exported score through the header strip", () => {
+    const policy = { nonCommercial: true, experimental: true, license: { notice: "(CC BY-NC 4.0)" } };
+    const exported = yue2AbcExport("X:1\nT:\n", policy);
+    expect(exported.split("\n")[0]).toBe(
+      "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY · experimental model",
+    );
+    expect(stripYue2ExportHeader(exported)).toBe("X:1\nT:\n");
+    expect(stripYue2ExportHeader("X:1\n% verse\n")).toBe("X:1\n% verse\n");
   });
 });

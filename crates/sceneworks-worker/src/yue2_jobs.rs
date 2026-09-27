@@ -55,7 +55,7 @@ use sceneworks_core::yue2_score::store::ScoreVersionRecord;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::video_jobs::{write_wav_pcm16, AudioTrack};
+use crate::video_jobs::{write_wav_pcm16_with_info, AudioTrack};
 
 const CANCEL_MESSAGE: &str = "YuE2 job canceled by user.";
 /// Suffix of a run's unpublished working directory (`candle_audio_yue2::run::PARTIAL_SUFFIX`).
@@ -1386,6 +1386,42 @@ fn provenance_block(
     block
 }
 
+/// The RIFF `INFO` tags a YuE2 WAV carries so its licence travels inside the file (E2, sc-23000):
+/// `ICOP` names the weight licence and the noncommercial restriction, `ICMT` the experimental
+/// model it came from. Read from the usage policy the run was granted, never assumed.
+pub(crate) fn wav_licence_info(usage_policy: &Value) -> Vec<([u8; 4], String)> {
+    let flag = |key: &str| usage_policy.get(key).and_then(Value::as_bool) == Some(true);
+    let license = usage_policy
+        .pointer("/license/license")
+        .and_then(Value::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            usage_policy
+                .pointer("/license/notice")
+                .and_then(Value::as_str)
+                .and_then(|notice| {
+                    notice
+                        .find("CC BY-NC")
+                        .map(|at| notice[at..].chars().take("CC BY-NC 4.0".len()).collect())
+                })
+        })
+        .unwrap_or_else(|| "see the model licence".to_owned());
+    let mut copyright = format!("Generated with YuE2 (weights: {license})");
+    if flag("nonCommercial") {
+        copyright.push_str(". NONCOMMERCIAL USE ONLY");
+    }
+    let mut comment = String::from("SceneWorks YuE2");
+    if flag("experimental") {
+        comment.push_str(" (experimental model)");
+    }
+    if let Some(url) = usage_policy.pointer("/license/url").and_then(Value::as_str) {
+        comment.push_str("; licence: ");
+        comment.push_str(url);
+    }
+    vec![(*b"ICOP", copyright), (*b"ICMT", comment)]
+}
+
 async fn publish_audio(
     spec: &Yue2JobSpec,
     project_path: &Path,
@@ -1429,9 +1465,14 @@ async fn publish_audio(
     };
     {
         let media_path = media_path.clone();
-        tokio::task::spawn_blocking(move || write_wav_pcm16(&wav, &media_path))
-            .await
-            .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
+        let info = wav_licence_info(usage_policy);
+        tokio::task::spawn_blocking(move || {
+            let tags: Vec<([u8; 4], &str)> =
+                info.iter().map(|(id, text)| (*id, text.as_str())).collect();
+            write_wav_pcm16_with_info(&wav, &media_path, &tags)
+        })
+        .await
+        .map_err(|error| WorkerError::Io(std::io::Error::other(error)))??;
     }
     let truncated = block.get("truncated").cloned().unwrap_or_else(|| json!({}));
     let is_truncated = truncated.get("abc").and_then(Value::as_bool) == Some(true)

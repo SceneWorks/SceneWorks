@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   audioAssetRunGroups,
+  audioDownloadName,
   audioExpectedTakes,
   audioJobMode,
   audioRunChips,
@@ -173,7 +174,7 @@ describe("audioTakeTitle", () => {
 // "Run again" that would resubmit it to the generic audio route, which refuses it.
 describe("YuE2 runs on the shared audio surfaces", () => {
   const YUE2 = { id: "yue2", name: "YuE2 Song Generation", audio: { sampleRates: [48000], supportsSymbolicSong: true } };
-  const policy = { nonCommercial: true, experimental: true };
+  const policy = { nonCommercial: true, experimental: true, license: { license: null, notice: "… (CC BY-NC 4.0) …" } };
 
   it("labels a YuE2 asset and hides Run again", () => {
     const [group] = audioAssetRunGroups(
@@ -182,8 +183,15 @@ describe("YuE2 runs on the shared audio surfaces", () => {
     );
     expect(group.mode).toBe("yue2");
     expect(group.modeLabel).toBe("YuE2 · Experimental");
-    expect(group.chips).toContain("Noncommercial");
+    // Version and licence travel with the take on the shared surfaces, not only "Noncommercial".
+    expect(group.chips.slice(0, 4)).toEqual(["YuE2 (v2)", "Experimental", "Noncommercial", "CC BY-NC 4.0"]);
     expect(group.replayable).toBe(false);
+  });
+
+  it("downloads a YuE2 take under the licence-marked name and any other clip under its own", () => {
+    const song = { id: "a1", type: "audio", displayName: "dream pop", extra: { yue2: {}, usagePolicy: policy } };
+    expect(audioDownloadName(song)).toBe("yue2-song-a1-noncommercial.wav");
+    expect(audioDownloadName({ id: "b", displayName: "Take 1" })).toBe("Take 1");
   });
 
   it("labels a YuE2 job and hides Run again", () => {
@@ -193,7 +201,7 @@ describe("YuE2 runs on the shared audio surfaces", () => {
       [YUE2],
     );
     expect(group.mode).toBe("yue2");
-    expect(group.chips).toContain("Noncommercial");
+    expect(group.chips.slice(0, 4)).toEqual(["YuE2 (v2)", "Experimental", "Noncommercial", "CC BY-NC 4.0"]);
     expect(group.replayable).toBe(false);
   });
 });

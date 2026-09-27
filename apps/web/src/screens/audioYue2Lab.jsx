@@ -4,7 +4,7 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { useAppContext } from "../context/AppContext.js";
-import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
+import { durableTextFits, loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
 import { writeLicenseAck } from "../licenseAcknowledgment.js";
 import { terminalStatuses } from "../jobTypes.js";
 import {
@@ -23,6 +23,7 @@ import {
   yue2ModelIdentity,
   yue2ModelInstalled,
   yue2ProjectRuns,
+  yue2FieldDisabledReason,
   yue2RequestProblems,
   yue2RunView,
   yue2TierRows,
@@ -73,8 +74,28 @@ const LAB_TABS = [
 
 const TIER_LABELS = { bf16: "BF16 (original)", q8: "Q8 (derived here)", q4: "Q4 (derived here)" };
 const PRESET_LIMIT = 12;
-// Preset snapshots carry controls, never the large score texts (they stay in the lab settings).
-const PRESET_EXCLUDED = new Set(["presets", "optIn", "tab", "suppliedScore", "coverScore", "selectedVersionId", "compareA", "compareB", "compareRenderA", "compareRenderB", "compareNotes", "advancedOpen"]);
+// Preset snapshots carry CONTROLS only — never free text (lyrics, style, scores, notes, drafts).
+// Twelve presets each holding a full lyric sheet would blow the durable snapshot budget, and a
+// preset is a reusable setup, not a song.
+const PRESET_EXCLUDED = new Set([
+  "presets",
+  "optIn",
+  "tab",
+  "lyrics",
+  "style",
+  "suppliedScore",
+  "coverScore",
+  "coverTranslatedFrom",
+  "selectedVersionId",
+  "compareA",
+  "compareB",
+  "compareRenderA",
+  "compareRenderB",
+  "compareNotes",
+  "advancedOpen",
+  "editDraft",
+  "importDraft",
+]);
 
 function Segmented({ label, value, options, onChange, disabledValues = [] }) {
   return (
@@ -96,9 +117,9 @@ function Segmented({ label, value, options, onChange, disabledValues = [] }) {
   );
 }
 
-function SamplingFields({ label, value, defaults, onChange, disabled = false }) {
+function SamplingFields({ label, value, defaults, onChange, disabled = false, reason = null }) {
   return (
-    <fieldset className="yue2-fieldset" disabled={disabled}>
+    <fieldset className="yue2-fieldset" disabled={disabled || Boolean(reason)} title={reason ?? undefined}>
       <legend>{label}</legend>
       <div className="yue2-grid">
         {SAMPLING_FIELDS.map((field) => (
@@ -121,11 +142,11 @@ function SamplingFields({ label, value, defaults, onChange, disabled = false }) 
   );
 }
 
-function TriStateSelect({ label, value, onChange }) {
+function TriStateSelect({ label, value, onChange, reason = null }) {
   return (
-    <label>
+    <label title={reason ?? undefined}>
       {label}
-      <select aria-label={label} onChange={(event) => onChange(event.target.value)} value={value}>
+      <select aria-label={label} disabled={Boolean(reason)} onChange={(event) => onChange(event.target.value)} value={value}>
         <option value="">Admission decides</option>
         <option value="on">On</option>
         <option value="off">Off</option>
@@ -274,7 +295,8 @@ export function Yue2SongLab({ header }) {
         setAck({ status: "ready", acknowledged: view?.acknowledged === true, error: null, view });
         // Mirror the server's record into the download choke point's cache so an install from
         // here (or the Models card) is not refused for a stale browser flag.
-        if (view?.acknowledged === true) writeLicenseAck(modelId, true);
+        // …and clear it when the server says the acceptance lapsed or was withdrawn.
+        writeLicenseAck(modelId, view?.acknowledged === true);
       })
       .catch((error) => {
         if (live) setAck({ status: "error", acknowledged: false, error });
@@ -379,8 +401,8 @@ export function Yue2SongLab({ header }) {
   const [guideOpen, setGuideOpen] = useState(false);
 
   async function submit(kind, target = {}) {
-    if (!projectId || submitting) return;
-    const problems = yue2RequestProblems(kind, settings, target);
+    if (submitting) return;
+    const problems = yue2RequestProblems(kind, settings, target, { hasProject: Boolean(projectId) });
     if (problems.length) {
       setSubmitError(problems.join(" "));
       return;
@@ -395,6 +417,7 @@ export function Yue2SongLab({ header }) {
     } catch (error) {
       setSubmitError(error);
       if (error?.code === "license_acknowledgment_required") {
+        writeLicenseAck(model.id, false);
         setAck({ status: "ready", acknowledged: false, error: null });
       }
     } finally {
@@ -471,8 +494,30 @@ export function Yue2SongLab({ header }) {
     (job) => job.type === "model_download" && job.payload?.modelId === model.id && !terminalStatuses.has(job.status),
   );
   const kind = composeKind(settings);
-  const composeProblems = yue2RequestProblems(kind, settings);
-  const coverProblems = yue2RequestProblems("cover", settings);
+  const hasProject = { hasProject: Boolean(projectId) };
+  const composeProblems = yue2RequestProblems(kind, settings, {}, hasProject);
+  const coverProblems = yue2RequestProblems("cover", settings, {}, hasProject);
+  // The job kind the visible surface submits: its controls are the only ones that reach a request,
+  // so a control the kind does not read is disabled with core's reason rather than silently dropped.
+  const activeKind =
+    settings.tab === "compose" ? kind : settings.tab === "cover" ? "cover" : settings.tab === "scores" ? "renderVersion" : null;
+  const why = (field) => yue2FieldDisabledReason(field, activeKind);
+  const renderProblems = yue2RequestProblems("renderVersion", settings, { versionId: "selected" }, hasProject);
+  // A score text over its durable cap survives only this session; say so and offer the durable home.
+  const sessionOnlyNote = (text) =>
+    text && !durableTextFits("yue2lab", "suppliedScore", text) ? (
+      <p className="yue2-muted" data-testid="yue2-session-only-note">
+        Kept for this session only — it is too large to restore after a relaunch.{" "}
+        <button
+          className="audio-link"
+          onClick={() => update({ tab: "scores", importDraft: { ...settings.importDraft, open: true, abc: text } })}
+          type="button"
+        >
+          Import it as a score version
+        </button>{" "}
+        to keep it.
+      </p>
+    ) : null;
   const blocked = blockedTranscription(model);
   const restorable = runs.map(yue2RunView).filter((view) => view.restorable);
   const tierProblem =
@@ -542,7 +587,7 @@ export function Yue2SongLab({ header }) {
                 </label>
                 <label className="settings-field settings-field-tier">
                   Tier
-                  <select aria-label="Tier" onChange={(event) => update({ tier: event.target.value })} value={settings.tier}>
+                  <select aria-label="Tier" disabled={Boolean(why("tier"))} title={why("tier") ?? undefined} onChange={(event) => update({ tier: event.target.value })} value={settings.tier}>
                     <option value="">Default (BF16)</option>
                     {tierRows.map((row) => (
                       <option key={row.tier} value={row.tier}>
@@ -554,7 +599,7 @@ export function Yue2SongLab({ header }) {
                 </label>
                 <label className="settings-field">
                   Decoder
-                  <select aria-label="Decoder" onChange={(event) => update({ decoder: event.target.value })} value={settings.decoder}>
+                  <select aria-label="Decoder" disabled={Boolean(why("decoder"))} title={why("decoder") ?? undefined} onChange={(event) => update({ decoder: event.target.value })} value={settings.decoder}>
                     <option value="">Default (standard)</option>
                     <option value="standard">Standard</option>
                     <option value="legacy">Legacy (add-on install)</option>
@@ -564,6 +609,8 @@ export function Yue2SongLab({ header }) {
                   Takes
                   <input
                     aria-label="Takes"
+                    disabled={Boolean(why("count"))}
+                    title={why("count") ?? undefined}
                     max={MAX_TAKES}
                     min="1"
                     onChange={(event) => update({ count: event.target.value })}
@@ -713,6 +760,7 @@ export function Yue2SongLab({ header }) {
                       spellCheck={false}
                       value={settings.suppliedScore}
                     />
+                    {sessionOnlyNote(settings.suppliedScore)}
                     <button
                       className="secondary-action"
                       disabled={!settings.suppliedScore.trim()}
@@ -834,6 +882,7 @@ export function Yue2SongLab({ header }) {
                       spellCheck={false}
                       value={settings.coverScore}
                     />
+                    {sessionOnlyNote(settings.coverScore)}
                     <button
                       className="secondary-action"
                       disabled={!settings.coverScore.trim()}
@@ -902,8 +951,35 @@ export function Yue2SongLab({ header }) {
                 onUseForCover={(versionId) => update({ tab: "cover", coverSource: "version", coverVersionId: versionId })}
                 projectId={projectId}
                 regenerationNotice={regenerationNotice}
-                renderProblem={!readyToRun ? tierProblem || "Install YuE2 first." : submitting ? "Submitting…" : ""}
+                draft={settings.editDraft}
+                importDraft={settings.importDraft}
+                // A score version's export is marked from the catalog's own declaration of the model.
+                policy={{
+                  nonCommercial: identity.nonCommercial,
+                  experimental: identity.experimental,
+                  license: { license: identity.license, url: identity.licenseUrl },
+                }}
+                refreshKey={finishedKey}
+                renderProblem={
+                  !readyToRun
+                    ? tierProblem || "Install YuE2 first."
+                    : submitting
+                      ? "Submitting…"
+                      : renderProblems.join(" ")
+                }
                 seedSettings={settings}
+                setDraft={(next) =>
+                  setSettings((current) => ({
+                    ...current,
+                    editDraft: typeof next === "function" ? next(current.editDraft) : next,
+                  }))
+                }
+                setImportDraft={(next) =>
+                  setSettings((current) => ({
+                    ...current,
+                    importDraft: typeof next === "function" ? next(current.importDraft) : next,
+                  }))
+                }
                 selectedVersionId={settings.selectedVersionId}
                 token={token}
                 versions={versions}
@@ -918,6 +994,7 @@ export function Yue2SongLab({ header }) {
                 comparisonsError={comparisonsError}
                 onReloadComparisons={reloadComparisons}
                 projectId={projectId}
+                refreshKey={finishedKey}
                 settings={settings}
                 token={token}
                 update={update}
@@ -935,19 +1012,19 @@ export function Yue2SongLab({ header }) {
               <div className="yue2-grid">
                 <label>
                   Seed
-                  <input aria-label="Seed" onChange={(event) => update({ seed: event.target.value })} placeholder="Random" step="1" type="number" value={settings.seed} />
+                  <input aria-label="Seed" disabled={Boolean(why("seed"))} title={why("seed") ?? undefined} onChange={(event) => update({ seed: event.target.value })} placeholder="Random" step="1" type="number" value={settings.seed} />
                 </label>
                 <label>
                   Guidance (CFG)
-                  <input aria-label="Guidance" onChange={(event) => update({ cfgScale: event.target.value })} placeholder="Model default" step="0.1" type="number" value={settings.cfgScale} />
+                  <input aria-label="Guidance" disabled={Boolean(why("cfgScale"))} title={why("cfgScale") ?? undefined} onChange={(event) => update({ cfgScale: event.target.value })} placeholder="Model default" step="0.1" type="number" value={settings.cfgScale} />
                 </label>
                 <label>
                   Acoustic ODE steps
-                  <input aria-label="ODE steps" max="10000" min="1" onChange={(event) => update({ steps: event.target.value })} placeholder="Model default" step="1" type="number" value={settings.steps} />
+                  <input aria-label="ODE steps" disabled={Boolean(why("steps"))} title={why("steps") ?? undefined} max="10000" min="1" onChange={(event) => update({ steps: event.target.value })} placeholder="Model default" step="1" type="number" value={settings.steps} />
                 </label>
                 <label>
                   Precision
-                  <select aria-label="Precision" onChange={(event) => update({ precision: event.target.value })} value={settings.precision}>
+                  <select aria-label="Precision" disabled={Boolean(why("precision"))} title={why("precision") ?? undefined} onChange={(event) => update({ precision: event.target.value })} value={settings.precision}>
                     <option value="">Default (BF16 on GPU)</option>
                     <option value="default">Default</option>
                     <option value="fp32">FP32</option>
@@ -955,7 +1032,7 @@ export function Yue2SongLab({ header }) {
                 </label>
                 <label>
                   Offload
-                  <select aria-label="Offload" onChange={(event) => update({ offloadPolicy: event.target.value })} value={settings.offloadPolicy}>
+                  <select aria-label="Offload" disabled={Boolean(why("offloadPolicy"))} title={why("offloadPolicy") ?? undefined} onChange={(event) => update({ offloadPolicy: event.target.value })} value={settings.offloadPolicy}>
                     <option value="">Default (resident)</option>
                     <option value="resident">Resident</option>
                     <option value="sequential">Sequential (offload the AR stage)</option>
@@ -966,28 +1043,30 @@ export function Yue2SongLab({ header }) {
                 defaults={SAMPLING_TOKEN_DEFAULTS.scoreSampling}
                 disabled={settings.planSource !== "sample" || settings.planning === "off"}
                 label="Score planning sampling"
+                reason={why("scoreSampling")}
                 onChange={(value) => update({ scoreSampling: value })}
                 value={settings.scoreSampling}
               />
               <SamplingFields
                 defaults={SAMPLING_TOKEN_DEFAULTS.semanticSampling}
                 label="Semantic sampling"
+                reason={why("semanticSampling")}
                 onChange={(value) => update({ semanticSampling: value })}
                 value={settings.semanticSampling}
               />
               <fieldset className="yue2-fieldset">
                 <legend>Memory</legend>
                 <div className="yue2-grid">
-                  <TriStateSelect label="Stage residency" onChange={(value) => update({ stageResidency: value })} value={settings.stageResidency} />
-                  <TriStateSelect label="Chunked attention" onChange={(value) => update({ chunkAttention: value })} value={settings.chunkAttention} />
+                  <TriStateSelect label="Stage residency" reason={why("memory.acoustic")} onChange={(value) => update({ stageResidency: value })} value={settings.stageResidency} />
+                  <TriStateSelect label="Chunked attention" reason={why("memory.acoustic")} onChange={(value) => update({ chunkAttention: value })} value={settings.chunkAttention} />
                   <label>
                     Attention chunk size
-                    <input aria-label="Attention chunk size" disabled={settings.chunkAttention !== "on"} min={MIN_ATTENTION_CHUNK_ELEMENTS} onChange={(event) => update({ attentionChunkSize: event.target.value })} placeholder={`≥ ${MIN_ATTENTION_CHUNK_ELEMENTS} (with chunked attention on)`} type="number" value={settings.attentionChunkSize} />
+                    <input aria-label="Attention chunk size" disabled={settings.chunkAttention !== "on" || Boolean(why("memory.acoustic"))} title={why("memory.acoustic") ?? undefined} min={MIN_ATTENTION_CHUNK_ELEMENTS} onChange={(event) => update({ attentionChunkSize: event.target.value })} placeholder={`≥ ${MIN_ATTENTION_CHUNK_ELEMENTS} (with chunked attention on)`} type="number" value={settings.attentionChunkSize} />
                   </label>
-                  <TriStateSelect label="Tiled decode" onChange={(value) => update({ tileVaeDecode: value })} value={settings.tileVaeDecode} />
+                  <TriStateSelect label="Tiled decode" reason={why("memory.decode")} onChange={(value) => update({ tileVaeDecode: value })} value={settings.tileVaeDecode} />
                   <label>
                     Decode tile (frames)
-                    <input aria-label="Decode tile" disabled={settings.tileVaeDecode !== "on"} max={MAX_DECODE_TILE_FRAMES} min="1" onChange={(event) => update({ decodeTileEdge: event.target.value })} placeholder="1–1024 (with tiled decode on)" type="number" value={settings.decodeTileEdge} />
+                    <input aria-label="Decode tile" disabled={settings.tileVaeDecode !== "on" || Boolean(why("memory.decode"))} title={why("memory.decode") ?? undefined} max={MAX_DECODE_TILE_FRAMES} min="1" onChange={(event) => update({ decodeTileEdge: event.target.value })} placeholder="1–1024 (with tiled decode on)" type="number" value={settings.decodeTileEdge} />
                   </label>
                 </div>
               </fieldset>

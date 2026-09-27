@@ -1,5 +1,6 @@
 import { terminalStatuses } from "./jobTypes.js";
 import { jobAudioResultAssets } from "./jobResultAssets.js";
+import { usagePolicyChips, yue2TakeFilename } from "./yue2Lab.js";
 
 // Shared, pure derivations behind the Audio Studio redesign (epic 14361). The take grid,
 // the play deck and the Simple UI surfaces all read a run's mode, model, settings chips and
@@ -32,12 +33,19 @@ export function isYue2AudioRun(job, asset = null) {
   );
 }
 
-function yue2PolicyChips(policy) {
-  const chips = [];
-  if (policy?.nonCommercial) {
-    chips.push("Noncommercial");
+// The version / experimental / noncommercial / licence chips a YuE2 run carries on the shared
+// surfaces, read from its recorded usage policy (the lab's own chip vocabulary).
+function yue2PolicyChips(policy, model) {
+  return usagePolicyChips(policy, model);
+}
+
+// The name a take downloads under: a YuE2 take gets the licence-marked export stem, never its style
+// text; every other clip keeps its display name.
+export function audioDownloadName(asset, job = null) {
+  if (isYue2AudioRun(job, asset)) {
+    return yue2TakeFilename(asset, job?.payload?.usagePolicy ?? null);
   }
-  return chips;
+  return asset?.displayName ?? "";
 }
 
 // m:ss clock for every transport read-out. Clamps NaN/negative to 0:00.
@@ -163,7 +171,7 @@ export function audioRunGroups(jobs, assets, models = []) {
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
       chips: yue2
-        ? [...yue2PolicyChips(job?.payload?.usagePolicy), ...audioRunChips(job)]
+        ? [...yue2PolicyChips(job?.payload?.usagePolicy, model), ...audioRunChips(job)]
         : audioRunChips(job),
       takes,
       running: audioJobIsRunning(job),
@@ -236,7 +244,7 @@ export function audioAssetRunGroups(assets, models = [], coveredAssetIds = new S
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
       chips: yue2
-        ? [...yue2PolicyChips(asset?.extra?.usagePolicy), ...audioRunChips(job)]
+        ? [...yue2PolicyChips(asset?.extra?.usagePolicy, model), ...audioRunChips(job)]
         : audioRunChips(job),
       takes: [asset],
       running: false,

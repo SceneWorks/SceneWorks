@@ -10,6 +10,10 @@ import {
   UI_PROVENANCE,
   buildEditOperation,
   defaultEditDraft,
+  defaultImportDraft,
+  seedValueProblem,
+  yue2AbcExport,
+  stripYue2ExportHeader,
   usagePolicyChips,
   yue2ExportStem,
   yue2RunExport,
@@ -201,6 +205,29 @@ export function InvariantReport({ report }) {
   );
 }
 
+// A completed run that truncated (or cannot say) does not wear the plain success badge.
+export function completionBadge(status, truncated, truncationUnknown) {
+  if (status === "completed" && truncated) {
+    return { className: "status-badge warning", text: "completed · truncated" };
+  }
+  if (status === "completed" && truncationUnknown) {
+    return { className: "status-badge warning", text: "completed · truncation unknown" };
+  }
+  return { className: `status-badge ${status}`, text: status };
+}
+
+function RunStatusBadge({ view }) {
+  if (view.cancelRequested && view.running) {
+    return <span className={`status-badge ${view.status}`}>canceling</span>;
+  }
+  const badge = completionBadge(view.status, view.truncations.length > 0, view.truncationUnknown);
+  return (
+    <span className={badge.className} data-testid="yue2-run-status">
+      {badge.text}
+    </span>
+  );
+}
+
 // ---- runs -----------------------------------------------------------------------------------
 
 export function Yue2RunCard({
@@ -228,7 +255,11 @@ export function Yue2RunCard({
         setExportError("This run recorded no score to export.");
         return;
       }
-      downloadText(abc, `${yue2ExportStem("yue2-score", view.id, view.usagePolicy)}.abc`, "text/vnd.abc");
+      downloadText(
+        yue2AbcExport(abc, view.usagePolicy),
+        `${yue2ExportStem("yue2-score", view.id, view.usagePolicy)}.abc`,
+        "text/vnd.abc",
+      );
     } catch (error) {
       setExportError(error?.message || "The score could not be read.");
     }
@@ -246,7 +277,7 @@ export function Yue2RunCard({
     <article className={`yue2-run yue2-run--${view.status}`} data-testid="yue2-run-card" data-job-id={view.id}>
       <header className="yue2-run__head">
         <span className="audio-mode-chip audio-mode-chip--yue2">{view.kindLabel}</span>
-        <span className={`status-badge ${view.status}`}>{view.cancelRequested && view.running ? "canceling" : view.status}</span>
+        <RunStatusBadge view={view} />
         <PolicyChips model={model} policy={view.usagePolicy} />
         {view.batch?.count > 1 ? (
           <span className="yue2-muted">
@@ -317,7 +348,7 @@ export function Yue2RunCard({
           {takes.map((asset) => (
             <div className="yue2-take" key={asset.id}>
               <audio controls preload="none" src={assetUrl(asset)} aria-label={`Play ${asset.displayName ?? "take"}`} />
-              <AudioDownloadButton asset={asset} className="secondary-action" iconSize={14} label="Audio" />
+              <AudioDownloadButton asset={asset} className="secondary-action" iconSize={14} job={job} label="Audio" />
             </div>
           ))}
         </div>
@@ -602,25 +633,36 @@ export function Yue2ScoreWorkbench({
   assets,
   regenerationNotice,
   seedSettings,
+  draft,
+  setDraft,
+  importDraft,
+  setImportDraft,
+  policy,
+  refreshKey = "",
 }) {
   const [detail, setDetail] = useState(null);
   const [inspection, setInspection] = useState(null);
   const [detailError, setDetailError] = useState(null);
-  const [draft, setDraft] = useState(defaultEditDraft);
   const [editResult, setEditResult] = useState(null);
   const [editError, setEditError] = useState(null);
   const [editBusy, setEditBusy] = useState(false);
-  const [importDraft, setImportDraft] = useState({ open: false, abc: "", cot: "full", seed: "", cfgScale: "" });
   const [importError, setImportError] = useState(null);
+
+  // Re-read the selected version when it changes AND when a run finishes (`refreshKey`), so a render
+  // that just completed shows up without re-selecting the version.
+  useEffect(() => {
+    setDetail(null);
+    setInspection(null);
+    setEditResult(null);
+    setEditError(null);
+  }, [selectedVersionId]);
 
   useEffect(() => {
     let live = true;
-    setDetail(null);
-    setInspection(null);
     setDetailError(null);
-    setEditResult(null);
-    setEditError(null);
     if (!selectedVersionId) {
+      setDetail(null);
+      setInspection(null);
       return undefined;
     }
     Promise.all([
@@ -639,7 +681,7 @@ export function Yue2ScoreWorkbench({
     return () => {
       live = false;
     };
-  }, [projectId, selectedVersionId, token]);
+  }, [projectId, selectedVersionId, token, refreshKey]);
 
   async function runEdit(dryRun) {
     const built = buildEditOperation(draft);
@@ -688,15 +730,20 @@ export function Yue2ScoreWorkbench({
       lyrics: seedSettings.lyrics.trim(),
       cot: importDraft.cot,
     };
-    if (importDraft.seed !== "") request.seed = Math.trunc(Number(importDraft.seed));
+    const seedProblem = seedValueProblem(importDraft.seed);
+    if (seedProblem) {
+      setImportError(seedProblem);
+      return;
+    }
+    if (importDraft.seed !== "") request.seed = Number(importDraft.seed);
     if (importDraft.cfgScale !== "") request.cfgScale = Number(importDraft.cfgScale);
     try {
       const record = await createYue2ScoreVersion(
         projectId,
-        { abc: importDraft.abc, request, origin: "import", provenance: UI_PROVENANCE },
+        { abc: stripYue2ExportHeader(importDraft.abc), request, origin: "import", provenance: UI_PROVENANCE },
         token,
       );
-      setImportDraft({ open: false, abc: "", cot: "full", seed: "", cfgScale: "" });
+      setImportDraft(defaultImportDraft());
       await onReloadVersions?.();
       onSelectVersion(record.id);
     } catch (error) {
@@ -807,7 +854,11 @@ export function Yue2ScoreWorkbench({
               <button
                 className="secondary-action"
                 onClick={() =>
-                  downloadText(version.score?.abc ?? "", `yue2-score-${version.id}-noncommercial.abc`, "text/vnd.abc")
+                  downloadText(
+                    yue2AbcExport(version.score?.abc ?? "", policy),
+                    `${yue2ExportStem("yue2-score", version.id, policy)}.abc`,
+                    "text/vnd.abc",
+                  )
                 }
                 type="button"
               >
@@ -822,7 +873,18 @@ export function Yue2ScoreWorkbench({
                 const asset = render.audioAssetId ? assetById.get(render.audioAssetId) : null;
                 return (
                   <div className="yue2-render" key={render.id}>
-                    <span className={`status-badge ${render.status}`}>{render.status}</span>
+                    {(() => {
+                      const badge = completionBadge(
+                        render.status,
+                        Boolean(render.truncated?.abc || render.truncated?.semantic),
+                        render.truncated == null,
+                      );
+                      return (
+                        <span className={badge.className} data-testid="yue2-render-status">
+                          {badge.text}
+                        </span>
+                      );
+                    })()}
                     {asset ? <audio controls preload="none" src={assetUrl(asset)} /> : null}
                     {render.truncated == null ? (
                       // A failed render may not know whether it truncated: say so, never "not truncated".
@@ -917,6 +979,7 @@ export function Yue2CompareWorkbench({
   comparisonsError,
   onReloadComparisons,
   assets,
+  refreshKey = "",
 }) {
   const [rendersBy, setRendersBy] = useState({});
   const [error, setError] = useState(null);
@@ -926,8 +989,10 @@ export function Yue2CompareWorkbench({
 
   useEffect(() => {
     let live = true;
+    // Read on every version selection and whenever a run finishes (`refreshKey`), so a render that
+    // just completed is offered without reopening the lab.
     for (const versionId of [settings.compareA, settings.compareB]) {
-      if (!versionId || rendersBy[versionId]) continue;
+      if (!versionId) continue;
       getYue2ScoreVersion(projectId, versionId, token)
         .then((detail) => {
           if (live) setRendersBy((current) => ({ ...current, [versionId]: detail?.renders ?? [] }));
@@ -939,9 +1004,7 @@ export function Yue2CompareWorkbench({
     return () => {
       live = false;
     };
-    // rendersBy is a cache keyed by version; re-reading it here would refetch on every write.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, token, settings.compareA, settings.compareB]);
+  }, [projectId, token, settings.compareA, settings.compareB, refreshKey]);
 
   async function compare() {
     setError(null);
