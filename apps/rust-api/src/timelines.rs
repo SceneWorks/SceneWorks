@@ -97,8 +97,9 @@ pub(crate) async fn create_timeline_export(
             .await?;
     if payload.commercial_use {
         crate::yue2_jobs::refuse_commercial_export(&usage_policies)?;
+        // Recorded only when declared, so an ordinary export's payload contract is unchanged.
+        job_payload.insert("commercialUse".to_owned(), json!(true));
     }
-    job_payload.insert("commercialUse".to_owned(), json!(payload.commercial_use));
     if !usage_policies.is_empty() {
         job_payload.insert("usagePolicies".to_owned(), json!(usage_policies));
     }
