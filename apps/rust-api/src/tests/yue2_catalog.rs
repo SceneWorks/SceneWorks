@@ -2,13 +2,12 @@
 //! upstream generation closure (model + tokenizer + the chosen decoder), its licence gate holds, a
 //! commercial-use pointer resolves to YuE1, and nothing crosses between the YuE1 and YuE2 families.
 //!
-//! The YuE2 entry is the LIVE builtin row (read from the embedded manifest, not re-typed here). The
-//! YuE1 entries are fixtures in the shape the YuE1 epic (sc-19373) ships, which is not on this branch
-//! (epic sc-22988 acceptance test 5).
+//! Every entry is the LIVE builtin row (read from the embedded manifest, not re-typed here): YuE2 and
+//! two of the six YuE1 (epic sc-19373) entries that ship beside it (epic sc-22988 acceptance test 5).
 use super::support::*;
 use crate::AppState;
 
-pub(super) fn builtin_yue2() -> Value {
+fn builtin_model(id: &str) -> Value {
     let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
         .iter()
         .find(|(name, _)| *name == "builtin.models.jsonc")
@@ -20,26 +19,13 @@ pub(super) fn builtin_yue2() -> Value {
         .as_array()
         .expect("models array")
         .iter()
-        .find(|model| model["id"] == "yue2")
-        .expect("yue2 is in the builtin catalog")
+        .find(|model| model["id"] == id)
+        .unwrap_or_else(|| panic!("{id} is in the builtin catalog"))
         .clone()
 }
 
-fn yue1_fixture(id: &str) -> Value {
-    json!({
-        "id": id,
-        "name": format!("YuE {id}"),
-        "family": "yue",
-        "type": "audio",
-        "downloads": [{
-            "provider": "huggingface",
-            "repo": format!("SceneWorks/{}-candle", id.replace('_', "-")),
-            "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
-            "variant": "q4",
-            "default": true,
-            "files": ["q4/*"]
-        }]
-    })
+pub(super) fn builtin_yue2() -> Value {
+    builtin_model("yue2")
 }
 
 pub(super) fn app_with_yue1_and_yue2(temp_dir: &tempfile::TempDir) -> axum::Router {
@@ -65,7 +51,7 @@ fn write_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) {
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
     let manifest = json!({
         "schemaVersion": 1,
-        "models": [yue1_fixture("yue_en_cot"), yue2, yue1_fixture("yue_zh_icl")]
+        "models": [builtin_model("yue_en_cot"), yue2, builtin_model("yue_zh_icl")]
     });
     std::fs::write(
         config_dir.join("builtin.models.jsonc"),
@@ -207,13 +193,23 @@ async fn yue1_and_yue2_installs_never_cross_namespaces() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let queued = queued_downloads(app.clone()).await;
-    assert_eq!(
-        repos(&queued),
-        ["SceneWorks/yue-en-cot-candle".to_owned()]
-            .into_iter()
-            .collect()
-    );
+    // Everything queued is one of YuE1's own re-hosts (its stage-1 primary among them) and none is
+    // a YuE2 repository.
+    let queued = repos(&queued_downloads(app.clone()).await);
+    let rows_of = |entry: Value| {
+        entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["repo"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let yue1 = builtin_model("yue_en_cot");
+    let primary = yue1["downloads"][0]["repo"].as_str().unwrap().to_owned();
+    let (v1_repos, v2_repos) = (rows_of(yue1), rows_of(builtin_yue2()));
+    assert!(queued.contains(&primary), "{queued:?}");
+    assert!(queued.is_subset(&v1_repos), "{queued:?} vs {v1_repos:?}");
+    assert!(queued.is_disjoint(&v2_repos), "{queued:?}");
     // An id neither family declares is a 404, not the nearest model.
     let (status, _) = request(
         app,

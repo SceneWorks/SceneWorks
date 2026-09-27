@@ -206,12 +206,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
-  // Re-pinned by sc-22998 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
-  // re-recorded when the catalog gained YuE2's three upstream repos. The Illustrious file
-  // censuses below are the real subject of this test and did NOT move — which is the point of
-  // asserting them beside the digest.
+  // Re-pinned alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was re-recorded when
+  // the catalog gained the eight YuE1 re-host keys (sc-19383) and YuE2's three upstream repos
+  // (sc-22998). The Illustrious file censuses below are the real subject of this test and did NOT
+  // move — which is the point of asserting them beside the digest.
   assert.equal(current.downloadEvidenceSha256,
-    "df5e6736409b8da5e6a9f7651866cb41b6eb91b4384063490053184c1461349c");
+    "3e643d6312f75ae0a2d715ee740c6c4918fe42572918bdf71e3ed1f5cc91adde");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

@@ -106,11 +106,38 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/audio/candle-audio",
+      "paths": [
+        "crates/audio/candle-audio/src/dsp.rs",
+        "crates/audio/candle-audio/src/neural_codec.rs",
+        "crates/audio/candle-audio/src/vocos.rs"
+      ],
+      "provenance": "The YuE epic (sc-19373: sc-19377/19378/19379) lifted three marker-bearing shared building blocks into the candle audio commons: src/vocos.rs, the Vocos ConvNeXt + ISTFT-head vocoder architecture (gemelo-ai/vocos, as vendored in the Apache-2.0 m-a-p/xcodec_mini_infer tree; used by MOSS-TTSD and YuE); src/neural_codec.rs, the descript-audio-codec encoder/decoder + residual-VQ architecture (used by MOSS-SFX, MOSS-TTSD and YuE's xcodec); src/dsp.rs, torchaudio's sinc_interp_hann resampling kernel formula (torchaudio.functional._get_sinc_resample_kernel) for YuE's reference-audio load and low-band splice.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Independently written candle Rust reimplementing published architectures and a resampling formula, verified against pinned reference fixtures; no upstream source is copied. The model terms of every consumer are already mapped in the About manifest (xcodec-mini-infer, moss-soundeffect-v2, moss-ttsd-v05). Classified per file with `paths` so the crate-level decision stays the explicit crateDispositions entry for crates/audio/candle-audio."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-yue",
+      "pathPrefix": "crates/audio/candle-audio-yue/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural port (epic sc-19373) of the Apache-2.0 YuE-v1 inference pipeline -- github.com/multimodal-art-projection/YuE branch YuE-v1 @ 6d4f0b1f8ce6a55fb2392e959394c46e07ee334d (inference/infer.py prompt/segment/CFG schedule, mmtokenizer.py, codecmanipulator.py) -- and of the codec half of HF m-a-p/xcodec_mini_infer @ fe781a67815ab47b4a3a5fce1e8d0a692da7e4e5 (Apache-2.0): the SoundStream encoder + HuBERT semantic branch + RVQ + DAC decoder (models/, quantization/, descriptaudiocodec/) and the Vocos vocal/instrumental upsamplers (vocos/, vocoder.py) plus post_process_audio.py's low-band splice.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Candle reimplementation written against those pinned references (parity fixtures under the crate's tests/fixtures/); the upstream terms are already mapped in the About manifest as components `yue` (the six stage-1 checkpoints + stage-2, Apache-2.0 LICENSE + NOTICE) and `xcodec-mini-infer` (codec, HuBERT branch and both Vocos decoders, Apache-2.0 LICENSE + NOTICE). The candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/contracts/core-llm",
       "pathPrefix": "crates/contracts/core-llm/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/core-llm/core-llm-testkit",
+      "paths": [
+        "crates/contracts/core-llm/core-llm-testkit/src/comparison.rs"
+      ],
+      "provenance": "The scanner matches first-party prose in this diagnostic comparison suite: \"not a reproduction of a vendor's aggregate benchmark\" (the model vendor's published scores, which it deliberately does not reproduce) and the identifier `follow_up` for its tool round-trip case.",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks-authored text-LLM comparison cases driven through the public core-llm TextLlm trait; no upstream source, prompt set or benchmark is copied. The crate remains explicitly classified as first-party-original in crateDispositions."
     },
     {
       "id": "architecture:crates/contracts/gen-core",
@@ -143,6 +170,15 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "first-party:crates/media/candle-gen/candle-gen/build.rs",
+      "paths": [
+        "crates/media/candle-gen/candle-gen/build.rs"
+      ],
+      "provenance": "The scanner matches the word \"vendored\" in this build script's docs, naming the in-repo `vendor/candle-kernels/build.rs` whose `-gencode` flags it parses to bake the quantized-kernel architecture ladder into the binary for the runtime diagnostic in src/cuda_arch.rs (sc-19545).",
+      "disposition": "first-party-source",
+      "evidence": "SceneWorks-authored build script: a string parser over a sibling file of the same repository plus cargo `rustc-env` output. It ports nothing; the vendored candle-kernels crate it reads is classified separately by its own area."
     },
     {
       "id": "architecture:crates/kernels/candle-quant-kernels",
@@ -266,6 +302,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/candle-gen-minimax-h3",
+      "pathPrefix": "crates/media/candle-gen/candle-gen-minimax-h3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (Candle lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation). The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/candle-gen/candle-gen-mochi",
@@ -506,6 +549,13 @@
       "excludePaths": [
         "crates/media/mlx-gen/mlx-gen-mage/src/latent.rs"
       ]
+    },
+    {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "MiniMax-H3 (Hailuo 3.0) provider (MLX lane, epic sc-17137): an architecture reimplementation of the upstream MiniMax-H3 reference and diffusers pipeline (flow-matching DiT, transformer-decoder video VAE and its 3-D causal CNN encoder, DAC-lineage audio VAE encoder + BigVGAN decoder with the Kaiser-sinc alias-free resamplers, the Qwen3-VL text encoder, LoRA/LoKr adapter validation) and the SceneWorks tier converter and memory strategy. The applicable model terms (MiniMax H3 Community License, and Apache-2.0 for the bundled Qwen3-VL-32B text encoder) are mapped in the About manifest's minimax-h3 component; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-mochi",
@@ -870,9 +920,14 @@
   },
   "crateDispositions": [
     {
+      "prefix": ".",
+      "disposition": "first-party-original",
+      "evidence": "The inference root Cargo.toml (a virtual workspace) is the nearest manifest of exactly one production-path .rs file, crates/media/sam3_box_prompt_cases.rs: a SceneWorks-authored, backend-neutral SAM3 box-prompt validation table (sc-21669) that mlx-gen-sam3 and candle-gen-sam3 include! only inside their #[cfg(test)] geometry tests, so it is never compiled into a shipped binary. No upstream source."
+    },
+    {
       "prefix": "crates/audio/candle-audio",
       "disposition": "architecture-reimplementation-existing-terms",
-      "evidence": "Shared candle audio commons. src/mel.rs reconstructs the HTK mel filterbank and src/dsp.rs the librosa/torch `center=True` STFT conventions for preprocessing parity with the audio models' reference implementations. No upstream source is copied and no marker sentence appears, so it needs an explicit decision rather than an inferred one; the applicable model terms are already mapped in the About manifest via the consuming provider crates."
+      "evidence": "Shared candle audio commons. src/mel.rs reconstructs the HTK mel filterbank and src/dsp.rs the librosa/torch `center=True` STFT conventions for preprocessing parity with the audio models' reference implementations. No upstream source is copied. The crate-level decision is made here explicitly rather than inferred; the marker-bearing files the YuE epic added (vocos.rs, neural_codec.rs, dsp.rs resampler) are classified file-by-file in the `architecture:crates/audio/candle-audio` ported-source area; the applicable model terms are already mapped in the About manifest via the consuming provider crates."
     },
     {
       "prefix": "crates/audio/candle-audio-catalog",

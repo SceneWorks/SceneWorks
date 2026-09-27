@@ -24,6 +24,10 @@ glob = "0.3"
 # is macOS-gated). Feature set is the workspace union (sc-15052) — it always effectively was.
 image = { workspace = true }
 quick-xml = "0.41"
+# YuE memory admission (sc-19386) counts lyric sections with the SAME pattern the engine's
+# `candle_audio_yue::tokenizer::split_lyrics` uses (`\[([\p{L}\p{N}_]+)\]([^\[]*)`) — Unicode
+# general categories std does not expose. Already in the graph (candle / tokenizers).
+regex = "1"
 resvg = { version = "0.45", default-features = false }
 # CPU raster for DWPose skeleton rendering (epic 3018, sc-3028): filled polygons
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
