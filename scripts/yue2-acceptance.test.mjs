@@ -15,6 +15,16 @@ import {
   SONG_RUN_FILES,
   buildSummary,
   caseRunnerIds,
+  coldBefore,
+  exitCodeFor,
+  hubModeOf,
+  isLatentCorruptionRefusal,
+  isMissingSourceRefusal,
+  recordedServiceEnv,
+  serviceDeviations,
+  stopWorkerSafely,
+  tierAssertions,
+  workerBusy,
   dependencySkip,
   deviceMatches,
   footprintBytes,
@@ -90,10 +100,11 @@ test("a case whose dependency did not pass is skipped naming the dependency and 
 });
 
 test("arguments: platform and out are required; --skip repeats; unknown input is refused", () => {
-  const options = parseArgs(["--platform", "cuda", "--out", "E:/evidence", "--skip", "batch-serial", "--skip", "admission", "--hf-hub", "E:/huggingface/hub", "--dry-run"]);
+  const options = parseArgs(["--platform", "cuda", "--out", "E:/evidence", "--skip", "batch-serial", "--skip", "admission", "--hf-home", "E:/run/hf-home", "--dry-run"]);
   assert.equal(options.platform, "cuda");
   assert.deepEqual(options.skip, ["batch-serial", "admission"]);
-  assert.equal(options.hfHub, "E:/huggingface/hub");
+  assert.equal(options.hfHome, "E:/run/hf-home");
+  assert.throws(() => parseArgs(["--platform", "cuda", "--out", "x", "--hf-hub", "E:/huggingface/hub"]), /unknown argument --hf-hub/);
   assert.equal(options.dryRun, true);
   assert.throws(() => parseArgs(["--out", "x"]), /--platform/);
   assert.throws(() => parseArgs(["--platform", "metal"]), /--out/);
@@ -194,7 +205,8 @@ function renderEvidence(overrides = {}) {
     runResult: { identity, truncated: { abc: false, semantic: true } },
     runConfig: { device: "metal", model_dtype: "bfloat16" },
     artifactCheck: { ok: true, detail: "10 artifacts re-hashed" },
-    runAudio: { sampleRate: 48000, channels: 2, rms: 0.12 },
+    runAudio: { sampleRate: 48000, channels: 2, rms: 0.12, durationSeconds: 31.5 },
+    assetAudio: { durationSeconds: 31.5 },
     ...overrides,
   };
 }
@@ -211,10 +223,76 @@ test("render evidence: production device, the engine's own identity and truncati
   assert.deepEqual(failing({ job: { status: "completed", result: { yue2: { run: { identity: "run-1" }, truncated: { abc: false, semantic: false } } } } }), ["truncation reported"]);
   assert.deepEqual(failing({ runResult: { identity: "run-1" } }), ["truncation reported"]);
   assert.deepEqual(failing({ artifactCheck: { ok: false, detail: "latent.npy hashes to x" } }), ["artifacts verify"]);
-  assert.deepEqual(failing({ runAudio: { sampleRate: 44100, channels: 2, rms: 0.1 } }), ["48 kHz stereo"]);
-  assert.deepEqual(failing({ runAudio: { sampleRate: 48000, channels: 2, rms: 0 } }), ["audible"]);
+  assert.deepEqual(failing({ runAudio: { sampleRate: 44100, channels: 2, rms: 0.1, durationSeconds: 31.5 } }), ["48 kHz stereo"]);
+  assert.deepEqual(failing({ runAudio: { sampleRate: 48000, channels: 2, rms: 0, durationSeconds: 31.5 } }), ["audible"]);
+  // A cached decode's top-level device is the SOURCE run's; its own device is cached_decode.device.
+  const decode = { runResult: { kind: "cached_decode", identity: "run-1", truncated: { abc: false, semantic: true } } };
+  assert.deepEqual(failing({ ...decode, runConfig: { device: "metal", cached_decode: { device: "metal" } } }), []);
+  assert.deepEqual(failing({ ...decode, runConfig: { device: "metal", cached_decode: { device: "cpu" } } }), ["decode ran on the production device"]);
+  assert.deepEqual(failing({ ...decode, runConfig: { device: "metal" } }), ["decode ran on the production device"]);
+  // The library asset must exist, parse, and last as long as the run's audio (within one frame).
+  assert.deepEqual(failing({ assetAudio: null }), ["library asset is the run's audio"]);
+  assert.deepEqual(failing({ assetAudio: { durationSeconds: 31.5 + 1 / 48000 } }), []);
+  assert.deepEqual(failing({ assetAudio: { durationSeconds: 31.5 + 2 / 48000 } }), ["library asset is the run's audio"]);
   assert.equal(deviceMatches("cuda", "cuda"), true);
   assert.equal(deviceMatches("metal", "cuda"), false);
+});
+
+const PINS = { q8: "8".repeat(64), q4: "4".repeat(64) };
+const MANIFEST_ENTRY = { downloads: [
+  { variant: "bf16", default: true },
+  { variant: "q8", localDerivation: { weightsSha256: PINS.q8 } },
+  { variant: "q4", localDerivation: { weightsSha256: PINS.q4 } },
+  { componentId: "vae", coRequisite: true },
+] };
+const tierRun = (tier, sha, overrides = {}) => ({
+  tier,
+  runConfig: { weight_tier: tier, quantization: "none", ...overrides.config },
+  runResult: { weights: { weight_tier: tier, quantization: "none", mot_native_weights_sha256: sha, ...overrides.weights } },
+  manifestEntry: MANIFEST_ENTRY,
+});
+const tierFailing = (input) => tierAssertions(input).filter((assertion) => !assertion.ok).map((assertion) => assertion.name);
+
+test("tier evidence comes from the engine: tier, no FP8, and the pinned derived weights", () => {
+  assert.deepEqual(tierFailing(tierRun("bf16", "b".repeat(64))), []);
+  assert.deepEqual(tierFailing(tierRun("q8", PINS.q8)), []);
+  assert.deepEqual(tierFailing(tierRun("q4", PINS.q4)), []);
+  // The worker's echo of the request is not evidence: the engine's own records must say the tier.
+  assert.deepEqual(tierFailing(tierRun("q8", PINS.q8, { config: { weight_tier: "bf16" } })), ["engine ran the q8 tier"]);
+  assert.deepEqual(tierFailing(tierRun("q8", PINS.q8, { weights: { weight_tier: "bf16" } })), ["engine ran the q8 tier"]);
+  assert.deepEqual(tierFailing(tierRun("q4", PINS.q4, { config: { quantization: "fp8" } })), ["AR ran without FP8"]);
+  // A derived tier must have loaded exactly its pinned weights; bf16 none of them.
+  assert.deepEqual(tierFailing(tierRun("q4", PINS.q8)), ["loaded the pinned derived q4 weights"]);
+  assert.deepEqual(tierFailing(tierRun("q8", "b".repeat(64))), ["loaded the pinned derived q8 weights"]);
+  assert.deepEqual(tierFailing(tierRun("bf16", PINS.q4)), ["loaded no derived tier's weights"]);
+});
+
+test("refusal matchers name the specific failure, not any error mentioning a record", () => {
+  const corrupt = `yue2: the source run does not verify against its recorded identity: /p/yue2/runs/yue2run_1/latent.npy: SHA-256 ${"a".repeat(64)}, recorded ${"b".repeat(64)}`;
+  assert.equal(isLatentCorruptionRefusal(corrupt), true);
+  assert.equal(isLatentCorruptionRefusal(corrupt.replace("latent.npy", "semantic.npy")), false);
+  assert.equal(isLatentCorruptionRefusal("yue2: the run was recorded as failed"), false);
+  assert.equal(isLatentCorruptionRefusal("YuE2 is not eligible to run now: the acknowledgment recorded is stale"), false);
+  assert.equal(isLatentCorruptionRefusal(null), false);
+  assert.equal(isMissingSourceRefusal("yue2: the source run /p/yue2/runs/yue2run_1 is missing"), true);
+  assert.equal(isMissingSourceRefusal("yue2: no decoder is installed; missing weights"), false);
+});
+
+test("a cold install starts from nothing installed on a fresh hub", async () => {
+  const none = { installState: "missing", variants: [{ variant: "bf16", installed: false, installState: "missing" }, { variant: "q8", installed: false, installState: "derivationPending" }] };
+  assert.equal(coldBefore(none), true);
+  assert.equal(coldBefore({ ...none, installState: "installed" }), false);
+  assert.equal(coldBefore({ ...none, variants: [...none.variants, { variant: "q4", installed: true, installState: "installed" }] }), false);
+  assert.equal(coldBefore({ installState: "missing", variants: [] }), false);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-acceptance-hub-"));
+  try {
+    assert.equal(await hubModeOf(path.join(dir, "absent")), "fresh");
+    assert.equal(await hubModeOf(dir), "fresh");
+    await mkdir(path.join(dir, "models--m-a-p--YuE2-3B"));
+    assert.equal(await hubModeOf(dir), "preseeded");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("the artifact check re-hashes every recorded file and names the first that does not verify", async () => {
@@ -272,7 +350,10 @@ test("a record stands as evidence only when it is complete; a non-pass must say 
   assert.throws(broken({ status: "skipped" }), /must say why/);
   assert.throws(broken({ status: "failed", reason: " " }), /must say why/);
   assert.throws(broken({ status: "blocked", reason: "x" }), /only an expected refusal/);
-  validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [] }));
+  const blockers = [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }];
+  validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [], blockers }));
+  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "component_blocked", jobs: [] })), /reason and unblock/);
+  assert.throws(() => validateRecord(passedRecord("transcription-blocked", { status: "blocked", reason: "x", jobs: [], blockers: [{ reason: "r" }] })), /reason and unblock/);
   assert.throws(broken({ jobs: [{ ...job, output: { ...job.output, runAudioSha256: undefined } }] }), /no output sha256/);
   assert.throws(broken({ jobs: [{ ...job, truncated: { abc: false } }] }), /no truncation flags/);
   assert.throws(broken({ jobs: [{ ...job, device: null }] }), /device\/dtype/);
@@ -287,13 +368,27 @@ function summaryOf(statuses, meta = {}) {
     ...passedRecord(item.id, { jobs: [] }),
     status: statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed"),
     reason: statuses[item.id] && statuses[item.id] !== "passed" ? `why ${item.id}` : item.expectBlocked ? "blocked as designed" : null,
+    blockers: (statuses[item.id] ?? (item.expectBlocked ? "blocked" : "passed")) === "blocked"
+      ? [{ componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]
+      : undefined,
   }));
   return buildSummary(records, { platform: "cuda", ...meta });
 }
 
 test("the verdict passes only a complete run: any failure fails it, any skip or dry run leaves it incomplete", () => {
-  assert.equal(summaryOf({}).verdict, "pass");
-  assert.equal(summaryOf({}).counts.blocked, 1);
+  // The designed transcription refusal is an open owner decision: never a plain pass, never exit 0.
+  const blocked = summaryOf({});
+  assert.equal(blocked.verdict, "pass-with-blockers");
+  assert.equal(blocked.counts.blocked, 1);
+  assert.deepEqual(blocked.blockers, [{ caseId: "transcription-blocked", acceptance: ["AT1"], componentId: "yue2_sheetsage2", reason: "owner licensing decision", unblock: "record a licence basis" }]);
+  assert.equal(exitCodeFor(blocked), 2);
+  const clean = summaryOf({ "transcription-blocked": "passed" });
+  assert.equal(clean.verdict, "pass");
+  assert.equal(exitCodeFor(clean), 0);
+  assert.equal(exitCodeFor(summaryOf({ "batch-serial": "failed" })), 1);
+  assert.equal(exitCodeFor(summaryOf({ "batch-serial": "skipped" })), 1);
+  assert.equal(exitCodeFor(summaryOf({}, { dryRun: true })), 0);
+  assert.equal(exitCodeFor(summaryOf({ "batch-serial": "failed" }, { dryRun: true })), 1);
   assert.equal(summaryOf({ "batch-serial": "failed" }).verdict, "fail");
   assert.equal(summaryOf({ "batch-serial": "skipped" }).verdict, "incomplete");
   assert.equal(summaryOf({ "batch-serial": "skipped", admission: "failed" }).verdict, "fail");
@@ -317,22 +412,104 @@ test("the markdown table has one row per case, carries hashes not audio, and esc
   assert.match(markdown, /long-context/);
   assert.match(markdown, /CC BY-NC 4\.0/);
   assert.doesNotMatch(markdown, /\.wav/);
+  // A blocker is listed with its reason and unblock condition, as an owner decision.
+  const withBlocker = renderMarkdown(summaryOf({}));
+  assert.match(withBlocker, /Verdict: \*\*pass-with-blockers\*\*/);
+  assert.match(withBlocker, /## Blockers — owner decision required \(not a pass\)/);
+  assert.match(withBlocker, /\*\*transcription-blocked\*\* \(AT1\) — yue2_sheetsage2: owner licensing decision\. Unblock: record a licence basis/);
+  assert.doesNotMatch(renderMarkdown(summaryOf({ "transcription-blocked": "passed" })), /Blockers/);
 });
 
-test("the service environment isolates the app, pins the worker device and really takes the hub away offline", () => {
-  const base = { PATH: "/bin", HF_HOME: "/home/hf", SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", HF_HUB_OFFLINE: "1" };
-  const online = serviceEnv({ platform: "cuda", base, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHub: "E:/hub", workerId: "w" });
-  assert.equal(online.PATH, "/bin");
-  for (const gone of ["HF_HOME", "SCENEWORKS_ACCESS_TOKEN", "SCENEWORKS_MLX_MEMORY_CAP_GB", "HF_HUB_OFFLINE", "SCENEWORKS_HUGGINGFACE_BASE_URL"]) assert.equal(online[gone], undefined, gone);
-  assert.equal(online.SCENEWORKS_GPU_ID, "0");
-  assert.equal(online.HF_HUB_CACHE, "E:/hub");
-  assert.equal(online.SCENEWORKS_API_URL, "http://127.0.0.1:5000");
-  assert.equal(online.SCENEWORKS_JOBS_DB_PATH, path.join("D", "cache", "jobs.db"));
-  const offline = serviceEnv({ platform: "metal", base, url: "u", port: 1, dataDir: "D", configDir: "C", hfHub: "H", workerId: "w", offline: true, extra: { SCENEWORKS_WORKER_ONLY: "1" } });
-  assert.equal(offline.SCENEWORKS_GPU_ID, "mlx");
+const SHELL = {
+  PATH: "/bin", HOME: "/home/u",
+  HF_HOME: "/home/hf", HF_HUB_CACHE: "/shared/hub", HUGGINGFACE_HUB_CACHE: "/shared/hub", HF_HUB_OFFLINE: "1", HF_TOKEN: "hf_secret",
+  SCENEWORKS_ACCESS_TOKEN: "t", SCENEWORKS_MLX_MEMORY_CAP_GB: "8", SCENEWORKS_HEARTBEAT_SECONDS: "5", SCENEWORKS_JOBS_DB_PATH: "/elsewhere.db",
+  SCENEWORKS_RESOLVED_CACHE_ENABLED: "true", CUDA_VISIBLE_DEVICES: "3", TRANSFORMERS_CACHE: "/t",
+};
+const common = { base: SHELL, url: "http://127.0.0.1:5000", port: 5000, dataDir: "D", configDir: "C", hfHome: "H", workerId: "w", driverPid: 42 };
+const driverKeys = (env) => Object.keys(env).filter((key) => /^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/.test(key) || key === "CUDA_VISIBLE_DEVICES").sort();
+
+test("the services get the desktop's shipped environment and nothing inherited from the shell", () => {
+  const resolved = { SCENEWORKS_RESOLVED_CACHE_ENABLED: "false", SCENEWORKS_RESOLVED_CACHE_MAX_BYTES: "68719476736", SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS: "1209600" };
+  const shared = { SCENEWORKS_DATA_DIR: "D", SCENEWORKS_CONFIG_DIR: "C", HF_HOME: "H", ...resolved };
+  // apps/desktop/src/setup.rs spawn_api, per platform.
+  const apiCommon = { ...shared, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "5000", SCENEWORKS_TRUST_LOOPBACK: "true", SCENEWORKS_RUN_UTILITY_INPROCESS: "true", SCENEWORKS_PARENT_PID: "42" };
+  const pick = (env) => Object.fromEntries(driverKeys(env).map((key) => [key, env[key]]));
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "api" })), { ...apiCommon, SCENEWORKS_MLX_REQUIRED: "1" });
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "api" })), { ...apiCommon, SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce" });
+  // supervise_mlx_worker (no parent-death watch on Metal: see serviceDeviations).
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "worker" })), {
+    ...shared, SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_WORKER_ID: "w", SCENEWORKS_API_URL: "http://127.0.0.1:5000",
+  });
+  // supervise_candle_worker's env + supervisor.rs child_environment for GPU 0.
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "worker", gpuId: "0" })), {
+    ...shared, SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_BACKEND_CANDLE_ENABLED: "true", SCENEWORKS_WORKER_ID: "w", SCENEWORKS_API_URL: "http://127.0.0.1:5000",
+    SCENEWORKS_PARENT_PID: "42", SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_GPU_ID: "0", CUDA_VISIBLE_DEVICES: "0", SCENEWORKS_UTILITY_JOBS: "0",
+  });
+  // Non-app variables pass through.
+  assert.equal(serviceEnv({ ...common, platform: "metal", role: "api" }).PATH, "/bin");
+  assert.throws(() => serviceEnv({ ...common, platform: "metal", role: "both" }), /unknown service role/);
+  assert.equal(serviceDeviations("metal").length, 2);
+  assert.match(serviceDeviations("cuda").join(" "), /per-GPU child/);
+});
+
+test("offline takes the hub away for real; an admission cap is the only extra; secrets are never recorded", () => {
+  const offline = serviceEnv({ ...common, platform: "metal", role: "worker", offline: true, extra: { SCENEWORKS_MLX_MEMORY_CAP_GB: "24" } });
   assert.equal(offline.HF_HUB_OFFLINE, "1");
+  assert.equal(offline.TRANSFORMERS_OFFLINE, "1");
   assert.equal(offline.SCENEWORKS_HUGGINGFACE_BASE_URL, "http://127.0.0.1:9");
-  assert.equal(offline.SCENEWORKS_WORKER_ONLY, "1");
+  assert.equal(offline.SCENEWORKS_MLX_MEMORY_CAP_GB, "24");
+  const recorded = recordedServiceEnv({ ...offline, SCENEWORKS_ACCESS_TOKEN: "t", HF_TOKEN: "x" });
+  assert.equal(recorded.SCENEWORKS_ACCESS_TOKEN, undefined);
+  assert.equal(recorded.HF_TOKEN, undefined);
+  assert.equal(recorded.PATH, undefined);
+  assert.equal(recorded.HF_HOME, "H");
+  assert.deepEqual(Object.keys(recorded), [...Object.keys(recorded)].sort());
+});
+
+function fakeWorker(rows) {
+  const calls = { quiesce: 0, signals: [] };
+  let index = 0;
+  return {
+    calls,
+    alive: () => true,
+    quiesce: async () => { calls.quiesce += 1; return { idle: false, reason: "still busy" }; },
+    readRow: async () => {
+      const row = rows[Math.min(index, rows.length - 1)];
+      index += 1;
+      if (row instanceof Error) throw row;
+      return row;
+    },
+    signalStop: async (options) => { calls.signals.push(options); },
+  };
+}
+
+test("a busy (or unreadable) Metal worker is never signalled unless the owner allowed it", async () => {
+  const busy = { id: "w", status: "busy", currentJobId: "job_7" };
+  for (const row of [busy, { id: "w", status: "idle", currentJobId: "job_7" }, new Error("ECONNREFUSED")]) {
+    const fake = fakeWorker([row]);
+    const outcome = await stopWorkerSafely({ platform: "metal", allowMetalWorkerKill: false, ...fake });
+    assert.equal(outcome.stopped, false);
+    assert.deepEqual(fake.calls.signals, [], "no signal reaches a Metal worker that may be mid-render");
+    assert.equal(fake.calls.quiesce, 1, "the job is cancelled through the API first");
+    assert.match(outcome.reason, /left running/);
+  }
+  // An idle Metal worker is stopped with SIGTERM only (no escalation).
+  const idle = fakeWorker([{ id: "w", status: "idle", currentJobId: null }]);
+  assert.deepEqual(await stopWorkerSafely({ platform: "metal", allowMetalWorkerKill: false, ...idle }), { stopped: true, signaled: true, reason: null });
+  assert.deepEqual(idle.calls.signals, [{ force: false }]);
+  // With the owner's say-so, or on CUDA, a busy worker is stopped (and may be escalated).
+  const allowed = fakeWorker([busy]);
+  assert.equal((await stopWorkerSafely({ platform: "metal", allowMetalWorkerKill: true, ...allowed })).stopped, true);
+  assert.deepEqual(allowed.calls.signals, [{ force: true }]);
+  const cuda = fakeWorker([busy]);
+  assert.equal((await stopWorkerSafely({ platform: "cuda", allowMetalWorkerKill: false, ...cuda })).stopped, true);
+  assert.deepEqual(cuda.calls.signals, [{ force: true }]);
+  // A worker already gone needs nothing.
+  const gone = { ...fakeWorker([busy]), alive: () => false };
+  assert.equal((await stopWorkerSafely({ platform: "metal", allowMetalWorkerKill: false, ...gone })).signaled, false);
+  assert.equal(workerBusy(null), false);
+  assert.equal(workerBusy(undefined), true);
 });
 
 test("evidence and app state must live outside the repository", () => {

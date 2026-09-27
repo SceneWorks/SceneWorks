@@ -1432,9 +1432,13 @@ jobs:
   # `yue2` provider on this card) and, once, the memory-profile campaign through the job path.
   # Dispatch only, at the frozen feature head:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_yue2_terminal_cuda=true -f inference_revision=<Cargo pin>
-  # The app state (models, derived q8/q4 tiers, projects -- and the CC BY-NC 4.0 audio) lives on E:
-  # under a fresh per-run directory and is NEVER uploaded; the artifact carries records, receipts,
-  # hashes and logs only. Remove E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review.
+  # The app state (a FRESH per-run Hugging Face home the cold install downloads into (~11 GB), the
+  # derived q8/q4 tiers, projects -- and the CC BY-NC 4.0 audio) lives on E: under a per-run directory
+  # and is NEVER uploaded; the artifact carries records, receipts, hashes and logs only. The shared
+  # E:\huggingface\hub is never touched: a preseeded hub is not cold-install evidence. Remove
+  # E:\sceneworks-terminal\sc-23002-yue2\<run> after the listening review. A `pass-with-blockers`
+  # acceptance verdict (the blocked AT2 transcription path) exits non-zero and fails this job: an
+  # open owner decision is never reported green.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
@@ -1448,7 +1452,6 @@ jobs:
     env:
       CUDA_COMPUTE_CAP: "120"
       CARGO_NET_OFFLINE: "true"
-      HF_HUB_CACHE: 'E:\huggingface\hub'
       YUE2_TERMINAL_STATE: 'E:\sceneworks-terminal\sc-23002-yue2\${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1473,10 +1476,6 @@ jobs:
           }
           if (Test-Path -LiteralPath $env:YUE2_TERMINAL_STATE) {
             throw "the terminal state directory $env:YUE2_TERMINAL_STATE already exists; the acceptance run starts cold"
-          }
-          $hub = Get-Item -LiteralPath $env:HF_HUB_CACHE -Force
-          if (-not $hub.PSIsContainer) {
-            throw 'HF_HUB_CACHE must be the runner hub directory'
           }
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the YuE2 terminal build
@@ -1519,7 +1518,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-hub "%HF_HUB_CACHE%" --api-bin target\release\sceneworks-rust-api.exe
+          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)
@@ -1529,6 +1528,9 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          set HF_HUB_CACHE=
+          set HUGGINGFACE_HUB_CACHE=
+          set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
           node scripts\yue2-memory-profile.mjs run --backend cuda --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
       - name: Upload the YuE2 terminal records and receipts (no audio)
         if: ${{ always() }}

@@ -7,7 +7,7 @@
 // artifacts the worker published into the app's data directory.
 //
 //   node scripts/yue2-acceptance.mjs --platform metal|cuda --out <dir>
-//        [--data-dir <dir>] [--hf-hub <dir>] [--api-bin <path>] [--skip <case>]... [--dry-run]
+//        [--data-dir <dir>] [--hf-home <dir>] [--api-bin <path>] [--skip <case>]... [--dry-run]
 //        [--gpu-id N] [--port N] [--allow-metal-worker-kill] [--job-timeout-minutes N]
 //
 // Runbook (Metal under the watchdog, CUDA by dispatch): docs/epic-22988-yue2-terminal.md.
@@ -17,7 +17,17 @@
 // scripts/memory-calibration-watchdog.py, which samples and terminates exactly one process group)
 // covers both, and it stops both on exit, on failure and on SIGINT/SIGTERM. An idle service is
 // stopped with SIGTERM; a render in flight is cancelled through the API first (the engine's own
-// cancel path) and only then stopped.
+// cancel path) and only then stopped. A Metal worker that is still busy is NEVER signalled (a signal
+// mid-command-buffer can wedge the GPU client until a reboot) unless the owner passed
+// --allow-metal-worker-kill: it is left running and reported.
+//
+// SHIPPED CONFIGURATION. The API and worker get the desktop's own spawn environment (`serviceEnv`);
+// every inherited SCENEWORKS_* / HF_* variable is removed first, and the few deliberate deviations
+// are recorded in the summary (`serviceDeviations`).
+//
+// COLD INSTALL. `--hf-home` (default `<out>/hf-home`) must be a FRESH, per-run Hugging Face home:
+// `install-cold` fails when anything is already installed or the hub is preseeded, so a shared hub
+// can never stand in for AT4's cold-install evidence.
 //
 // EVIDENCE. `<out>/evidence/` holds one record per case (`records/<case>.json`), `summary.json`,
 // `summary.md` and the service logs. Outputs are CC BY-NC 4.0: audio is NEVER copied into the
@@ -182,7 +192,7 @@ export function parseArgs(argv) {
     if (arg === "--platform") options.platform = value();
     else if (arg === "--out") options.out = value();
     else if (arg === "--data-dir") options.dataDir = value();
-    else if (arg === "--hf-hub") options.hfHub = value();
+    else if (arg === "--hf-home") options.hfHome = value();
     else if (arg === "--api-bin") options.apiBin = value();
     else if (arg === "--skip") options.skip.push(value());
     else if (arg === "--gpu-id") options.gpuId = value();
@@ -337,12 +347,17 @@ export function deviceMatches(platform, device) {
  * app's run record is the engine's (identity, truncation), the engine's artifact manifest verifies
  * byte for byte, and the audio is 48 kHz stereo and audible.
  */
-export function renderAssertions({ platform, job, runResult, runConfig, artifactCheck, runAudio }) {
+export function renderAssertions({ platform, job, runResult, runConfig, artifactCheck, runAudio, assetAudio }) {
   const y2 = job?.result?.yue2 ?? {};
   const out = [];
   const check = (name, ok, detail) => out.push({ name, ok: Boolean(ok), detail });
   check("job completed", job?.status === "completed", `status ${job?.status}${job?.error ? `: ${job.error}` : ""}`);
   check("production device", deviceMatches(platform, runConfig?.device), `config.json device ${runConfig?.device}, expected ${PLATFORMS[platform]?.device}`);
+  // A cached decode copies the SOURCE run's device into config.json's top level; the device this
+  // decode ran on is `cached_decode.device` alone, so a decode is held to it as well.
+  if (runResult?.kind === "cached_decode" || runConfig?.cached_decode !== undefined) {
+    check("decode ran on the production device", deviceMatches(platform, runConfig?.cached_decode?.device), `config.json cached_decode.device ${runConfig?.cached_decode?.device}, expected ${PLATFORMS[platform]?.device}`);
+  }
   check("run identity", typeof runResult?.identity === "string" && runResult.identity === y2.run?.identity, `result.json ${runResult?.identity} vs job ${y2.run?.identity}`);
   const truncation = runResult?.truncated;
   check(
@@ -354,7 +369,50 @@ export function renderAssertions({ platform, job, runResult, runConfig, artifact
   check("artifacts verify", artifactCheck?.ok === true, artifactCheck?.detail ?? "not checked");
   check("48 kHz stereo", runAudio?.sampleRate === 48000 && runAudio?.channels === 2, `${runAudio?.sampleRate} Hz x ${runAudio?.channels}`);
   check("audible", Number.isFinite(runAudio?.rms) && runAudio.rms > 1e-3, `rms ${runAudio?.rms}`);
+  // The library asset the user gets is the same recording: it exists, parses, and lasts as long as
+  // the run's own audio to within one frame.
+  const frame = runAudio?.sampleRate ? 1 / runAudio.sampleRate : 0;
+  check(
+    "library asset is the run's audio",
+    Number.isFinite(assetAudio?.durationSeconds) && Number.isFinite(runAudio?.durationSeconds) &&
+      Math.abs(assetAudio.durationSeconds - runAudio.durationSeconds) <= frame + 1e-9,
+    assetAudio ? `asset ${assetAudio.durationSeconds} s vs run ${runAudio?.durationSeconds} s` : "no library asset audio",
+  );
   return out;
+}
+
+/**
+ * The tier a render really ran at, from the ENGINE's records (config.json `weight_tier`, result.json
+ * `weights`), never the worker's echo of the request: the tier matches, the AR runs without the
+ * experimental FP8 mode (`quantization` is the engine's AR-precision field, `none` unless FP8), and a
+ * derived q8/q4 tier loaded exactly the pinned derived weights (`mot_native_weights_sha256`) while
+ * bf16 loaded none of them.
+ */
+export function tierAssertions({ tier, runConfig, runResult, manifestEntry }) {
+  const out = [];
+  const check = (name, ok, detail) => out.push({ name, ok: Boolean(ok), detail });
+  const weights = runResult?.weights ?? {};
+  const pins = Object.fromEntries((manifestEntry?.downloads ?? [])
+    .filter((row) => !row.coRequisite && row.localDerivation)
+    .map((row) => [row.variant, row.localDerivation.weightsSha256]));
+  check(`engine ran the ${tier} tier`, runConfig?.weight_tier === tier && weights.weight_tier === tier, `config.json ${runConfig?.weight_tier}, result.json ${weights.weight_tier}`);
+  check("AR ran without FP8", runConfig?.quantization === "none" && weights.quantization === "none", `config.json ${runConfig?.quantization}, result.json ${weights.quantization}`);
+  if (tier === "q8" || tier === "q4") {
+    check(`loaded the pinned derived ${tier} weights`, /^[0-9a-f]{64}$/.test(pins[tier] ?? "") && weights.mot_native_weights_sha256 === pins[tier], `${weights.mot_native_weights_sha256} vs pinned ${pins[tier]}`);
+  } else {
+    check("loaded no derived tier's weights", typeof weights.mot_native_weights_sha256 === "string" && !Object.values(pins).includes(weights.mot_native_weights_sha256), weights.mot_native_weights_sha256);
+  }
+  return out;
+}
+
+/** The worker's refusal of a source run whose latent.npy no longer hashes to its recorded digest. */
+export function isLatentCorruptionRefusal(error) {
+  return /the source run does not verify against its recorded identity: .*latent\.npy: SHA-256 [0-9a-f]{64}, recorded [0-9a-f]{64}/.test(String(error ?? ""));
+}
+
+/** The worker's refusal of a source run whose directory is gone. */
+export function isMissingSourceRefusal(error) {
+  return /yue2: the source run .+ is missing/.test(String(error ?? ""));
 }
 
 export function validateRecord(record) {
@@ -368,6 +426,9 @@ export function validateRecord(record) {
   }
   if (!Array.isArray(record.assertions) || !Array.isArray(record.requests) || !Array.isArray(record.jobs)) fail(`${where}: assertions, requests and jobs must be arrays`);
   if (record.status === "blocked" && !caseById(record.caseId).expectBlocked) fail(`${where}: only an expected refusal may be recorded as blocked`);
+  if (record.status === "blocked" && !(Array.isArray(record.blockers) && record.blockers.length && record.blockers.every((blocker) => blocker.reason && blocker.unblock))) {
+    fail(`${where}: a blocked case must name each blocker with its reason and unblock condition`);
+  }
   if (record.status === "passed") {
     if (!record.assertions.length) fail(`${where}: a passed case asserted nothing`);
     const failed = record.assertions.filter((assertion) => !assertion.ok);
@@ -397,6 +458,10 @@ export function buildSummary(records, meta) {
   // A run that stopped early (`meta.fatal`) fails: what it recorded stands, and it is never "incomplete".
   if (counts.failed || meta.fatal) verdict = "fail";
   else if (meta.dryRun || counts.skipped || missing.length) verdict = "incomplete";
+  // A blocked path is an open owner decision, never a pass.
+  else if (counts.blocked) verdict = "pass-with-blockers";
+  const blockers = records.filter((record) => record.status === "blocked")
+    .flatMap((record) => (record.blockers ?? []).map((blocker) => ({ caseId: record.caseId, acceptance: record.acceptance, ...blocker })));
   return {
     schema: SUMMARY_SCHEMA,
     verdict,
@@ -404,8 +469,11 @@ export function buildSummary(records, meta) {
     dryRun: Boolean(meta.dryRun),
     fatal: meta.fatal ?? null,
     counts,
+    blockers,
     missing,
     identity: meta.identity ?? null,
+    serviceEnv: meta.serviceEnv ?? null,
+    deviations: meta.deviations ?? [],
     coveredElsewhere: COVERED_ELSEWHERE,
     startedAt: meta.startedAt ?? null,
     finishedAt: meta.finishedAt ?? null,
@@ -436,6 +504,14 @@ export function buildSummary(records, meta) {
 const gib = (bytes) => (Number.isFinite(bytes) ? `${(bytes / 1024 ** 3).toFixed(2)} GiB` : "—");
 const cell = (value) => String(value ?? "—").replaceAll("|", "\\|").replaceAll("\n", " ");
 
+/** 0 only for a clean pass (or a dry run with no failure); a pass with blockers exits 2, anything else 1. */
+export function exitCodeFor(summary) {
+  if (summary.verdict === "pass") return 0;
+  if (summary.dryRun && summary.counts.failed === 0 && !summary.fatal) return 0;
+  if (summary.verdict === "pass-with-blockers") return 2;
+  return 1;
+}
+
 export function renderMarkdown(summary) {
   const lines = [
     `# YuE2 terminal acceptance — ${summary.platform}${summary.dryRun ? " (dry run)" : ""}`,
@@ -455,29 +531,92 @@ export function renderMarkdown(summary) {
     const jobs = item.jobs.map((job) => `${job.kind ?? "?"}·${job.tier ?? "-"}·${job.device ?? "-"}/${job.dtype?.model ?? "-"} ${job.status}`).join("<br>");
     lines.push(`| ${cell(item.caseId)} | ${cell(item.acceptance.join(", "))} | ${item.status} | ${cell(jobs || "—")} | ${cell(rendered.map((job) => job.outputSha256.slice(0, 16)).join("<br>") || "—")} | ${cell(rendered.map((job) => job.audioSeconds?.toFixed(1)).join("<br>") || "—")} | ${cell(rendered.map((job) => job.rms?.toFixed(4)).join("<br>") || "—")} | ${cell(rendered.map((job) => `${job.truncated?.abc}/${job.truncated?.semantic}`).join("<br>") || "—")} | ${gib(item.peakMemoryBytes)} | ${cell(item.reason)} |`);
   }
+  if (summary.blockers?.length) {
+    lines.push("", "## Blockers — owner decision required (not a pass)", "");
+    for (const blocker of summary.blockers) {
+      lines.push(`- **${cell(blocker.caseId)}** (${cell(blocker.acceptance.join(", "))}) — ${cell(blocker.componentId ?? "")}: ${cell(blocker.reason)}. Unblock: ${cell(blocker.unblock)}`);
+    }
+  }
+  if (summary.deviations?.length) {
+    lines.push("", "Deviations from the shipped desktop configuration:");
+    for (const deviation of summary.deviations) lines.push(`- ${deviation}`);
+  }
   lines.push("", "Covered by another harness:");
   for (const note of summary.coveredElsewhere) lines.push(`- ${note.acceptance}: ${note.by}`);
   lines.push("", "Audio outputs are CC BY-NC 4.0 and stay on the capture host; this bundle carries their hashes only.", "");
   return lines.join("\n");
 }
 
-/** The service environment: isolated data/config dirs, the loopback API, the platform's worker device. */
-export function serviceEnv({ platform, base = process.env, url, port, dataDir, configDir, hfHub, workerId, gpuId, offline = false, extra = {} }) {
-  const env = { ...base };
-  for (const inherited of ["HF_HOME", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE", "HF_ENDPOINT", "SCENEWORKS_ACCESS_TOKEN", "SCENEWORKS_WORKER_ONLY", "HF_HUB_OFFLINE", "SCENEWORKS_HUGGINGFACE_BASE_URL", "SCENEWORKS_MLX_MEMORY_CAP_GB", "SCENEWORKS_CUDA_VRAM_CAP_GB", "SCENEWORKS_RUN_UTILITY_INPROCESS"]) delete env[inherited];
+/** The resolved-cache policy the desktop passes every sidecar at its shipped default (opt-in, off). */
+export const RESOLVED_CACHE_DEFAULT_ENV = Object.freeze({
+  SCENEWORKS_RESOLVED_CACHE_ENABLED: "false",
+  SCENEWORKS_RESOLVED_CACHE_MAX_BYTES: "68719476736",
+  SCENEWORKS_RESOLVED_CACHE_INACTIVITY_SECONDS: "1209600",
+});
+
+/**
+ * Where the services run differently from the shipped desktop, and why. Recorded in every summary.
+ * Everything else in `serviceEnv` is the desktop's own spawn environment (apps/desktop/src/setup.rs
+ * `spawn_api`, `supervise_mlx_worker`, `supervise_candle_worker` + worker/src/supervisor.rs
+ * `child_environment`).
+ */
+export function serviceDeviations(platform) {
+  const out = [
+    "SCENEWORKS_FFMPEG is not set: the desktop points it at its bundled ffmpeg; YuE2 jobs never shell out to ffmpeg.",
+  ];
+  if (platform === "metal") {
+    out.push("The Metal worker gets no SCENEWORKS_PARENT_PID: its parent-death exit drops the render mid-command-buffer, the host-wedging kill this driver never performs; the API keeps it.");
+  } else {
+    out.push("The CUDA worker is the per-GPU child the desktop's `auto` supervisor would spawn, started directly with the supervisor's child environment (so the driver owns its pid for kill/resume); the supervisor's restart loop is not in the path.");
+  }
+  return out;
+}
+
+/**
+ * The service environment: the shipped desktop's spawn environment for the API and the GPU worker,
+ * built from a base with EVERY inherited SCENEWORKS_* / HF_* / CUDA_VISIBLE_DEVICES / TRANSFORMERS_*
+ * variable removed, so the shell a run is started from cannot change what is measured.
+ */
+export function serviceEnv({ platform, role, base = process.env, url, port, dataDir, configDir, hfHome, workerId, gpuId, driverPid = process.pid, offline = false, extra = {} }) {
+  if (!["api", "worker"].includes(role)) fail(`unknown service role ${role}`);
+  const env = {};
+  for (const [key, value] of Object.entries(base)) {
+    if (/^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/i.test(key) || key.toUpperCase() === "CUDA_VISIBLE_DEVICES") continue;
+    env[key] = value;
+  }
   Object.assign(env, {
-    SCENEWORKS_API_HOST: "127.0.0.1",
-    SCENEWORKS_API_PORT: String(port),
-    SCENEWORKS_API_URL: url,
     SCENEWORKS_DATA_DIR: dataDir,
     SCENEWORKS_CONFIG_DIR: configDir,
-    SCENEWORKS_JOBS_DB_PATH: path.join(dataDir, "cache", "jobs.db"),
-    SCENEWORKS_WORKER_ID: workerId,
-    SCENEWORKS_GPU_ID: gpuId ?? PLATFORMS[platform].gpuId,
-    HF_HUB_CACHE: hfHub,
-    // The cancel check rides the heartbeat (clamped to >= 5 s); the shortest keeps cancels prompt.
-    SCENEWORKS_HEARTBEAT_SECONDS: "5",
+    // The desktop sets HF_HOME only (macOS / Windows); the hub is <HF_HOME>/hub.
+    HF_HOME: hfHome,
+    ...RESOLVED_CACHE_DEFAULT_ENV,
   });
+  if (role === "api") {
+    Object.assign(env, {
+      SCENEWORKS_API_HOST: "127.0.0.1",
+      SCENEWORKS_API_PORT: String(port),
+      SCENEWORKS_TRUST_LOOPBACK: "true",
+      SCENEWORKS_RUN_UTILITY_INPROCESS: "true",
+      SCENEWORKS_PARENT_PID: String(driverPid),
+    });
+    if (platform === "metal") env.SCENEWORKS_MLX_REQUIRED = "1";
+    else Object.assign(env, { SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce" });
+  } else {
+    Object.assign(env, { SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_API_URL: url });
+    if (platform === "metal") {
+      env.SCENEWORKS_GPU_ID = "mlx";
+    } else {
+      const gpu = String(gpuId ?? PLATFORMS.cuda.gpuId);
+      Object.assign(env, {
+        SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",
+        SCENEWORKS_PARENT_PID: String(driverPid),
+        SCENEWORKS_WORKER_CHILD: "1",
+        SCENEWORKS_GPU_ID: gpu,
+        CUDA_VISIBLE_DEVICES: gpu,
+        SCENEWORKS_UTILITY_JOBS: "0",
+      });
+    }
+  }
   if (offline) {
     // The app reads no HF_HUB_OFFLINE; the unreachable hub base is what actually takes the network
     // away from the worker's download path (discard port on loopback).
@@ -487,6 +626,51 @@ export function serviceEnv({ platform, base = process.env, url, port, dataDir, c
   }
   Object.assign(env, extra);
   return env;
+}
+
+/** The part of a service environment the run records: what the driver set, never a secret. */
+export function recordedServiceEnv(env) {
+  return Object.fromEntries(
+    Object.entries(env)
+      .filter(([key]) => /^(SCENEWORKS_|HF_|TRANSFORMERS_)/.test(key) || key === "CUDA_VISIBLE_DEVICES")
+      .filter(([key]) => !/TOKEN|SECRET|PASSWORD|CREDENTIAL/i.test(key))
+      .sort(([a], [b]) => a.localeCompare(b)),
+  );
+}
+
+/** Whether a registry row says the worker is (or may be) mid-job. An unreadable registry counts as busy. */
+export function workerBusy(row) {
+  if (row === undefined) return true;
+  if (row === null) return false;
+  return row.status === "busy" || row.currentJobId != null;
+}
+
+/**
+ * Stop the GPU worker without ever signal-killing a Metal render. Active jobs are cancelled through
+ * the API first (the engine's own cancel path) and the worker is waited to idle; on Metal a worker
+ * that is still busy — or whose state cannot be read — is LEFT RUNNING for the operator or the
+ * watchdog unless the owner allowed worker kills. Returns what happened; never throws on refusal.
+ */
+export async function stopWorkerSafely({ platform, allowMetalWorkerKill, alive, quiesce, readRow, signalStop }) {
+  if (!alive()) return { stopped: true, signaled: false, reason: "not running" };
+  const quiesced = await quiesce().catch((error) => ({ idle: false, reason: error.message }));
+  let row;
+  try {
+    row = await readRow();
+  } catch {
+    row = undefined;
+  }
+  if (platform === "metal" && workerBusy(row) && !allowMetalWorkerKill) {
+    return {
+      stopped: false,
+      signaled: false,
+      reason: `the Metal worker is ${row === undefined ? "in an unknown state (API unreachable)" : `busy (job ${row.currentJobId ?? "?"})`}` +
+        `${quiesced?.idle === false && quiesced.reason ? ` after cancel: ${quiesced.reason}` : ""}; ` +
+        "it is left running — a signal mid-render can wedge the GPU client (pass --allow-metal-worker-kill to override)",
+    };
+  }
+  await signalStop({ force: platform !== "metal" || allowMetalWorkerKill });
+  return { stopped: true, signaled: true, reason: null };
 }
 
 // ---- Runtime ---------------------------------------------------------------------------------------
@@ -529,6 +713,8 @@ async function runIdentity(apiBin) {
   };
 }
 
+const ACTIVE_JOB_STATUSES = ["preparing", "downloading", "loading_model", "running", "saving", "queued", "pending_caption", "pending_workflow"];
+
 class Service {
   constructor(options, paths) {
     this.options = options;
@@ -538,27 +724,34 @@ class Service {
     this.workerId = `yue2-acceptance-${randomBytes(6).toString("hex")}`;
     this.offline = false;
     this.workerExtra = {};
+    this.envs = {};
   }
 
   env(role) {
-    return serviceEnv({
+    const env = serviceEnv({
       platform: this.options.platform,
+      role,
       url: this.url,
       port: this.port,
       dataDir: this.paths.dataDir,
       configDir: this.paths.configDir,
-      hfHub: this.paths.hfHub,
+      hfHome: this.paths.hfHome,
       workerId: this.workerId,
       gpuId: this.options.gpuId,
       offline: this.offline,
-      extra: role === "worker" ? { SCENEWORKS_WORKER_ONLY: "1", ...this.workerExtra } : {},
+      extra: role === "worker" ? this.workerExtra : {},
     });
+    this.envs[role] = recordedServiceEnv(env);
+    return env;
   }
 
   async spawnChild(role) {
     const log = await open(path.join(this.paths.logs, `${role}.log`), "a");
+    // A CUDA per-GPU child treats stdin EOF as its graceful-shutdown request (the supervisor holds
+    // the pipe), so the driver holds it the same way; everything else gets no stdin.
+    const stdin = role === "worker" && this.options.platform === "cuda" ? "pipe" : "ignore";
     // NOT detached: the child stays in the driver's process group, which the external guard samples.
-    const child = spawn(this.options.apiBin, [], { cwd: ROOT, env: this.env(role), stdio: ["ignore", log.fd, log.fd], windowsHide: true });
+    const child = spawn(this.options.apiBin, [], { cwd: ROOT, env: this.env(role), stdio: [stdin, log.fd, log.fd], windowsHide: true });
     await log.close();
     child.spawnError = null;
     child.once("error", (error) => { child.spawnError = error; });
@@ -597,12 +790,17 @@ class Service {
     fail("the API did not become ready in 120 s");
   }
 
+  async workerRow() {
+    const workers = await this.request("GET", "/api/v1/workers", undefined, { timeoutMs: 10_000 });
+    if (workers.status !== 200 || !Array.isArray(workers.body)) fail(`GET /api/v1/workers → HTTP ${workers.status}`);
+    return workers.body.find((worker) => worker.id === this.workerId) ?? null;
+  }
+
   async startWorker() {
     this.worker = await this.spawnChild("worker");
     for (let attempt = 0; attempt < 360; attempt += 1) {
       if (!this.alive(this.worker)) fail(`the worker exited during startup (see ${path.join(this.paths.logs, "worker.log")})`);
-      const workers = await this.request("GET", "/api/v1/workers");
-      const mine = Array.isArray(workers.body) ? workers.body.find((worker) => worker.id === this.workerId) : null;
+      const mine = await this.workerRow().catch(() => null);
       if (mine && mine.status === "idle" && mine.currentJobId == null) return mine;
       await sleep(500);
     }
@@ -613,44 +811,68 @@ class Service {
     return [this.api, this.worker].filter((child) => this.alive(child)).map((child) => child.pid);
   }
 
-  /** Stop one child: SIGTERM (taskkill /T on Windows), escalate after `graceMs`. */
-  async stopChild(child, { force = false, graceMs = 15_000 } = {}) {
+  /**
+   * Stop one child. Windows: close the CUDA child's stdin (its graceful shutdown), then tree-kill.
+   * POSIX: SIGTERM, then SIGKILL only when `force` — a Metal worker is never escalated unless the
+   * owner allowed worker kills.
+   */
+  async stopChild(child, { force = false, kill = false, graceMs = 15_000 } = {}) {
     if (!this.alive(child)) return;
     const exited = new Promise((resolve) => child.once("exit", resolve));
+    const wait = (ms) => Promise.race([exited.then(() => true), sleep(ms).then(() => false)]);
     if (process.platform === "win32") {
+      if (!kill && child.stdin) {
+        child.stdin.end();
+        if (await wait(graceMs)) return;
+      }
       await execFile("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true })
         .catch((error) => console.error(`yue2-acceptance: taskkill ${child.pid}: ${error.message}`));
+      await wait(graceMs);
     } else {
-      child.kill(force ? "SIGKILL" : "SIGTERM");
-    }
-    const done = await Promise.race([exited.then(() => true), sleep(graceMs).then(() => false)]);
-    if (!done && process.platform !== "win32") {
-      child.kill("SIGKILL");
-      await Promise.race([exited, sleep(graceMs)]);
+      child.kill(kill ? "SIGKILL" : "SIGTERM");
+      if (!(await wait(graceMs)) && force && !kill) {
+        child.kill("SIGKILL");
+        await wait(graceMs);
+      }
     }
     if (this.alive(child)) fail(`pid ${child.pid} did not exit`);
   }
 
-  /** Cancel any active job through the API (the engine's own cancel path) and wait for the worker to idle. */
+  /** Cancel every active job through the API (the engine's own cancel path) and wait for the worker to idle. */
   async quiesce({ timeoutMs = 15 * 60_000 } = {}) {
-    if (!this.alive(this.api)) return;
+    if (!this.alive(this.api)) return { idle: false, reason: "the API is not running" };
     const deadline = Date.now() + timeoutMs;
-    const jobs = await this.request("GET", "/api/v1/jobs").catch(() => null);
-    const active = (Array.isArray(jobs?.body) ? jobs.body : jobs?.body?.items ?? []).filter((job) => ["preparing", "downloading", "loading_model", "running", "saving", "queued"].includes(job.status));
-    for (const job of active) await this.request("POST", `/api/v1/jobs/${job.id}/cancel`).catch(() => {});
+    const jobs = await this.request("GET", "/api/v1/jobs");
+    if (jobs.status !== 200 || !Array.isArray(jobs.body)) return { idle: false, reason: `GET /api/v1/jobs → HTTP ${jobs.status}` };
+    const active = jobs.body.filter((job) => ACTIVE_JOB_STATUSES.includes(job.status));
+    for (const job of active) {
+      const canceled = await this.request("POST", `/api/v1/jobs/${job.id}/cancel`);
+      if (canceled.status !== 200) console.error(`yue2-acceptance: cancel ${job.id} → HTTP ${canceled.status}`);
+    }
     while (this.alive(this.worker) && Date.now() < deadline) {
-      const workers = await this.request("GET", "/api/v1/workers").catch(() => null);
-      const mine = Array.isArray(workers?.body) ? workers.body.find((worker) => worker.id === this.workerId) : null;
-      if (!mine || (mine.status !== "busy" && mine.currentJobId == null)) return;
+      if (!workerBusy(await this.workerRow().catch(() => undefined))) return { idle: true, canceled: active.map((job) => job.id) };
       await sleep(1000);
     }
+    return this.alive(this.worker)
+      ? { idle: false, reason: `the worker was still busy ${Math.round(timeoutMs / 60000)} min after the cancel` }
+      : { idle: true, canceled: active.map((job) => job.id) };
   }
 
-  async stop({ graceful = true } = {}) {
-    // A failed quiesce is reported, and the stop still happens (the processes must not outlive the driver).
-    if (graceful) await this.quiesce().catch((error) => console.error(`yue2-acceptance: quiesce before stop: ${error.message}`));
-    await this.stopChild(this.worker);
-    await this.stopChild(this.api);
+  /** Stop the worker safely (see `stopWorkerSafely`), then the API. Throws when the worker had to be left running. */
+  async stop() {
+    const worker = await stopWorkerSafely({
+      platform: this.options.platform,
+      allowMetalWorkerKill: this.options.allowMetalWorkerKill,
+      alive: () => this.alive(this.worker),
+      quiesce: () => this.quiesce(),
+      readRow: () => this.workerRow(),
+      signalStop: ({ force }) => this.stopChild(this.worker, { force }),
+    });
+    if (!worker.stopped) {
+      // The API stays up too: the render finishes and posts its result, and nothing is signalled.
+      fail(`${worker.reason}; left running: worker pid ${this.worker?.pid}, API pid ${this.api?.pid}`);
+    }
+    await this.stopChild(this.api, { force: true });
   }
 
   async restart({ offline = this.offline, workerExtra = {}, worker = true } = {}) {
@@ -819,6 +1041,11 @@ class Context {
     fail(`job ${jobId} did not reach the expected state in ${Math.round(timeoutMs / 60000)} min (last: ${snapshot?.status} ${snapshot?.message})`);
   }
 
+  /** The tier a job asked for, or the catalog's default row when it asked for none. */
+  requestedTier(snapshot) {
+    return snapshot.payload?.yue2?.tier ?? this.fixtures.manifestEntry.downloads.find((row) => !row.coRequisite && row.default)?.variant ?? null;
+  }
+
   runDir(job) {
     const rel = job?.result?.yue2?.run?.dir ?? (job?.payload?.yue2?.runId ? `yue2/runs/${job.payload.yue2.runId}` : null);
     if (!rel) return null;
@@ -833,7 +1060,7 @@ class Context {
       jobId,
       kind: snapshot.payload?.yue2?.kind ?? null,
       runId: snapshot.payload?.yue2?.runId ?? null,
-      tier: snapshot.result?.yue2?.tier ?? snapshot.result?.yue2?.effectiveSettings?.tier ?? snapshot.payload?.yue2?.tier ?? null,
+      tier: null,
       status: snapshot.status,
       error: snapshot.error ?? null,
       message: snapshot.message ?? null,
@@ -868,7 +1095,9 @@ class Context {
     const configFile = existsSync(path.join(runDir, "config.json")) ? "config.json" : "provenance.json";
     const configBody = JSON.parse(await readFile(path.join(runDir, configFile), "utf8"));
     const runConfig = configFile === "config.json" ? configBody : configBody.config ?? configBody;
-    entry.device = runConfig.device ?? null;
+    // A cached decode's own device is `cached_decode.device`; its top-level fields are the source's.
+    entry.device = runConfig.cached_decode ? runConfig.cached_decode.device ?? null : runConfig.device ?? null;
+    entry.sourceDevice = runConfig.cached_decode ? runConfig.device ?? null : null;
     entry.dtype = { model: runConfig.model_dtype ?? null, vae: runConfig.vae_dtype ?? null };
     entry.engineConfig = { cot: runConfig.cot ?? null, weightTier: runConfig.weight_tier ?? null, quantization: runConfig.quantization ?? null, offloadAr: runConfig.offload_ar ?? null, queryTile: runConfig.query_tile ?? null, vaeDecode: runConfig.vae_decode ?? null, vaeCoreFrames: runConfig.vae_core_frames ?? null, decoderRelease: runConfig.decoder_release ?? null };
     const artifactCheck = await verifyRunArtifacts(runDir, runResult);
@@ -877,6 +1106,10 @@ class Context {
       rec.check(`${jobId}: plan run on the production device`, deviceMatches(this.platform, entry.device), `device ${entry.device}`);
       rec.check(`${jobId}: plan artifacts verify`, artifactCheck.ok, artifactCheck.detail);
       rec.check(`${jobId}: plan truncation reported`, typeof runResult.truncated?.abc === "boolean", JSON.stringify(runResult.truncated));
+      entry.tier = this.requestedTier(snapshot);
+      for (const assertion of tierAssertions({ tier: entry.tier, runConfig, runResult, manifestEntry: this.fixtures.manifestEntry })) {
+        rec.check(`${jobId}: ${assertion.name}`, assertion.ok, assertion.detail);
+      }
       return { snapshot, entry, runDir, runResult, runConfig };
     }
     const audioPath = path.join(runDir, "audio.wav");
@@ -884,7 +1117,12 @@ class Context {
     const runAudio = parseWav(audioBytes);
     const assetPath = snapshot.result?.assetWrites?.[0]?.mediaPath;
     let assetSha = null;
-    if (assetPath && existsSync(path.join(this.project.path, assetPath))) assetSha = await fileSha256(path.join(this.project.path, assetPath));
+    let assetAudio = null;
+    if (assetPath && existsSync(path.join(this.project.path, assetPath))) {
+      const assetBytes = await readFile(path.join(this.project.path, assetPath));
+      assetSha = sha256(assetBytes);
+      try { assetAudio = parseWav(assetBytes); } catch (error) { rec.note(`${jobId}: the library asset does not parse: ${error.message}`); }
+    }
     entry.rendered = true;
     entry.output = {
       runAudioSha256: sha256(audioBytes),
@@ -900,8 +1138,16 @@ class Context {
     };
     entry.latent = runResult.latent ?? null;
     entry.engineDecoder = runResult.decoder ?? null;
-    for (const assertion of renderAssertions({ platform: this.platform, job: snapshot, runResult, runConfig, artifactCheck, runAudio })) {
+    entry.output.assetDurationSeconds = assetAudio?.durationSeconds ?? null;
+    for (const assertion of renderAssertions({ platform: this.platform, job: snapshot, runResult, runConfig, artifactCheck, runAudio, assetAudio })) {
       rec.check(`${jobId}: ${assertion.name}`, assertion.ok, assertion.detail);
+    }
+    if (runResult.kind !== "cached_decode") {
+      const requested = this.requestedTier(snapshot);
+      entry.tier = requested;
+      for (const assertion of tierAssertions({ tier: requested, runConfig, runResult, manifestEntry: this.fixtures.manifestEntry })) {
+        rec.check(`${jobId}: ${assertion.name}`, assertion.ok, assertion.detail);
+      }
     }
     return { snapshot, entry, runDir, runResult, runConfig, runAudio };
   }
@@ -1100,12 +1346,20 @@ const CASE_RUNNERS = {
     rec.check("the refusal names the blocked components and their unblock condition", (transcribe?.context?.blocked ?? []).length > 0 && transcribe.context.blocked.every((item) => item.reason && item.unblock), JSON.stringify(transcribe?.context ?? null).slice(0, 400));
     const cover = await ctx.submit(rec, { kind: "cover", lyrics: ctx.fixtures.song.lyrics, cover: { mode: "full", sourceAudioAssetId: "asset_acceptance_source" }, licenseAcknowledged: true }, 403);
     rec.check("a cover from a source recording refused with component_blocked", cover?.code === "component_blocked", JSON.stringify(cover).slice(0, 400));
-    return { status: "blocked", reason: `recording transcription is blocked as designed: ${(transcribe?.context?.blocked ?? []).map((item) => `${item.componentId}: ${item.reason}`).join("; ")}` };
+    const blocked = transcribe?.context?.blocked ?? [];
+    return {
+      status: "blocked",
+      reason: `AT2's recording → transcription path is blocked (owner decision): ${blocked.map((item) => item.componentId).join(", ")}`,
+      blockers: blocked.map((item) => ({ componentId: item.componentId, reason: item.reason, unblock: item.unblock })),
+    };
   },
 
   async "install-cold"(ctx, rec) {
     const before = (await ctx.models(rec)).entry;
-    rec.note(`before install: ${before.installState}; ${JSON.stringify((before.variants ?? []).map((variant) => [variant.variant, variant.installState]))}; hub ${ctx.paths.hfHub}`);
+    rec.note(`before install: ${before.installState}; ${JSON.stringify((before.variants ?? []).map((variant) => [variant.variant, variant.installState]))}; hub ${ctx.paths.hfHub} (${ctx.hubMode})`);
+    // AT4's cold install is evidence only from a fresh hub with nothing installed.
+    rec.require("the Hugging Face home is fresh (not a preseeded hub)", ctx.hubMode === "fresh", `hub ${ctx.paths.hfHub} is ${ctx.hubMode}: a preseeded hub is not cold-install evidence`);
+    rec.require("nothing is installed before the install", coldBefore(before), JSON.stringify({ installState: before.installState, variants: (before.variants ?? []).map((variant) => [variant.variant, variant.installed, variant.installState]) }));
     const installed = [];
     for (const [variant, decoder] of [["bf16", "standard"], ["bf16", "legacy"], ["q8", "standard"], ["q4", "standard"]]) {
       const { jobs } = await ctx.install(rec, { variant, licenseAcknowledged: true, choices: { decoder } });
@@ -1135,7 +1389,7 @@ const CASE_RUNNERS = {
     const body = ctx.songBody({ planning: "full" });
     const response = await ctx.submit(rec, body);
     const { entry } = await ctx.evidence(rec, response.jobs[0].id);
-    rec.check("effective tier is the default bf16", entry.effectiveSettings?.tier === "bf16", entry.effectiveSettings?.tier);
+    rec.check("the engine ran the default bf16 tier", entry.engineConfig.weightTier === "bf16", entry.engineConfig.weightTier);
     rec.check("engine ran cot=full", entry.engineConfig.cot === "full", entry.engineConfig.cot);
     rec.check("EN lyrics rendered", /[A-Za-z]/.test(entry.effectiveSettings?.lyrics ?? ""), "");
     ctx.outputs.set("source", { jobId: response.jobs[0].id, entry });
@@ -1145,14 +1399,14 @@ const CASE_RUNNERS = {
     const response = await ctx.submit(rec, ctx.songBody({ planning: "melody", tier: "q8" }));
     const { entry } = await ctx.evidence(rec, response.jobs[0].id);
     rec.check("engine ran cot=melody", entry.engineConfig.cot === "melody", entry.engineConfig.cot);
-    rec.check("q8 tier", entry.engineConfig.weightTier === "q8" || entry.effectiveSettings?.tier === "q8", JSON.stringify(entry.engineConfig));
+    rec.check("the engine ran the q8 tier", entry.engineConfig.weightTier === "q8", JSON.stringify(entry.engineConfig));
   },
 
   async "create-cot-off"(ctx, rec) {
     const response = await ctx.submit(rec, ctx.songBody({ planning: "off", tier: "q4" }));
     const { entry, runDir } = await ctx.evidence(rec, response.jobs[0].id);
     rec.check("engine ran cot=off", entry.engineConfig.cot === "off", entry.engineConfig.cot);
-    rec.check("q4 tier", entry.engineConfig.weightTier === "q4" || entry.effectiveSettings?.tier === "q4", JSON.stringify(entry.engineConfig));
+    rec.check("the engine ran the q4 tier", entry.engineConfig.weightTier === "q4", JSON.stringify(entry.engineConfig));
     rec.check("an unplanned run carries no score", !existsSync(path.join(runDir, "score.abc")), "");
   },
 
@@ -1277,7 +1531,7 @@ const CASE_RUNNERS = {
       rec.note(`flipped the last byte of ${path.relative(ctx.paths.dataDir, latent)}`);
       const refused = await ctx.submit(rec, { kind: "decode", sourceJobId: source.jobId });
       const { snapshot } = await ctx.evidence(rec, refused.jobs[0].id, { expectStatus: "failed" });
-      rec.check("the corrupt source is refused by identity verification", /does not verify|hashes to|recorded/i.test(snapshot.error ?? ""), snapshot.error);
+      rec.check("the corrupt latent.npy is refused by identity verification", isLatentCorruptionRefusal(snapshot.error), snapshot.error);
     } finally {
       await copyFile(backup, latent);
       await rm(backup, { force: true });
@@ -1295,7 +1549,7 @@ const CASE_RUNNERS = {
     try {
       const refused = await ctx.submit(rec, { kind: "decode", sourceJobId: source.jobId });
       const { snapshot } = await ctx.evidence(rec, refused.jobs[0].id, { expectStatus: "failed" });
-      rec.check("the missing source run is refused", /missing/i.test(snapshot.error ?? ""), snapshot.error);
+      rec.check("the missing source run is refused", isMissingSourceRefusal(snapshot.error), snapshot.error);
     } finally {
       await rename(moved, dir);
     }
@@ -1304,7 +1558,9 @@ const CASE_RUNNERS = {
   },
 
   async "cancel-ar"(ctx, rec) {
-    await cancelCase(ctx, rec, ctx.songBody({ planning: "off", tier: "q4" }), "semantic");
+    // The cancel lands on the worker's shipped 10 s heartbeat; 3 000 forced semantic tokens keep the
+    // AR stage far longer than that on any host.
+    await cancelCase(ctx, rec, ctx.songBody({ planning: "off", tier: "q4", semanticSampling: { minTokens: 3000, maxTokens: 3000 } }), "semantic");
   },
   async "cancel-nar"(ctx, rec) {
     // Many midpoint ODE steps keep the acoustic stage longer than the cancel's heartbeat latency.
@@ -1329,7 +1585,7 @@ const CASE_RUNNERS = {
     rec.require("the plan checkpoint was recorded", existsSync(planRecord), planRecord);
     const checkpoint = JSON.parse(await readFile(planRecord, "utf8"));
     const killedPid = ctx.service.worker.pid;
-    await ctx.service.stopChild(ctx.service.worker, { force: true, graceMs: 30_000 });
+    await ctx.service.stopChild(ctx.service.worker, { kill: true, graceMs: 30_000 });
     rec.note(`SIGKILLed worker pid ${killedPid} during ${reached.observations.at(-1)?.message}`);
     await ctx.service.startWorker();
     const interrupted = await ctx.follow(jobId, { timeoutMs: 5 * 60_000 });
@@ -1406,6 +1662,19 @@ const CASE_RUNNERS = {
     rec.check("q4 installed again", back?.installed === true, JSON.stringify(back ?? null).slice(0, 200));
   },
 };
+
+/** A catalog row that reads as nothing installed: the model and every tier. */
+export function coldBefore(entry) {
+  return Boolean(entry) && entry.installState !== "installed" && Array.isArray(entry.variants) && entry.variants.length > 0 &&
+    entry.variants.every((variant) => variant.installed !== true && variant.installState !== "installed");
+}
+
+/** A hub directory's mode: `fresh` when it holds no cached repository, else `preseeded`. */
+export async function hubModeOf(hub) {
+  let names = [];
+  try { names = await readdir(hub); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  return names.some((name) => name.startsWith("models--")) ? "preseeded" : "fresh";
+}
 
 /** The ids that have a runner — every case must (the test suite holds it to that). */
 export function caseRunnerIds() {
@@ -1487,6 +1756,13 @@ async function writeJson(file, value) {
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
+/** A failed case leaves nothing in flight: its jobs are cancelled through the API and the worker idles. */
+async function settleAfterFailure(ctx, rec) {
+  if (ctx.options.dryRun) return;
+  const settled = await ctx.service.quiesce().catch((error) => ({ idle: false, reason: error.message }));
+  rec.note(settled.idle ? `after the failure: cancelled ${settled.canceled?.length ?? 0} in-flight job(s); the worker is idle` : `after the failure the worker did not idle: ${settled.reason}`);
+}
+
 async function runCase(ctx, item, planned, records, sampler) {
   const rec = new Recorder(item, ctx.platform);
   const finish = async (status, reason) => {
@@ -1519,13 +1795,20 @@ async function runCase(ctx, item, planned, records, sampler) {
   try {
     outcome = await CASE_RUNNERS[item.id](ctx, rec);
   } catch (error) {
+    await settleAfterFailure(ctx, rec);
     await stopSampler();
     return finish("failed", error instanceof CaseFailure ? error.message : `${error.name}: ${error.message}`);
   }
   await stopSampler();
   const failed = rec.record.assertions.filter((assertion) => !assertion.ok);
-  if (failed.length) return finish("failed", failed.map((assertion) => `${assertion.name}: ${assertion.detail ?? ""}`).join("; "));
-  if (outcome?.status === "blocked") return finish("blocked", outcome.reason);
+  if (failed.length) {
+    await settleAfterFailure(ctx, rec);
+    return finish("failed", failed.map((assertion) => `${assertion.name}: ${assertion.detail ?? ""}`).join("; "));
+  }
+  if (outcome?.status === "blocked") {
+    rec.record.blockers = outcome.blockers;
+    return finish("blocked", outcome.reason);
+  }
   return finish("passed", null);
 }
 
@@ -1542,21 +1825,24 @@ export async function main(argv = process.argv.slice(2)) {
     logs: path.join(evidence, "logs"),
     dataDir,
     configDir: `${dataDir}-config`,
-    hfHub: path.resolve(options.hfHub ?? path.join(out, "hf-hub")),
+    hfHome: path.resolve(options.hfHome ?? path.join(out, "hf-home")),
   };
+  paths.hfHub = path.join(paths.hfHome, "hub");
   if (insideRepository(dataDir) || insideRepository(out)) fail("--out and --data-dir must be outside the repository");
   if (existsSync(paths.records) && (await readdir(paths.records)).length) fail(`${paths.records} already holds records; use a fresh --out`);
   if (existsSync(path.join(paths.dataDir, "cache", "jobs.db"))) fail(`${paths.dataDir} already holds an app; the acceptance run starts cold — use a fresh --data-dir`);
+  const hubMode = await hubModeOf(paths.hfHub);
   for (const dir of [paths.records, paths.logs, paths.dataDir, paths.configDir, paths.hfHub]) await mkdir(dir, { recursive: true });
   options.apiBin = path.resolve(options.apiBin ?? path.join(ROOT, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api"));
   if (!existsSync(options.apiBin)) fail(`no API binary at ${options.apiBin}; build it first (cargo build --release --locked -p sceneworks-rust-api${options.platform === "cuda" ? " --features backend-candle" : ""})`);
 
   const startedAt = nowIso();
   const identity = await runIdentity(options.apiBin);
-  identity.hfHub = { path: paths.hfHub, mode: options.hfHub ? "preseeded hub (install re-verifies against the Hub)" : "fresh (install downloads)" };
+  identity.hfHome = { path: paths.hfHome, hub: paths.hfHub, mode: hubMode };
   const plan = planCases(options);
   const service = new Service(options, paths);
   const ctx = new Context(options, service, paths);
+  ctx.hubMode = hubMode;
   const sampler = new Sampler(options.platform, service, options.gpuId);
   const records = new Map();
   let stopping = false;
@@ -1564,7 +1850,7 @@ export async function main(argv = process.argv.slice(2)) {
     if (stopping) return;
     stopping = true;
     console.error(`yue2-acceptance: ${signal}; stopping the service`);
-    service.stop({ graceful: true }).finally(() => process.exit(130));
+    service.stop().catch((error) => console.error(`yue2-acceptance: ${error.message}`)).finally(() => process.exit(130));
   };
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
@@ -1581,14 +1867,20 @@ export async function main(argv = process.argv.slice(2)) {
     fatal = error;
     console.error(error.stack ?? error.message);
   } finally {
-    await service.stop({ graceful: true }).catch((error) => console.error(`service stop: ${error.message}`));
+    await service.stop().catch((error) => {
+      console.error(`yue2-acceptance: service stop: ${error.message}`);
+      fatal ??= error;
+    });
   }
   const ordered = CASES.map((item) => records.get(item.id)).filter(Boolean);
-  const summary = buildSummary(ordered, { platform: options.platform, dryRun: options.dryRun, identity, startedAt, finishedAt: nowIso(), fatal: fatal?.message });
+  const summary = buildSummary(ordered, {
+    platform: options.platform, dryRun: options.dryRun, identity, startedAt, finishedAt: nowIso(), fatal: fatal?.message,
+    serviceEnv: service.envs, deviations: serviceDeviations(options.platform),
+  });
   await writeJson(path.join(evidence, "summary.json"), summary);
   await writeFile(path.join(evidence, "summary.md"), renderMarkdown(summary));
   console.log(`verdict: ${summary.verdict} → ${path.join(evidence, "summary.md")}`);
-  return summary.verdict === "pass" || (options.dryRun && summary.counts.failed === 0 && !fatal) ? 0 : 1;
+  return exitCodeFor(summary);
 }
 
 if (process.argv[1] && pathToFileURL(path.resolve(process.argv[1])).href === import.meta.url) {

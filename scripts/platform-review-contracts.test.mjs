@@ -964,7 +964,11 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
-  assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
+  // A fresh per-run Hugging Face home: the shared runner hub is never cold-install evidence, so no
+  // line of code in this job names it or pins HF_HUB_CACHE.
+  const jobCode = job.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  assert.doesNotMatch(jobCode, /huggingface\\hub/);
+  assert.doesNotMatch(jobCode, /HF_HUB_CACHE: /);
   // The ordinary lane stands down for this dispatch: it would share the measured GPU.
   const candleWorker = jobBlock(workflow, workflow.indexOf("  candle-worker:\n"));
   assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda\)/m);
@@ -989,9 +993,11 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(build, /cargo build --release --locked -p sceneworks-rust-api --features backend-candle/);
   const acceptance = step("Run the YuE2 terminal acceptance matrix (CUDA)");
   assert.match(acceptance, vcvars);
-  assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-hub "%HF_HUB_CACHE%" --api-bin target\\release\\sceneworks-rust-api\.exe/);
+  assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-home "%YUE2_TERMINAL_STATE%\\hf-home" --api-bin target\\release\\sceneworks-rust-api\.exe/);
   const profile = step("Run the YuE2 memory profile campaign (CUDA)");
   assert.match(profile, vcvars);
+  // The profile resolves the acceptance run's installed weights from the same per-run HF home.
+  assert.match(profile, /set HF_HUB_CACHE=\n {10}set HUGGINGFACE_HUB_CACHE=\n {10}set HF_HOME=%YUE2_TERMINAL_STATE%\\hf-home\n/);
   assert.match(profile, /node scripts\\yue2-memory-profile\.mjs run --backend cuda .*--inference-repo "%GITHUB_WORKSPACE%\\\.terminal\\inference" --data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
   assert.match(job, /^ {6}YUE2_TERMINAL_STATE: 'E:\\/m);
   // Receipts only: the app state (which holds the audio) is never an upload path, and audio is excluded.

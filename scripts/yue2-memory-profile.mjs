@@ -51,7 +51,13 @@ export const PLAN_PATH = "config/yue2-memory-profile-plan.json";
 export const CLOSURES_PATH = "config/inference-provider-closures.json";
 export const MANIFEST_PATH = "config/manifests/builtin.models.jsonc";
 export const PLAN_SCHEMA = "sceneworks-yue2-memory-profile-plan-v1";
-export const RECORD_SCHEMA = "sceneworks-yue2-memory-profile-record-v1";
+/**
+ * v2 (sc-23002): a completed capture states the run's truncation, stage times, engine timings and
+ * run / plan / decoder / latent identities, and must. v1 records predate those fields; they stay
+ * readable (legacy), and are the only ones allowed to lack them.
+ */
+export const RECORD_SCHEMA = "sceneworks-yue2-memory-profile-record-v2";
+export const LEGACY_RECORD_SCHEMAS = Object.freeze(["sceneworks-yue2-memory-profile-record-v1"]);
 export const BACKENDS = Object.freeze(["metal", "cuda"]);
 export const TIERS = Object.freeze(["bf16", "q8", "q4"]);
 export const STAGES = Object.freeze(["load", "plan", "semantic", "acoustic", "decode"]);
@@ -263,7 +269,7 @@ export function buildRecord({
 }
 
 export function validateRecord(record) {
-  if (record?.schema !== RECORD_SCHEMA) fail("not a YuE2 memory-profile record");
+  if (record?.schema !== RECORD_SCHEMA && !LEGACY_RECORD_SCHEMAS.includes(record?.schema)) fail("not a YuE2 memory-profile record");
   for (const field of ["caseId", "lane", "backend", "identity", "admission", "measured", "outcome"]) {
     if (record[field] === undefined) fail(`record ${record.caseId ?? "?"} has no ${field}`);
   }
@@ -290,8 +296,8 @@ export function validateRecord(record) {
 /**
  * The run fields a completed capture's `outcome.json` states since sc-23002 (`outcome_json` in
  * yue2_memory_profile.rs): truncation flags, per-stage wall times, engine timings and the run / plan /
- * decoder / latent identities. A record captured before them carries none and stays valid; a record
- * carrying any of them must carry all of them, well-formed — a partial set is a broken capture.
+ * decoder / latent identities. A current-schema record must carry all of them, well-formed; only a
+ * legacy (v1) record, captured before they existed, may carry none — and never a partial set.
  */
 export const RUN_OUTCOME_FIELDS = Object.freeze([
   "truncated", "stageSeconds", "engineTiming", "runIdentity", "planIdentity", "decoder", "latent",
@@ -300,9 +306,9 @@ export const RUN_OUTCOME_FIELDS = Object.freeze([
 export function validateRunOutcome(record) {
   const outcome = record.outcome;
   const present = RUN_OUTCOME_FIELDS.filter((field) => outcome[field] !== undefined);
-  if (!present.length) return record;
+  if (!present.length && LEGACY_RECORD_SCHEMAS.includes(record.schema)) return record;
   const missing = RUN_OUTCOME_FIELDS.filter((field) => outcome[field] === undefined || outcome[field] === null);
-  if (missing.length) fail(`${record.caseId}: the outcome states ${present.join(", ")} but not ${missing.join(", ")}`);
+  if (missing.length) fail(`${record.caseId}: the outcome states ${present.join(", ") || "none of the run fields"} but not ${missing.join(", ")}`);
   for (const phase of ["abc", "semantic"]) {
     if (typeof outcome.truncated?.[phase] !== "boolean") fail(`${record.caseId}: outcome.truncated.${phase} is not a boolean`);
   }

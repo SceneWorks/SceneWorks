@@ -34,6 +34,17 @@ const sources = await readSources();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const GIB = 1024 ** 3;
 
+// What a current (v2) capture's outcome.json states about its run (`outcome_json`).
+const RUN_FIELDS = Object.freeze({
+  truncated: { abc: false, semantic: false },
+  stageSeconds: { load: 2, plan: 5, semantic: 9, acoustic: 4, decode: 1 },
+  engineTiming: { nar_seconds: 3.5, vae_seconds: 1.0 },
+  runIdentity: "run-identity",
+  planIdentity: "plan-identity",
+  decoder: { release: "standard" },
+  latent: { sha256: "d".repeat(64) },
+});
+
 function record(item, overrides = {}) {
   const declared = sources.closures.providers[sources.plan.lane];
   const marks = [
@@ -77,7 +88,7 @@ function record(item, overrides = {}) {
         },
       },
     },
-    outcome: { status: "completed", audioSeconds: 30, rms: 0.1 },
+    outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...RUN_FIELDS },
     sampler: "synthetic",
     samples,
     marks,
@@ -284,9 +295,15 @@ test("a record states the run's truncation, stage times and identities, or none 
     latent: { sha256: "c".repeat(64) },
   };
   const withRun = (outcome) => record(item, { outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...outcome } });
-  // A record captured before these fields existed stays valid and ingestible.
-  validateRecord(record(item));
-  admitToCorpus(record(item), sources);
+  const bare = record(item, { outcome: { status: "completed", audioSeconds: 30, rms: 0.1 } });
+  // A legacy (v1) record captured before these fields existed stays valid and ingestible…
+  const legacy = { ...bare, schema: "sceneworks-yue2-memory-profile-record-v1" };
+  validateRecord(legacy);
+  admitToCorpus(legacy, sources);
+  // …but a current record without them is refused outright, at validation and at ingest.
+  assert.throws(() => validateRecord(bare), /none of the run fields but not truncated/);
+  assert.throws(() => admitToCorpus(bare, sources), /none of the run fields/);
+  assert.throws(() => validateRecord({ ...legacy, outcome: { ...legacy.outcome, latent: { sha256: "c".repeat(64) } } }), /but not truncated/);
   // A record carrying them is valid and ingestible with them intact.
   const current = withRun(run);
   validateRecord(current);
