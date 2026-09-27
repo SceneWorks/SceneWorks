@@ -1586,6 +1586,150 @@ async fn missing_tiers_decoders_and_blocked_transcription_refuse_before_load() {
     }
 }
 
+/// sc-23001: a YuE2 job whose render cannot fit the live budget is refused by admission BEFORE the
+/// loader runs, with the binding stage and the shortfall on the failed job; one that fits carries
+/// the admission-chosen memory controls to the engine. Mutation: move the admission call after
+/// `generate` starts (the loader then runs), or drop the `request.memory` assignment.
+#[tokio::test]
+async fn an_over_budget_render_is_refused_by_admission_before_load() {
+    let h = Harness::new().await;
+    let tiny =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: 1 << 30,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let job = h.job(
+        "over-budget",
+        json!({"kind": "create", "lyrics": "[verse]\nla"}),
+    );
+    h.run(
+        &job,
+        loader(complete(vec![]), Default::default(), loads.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loads.load(Ordering::SeqCst), 0, "refused before the load");
+    let terminal = h.terminal();
+    assert_eq!(terminal["status"], "failed");
+    let error = terminal["error"].as_str().unwrap();
+    assert!(
+        error.contains("GB short") && error.contains("the model load"),
+        "{error}"
+    );
+    drop(tiny);
+
+    let _ample =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: u64::MAX / 4,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }));
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let job = h.job("fits", json!({"kind": "create", "lyrics": "[verse]\nla"}));
+    h.run(
+        &job,
+        loader(
+            complete(vec![Progress::Decoding]),
+            seen.clone(),
+            loads.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+    let req = seen
+        .lock()
+        .unwrap()
+        .request
+        .clone()
+        .expect("the engine saw the request");
+    assert_eq!(
+        req.memory,
+        Some(crate::yue2_admission::Yue2Controls::production().generation_memory()),
+        "the job sets no memory block, so admission's choice is sent"
+    );
+}
+
+/// sc-23001: a job that sets only `stageResidency` pins that one control. On a decode-bound budget
+/// admission still shrinks the decode tile the job left unset, and the engine receives the job's
+/// residency plus the chosen tile. Mutation: pin every control when the job sets any.
+#[tokio::test]
+async fn a_job_setting_only_stage_residency_still_gets_a_decode_tile_that_fits() {
+    use crate::yue2_admission::{
+        estimate, shape_of, Yue2ArMode, Yue2Backend, Yue2Budget, Yue2Controls, Yue2LoadFacts,
+        Yue2Precision, Yue2Stage, Yue2Tier,
+    };
+    let h = Harness::new().await;
+    let spec =
+        json!({"kind": "create", "lyrics": "[verse]\nla", "memory": {"stageResidency": true}});
+    let metal = |capacity_bytes| {
+        crate::yue2_admission::override_budget(Some(Yue2Budget::Unified {
+            backend: Yue2Backend::Metal,
+            capacity_bytes,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }))
+    };
+    // First, the exact request this job sends (ample budget).
+    let ample = metal(u64::MAX / 4);
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    h.run(
+        &h.job("probe", spec.clone()),
+        loader(
+            complete(vec![Progress::Decoding]),
+            seen.clone(),
+            Default::default(),
+        ),
+    )
+    .await
+    .unwrap();
+    drop(ample);
+    let request = seen.lock().unwrap().request.clone().expect("request seen");
+    let load = Yue2LoadFacts {
+        tier: Yue2Tier::Bf16,
+        precision: Yue2Precision::Default,
+        sequential_offload: false,
+    };
+    let shape = shape_of(&builtin_yue2(), &request, load, None, Yue2ArMode::Native).unwrap();
+    let production =
+        estimate(&shape, Yue2Backend::Metal, Yue2Controls::production(), None).unwrap();
+    let (binding, floor) = production.unified_floor();
+    assert_eq!(binding, Yue2Stage::Decode, "precondition: decode-bound");
+
+    let _tight = metal(floor - 1);
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    h.run(
+        &h.job("tight", spec),
+        loader(
+            complete(vec![Progress::Decoding]),
+            seen.clone(),
+            Default::default(),
+        ),
+    )
+    .await
+    .unwrap();
+    let memory = seen
+        .lock()
+        .unwrap()
+        .request
+        .clone()
+        .expect("admitted and loaded")
+        .memory
+        .expect("a memory block");
+    assert!(memory.stage_residency, "the job's own control");
+    assert!(memory.tile_vae_decode && memory.chunk_attention);
+    let edge = memory.decode_tile_edge.expect("the chosen tile");
+    assert!(
+        edge < Yue2Controls::production().decode_core_frames as u32,
+        "a smaller tile than production: {edge}"
+    );
+}
+
 /// A derived tier that verifies against its pins loads as that tier (`quantize` asserted).
 #[tokio::test]
 async fn a_verified_derived_tier_loads_with_its_quantization() {

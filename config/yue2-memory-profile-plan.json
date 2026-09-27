@@ -1,0 +1,57 @@
+{
+  "$comment": "sc-23001 (epic 22988): the YuE2 memory-profile cases the terminal story (sc-23002) captures ONCE, on Mac Metal and Windows CUDA, through scripts/yue2-memory-profile.mjs. YuE2 is an audio-lane model with no image five-rung contract, so it has its own profile harness rather than an anchor in config/memory-calibration-plan.json; it shares that harness's currency rule (the `candle:yue2` compile-closure digest in config/inference-provider-closures.json) and its Darwin footprint guard (scripts/memory-calibration-watchdog.py). Each case is `yue2:<tier>:<backend>:<request>`, expanded from `requests` x `backends`. A record is keyed by the exact model repo@revision + tier weights, the decoder repo@revision, the engine's closure digest, the tier and the backend; `check` grades a record whose identity no longer matches as stale and `ingest` refuses it. `run` skips every case the corpus already holds a current record for, so an interrupted campaign resumes instead of starting over. Nothing here runs in CI.",
+  "schema": "sceneworks-yue2-memory-profile-plan-v1",
+  "modelId": "yue2",
+  "lane": "candle:yue2",
+  "harness": "scripts/yue2-memory-profile.mjs",
+  "entrypoint": "yue2_memory_profile::capture_case",
+  "corpus": "docs/calibration/yue2",
+  "backends": ["metal", "cuda"],
+  "requests": {
+    "default": {
+      "$comment": "The product default: a planned (cot full) song at the engine's default ABC / semantic budgets, standard decoder, admission-chosen memory controls. One per tier: every advertised tier gets a measurement. The measured load stage checks the estimator's assumption that the mapped weights file costs nothing in unified memory (clean file-backed pages): on Metal the load is priced at the resident weights alone, so the decode or the acoustic stage binds; on CUDA the mapped file is charged to host RAM.",
+      "tiers": ["bf16", "q8", "q4"],
+      "decoder": "standard",
+      "request": {
+        "planning": "full",
+        "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+        "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+        "seed": 831001
+      }
+    },
+    "legacy-decoder": {
+      "$comment": "The same render decoded by the legacy decoder (m-a-p/YuE2-Vae-legacy): the decoder is part of a record's identity.",
+      "tiers": ["q8"],
+      "decoder": "legacy",
+      "request": {
+        "planning": "full",
+        "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+        "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+        "seed": 831001
+      }
+    },
+    "long-context": {
+      "$comment": "The memory worst case the protocol admits: no plan (cot off, so the whole context is song), guidance on (two semantic KV caches), and 16 000 forced semantic tokens — 640 s of audio, two acoustic chunks (a chunk is (24576 - prefix - 3) / 2 frames), the longest decode. q4 keeps the weights small so the working sets dominate.",
+      "tiers": ["q4"],
+      "decoder": "standard",
+      "request": {
+        "planning": "off",
+        "style": "cinematic orchestral rock, male vocal, strings, piano, big drums",
+        "lyrics": "[verse]\nOver the ridge where the old roads end\nI carried the fire, I carried my friend\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside\n\n[bridge]\nAnd the night is long but the night will turn\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside",
+        "seed": 831002,
+        "cfgScale": 1.01,
+        "semanticSampling": { "minTokens": 16000, "maxTokens": 16000 }
+      }
+    }
+  },
+  "unreachable": [
+    {
+      "what": "the experimental FP8 AR mode (CUDA sm_89+, bf16 tier)",
+      "why": "candle-audio-yue2 owner decision `fp8_not_on_the_load_spec`: LoadSpec has no FP8 value, so the registered provider cannot request it. Admission prices its layout (the retained BF16 originals in host memory) and refuses it off CUDA sm_89+; there is nothing to capture until a load path exists."
+    },
+    {
+      "what": "the recording transcription step of a cover (SheetSage2 + MERT-v2-FullSong)",
+      "why": "blocked: the native transcriber's port code has no recorded licence basis (the catalog's conditionalComponents[].blocked), so it is gated out of every runtime bundle. Admission prices it as its own stage (it unloads before the MoT loads); capture it once it is unblocked."
+    }
+  ]
+}
