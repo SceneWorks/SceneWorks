@@ -588,7 +588,7 @@ async fn a_create_job_maps_every_setting_and_publishes_a_library_asset() {
                               "penaltyWindow": 64, "minTokens": 16, "maxTokens": 512},
             "semanticSampling": {"maxTokens": 300, "minTokens": 10},
             "decoder": "legacy", "precision": "fp32", "offloadPolicy": "sequential",
-            "memory": {"chunkAttention": true, "attentionChunkSize": 65536,
+            "memory": {"chunkAttention": true, "attentionChunkSize": 1572864,
                        "tileVaeDecode": true, "decodeTileEdge": 64},
         }),
     );
@@ -651,7 +651,10 @@ async fn a_create_job_maps_every_setting_and_publishes_a_library_asset() {
     assert!(artifacts.resume, "a job always resumes its own run id");
     let memory = req.memory.expect("memory controls pass through");
     assert!(memory.chunk_attention && memory.tile_vae_decode);
-    assert_eq!(memory.attention_chunk_size, Some(65536));
+    // sc-23001: a chunk must hold one query row at the full context (16 heads × 24 576 keys =
+    // 393 216 elements) or the engine refuses it — and so does admission, before the load; the
+    // original 65 536 here was below that floor. 1 572 864 is four such rows.
+    assert_eq!(memory.attention_chunk_size, Some(1_572_864));
     assert_eq!(memory.decode_tile_edge, Some(64));
     // Unset stageResidency follows the load's sequential offload instead of forcing residency.
     // Mutation that reds this: `stage_residency: m.stage_residency.unwrap_or(false)`.
@@ -1364,6 +1367,71 @@ async fn missing_tiers_decoders_and_blocked_transcription_refuse_before_load() {
 }
 
 /// A derived tier that verifies against its pins loads as that tier (`quantize` asserted).
+/// sc-23001: a YuE2 job whose render cannot fit the live budget is refused by admission BEFORE the
+/// loader runs, with the binding stage and the shortfall on the failed job; one that fits carries
+/// the admission-chosen memory controls to the engine. Mutation: move the admission call after
+/// `generate` starts (the loader then runs), or drop the `request.memory` assignment.
+#[tokio::test]
+async fn an_over_budget_render_is_refused_by_admission_before_load() {
+    let h = Harness::new().await;
+    let tiny =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: 1 << 30,
+        }));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let job = h.job(
+        "over-budget",
+        json!({"kind": "create", "lyrics": "[verse]\nla"}),
+    );
+    h.run(
+        &job,
+        loader(complete(vec![]), Default::default(), loads.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loads.load(Ordering::SeqCst), 0, "refused before the load");
+    let terminal = h.terminal();
+    assert_eq!(terminal["status"], "failed");
+    let error = terminal["error"].as_str().unwrap();
+    assert!(
+        error.contains("GB short") && error.contains("the model load"),
+        "{error}"
+    );
+    drop(tiny);
+
+    let _ample =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: u64::MAX / 4,
+        }));
+    let seen = Arc::new(Mutex::new(Seen::default()));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let job = h.job("fits", json!({"kind": "create", "lyrics": "[verse]\nla"}));
+    h.run(
+        &job,
+        loader(
+            complete(vec![Progress::Decoding]),
+            seen.clone(),
+            loads.clone(),
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loads.load(Ordering::SeqCst), 1);
+    let req = seen
+        .lock()
+        .unwrap()
+        .request
+        .clone()
+        .expect("the engine saw the request");
+    assert_eq!(
+        req.memory,
+        Some(crate::yue2_admission::Yue2Controls::production().generation_memory()),
+        "the job sets no memory block, so admission's choice is sent"
+    );
+}
+
 #[tokio::test]
 async fn a_verified_derived_tier_loads_with_its_quantization() {
     let h = Harness::new().await;

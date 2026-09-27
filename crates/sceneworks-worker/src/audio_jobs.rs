@@ -2788,7 +2788,7 @@ mod tests {
         descriptor: gen_core::ModelDescriptor,
         behavior: StubBehavior,
         memory: Arc<Mutex<Option<gen_core::GenerationMemory>>>,
-        lease_held_during_generate: Arc<AtomicBool>,
+        live_leases_during_generate: Arc<Mutex<Vec<u64>>>,
     }
 
     impl gen_core::Generator for Yue2Stub {
@@ -2804,9 +2804,8 @@ mod tests {
             _on_progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<GenerationOutput> {
             *self.memory.lock().expect("memory lock") = req.memory;
-            let (device, host) = crate::yue2_admission::live_residency_bytes();
-            self.lease_held_during_generate
-                .store(device + host > 0, Ordering::SeqCst);
+            *self.live_leases_during_generate.lock().expect("lease lock") =
+                crate::yue2_admission::live_lease_ids();
             match self.behavior {
                 StubBehavior::WaitForCancel => {
                     let start = Instant::now();
@@ -2831,7 +2830,7 @@ mod tests {
     struct Yue2Run {
         loaded: Arc<AtomicBool>,
         memory: Arc<Mutex<Option<gen_core::GenerationMemory>>>,
-        lease_held_during_generate: Arc<AtomicBool>,
+        live_leases_during_generate: Arc<Mutex<Vec<u64>>>,
     }
 
     fn yue2_run(
@@ -2843,12 +2842,12 @@ mod tests {
         let run = Yue2Run {
             loaded: Arc::new(AtomicBool::new(false)),
             memory: Arc::new(Mutex::new(None)),
-            lease_held_during_generate: Arc::new(AtomicBool::new(false)),
+            live_leases_during_generate: Arc::new(Mutex::new(Vec::new())),
         };
         let (loaded, memory, held) = (
             run.loaded.clone(),
             run.memory.clone(),
-            run.lease_held_during_generate.clone(),
+            run.live_leases_during_generate.clone(),
         );
         let load = move |_id: &str, _spec: &LoadSpec| {
             loaded.store(true, Ordering::SeqCst);
@@ -2856,7 +2855,7 @@ mod tests {
                 descriptor: stub_descriptor(),
                 behavior,
                 memory,
-                lease_held_during_generate: held,
+                live_leases_during_generate: held,
             }) as Box<dyn Generator>)
         };
         (run, load)
@@ -2941,8 +2940,14 @@ mod tests {
                 *run.memory.lock().unwrap(),
                 Some(crate::yue2_admission::Yue2Controls::production().generation_memory())
             );
-            assert!(run.lease_held_during_generate.load(Ordering::SeqCst));
             let lease = crate::yue2_admission::last_opened_lease().expect("a lease was opened");
+            assert!(
+                run.live_leases_during_generate
+                    .lock()
+                    .unwrap()
+                    .contains(&lease),
+                "the render's lease held its residency while it generated"
+            );
             assert!(!crate::yue2_admission::lease_is_live(lease));
         });
     }
@@ -2972,8 +2977,14 @@ mod tests {
                 matches!(result, Err(WorkerError::Canceled(_))),
                 "{result:?}"
             );
-            assert!(run.lease_held_during_generate.load(Ordering::SeqCst));
             let lease = crate::yue2_admission::last_opened_lease().expect("a lease was opened");
+            assert!(
+                run.live_leases_during_generate
+                    .lock()
+                    .unwrap()
+                    .contains(&lease),
+                "the render's lease held its residency while it generated"
+            );
             assert!(
                 !crate::yue2_admission::lease_is_live(lease),
                 "the cancelled render's residency was released"

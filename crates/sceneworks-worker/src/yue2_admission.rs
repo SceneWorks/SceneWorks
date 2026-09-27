@@ -187,8 +187,7 @@ impl Yue2Tier {
     }
 
     /// The tier a catalog variant names. Anything else is `None`, which every caller refuses — an
-    /// unknown tier is never priced as zero. (Read by the profile entrypoint's case files.)
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// unknown tier is never priced as zero.
     pub(crate) fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|tier| tier.key() == key)
     }
@@ -1821,19 +1820,31 @@ pub(crate) fn transcription_shape(
 
 // ---- Residency leases -----------------------------------------------------------------------------
 
+/// One live lease's `(device, host)` bytes and the thread that admitted it.
+type LiveEntry = (u64, u64, std::thread::ThreadId);
+
 /// Residency the live YuE2 renders of this process hold, keyed by lease id.
-fn live_leases() -> &'static Mutex<BTreeMap<u64, (u64, u64)>> {
-    static LIVE: OnceLock<Mutex<BTreeMap<u64, (u64, u64)>>> = OnceLock::new();
+fn live_leases() -> &'static Mutex<BTreeMap<u64, LiveEntry>> {
+    static LIVE: OnceLock<Mutex<BTreeMap<u64, LiveEntry>>> = OnceLock::new();
     LIVE.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
-/// `(device, host)` bytes every live YuE2 lease holds.
+/// `(device, host)` bytes every live YuE2 lease holds. Under `cfg(test)` only the leases this
+/// thread admitted count, so parallel tests that run YuE2 jobs cannot shrink each other's budgets.
 pub(crate) fn live_residency_bytes() -> (u64, u64) {
+    #[cfg(test)]
+    let current = std::thread::current().id();
     live_leases()
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .values()
-        .fold((0, 0), |(d, h), &(dd, hh)| (d + dd, h + hh))
+        .filter(|_entry| {
+            #[cfg(test)]
+            return _entry.2 == current;
+            #[cfg(not(test))]
+            true
+        })
+        .fold((0, 0), |(d, h), &(dd, hh, _)| (d + dd, h + hh))
 }
 
 /// The admitted residency of one render, held from admission until the render's generator is
@@ -1853,6 +1864,8 @@ pub(crate) struct Yue2Lease {
     /// Index into `order` (the load stage before any progress).
     at: Option<usize>,
     last_step: Option<(u32, u32)>,
+    /// The thread that admitted the render (its residency is charged to it under `cfg(test)`).
+    owner: std::thread::ThreadId,
     /// The step totals the AR stages report (their `max_tokens`): a resumed run reuses finished
     /// stages without reporting them, so a restarted count is matched to its stage by its total.
     plan_total: Option<u64>,
@@ -1900,6 +1913,7 @@ impl Yue2Lease {
             order,
             at: None,
             last_step: None,
+            owner: std::thread::current().id(),
             plan_total,
             semantic_total,
         };
@@ -1939,11 +1953,11 @@ impl Yue2Lease {
     }
 
     fn publish(&self) {
-        let held = self.held_bytes();
+        let (device, host) = self.held_bytes();
         live_leases()
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .insert(self.id, held);
+            .insert(self.id, (device, host, self.owner));
     }
 
     fn enter(&mut self, stage: Yue2Stage) {
@@ -2017,6 +2031,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// Hardware budget probes [`check`] made on this thread.
     static BUDGET_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Whether this thread's admissions read the real hardware budget (the profile capture).
+    static HARDWARE_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The last lease [`Yue2Lease::open`] opened on this thread.
     static LAST_OPENED_LEASE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
@@ -2044,10 +2060,31 @@ pub(crate) fn budget_probes() -> usize {
     BUDGET_PROBES.with(std::cell::Cell::get)
 }
 
+/// Let this thread's admissions read the real hardware budget (the profile capture entrypoint).
+#[cfg(test)]
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn probe_hardware_in_this_test() {
+    HARDWARE_PROBE.with(|probe| probe.set(true));
+}
+
 /// The last lease opened on this thread (tests only).
 #[cfg(test)]
 pub(crate) fn last_opened_lease() -> Option<u64> {
     LAST_OPENED_LEASE.with(std::cell::Cell::get)
+}
+
+/// Every live lease id, whichever thread admitted it (tests only).
+#[cfg(test)]
+pub(crate) fn live_lease_ids() -> Vec<u64> {
+    live_leases()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .keys()
+        .copied()
+        .collect()
 }
 
 /// Whether lease `id` still holds residency (tests only).
@@ -2060,12 +2097,19 @@ pub(crate) fn lease_is_live(id: u64) -> bool {
 }
 
 /// Read this host's budget for the YuE2 render.
+///
+/// Under `cfg(test)` the hardware is never read unless a test asks: an installed override wins, a
+/// thread that opted in ([`probe_hardware_in_this_test`], the profile capture) reads the real
+/// budget, and every other test reads "no budget" — so a job test never depends on the machine.
 async fn live_budget(gpu_id: &str) -> Option<Yue2Budget> {
     #[cfg(test)]
     {
         BUDGET_PROBES.with(|probes| probes.set(probes.get() + 1));
         if let Some(budget) = BUDGET_OVERRIDE.with(|slot| slot.borrow().clone()) {
             return budget;
+        }
+        if !HARDWARE_PROBE.with(std::cell::Cell::get) {
+            return None;
         }
     }
     probe_budget(gpu_id).await

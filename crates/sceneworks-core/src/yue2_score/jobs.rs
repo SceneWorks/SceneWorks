@@ -43,6 +43,10 @@ pub const MAX_BATCH: u32 = 8;
 pub const MAX_STEPS: u32 = 10_000;
 /// The model's context (`candle_audio_yue2::protocol::CONTEXT`): no phase may budget more.
 pub const CONTEXT_TOKENS: u32 = 24_576;
+/// Smallest NAR attention chunk the engine accepts, in score elements: one query row at the full
+/// context, `heads × positions` (`candle_audio_yue2::engine::Yue2Engine::attention_bounds`, 16 × the
+/// context). A smaller chunk is refused by the engine, so it is refused at submission (sc-23001).
+pub const MIN_ATTENTION_CHUNK_ELEMENTS: u32 = 16 * CONTEXT_TOKENS;
 /// Largest decode tile core, in latent frames (`candle_audio_yue2::decode::DecodeOptions::tiled`).
 pub const MAX_DECODE_TILE_FRAMES: u32 = 1024;
 /// The engine's truncation warning codes.
@@ -907,11 +911,17 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                 "is read only with memory.chunkAttention",
             ));
         }
-        if memory.attention_chunk_size == Some(0) {
+        if memory
+            .attention_chunk_size
+            .is_some_and(|elements| elements < MIN_ATTENTION_CHUNK_ELEMENTS)
+        {
             return Err(error(
                 INVALID_VALUE,
                 "memory.attentionChunkSize",
-                "must be >= 1",
+                format!(
+                    "must be >= {MIN_ATTENTION_CHUNK_ELEMENTS} score elements (one query row at \
+                     the full context: 16 heads × {CONTEXT_TOKENS} keys)"
+                ),
             ));
         }
         if memory.decode_tile_edge.is_some() && memory.tile_vae_decode != Some(true) {

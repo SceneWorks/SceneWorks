@@ -184,6 +184,14 @@ fn protocol_limits_are_refused_with_the_field_named() {
         ..Default::default()
     });
     cases.push((s, "memory.decodeTileEdge"));
+    // sc-23001: the engine refuses a chunk below one query row at the full context.
+    let mut s = base(Yue2JobKind::Create);
+    s.memory = Some(MemoryControls {
+        chunk_attention: Some(true),
+        attention_chunk_size: Some(MIN_ATTENTION_CHUNK_ELEMENTS - 1),
+        ..Default::default()
+    });
+    cases.push((s, "memory.attentionChunkSize"));
     let mut s = base(Yue2JobKind::Create);
     s.count = Some(MAX_BATCH + 1);
     cases.push((s, "count"));

@@ -303,6 +303,7 @@ fn capture_case() {
         }
     }
 
+    crate::yue2_admission::probe_hardware_in_this_test();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
