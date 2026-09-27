@@ -285,7 +285,14 @@ export function AudioClock({ current, total, className = "audio-clock" }) {
  * browser owns the save dialog — same mechanism the Simple UI's DownloadButton uses.
  */
 // `job` (optional) lets a YuE2 take fall back to its run's usage policy for the licence-marked name.
-export function AudioDownloadButton({ asset, job = null, className = "", label = null, iconSize = 14 }) {
+export function AudioDownloadButton({
+  asset,
+  job = null,
+  className = "",
+  label = null,
+  iconSize = 14,
+  ariaLabel = "Download",
+}) {
   const anchorRef = useRef(null);
   return (
     <>
@@ -300,10 +307,10 @@ export function AudioDownloadButton({ asset, job = null, className = "", label =
         download
       </a>
       <button
-        aria-label="Download"
+        aria-label={ariaLabel}
         className={className}
         onClick={() => anchorRef.current?.click()}
-        title="Download"
+        title={ariaLabel}
         type="button"
       >
         <Icon.Download size={iconSize} />

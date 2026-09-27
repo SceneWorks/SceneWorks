@@ -4367,6 +4367,54 @@ label {
   border-radius: var(--r-md);
 }
 
+/* YuE lyrics-to-song controls (sc-19385). The lyrics editor reuses the multi-speaker script rows;
+   the genre-tag chips reuse the saved-voice chip; the ICL band is a .studio-source-band <fieldset>
+   (so `disabled` greys every control for a CoT checkpoint). Tokens only — both themes inherit. */
+.yue-reference-band {
+  margin: 0;
+  min-width: 0;
+}
+
+.yue-reference-band:disabled {
+  opacity: 0.6;
+}
+
+.yue-genre-tags {
+  display: grid;
+  gap: 8px;
+}
+
+.yue-genre-tags .field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.yue-genre-tags__suggested {
+  display: grid;
+  gap: 8px;
+}
+
+.yue-genre-tags__suggested > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--accent-strong);
+}
+
+.yue-genre-tags__suggestions {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.audio-icon-btn.audio-stem-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 0 6px;
+  font-size: 11.5px;
+}
+
 /* Voice Clone saved-voices registry + register affordance (sc-13517). Reuses the .preset-chip pill
    and .settings-field/.field-hint tokens; only the per-chip select+delete split and the register row
    are bespoke. Theme-neutral: everything rides the shared CSS variables, so light/dark are inherited. */

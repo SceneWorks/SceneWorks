@@ -1,7 +1,7 @@
 //! sc-22999: the YuE2 job route, execution-time eligibility, the server-side licence
 //! acknowledgment, source resolution, serial batches, the terminal side effects (score versions
 //! and render records) and the usage policy on exports — through the real HTTP routes over the
-//! LIVE builtin YuE2 entry (the YuE1 entries are sc-22998's fixtures).
+//! LIVE builtin YuE2 entry and the live builtin YuE1 entries that ship beside it.
 use super::support::*;
 use super::yue2_catalog::{app_with_yue1_and_yue2, app_with_yue1_and_yue2_state, builtin_yue2};
 use crate::AppState;

@@ -1,6 +1,6 @@
 import { terminalStatuses } from "./jobTypes.js";
 import { jobAudioResultAssets } from "./jobResultAssets.js";
-import { usagePolicyChips, yue2TakeFilename } from "./yue2Lab.js";
+import { usagePolicyChips, yue2TakeFilename } from "./yue2Policy.js";
 
 // Shared, pure derivations behind the Audio Studio redesign (epic 14361). The take grid,
 // the play deck and the Simple UI surfaces all read a run's mode, model, settings chips and
@@ -150,6 +150,34 @@ export function audioRunModelName(job, models = []) {
   return match?.name ?? match?.ui?.label ?? id;
 }
 
+// A segmented-song render (YuE, sc-19384) persists its vocal / instrumental stems as child assets
+// of the mix (`extra.audioStem` names the stem, `extra.mixAssetId` the mix). The take grid shows the
+// MIX as the take and offers each stem as a download on that card (sc-19385), so fold every stem
+// whose mix is among the run's takes out of the take list. A stem whose mix is gone (discarded)
+// stays an ordinary take rather than vanishing.
+export function foldAudioStems(takes) {
+  const list = Array.isArray(takes) ? takes : [];
+  const ids = new Set(list.map((asset) => asset?.id));
+  const stems = {};
+  const kept = [];
+  for (const asset of list) {
+    const mixId = asset?.extra?.mixAssetId;
+    const stem = asset?.extra?.audioStem;
+    if (stem && stem !== "mix" && mixId && ids.has(mixId)) {
+      (stems[mixId] ??= []).push(asset);
+    } else {
+      kept.push(asset);
+    }
+  }
+  return { takes: kept, stems };
+}
+
+// Display label for a stem asset ("vocals" → "Vocals").
+export function audioStemLabel(asset) {
+  const stem = String(asset?.extra?.audioStem ?? "");
+  return stem ? stem.charAt(0).toUpperCase() + stem.slice(1) : "Stem";
+}
+
 // True while a run is still producing — the in-flight strip's gate.
 export function audioJobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
@@ -160,7 +188,7 @@ export function audioJobIsRunning(job) {
 // (with no takes yet) so the caller can pin them above the completed groups.
 export function audioRunGroups(jobs, assets, models = []) {
   return (Array.isArray(jobs) ? jobs : []).map((job) => {
-    const takes = jobAudioResultAssets(job, assets);
+    const { takes, stems } = foldAudioStems(jobAudioResultAssets(job, assets));
     const model = (models ?? []).find((item) => item?.id === job?.payload?.model) ?? null;
     const yue2 = isYue2AudioRun(job);
     const mode = yue2 ? "yue2" : audioJobMode(job, model);
@@ -174,6 +202,7 @@ export function audioRunGroups(jobs, assets, models = []) {
         ? [...yue2PolicyChips(job?.payload?.usagePolicy, model), ...audioRunChips(job)]
         : audioRunChips(job),
       takes,
+      stems,
       running: audioJobIsRunning(job),
       createdAt: job.createdAt ?? job.startedAt ?? null,
       replayable: Boolean(job.payload) && !yue2,
@@ -263,6 +292,7 @@ export function audioAssetRunGroups(assets, models = [], coveredAssetIds = new S
   // takes oldest-first or Take 1 would label the last clip rendered.
   for (const group of groups) {
     group.takes.sort((a, b) => Date.parse(a.createdAt ?? 0) - Date.parse(b.createdAt ?? 0));
+    Object.assign(group, foldAudioStems(group.takes));
   }
   return groups;
 }

@@ -1671,34 +1671,12 @@ def test_builtin_manifest_ships_the_seeded_audio_models():
     assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
 
 
-# sc-22998 (epic sc-22988). YuE1 (epic sc-19373) is not on this branch, so its side of every V1/V2
-# separation check is a fixture in the exact shape the YuE1 epic ships: family `yue`, ids
-# `yue_{en,zh,jp_kr}_{cot,icl}`, `SceneWorks/yue-*-candle` re-hosts (epic acceptance test 5).
-def _yue1_fixture(model_id: str) -> dict:
-    return {
-        "id": model_id,
-        "family": "yue",
-        "type": "audio",
-        "downloads": [
-            {
-                "provider": "huggingface",
-                "repo": f"SceneWorks/{model_id.replace('_', '-')}-candle",
-                "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
-                "variant": "q4",
-                "default": True,
-                "files": ["q4/*"],
-            },
-            {
-                "provider": "huggingface",
-                "repo": "SceneWorks/xcodec-mini-infer",
-                "revision": "8ca30a19de500892e23a6ee687fca030053db60d",
-                "coRequisite": True,
-                "componentId": "xcodec",
-                "files": ["final_ckpt/ckpt_00360000.safetensors"],
-            },
-        ],
-        "paths": {"model": f"${{HF_CACHE}}/SceneWorks/{model_id.replace('_', '-')}-candle"},
-    }
+# sc-22998 (epic sc-22988). Every V1/V2 separation check runs against the REAL YuE1 entries (epic
+# sc-19373: family `yue`, ids `yue_{en,zh,jp_kr}_{cot,icl}`, `SceneWorks/yue-*-candle` re-hosts) that
+# now ship beside `yue2` in the builtin catalog (epic acceptance test 5).
+_YUE1_IDS = tuple(
+    f"yue_{language}_{mode}" for language in ("en", "zh", "jp_kr") for mode in ("cot", "icl")
+)
 
 
 def _model_repos(model: dict) -> set[str]:
@@ -1768,24 +1746,26 @@ def test_yue1_and_yue2_identities_stay_disjoint_with_swapped_model_negative_fixt
     the entry's family to `yue`.
     """
     models = _load_builtin_models_manifest()["models"]
-    v1_ids = [f"yue_{lang}_{mode}" for lang in ("en", "zh", "jp_kr") for mode in ("cot", "icl")]
-    live = models + [_yue1_fixture(model_id) for model_id in v1_ids]
-    assert _yue_family_separation_violations(live) == []
+    by_id = {m["id"]: m for m in models}
+    for model_id in _YUE1_IDS:
+        assert by_id[model_id]["family"] == "yue", model_id
+    assert _yue_family_separation_violations(models) == []
 
-    yue2 = next(m for m in models if m["id"] == "yue2")
+    yue2 = by_id["yue2"]
+    yue_en_cot = by_id["yue_en_cot"]
     # The checker is not vacuous: each swapped-model fixture below must be caught.
-    v1_claims_v2_family = _yue1_fixture("yue_en_cot") | {"family": "yue2"}
+    v1_claims_v2_family = copy.deepcopy(yue_en_cot) | {"family": "yue2"}
     v2_claims_v1_family = copy.deepcopy(yue2) | {"family": "yue"}
     v2_on_v1_rehost = copy.deepcopy(yue2)
-    v2_on_v1_rehost["downloads"][0]["repo"] = "SceneWorks/yue-en-cot-candle"
-    v1_on_v2_weights = _yue1_fixture("yue_zh_cot")
+    v2_on_v1_rehost["downloads"][0]["repo"] = yue_en_cot["downloads"][0]["repo"]
+    v1_on_v2_weights = copy.deepcopy(by_id["yue_zh_cot"])
     v1_on_v2_weights["downloads"][0]["repo"] = "m-a-p/YuE2-3B"
     v2_pointing_at_itself = copy.deepcopy(yue2)
     v2_pointing_at_itself["commercialUse"]["alternativeFamily"] = "yue2"
     for label, swapped in [
         ("V1 claims family yue2", [yue2, v1_claims_v2_family]),
-        ("V2 claims family yue", [v2_claims_v1_family, _yue1_fixture("yue_en_cot")]),
-        ("V2 row on a V1 re-host", [v2_on_v1_rehost, _yue1_fixture("yue_en_cot")]),
+        ("V2 claims family yue", [v2_claims_v1_family, yue_en_cot]),
+        ("V2 row on a V1 re-host", [v2_on_v1_rehost, yue_en_cot]),
         ("V1 row on the V2 weights", [yue2, v1_on_v2_weights]),
         ("V2 commercial pointer at itself", [v2_pointing_at_itself]),
     ]:
@@ -1848,6 +1828,30 @@ def test_choice_groups_declare_one_default_and_cover_components_are_never_downlo
             "blocked: owner licensing decision for SheetSage2/MERT port code"
         )
         assert component["blocked"]["unblock"]
+
+
+def test_yue_entries_advertise_their_backend_audio_capabilities():
+    """sc-19383 (epic 19373): each YuE entry's `audio` block mirrors the candle-audio-yue descriptor
+    — segmented lyrics, repetition penalty and the Clamp/Rescale output limiter on every variant;
+    ReferenceAudio conditioning and the reference window only on the ICL checkpoints. The audio
+    polarity is ABSENT MEANS FALSE, so a dropped key silently hides the control.
+
+    *Mutation that reds this:* deleting any of those keys from one entry, or advertising
+    `conditioning` / `supportsReferenceRegion` on a CoT checkpoint.
+    """
+    by_id = {m.get("id"): m for m in _load_builtin_models_manifest()["models"]}
+    for model_id in _YUE1_IDS:
+        audio = by_id[model_id]["audio"]
+        icl = model_id.endswith("_icl")
+        for key in (
+            "supportsSegmentedLyrics",
+            "supportsRepetitionPenalty",
+            "supportsOutputLimiter",
+            "supportsGuidance",
+        ):
+            assert audio.get(key) is True, f"{model_id}.audio.{key} must be true"
+        assert audio.get("supportsReferenceRegion") is icl, model_id
+        assert ("ReferenceAudio" in audio.get("conditioning", [])) is icl, model_id
 
 
 def _duplicate_default_downloads(manifest: dict) -> list[str]:

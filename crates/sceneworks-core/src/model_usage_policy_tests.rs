@@ -1,7 +1,6 @@
 //! sc-22998: the commercial-use verdict and the conditional-component seam, judged on the LIVE
-//! builtin YuE2 entry plus YuE1 fixtures shaped exactly like the YuE1 epic's (sc-19373) catalog rows,
-//! which are not on this branch yet (epic sc-22988 acceptance test 5: V1 fixtures, no claim of live
-//! V1 inference).
+//! builtin catalog — the YuE2 entry and the six YuE1 (epic sc-19373) entries that ship beside it
+//! (epic sc-22988 acceptance test 5).
 
 use super::*;
 use crate::builtin_manifests::BUILTIN_MANIFESTS;
@@ -24,29 +23,23 @@ fn builtin_yue2() -> Value {
         .expect("yue2 is in the builtin catalog")
 }
 
-/// The YuE1 epic's catalog row shape (feature/sc-19373: family `yue`, ids
-/// `yue_{en,zh,jp_kr}_{cot,icl}`, SceneWorks re-hosts, Apache-2.0 so no NC flag).
-fn yue1_fixture(id: &str) -> Value {
-    json!({
-        "id": id,
-        "family": "yue",
-        "type": "audio",
-        "downloads": [{
-            "provider": "huggingface",
-            "repo": format!("SceneWorks/{}-candle", id.replace('_', "-")),
-            "revision": "5842b8bc97d2a6dddc427a444920050dd3860949",
-            "variant": "q4",
-            "default": true,
-            "files": ["q4/*"]
-        }]
-    })
-}
+/// The six YuE1 catalog ids, in builtin catalog order.
+const YUE1_IDS: [&str; 6] = [
+    "yue_en_cot",
+    "yue_en_icl",
+    "yue_zh_cot",
+    "yue_zh_icl",
+    "yue_jp_kr_cot",
+    "yue_jp_kr_icl",
+];
 
-fn catalog_with_yue1() -> Vec<Value> {
-    let mut catalog = builtin_models();
-    catalog.push(yue1_fixture("yue_en_cot"));
-    catalog.push(yue1_fixture("yue_zh_icl"));
-    catalog
+/// The builtin catalog with every YuE1 entry removed — the swapped-model negative case of a V1 id
+/// the catalog does not hold.
+fn catalog_without_yue1() -> Vec<Value> {
+    builtin_models()
+        .into_iter()
+        .filter(|model| model["family"] != "yue")
+        .collect()
 }
 
 #[test]
@@ -55,7 +48,7 @@ fn commercial_route_refuses_yue2_and_points_to_eligible_yue1_entries_only() {
     // builtin yue2 entry. Mutation that reds this: drop `commercialUse` + `nonCommercial` from the
     // manifest entry (verdict becomes Eligible), or change `alternativeFamily` away from `yue`
     // (alternatives go empty).
-    let catalog = catalog_with_yue1();
+    let catalog = builtin_models();
     let verdict = commercial_use_verdict(&catalog, "yue2").expect("yue2 resolves");
     let CommercialUseVerdict::Refused {
         model_id,
@@ -70,7 +63,7 @@ fn commercial_route_refuses_yue2_and_points_to_eligible_yue1_entries_only() {
     assert_eq!(model_id, "yue2");
     assert!(reason.contains("CC BY-NC 4.0"), "{reason}");
     assert_eq!(alternative_family.as_deref(), Some("yue"));
-    assert_eq!(alternatives, ["yue_en_cot", "yue_zh_icl"]);
+    assert_eq!(alternatives, YUE1_IDS);
     let note = note.expect("the pointer carries its rights caveat");
     assert!(
         note.contains("does not clear rights"),
@@ -80,20 +73,22 @@ fn commercial_route_refuses_yue2_and_points_to_eligible_yue1_entries_only() {
 
 #[test]
 fn a_yue1_entry_is_eligible_and_never_resolves_to_yue2() {
-    let catalog = catalog_with_yue1();
-    assert_eq!(
-        commercial_use_verdict(&catalog, "yue_en_cot").unwrap(),
-        CommercialUseVerdict::Eligible {
-            model_id: "yue_en_cot".to_owned()
-        }
-    );
+    let catalog = builtin_models();
+    for id in YUE1_IDS {
+        assert_eq!(
+            commercial_use_verdict(&catalog, id).unwrap(),
+            CommercialUseVerdict::Eligible {
+                model_id: id.to_owned()
+            }
+        );
+    }
 }
 
 #[test]
 fn an_unknown_or_ambiguous_id_is_an_error_never_another_model() {
     // Swapped-model negative fixtures: a V1 id this catalog does not hold must not be answered with
     // the V2 entry that shares its prefix, and V2 must not be answered with a V1 row.
-    let catalog = builtin_models();
+    let catalog = catalog_without_yue1();
     assert_eq!(
         commercial_use_verdict(&catalog, "yue_en_cot"),
         Err(CommercialUseError::UnknownModel("yue_en_cot".to_owned()))
@@ -102,7 +97,7 @@ fn an_unknown_or_ambiguous_id_is_an_error_never_another_model() {
         commercial_use_verdict(&catalog, "yue"),
         Err(CommercialUseError::UnknownModel("yue".to_owned()))
     );
-    let mut duplicated = catalog_with_yue1();
+    let mut duplicated = builtin_models();
     duplicated.push(builtin_yue2());
     assert_eq!(
         commercial_use_verdict(&duplicated, "yue2"),
@@ -112,18 +107,20 @@ fn an_unknown_or_ambiguous_id_is_an_error_never_another_model() {
 
 #[test]
 fn alternatives_exclude_restricted_family_members_and_self_pointers() {
-    // A YuE1 fixture that is itself non-commercial is not offered; a block pointing at its own family
+    // A YuE1 entry that is itself non-commercial is not offered; a block pointing at its own family
     // offers nothing (it would hand the refused weights back).
-    let mut restricted_v1 = yue1_fixture("yue_jp_kr_cot");
-    restricted_v1["nonCommercial"] = json!(true);
-    let mut catalog = catalog_with_yue1();
-    catalog.push(restricted_v1);
+    let mut catalog = builtin_models();
+    catalog
+        .iter_mut()
+        .find(|model| model["id"] == "yue_jp_kr_cot")
+        .expect("yue_jp_kr_cot is in the builtin catalog")["nonCommercial"] = json!(true);
     let CommercialUseVerdict::Refused { alternatives, .. } =
         commercial_use_verdict(&catalog, "yue2").unwrap()
     else {
         panic!("refused");
     };
     assert!(!alternatives.contains(&"yue_jp_kr_cot".to_owned()));
+    assert!(alternatives.contains(&"yue_jp_kr_icl".to_owned()));
 
     let mut self_pointer = builtin_yue2();
     self_pointer["commercialUse"]["alternativeFamily"] = json!("yue2");

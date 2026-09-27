@@ -11,7 +11,23 @@
 // settings imply and then keeps only the ones the job kind reads (`YUE2_FIELD_KINDS`, a mirror of the
 // core's `FIELD_KINDS`) — a control never leaks into a kind it would break.
 
-export const YUE2_MODEL_ID = "yue2";
+import {
+  YUE2_MODEL_ID,
+  licenseFromNotice,
+  usagePolicyChips,
+  yue2ExportStem,
+  yue2ModelIdentity,
+  yue2TakeFilename,
+} from "./yue2Policy.js";
+
+export {
+  YUE2_MODEL_ID,
+  licenseFromNotice,
+  usagePolicyChips,
+  yue2ExportStem,
+  yue2ModelIdentity,
+  yue2TakeFilename,
+};
 
 // What a job does (core `Yue2JobKind`).
 export const YUE2_KINDS = Object.freeze([
@@ -447,50 +463,6 @@ export function yue2FieldDisabledReason(field, kind) {
 
 // ---- model / licence ------------------------------------------------------------------------
 
-// The version / licence identity every lab surface prints: the picker, the presets and the runs.
-// The licence name is the catalog's `license` when it declares one; YuE2's entry names its licence
-// only inside `licenseNotice`, so the Creative Commons identifier is read from there (never assumed).
-export function yue2ModelIdentity(model) {
-  const declared = typeof model?.license === "string" && model.license.trim() ? model.license.trim() : null;
-  return {
-    id: model?.id ?? YUE2_MODEL_ID,
-    name: model?.ui?.label ?? model?.name ?? "YuE2",
-    version: "YuE2 (v2)",
-    license: declared ?? licenseFromNotice(model?.licenseNotice) ?? "",
-    licenseUrl: typeof model?.licenseUrl === "string" ? model.licenseUrl : "",
-    experimental: model?.experimental === true,
-    nonCommercial: model?.nonCommercial === true,
-  };
-}
-
-export function licenseFromNotice(notice) {
-  if (typeof notice !== "string") {
-    return null;
-  }
-  const match = notice.match(/\bCC BY(?:-[A-Z]{2})*\s+\d\.\d\b/);
-  return match ? match[0].replace(/\s+/g, " ") : null;
-}
-
-// Chips for a usage policy recorded on a job / asset (`sceneworks.usagePolicy.v1`).
-export function usagePolicyChips(policy, fallbackModel = null) {
-  const chips = [];
-  const identity = yue2ModelIdentity(fallbackModel);
-  chips.push(identity.version);
-  if (policy?.experimental ?? identity.experimental) {
-    chips.push("Experimental");
-  }
-  const nonCommercial = policy?.nonCommercial ?? identity.nonCommercial;
-  if (nonCommercial) {
-    chips.push("Noncommercial");
-  }
-  const license =
-    policy?.license?.license || licenseFromNotice(policy?.license?.notice) || identity.license;
-  if (license) {
-    chips.push(String(license));
-  }
-  return chips;
-}
-
 // The commercial-use alternatives the catalog names (`commercialUse.alternatives`, ids), resolved
 // to display names when the catalog has them.
 export function commercialAlternatives(model, models = []) {
@@ -679,12 +651,6 @@ export function yue2RunExport(job, assets = [], exportedAt = new Date().toISOStr
   };
 }
 
-// A download filename stem that keeps the licence distinction visible in the file itself.
-export function yue2ExportStem(prefix, id, policy) {
-  const safe = String(id ?? "run").replace(/[^A-Za-z0-9_-]+/g, "-");
-  return `${prefix}-${safe}${policy?.nonCommercial ? "-noncommercial" : ""}`;
-}
-
 // Exported .abc files open with a `%` comment naming the licence, so a score file that leaves the
 // app keeps the noncommercial distinction (E2). The native YuE2 dialect requires `X:1` on the
 // first line, so the lab strips this header again whenever a score is pasted back in.
@@ -716,11 +682,6 @@ export function stripYue2ExportHeader(abc) {
     index += 1;
   }
   return index ? lines.slice(index).join("\n") : abc;
-}
-
-// A YuE2 take's download name: never the style text, always the licence-marked export stem.
-export function yue2TakeFilename(asset, policy = null) {
-  return `${yue2ExportStem("yue2-song", asset?.id ?? "take", asset?.extra?.usagePolicy ?? policy)}.wav`;
 }
 
 // ---- score edits ----------------------------------------------------------------------------

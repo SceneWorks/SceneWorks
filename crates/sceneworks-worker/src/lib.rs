@@ -288,6 +288,8 @@ pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
+// YuE lyrics2song whole-render memory admission (sc-19386): max-over-stages + KV, all targets.
+mod yue_admission;
 use audio_jobs::*;
 // YuE2's whole-render memory admission (sc-23001, epic 22988): prices every stage of one render,
 // chooses the per-request memory controls the engine honours, refuses before the load, and holds
