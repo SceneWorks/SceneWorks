@@ -96,6 +96,22 @@ export function boundDurableSnapshot(studio, durable) {
   return durable;
 }
 
+// The fields of `settings` the durable copy of `studio` leaves out or trims — a text over its cap,
+// or a field the snapshot budget dropped — so a surface can say which of its texts and drafts are
+// kept for this session only. The same derivation the writer persists.
+export function sessionOnlyFields(studio, settings) {
+  const durable = { ...(settings ?? {}) };
+  for (const field of NON_DURABLE_FIELDS) {
+    delete durable[field];
+  }
+  boundDurableSnapshot(studio, durable);
+  return new Set(
+    Object.keys(settings ?? {}).filter(
+      (key) => !NON_DURABLE_FIELDS.includes(key) && JSON.stringify(durable[key]) !== JSON.stringify(settings[key]),
+    ),
+  );
+}
+
 const DEFAULT_WORKSPACE = "default";
 // Keep in sync with MAX_STUDIO_WORKSPACES in apps/rust-api/src/preferences.rs.
 const MAX_WORKSPACES = 24;

@@ -48,6 +48,24 @@ export function audioDownloadName(asset, job = null) {
   return asset?.displayName ?? "";
 }
 
+// A YuE2 take whose score plan or song hit its token budget is cut short — it can sound finished
+// but is not. Its own provenance (`extra.yue2.truncated`) says so; this is the sentence every take
+// surface shows beside a "Truncated" badge. Null for a complete take and for any other clip.
+export function audioTakeTruncation(asset) {
+  if (!isYue2AudioRun(null, asset)) {
+    return null;
+  }
+  const truncated = asset?.extra?.yue2?.truncated;
+  if (!truncated || typeof truncated !== "object") {
+    return null;
+  }
+  const phases = [truncated.abc === true ? "score plan" : null, truncated.semantic === true ? "song" : null].filter(
+    Boolean,
+  );
+  const budget = phases.length > 1 ? "hit their token budgets" : "hit its token budget";
+  return phases.length ? `Truncated: the ${phases.join(" and ")} ${budget}, so this take is cut short.` : null;
+}
+
 // m:ss clock for every transport read-out. Clamps NaN/negative to 0:00.
 export function formatClock(seconds) {
   const total = Number.isFinite(seconds) && seconds > 0 ? Math.floor(seconds) : 0;
@@ -328,6 +346,7 @@ export function audioAssetMetaLine(asset, run = null) {
     .filter(Boolean)
     .join(" ");
   return [
+    audioTakeTruncation(asset) ? "Truncated" : null,
     run?.modelName || asset?.recipe?.model || null,
     settings.voice ?? null,
     settings.language ?? null,

@@ -45,7 +45,7 @@ pub(super) fn app_with_yue1_and_yue2_state(
     create_app_with_state(test_settings(temp_dir)).expect("app and state create")
 }
 
-fn write_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) {
+pub(super) fn write_yue1_and(temp_dir: &tempfile::TempDir, yue2: Value) {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let config_dir = temp_dir.path().join("config/manifests");
     std::fs::create_dir_all(&config_dir).expect("manifest dir creates");

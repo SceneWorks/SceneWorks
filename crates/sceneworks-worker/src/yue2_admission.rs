@@ -78,9 +78,6 @@ use serde_json::Value;
 use crate::fit_gate::BYTES_PER_GIB;
 use crate::WorkerError;
 
-/// The manifest `family` of the YuE2 entry (and the engine's `provider::FAMILY`).
-pub(crate) const YUE2_FAMILY: &str = "yue2";
-
 // ---- Architecture: the pinned `m-a-p/YuE2-3B@1a96eca` config / tensor table ----------------------
 
 /// `num_hidden_layers`.
@@ -98,8 +95,8 @@ const INTERMEDIATE: u64 = 6144;
 /// `vocab_size` (text, ABC, protocol specials, 32 768 codec ids, latent markers).
 const VOCAB: u64 = 184_704;
 /// The released context (`protocol::CONTEXT` = `max_position_embeddings` = the latent position
-/// table's rows).
-const CONTEXT: u64 = 24_576;
+/// table's rows) — the job contract's own `CONTEXT_TOKENS`, not a copy.
+const CONTEXT: u64 = sceneworks_core::yue2_score::jobs::CONTEXT_TOKENS as u64;
 /// `latent_dim`: acoustic latent channels.
 const LATENT_DIM: u64 = 64;
 /// `TimestepEmbedder.frequency_embedding_size` (`nar::TIME_FREQUENCIES`).
@@ -115,10 +112,11 @@ const EAGER_QUERY_TILE: u64 = 256;
 /// `nar::SCORE_TILES_LIVE`: score-sized temporaries one attention call holds at once (the raw `QKᵀ`
 /// product, the masked/scaled copy and the softmax).
 const SCORE_TILES_LIVE: u64 = 3;
-/// `Sampling::abc_default().max_tokens`.
-const ABC_MAX_TOKENS_DEFAULT: u64 = 4096;
-/// `Sampling::semantic_default().max_tokens`.
-const SEMANTIC_MAX_TOKENS_DEFAULT: u64 = 9000;
+/// `Sampling::abc_default().max_tokens` — the job contract's `ABC_TOKEN_DEFAULTS` maximum.
+const ABC_MAX_TOKENS_DEFAULT: u64 = sceneworks_core::yue2_score::jobs::ABC_TOKEN_DEFAULTS.1 as u64;
+/// `Sampling::semantic_default().max_tokens` — the job contract's `SEMANTIC_TOKEN_DEFAULTS` maximum.
+const SEMANTIC_MAX_TOKENS_DEFAULT: u64 =
+    sceneworks_core::yue2_score::jobs::SEMANTIC_TOKEN_DEFAULTS.1 as u64;
 /// A lower bound on the semantic prefix, priced as zero tokens (the real one always carries at
 /// least `EOD`, an instruction line and the score framing, so zero is conservative). It bounds the
 /// longest song and the longest acoustic chunk — a shorter prefix leaves more of the context to the
@@ -1799,11 +1797,6 @@ fn largest_fitting(current: u64, fits: impl Fn(u64) -> bool) -> Option<u64> {
 
 // ---- The request → shape --------------------------------------------------------------------------
 
-/// Whether a manifest entry is YuE2.
-pub(crate) fn is_yue2(manifest_entry: &Value) -> bool {
-    manifest_entry.get("family").and_then(Value::as_str) == Some(YUE2_FAMILY)
-}
-
 fn download_bytes(row: &Value) -> Option<u64> {
     row.get("estimatedSizeBytes")
         .and_then(Value::as_u64)
@@ -2089,8 +2082,6 @@ impl Yue2Lease {
             semantic_total,
         };
         lease.publish();
-        #[cfg(test)]
-        LAST_OPENED_LEASE.with(|last| last.set(Some(id)));
         lease
     }
 
@@ -2206,8 +2197,6 @@ thread_local! {
     static HARDWARE_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Evictions [`check`] requested on this thread.
     static EVICTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    /// The last lease [`Yue2Lease::open`] opened on this thread.
-    static LAST_OPENED_LEASE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Restores the hardware probe when dropped ([`override_budget`]).
@@ -2247,23 +2236,6 @@ pub(crate) fn probe_hardware_in_this_test() {
 #[cfg(test)]
 pub(crate) fn evictions() -> usize {
     EVICTIONS.with(std::cell::Cell::get)
-}
-
-/// The last lease opened on this thread (tests only).
-#[cfg(test)]
-pub(crate) fn last_opened_lease() -> Option<u64> {
-    LAST_OPENED_LEASE.with(std::cell::Cell::get)
-}
-
-/// Every live lease id, whichever thread admitted it (tests only).
-#[cfg(test)]
-pub(crate) fn live_lease_ids() -> Vec<u64> {
-    live_leases()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .keys()
-        .copied()
-        .collect()
 }
 
 /// Whether lease `id` still holds residency (tests only).

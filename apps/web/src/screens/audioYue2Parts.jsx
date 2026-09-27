@@ -239,8 +239,11 @@ export function Yue2RunCard({
   onRestorePlan,
   onDecodeAgain,
   onFetchVersionAbc,
+  decodeBlocked = null,
 }) {
   const view = useMemo(() => yue2RunView(job), [job]);
+  // "Decode again" picks its decoder here, on the run it re-decodes.
+  const [decoder, setDecoder] = useState("");
   const takes = useMemo(() => jobAudioResultAssets(job, assets), [job, assets]);
   const [exportError, setExportError] = useState("");
 
@@ -375,9 +378,27 @@ export function Yue2RunCard({
             </button>
           ) : null}
           {view.decodable ? (
-            <button className="secondary-action" onClick={() => onDecodeAgain?.(view.id)} type="button">
-              Decode again
-            </button>
+            <span className="yue2-inline">
+              <select aria-label="Decode again with" onChange={(event) => setDecoder(event.target.value)} value={decoder}>
+                <option value="">Default decoder (standard)</option>
+                <option value="standard">Standard decoder</option>
+                <option value="legacy">Legacy decoder (add-on install)</option>
+              </select>
+              <button
+                className="secondary-action"
+                disabled={Boolean(decodeBlocked)}
+                onClick={() => onDecodeAgain?.(view.id, decoder)}
+                title={decodeBlocked ?? undefined}
+                type="button"
+              >
+                Decode again
+              </button>
+              {decodeBlocked ? (
+                <span className="yue2-muted" data-testid="yue2-decode-blocked">
+                  {decodeBlocked}
+                </span>
+              ) : null}
+            </span>
           ) : null}
         </div>
       ) : null}
@@ -639,6 +660,8 @@ export function Yue2ScoreWorkbench({
   setImportDraft,
   policy,
   refreshKey = "",
+  draftSessionOnly = false,
+  importDraftSessionOnly = false,
 }) {
   const [detail, setDetail] = useState(null);
   const [inspection, setInspection] = useState(null);
@@ -775,6 +798,11 @@ export function Yue2ScoreWorkbench({
               spellCheck={false}
               value={importDraft.abc}
             />
+            {importDraftSessionOnly ? (
+              <p className="yue2-muted" data-testid="yue2-import-session-only">
+                Kept for this session only — too large to restore after a relaunch. Save it as a version to keep it.
+              </p>
+            ) : null}
             <div className="yue2-inline">
               <select aria-label="Import planning mode" onChange={(event) => setImportDraft((d) => ({ ...d, cot: event.target.value }))} value={importDraft.cot}>
                 <option value="full">Full</option>
@@ -917,6 +945,11 @@ export function Yue2ScoreWorkbench({
                 </select>
               </label>
               <EditFields draft={draft} sections={inspection?.sections ?? []} setDraft={setDraft} />
+              {draftSessionOnly ? (
+                <p className="yue2-muted" data-testid="yue2-edit-session-only">
+                  This edit draft is kept for this session only — it is too large to restore after a relaunch.
+                </p>
+              ) : null}
               <label>
                 Brief (what changes and why)
                 <input

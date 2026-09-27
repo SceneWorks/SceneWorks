@@ -1,3 +1,6 @@
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   YUE2_FIELD_KINDS,
@@ -67,34 +70,48 @@ const EVERY_CONTROL = {
   coverTranslatedFrom: "[verse]\nhola",
 };
 
-// The core contract's own table (crates/sceneworks-core/src/yue2_score/jobs.rs FIELD_KINDS).
-const CORE_FIELD_KINDS = {
-  style: ["create", "plan", "fromPlan", "cover"],
-  lyrics: ["create", "plan", "fromPlan", "cover"],
-  seed: ["create", "plan", "cover"],
-  cfgScale: ["create", "plan", "cover"],
-  steps: ["create", "fromPlan", "cover", "renderVersion"],
-  planning: ["create", "plan"],
-  score: ["create", "plan"],
-  scoreSampling: ["create", "plan"],
-  semanticSampling: ["create", "fromPlan", "cover", "renderVersion"],
-  decoder: ["create", "fromPlan", "cover", "renderVersion", "decode"],
-  tier: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
-  precision: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
-  offloadPolicy: ["create", "fromPlan", "cover", "renderVersion"],
-  "memory.acoustic": ["create", "fromPlan", "cover", "renderVersion"],
-  "memory.decode": ["create", "fromPlan", "cover", "renderVersion", "decode"],
-  planJobId: ["fromPlan"],
-  sourceJobId: ["decode"],
-  versionId: ["renderVersion"],
-  cover: ["cover"],
-  sourceAudioAssetId: ["transcribe"],
-  count: ["create", "plan", "cover"],
-};
+// The request contract shared with the server (sc-22988 review item 7): a fixture of the field
+// table and of the bodies this builder produces, which the rust-api suite
+// (`apps/rust-api/src/tests/yue2_jobs.rs`, `the_web_lab_request_bodies_…`) pins to core
+// `FIELD_KINDS` and replays through `Yue2JobSpec` (deny_unknown_fields) + `validate_request`. A
+// drift on either side reds one of the two suites; regenerate with UPDATE_YUE2_WEB_FIXTURE=1.
+const FIXTURES = resolve(dirname(fileURLToPath(import.meta.url)), "../../../crates/sceneworks-core/src/yue2_score/fixtures");
+const WEB_REQUESTS_PATH = resolve(FIXTURES, "web-job-requests.json");
+const SCORE_ABC = readFileSync(resolve(FIXTURES, "score.abc"), "utf8");
+const WEB_REQUESTS = JSON.parse(readFileSync(WEB_REQUESTS_PATH, "utf8"));
+const CORE_FIELD_KINDS = WEB_REQUESTS.fieldKinds;
+
+// Every body shape the lab submits, from its own settings.
+function webJobRequests() {
+  const scenarios = [
+    ["create", EVERY_CONTROL, {}],
+    ["create", { ...EVERY_CONTROL, planSource: "supplied", planning: "full", suppliedScore: SCORE_ABC }, {}],
+    ["plan", EVERY_CONTROL, {}],
+    ["fromPlan", { ...EVERY_CONTROL, planSource: "restore" }, { plan: { style: "folk", lyrics: "[verse]\nplanned" } }],
+    ["cover", EVERY_CONTROL, {}],
+    ["cover", { ...EVERY_CONTROL, coverSource: "inline", coverScore: SCORE_ABC, coverMode: "full" }, {}],
+    ["renderVersion", EVERY_CONTROL, { versionId: "ver_1" }],
+    ["decode", EVERY_CONTROL, { sourceJobId: "job_src", decoder: "standard" }],
+    ["create", { ...defaultYue2Settings(), lyrics: "la la" }, {}],
+  ];
+  return scenarios.map(([kind, settings, target]) => buildYue2JobRequest(kind, settings, target, "auto"));
+}
 
 describe("YuE2 request builder (sc-23000)", () => {
   it("mirrors the core FIELD_KINDS table exactly", () => {
     expect(YUE2_FIELD_KINDS).toEqual(CORE_FIELD_KINDS);
+  });
+
+  it("builds exactly the request bodies the server's contract test replays", () => {
+    const current = { fieldKinds: YUE2_FIELD_KINDS, bodies: webJobRequests() };
+    if (process.env.UPDATE_YUE2_WEB_FIXTURE === "1") {
+      writeFileSync(WEB_REQUESTS_PATH, `${JSON.stringify(current, null, 2)}\n`);
+    }
+    // Mutation that reds this: any change to what `buildYue2JobRequest` sends for these settings.
+    expect(JSON.parse(readFileSync(WEB_REQUESTS_PATH, "utf8"))).toEqual(current);
+    expect(new Set(current.bodies.map((body) => body.kind))).toEqual(
+      new Set(["create", "plan", "fromPlan", "cover", "renderVersion", "decode"]),
+    );
   });
 
   it("never sends a field to a kind that does not read it", () => {

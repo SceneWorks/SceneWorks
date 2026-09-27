@@ -1109,6 +1109,21 @@ async fn a_long_ar_phase_keeps_heartbeats_flowing_and_coalesces_progress() {
     assert_eq!(h.terminal()["status"], "completed");
 }
 
+/// The API reads `"yue2": null` as no block (and refuses it on a replay), so the worker must too:
+/// a generic (YuE1) audio job whose payload carries a null `yue2` key still runs as that job.
+#[test]
+fn a_null_yue2_block_keeps_a_generic_audio_job_generic() {
+    let payload = |value: Value| value.as_object().unwrap().clone();
+    // Mutation that reds this: `payload.contains_key(contract::PAYLOAD_KEY)`.
+    assert!(!is_yue2_job(&payload(
+        json!({"model": "yue_en_cot", "prompt": "p", "yue2": null})
+    )));
+    assert!(!is_yue2_job(&payload(json!({"model": "yue_en_cot"}))));
+    assert!(is_yue2_job(&payload(
+        json!({"model": "yue2", "yue2": {"kind": "create", "lyrics": "l"}})
+    )));
+}
+
 #[test]
 fn progress_maps_plan_semantic_acoustic_and_decode_in_order() {
     let spec: Yue2JobSpec = serde_json::from_value(json!({

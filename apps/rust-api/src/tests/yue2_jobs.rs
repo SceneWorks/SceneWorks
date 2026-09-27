@@ -3,7 +3,9 @@
 //! and render records) and the usage policy on exports — through the real HTTP routes over the
 //! LIVE builtin YuE2 entry and the live builtin YuE1 entries that ship beside it.
 use super::support::*;
-use super::yue2_catalog::{app_with_yue1_and_yue2, app_with_yue1_and_yue2_state, builtin_yue2};
+use super::yue2_catalog::{
+    app_with_yue1_and_yue2, app_with_yue1_and_yue2_state, builtin_yue2, write_yue1_and,
+};
 use crate::AppState;
 use sceneworks_core::contracts::JobType;
 use sceneworks_core::jobs_store::CreateJob;
@@ -11,6 +13,11 @@ use sceneworks_core::jobs_store::CreateJob;
 const SCORE: &str =
     include_str!("../../../../crates/sceneworks-core/src/yue2_score/fixtures/score.abc");
 const WORKER: &str = "yue2-test-worker";
+/// The Song Lab's field table and the bodies its request builder produces
+/// (`apps/web/src/yue2Lab.test.js` writes and checks this file).
+const WEB_JOB_REQUESTS: &str = include_str!(
+    "../../../../crates/sceneworks-core/src/yue2_score/fixtures/web-job-requests.json"
+);
 
 async fn project(app: &axum::Router) -> String {
     let (status, created) = request(
@@ -440,6 +447,98 @@ async fn plan_and_decode_sources_resolve_completed_runs_of_the_project_only() {
     assert_eq!(status, StatusCode::CONFLICT, "{response}");
 }
 
+/// A restored plan renders the plan's own style and lyrics: a `fromPlan` job whose style or lyrics
+/// differ from the run's recorded `request.json` is refused at submission (409
+/// `yue2_plan_request_mismatch`) and queues nothing — the engine would refuse it only after a
+/// multi-GB load. The plan's exact text, or none, is accepted.
+#[tokio::test]
+async fn a_restored_plan_with_other_words_is_refused_before_it_queues() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp_dir);
+    let project_id = project(&app).await;
+    let jobs = submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "plan", "style": "folk", "lyrics": "[verse]\nhey", "licenseAcknowledged": true}),
+    )
+    .await;
+    let plan_id = jobs[0]["id"].as_str().unwrap().to_owned();
+    let run_id = jobs[0]["payload"]["yue2"]["runId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    register(&app, WORKER).await;
+    claim(&app, WORKER).await;
+    let (_, created) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let run_dir = std::path::PathBuf::from(created["path"].as_str().unwrap())
+        .join(format!("yue2/runs/{run_id}"));
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("request.json"),
+        json!({"style": "folk", "lyrics": "[verse]\nhey", "cot": "full", "seed": 7}).to_string(),
+    )
+    .unwrap();
+    finish(
+        &app,
+        &plan_id,
+        "completed",
+        json!({"yue2": {
+            "status": "completed", "kind": "plan",
+            "run": {"dir": format!("yue2/runs/{run_id}"), "kind": "plan", "identity": "aa", "planIdentity": "bb"},
+        }}),
+        None,
+    )
+    .await;
+    let job_count = |jobs: Value| jobs.as_array().expect("jobs is an array").len();
+    let queued_before = job_count(
+        request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
+            .await
+            .1,
+    );
+
+    for (mut body, field) in [
+        (json!({"lyrics": "[verse]\nnew words"}), "lyrics"),
+        (json!({"style": "metal", "lyrics": "[verse]\nhey"}), "style"),
+    ] {
+        body["kind"] = json!("fromPlan");
+        body["planJobId"] = json!(plan_id);
+        let (status, response) = submit(&app, &project_id, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(response["code"], "yue2_plan_request_mismatch", "{response}");
+        assert_eq!(response["context"]["field"], field, "{response}");
+    }
+    assert_eq!(
+        job_count(
+            request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
+                .await
+                .1
+        ),
+        queued_before,
+        "a refused restore queues nothing"
+    );
+
+    let exact = submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "fromPlan", "planJobId": plan_id, "style": "folk", "lyrics": "[verse]\nhey"}),
+    )
+    .await;
+    assert_eq!(exact[0]["payload"]["yue2"]["lyrics"], "[verse]\nhey");
+    submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "fromPlan", "planJobId": plan_id}),
+    )
+    .await;
+}
+
 /// A completed plan becomes a score version linked to its job, once; a score-version render —
 /// completed or failed — is recorded with `record_yue2_render`, linking version, job and asset; a
 /// render whose score digest is not its version's is NOT recorded (409 surfaced on the result).
@@ -865,6 +964,24 @@ async fn replays_cannot_swap_the_model_inject_a_block_or_share_a_run() {
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
     assert_eq!(response["code"], "yue2_song_route_required");
+
+    // A generic (V1) retry cannot store `"yue2": null` — a key the worker once read as a block.
+    // Mutation that reds this: dropping the null-block refusal in
+    // `canonicalize_replayed_audio_payload` (the block-less path accepts it).
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{}/duplicate", generic.id),
+        json!({"payloadChanges": {"yue2": null}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["context"]["field"], "yue2");
+    let stored = job(&app, &generic.id).await;
+    assert!(
+        stored["payload"].get("yue2").is_none(),
+        "the V1 job stays V1: {stored}"
+    );
 }
 
 fn stored_yue2_job(state: &AppState, project_id: &str, payload_extra: Value) -> String {
@@ -1025,6 +1142,135 @@ async fn usage_policies_survive_derivation_and_re_export() {
         json!({"commercialUse": true}),
     )
     .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    assert_eq!(response["code"], "commercial_use_refused");
+}
+
+/// Queue a generic (non-YuE2) audio job, claim it and complete it with `asset_writes`.
+async fn finish_generic_audio(
+    app: &axum::Router,
+    state: &AppState,
+    project_id: &str,
+    asset_writes: Value,
+) {
+    let job = state
+        .jobs_store
+        .create_job(CreateJob {
+            job_type: JobType::AudioGenerate,
+            project_id: Some(project_id.to_owned()),
+            project_name: None,
+            payload: json!({"projectId": project_id, "model": "yue_en_icl", "prompt": "icl"})
+                .as_object()
+                .unwrap()
+                .clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    let claimed = claim(app, WORKER).await;
+    assert_eq!(claimed["id"], job.id);
+    finish(
+        app,
+        &job.id,
+        "completed",
+        json!({"generationSetId": "gs_icl", "assetWrites": asset_writes}),
+        None,
+    )
+    .await;
+}
+
+async fn asset(app: &axum::Router, project_id: &str, asset_id: &str) -> Value {
+    let (status, asset) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets/{asset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{asset}");
+    asset
+}
+
+/// A YuE1 ICL render that uses a YuE2 output as its reference writes its mix AND its stems in one
+/// batch; each stem names only the (not yet persisted) mix as its parent. The stems still inherit
+/// the YuE2 policy through the mix, so a commercial export of a stem is refused. An input that is
+/// in neither the batch nor the library is recorded as unresolved lineage — never as "no policy" —
+/// and a commercial export of it fails closed.
+#[tokio::test]
+async fn stems_of_an_icl_render_from_a_yue2_song_inherit_its_policy() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (app, state) = app_with_yue1_and_yue2_state(&temp_dir);
+    let project_id = project(&app).await;
+    register(&app, WORKER).await;
+    let jobs = submit_ok(&app, &project_id, create_body()).await;
+    let song_id = jobs[0]["id"].as_str().unwrap().to_owned();
+    claim(&app, WORKER).await;
+    finish(
+        &app,
+        &song_id,
+        "completed",
+        song_result("yue2run_i", "asset_song_icl", json!({})),
+        None,
+    )
+    .await;
+
+    // The worker's shape (`record_song_settings` / `stem_asset_fact`): the mix's parents are the
+    // ICL references; a stem replaces them with the mix and replaces `extra`.
+    let mut mix = audio_fact("asset_icl_mix");
+    mix.as_object_mut().unwrap().remove("extra");
+    mix["parents"] = json!(["asset_song_icl"]);
+    let mut stem = audio_fact("asset_icl_vocal");
+    stem["parents"] = json!(["asset_icl_mix"]);
+    stem["extra"] = json!({"audioStem": "vocal", "mixAssetId": "asset_icl_mix"});
+    // Stem first: the resolution does not depend on the batch order.
+    finish_generic_audio(&app, &state, &project_id, json!([stem, mix])).await;
+
+    for id in ["asset_icl_mix", "asset_icl_vocal"] {
+        let stored = asset(&app, &project_id, id).await;
+        // Mutation that reds this: resolving parents only from the library (the pre-fix
+        // `usage_policies_of` on each fact), which finds no persisted mix for the stem.
+        assert_eq!(
+            stored["extra"]["usagePolicies"][0]["assetId"], "asset_song_icl",
+            "{id}: {stored}"
+        );
+    }
+    let timeline_id = timeline_placing(&app, &project_id, "asset_icl_vocal").await;
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
+        json!({"commercialUse": true}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
+    assert_eq!(response["code"], "commercial_use_refused");
+
+    // A parent in neither the batch nor the library: recorded, and a commercial export refuses it.
+    let mut orphan = audio_fact("asset_orphan");
+    orphan.as_object_mut().unwrap().remove("extra");
+    orphan["parents"] = json!(["asset_deleted_meanwhile"]);
+    finish_generic_audio(&app, &state, &project_id, json!([orphan])).await;
+    let stored = asset(&app, &project_id, "asset_orphan").await;
+    // Mutation that reds this: `NotFound => continue` in `usage_policies_of` (the pre-fix
+    // "missing = no policy").
+    assert_eq!(
+        stored["extra"]["usagePolicies"],
+        json!([{"assetId": "asset_deleted_meanwhile", "policy": null, "unresolved": "not_found"}]),
+        "{stored}"
+    );
+    let timeline_id = timeline_placing(&app, &project_id, "asset_orphan").await;
+    let (status, response) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/timelines/{timeline_id}/exports"),
+        json!({"commercialUse": true}),
+    )
+    .await;
+    // Mutation that reds this: dropping the `unresolved` arm of `refuse_commercial_export`.
     assert_eq!(status, StatusCode::FORBIDDEN, "{response}");
     assert_eq!(response["code"], "commercial_use_refused");
 }
@@ -1200,4 +1446,203 @@ async fn malformed_identities_are_loud_and_truncated_plans_are_not_versioned() {
         "{block}"
     );
     assert!(block.get("renderRecordId").is_none());
+}
+
+/// E5: an agent renders a score version (and a cover of it) through MCP, over the same job route
+/// the Song Lab uses. Without the USER's licence acceptance the render is refused with the
+/// acknowledgment reason and nothing queues — the tool never acknowledges for them, and it has no
+/// field to try; once the user accepts, the render queues, carries the regeneration notice and is
+/// polled with `yue2_get_render`.
+#[tokio::test]
+async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licence() {
+    use rmcp::model::CallToolRequestParams;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::ServiceExt;
+    use sceneworks_core::yue2_score::REGENERATION_NOTICE;
+
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_yue1_and(&temp_dir, builtin_yue2());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ephemeral listener");
+    let addr = listener.local_addr().expect("listener addr");
+    let mut settings = test_settings(&temp_dir);
+    settings.trust_loopback = true;
+    settings.mcp_api_url = format!("http://{addr}");
+    let (app, _state) = crate::create_app_with_state(settings).expect("app creates");
+    let http = app.clone();
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await;
+    });
+    let project_id = project(&http).await;
+    let (status, version) = request(
+        http.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/yue2/score-versions"),
+        json!({
+            "abc": SCORE,
+            "request": {"style": "warm piano pop", "lyrics": "[Verse]\nNeon fades", "cot": "full", "seed": 5},
+            "origin": "import",
+            "provenance": {"actor": "user", "channel": "ui"},
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{version}");
+    let version_id = version["id"].as_str().unwrap().to_owned();
+
+    let client = rmcp::model::ClientInfo::default()
+        .serve(StreamableHttpClientTransport::from_config(
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        ))
+        .await
+        .expect("MCP client initializes");
+    let tools = client.list_tools(None).await.expect("tools/list");
+    for expected in [
+        "yue2_render_score_version",
+        "yue2_cover_score_version",
+        "yue2_get_render",
+    ] {
+        let tool = tools
+            .tools
+            .iter()
+            .find(|tool| tool.name == expected)
+            .unwrap_or_else(|| panic!("missing {expected}"));
+        let description = tool.description.as_deref().unwrap_or("");
+        assert!(
+            description.contains("NONCOMMERCIAL") || expected == "yue2_get_render",
+            "{expected}: {description}"
+        );
+    }
+    let call = |name: &'static str, arguments: Value| {
+        CallToolRequestParams::new(name).with_arguments(arguments.as_object().unwrap().clone())
+    };
+    let job_count = || async {
+        request(http.clone(), "GET", "/api/v1/jobs", Value::Null)
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len()
+    };
+
+    // No acceptance yet: refused with the reason, nothing queued.
+    let refused = client
+        .call_tool(call(
+            "yue2_render_score_version",
+            json!({"projectId": project_id, "versionId": version_id}),
+        ))
+        .await
+        .expect("a refusal is a tool result");
+    assert_eq!(refused.is_error, Some(true), "{refused:?}");
+    let text = format!("{refused:?}");
+    // Mutation that reds this: `submit_render` sending `licenseAcknowledged: true`.
+    assert!(
+        text.contains("license_acknowledgment_required") && text.contains("USER must"),
+        "{text}"
+    );
+    assert_eq!(job_count().await, 0, "a refused render queues nothing");
+    // The agent cannot acknowledge through the tool: there is no such field.
+    let smuggled = client
+        .call_tool(call(
+            "yue2_render_score_version",
+            json!({"projectId": project_id, "versionId": version_id, "licenseAcknowledged": true}),
+        ))
+        .await;
+    assert!(
+        smuggled.is_err() || smuggled.as_ref().unwrap().is_error == Some(true),
+        "{smuggled:?}"
+    );
+    assert_eq!(job_count().await, 0);
+
+    // The user accepts in SceneWorks; now the agent's render queues.
+    let (status, _) = request(
+        http.clone(),
+        "PUT",
+        "/api/v1/models/yue2/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rendered = client
+        .call_tool(call(
+            "yue2_render_score_version",
+            json!({"projectId": project_id, "versionId": version_id, "steps": 8}),
+        ))
+        .await
+        .expect("render call");
+    assert_ne!(rendered.is_error, Some(true), "{rendered:?}");
+    let rendered = mcp_tool_content_json(&rendered);
+    assert_eq!(rendered["renderNotice"], REGENERATION_NOTICE);
+    assert_eq!(rendered["jobs"][0]["kind"], "renderVersion");
+    assert_eq!(rendered["usagePolicy"]["nonCommercial"], true);
+    let job_id = rendered["jobs"][0]["jobId"].as_str().unwrap().to_owned();
+    let stored = job(&http, &job_id).await;
+    assert_eq!(stored["payload"]["yue2"]["versionId"], version_id);
+    assert_eq!(stored["payload"]["yue2"]["steps"], 8);
+    assert_eq!(stored["payload"]["commercialUse"], false);
+
+    let polled = client
+        .call_tool(call("yue2_get_render", json!({"jobId": job_id})))
+        .await
+        .expect("poll call");
+    assert_ne!(polled.is_error, Some(true), "{polled:?}");
+    let polled = mcp_tool_content_json(&polled);
+    assert_eq!(polled["status"], "queued");
+    assert_eq!(polled["yue2"]["kind"], "renderVersion");
+    assert_eq!(polled["yue2"]["versionId"], version_id);
+    assert_eq!(polled["renderNotice"], REGENERATION_NOTICE);
+
+    let covered = client
+        .call_tool(call(
+            "yue2_cover_score_version",
+            json!({"projectId": project_id, "versionId": version_id, "mode": "melody",
+                   "keep": "vocal", "lyrics": "[Verse]\nNew words"}),
+        ))
+        .await
+        .expect("cover call");
+    assert_ne!(covered.is_error, Some(true), "{covered:?}");
+    let covered = mcp_tool_content_json(&covered);
+    assert_eq!(covered["jobs"][0]["kind"], "cover");
+    assert_eq!(covered["renderNotice"], REGENERATION_NOTICE);
+
+    let missing = client
+        .call_tool(call("yue2_get_render", json!({"jobId": "job_missing"})))
+        .await
+        .expect("a missing job is a tool result");
+    assert_eq!(missing.is_error, Some(true));
+
+    let _ = client.cancel().await;
+}
+
+/// sc-22988 review item 7: the web lab's field table is core `FIELD_KINDS`, and every body its
+/// request builder produces deserializes through the route's `Yue2JobSpec` (deny_unknown_fields)
+/// and passes `validate_request`. The web suite pins the same file to what the builder sends, so a
+/// drift on either side reds one of the two suites.
+#[test]
+fn the_web_lab_request_bodies_deserialize_and_validate_against_the_core_contract() {
+    use sceneworks_core::yue2_score::jobs::{self as contract, Yue2JobSpec};
+    let fixture: Value = serde_json::from_str(WEB_JOB_REQUESTS).expect("the fixture is JSON");
+    let core: serde_json::Map<String, Value> = contract::FIELD_KINDS
+        .iter()
+        .map(|(field, kinds)| {
+            let kinds: Vec<&str> = kinds.iter().map(|kind| kind.as_str()).collect();
+            ((*field).to_owned(), json!(kinds))
+        })
+        .collect();
+    // Mutation that reds this: adding or removing one kind in core `FIELD_KINDS`.
+    assert_eq!(fixture["fieldKinds"], Value::Object(core));
+    let bodies = fixture["bodies"].as_array().expect("bodies");
+    assert!(bodies.len() >= 6, "{fixture}");
+    for body in bodies {
+        // Mutation that reds this: a field the builder sends that `Yue2JobSpec` does not declare.
+        let spec: Yue2JobSpec =
+            serde_json::from_value(body.clone()).unwrap_or_else(|error| panic!("{body}: {error}"));
+        contract::validate_request(&spec).unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
 }

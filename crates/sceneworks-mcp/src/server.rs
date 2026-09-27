@@ -789,6 +789,36 @@ impl SceneWorksMcp {
         crate::yue2::get_comparison(&self.api, args).await
     }
 
+    #[tool(
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL — CC BY-NC 4.0): render one take of a score version through the Song Lab's job route. The version fixes the style, lyrics, planning, seed and guidance; you may choose steps, decoder and tier. Rendering regenerates the WHOLE recording from the score, style and lyrics — it does not edit or preserve an earlier waveform, so audio can differ everywhere. Requires that the USER has accepted YuE2's licence in SceneWorks: without it the call is refused with license_acknowledgment_required and nothing is queued (this tool never accepts the licence for them). Output is noncommercial. Returns the job id; poll yue2_get_render."
+    )]
+    async fn yue2_render_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2RenderArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::render_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL): render a zero-shot cover that follows a reviewed score version — mode \"melody\" (keep the melody) or \"full\" — singing the lyrics you give, in an optional style. A cover is a complete new recording, not an edit of an earlier one. Requires the USER's licence acceptance in SceneWorks (refused with license_acknowledgment_required otherwise; never accepted by this tool). Returns the job id; poll yue2_get_render."
+    )]
+    async fn yue2_cover_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CoverArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::cover_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: poll a render or cover job — status, stage, progress and, once finished, its render record, truncation flags (a truncated take is cut short), warnings, errors, the noncommercial usage policy and the produced asset ids. Use get_job_result on a completed job for download links."
+    )]
+    async fn yue2_get_render(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2RenderStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_render(&self.api, args).await
+    }
+
     /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
     /// `/api/v1` are the SAME axum app, so the host the client used to reach
     /// `/mcp` is exactly the host that serves the media — derive it from the
@@ -989,7 +1019,9 @@ impl ServerHandler for SceneWorksMcp {
              download links (get_job_status/get_job_result work for image jobs too). \
              YuE2 score tools (yue2_*) inspect native ABC scores, apply one bounded, \
              invariant-checked edit per new version, and persist A/B listening comparisons; \
-             rendering a version regenerates the whole recording.",
+             yue2_render_score_version / yue2_cover_score_version queue a render (after the \
+             user has accepted YuE2's noncommercial licence in SceneWorks) and yue2_get_render \
+             polls it; rendering a version regenerates the whole recording.",
         )
     }
 }
@@ -1684,6 +1716,15 @@ pub(crate) fn compact_models(models: &Value) -> Value {
                 "installState",
                 "gated",
                 "defaults",
+                // Usage terms (sc-22988 E2): an agent picking a model must see that it is
+                // noncommercial / experimental, whether commercial use is eligible (and the
+                // alternatives when it is not), where the licence lives and that the user must
+                // accept it before it runs.
+                "nonCommercial",
+                "experimental",
+                "commercialUse",
+                "licenseUrl",
+                "requiresLicenseAcknowledgment",
             ],
             &mut out,
         );
@@ -1817,6 +1858,42 @@ mod tests {
                 "defaults": { "resolution": "1024x1024", "steps": 8, "guidanceScale": 0, "count": 4 },
                 "resolutions": ["768x768", "1024x1024"],
                 "loraFamilies": ["z-image"]
+            }])
+        );
+    }
+
+    #[test]
+    fn compact_models_keeps_the_usage_terms() {
+        let commercial_use = json!({
+            "eligible": false,
+            "reason": "CC BY-NC 4.0",
+            "alternativeFamily": "yue"
+        });
+        let full = json!([{
+            "id": "yue2",
+            "name": "YuE2",
+            "type": "audio",
+            "installState": "missing",
+            "nonCommercial": true,
+            "experimental": true,
+            "commercialUse": commercial_use,
+            "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca/LICENSE",
+            "requiresLicenseAcknowledgment": true,
+            "licenseNotice": "a long notice that stays on the full API response"
+        }]);
+        // Mutation that reds this: dropping any of the five keys from `compact_models`.
+        assert_eq!(
+            compact_models(&full),
+            json!([{
+                "id": "yue2",
+                "name": "YuE2",
+                "type": "audio",
+                "installState": "missing",
+                "nonCommercial": true,
+                "experimental": true,
+                "commercialUse": commercial_use,
+                "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca/LICENSE",
+                "requiresLicenseAcknowledgment": true
             }])
         );
     }

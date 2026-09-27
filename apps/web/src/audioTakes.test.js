@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  audioAssetMetaLine,
   audioAssetRunGroups,
   audioDownloadName,
   audioExpectedTakes,
@@ -8,6 +9,7 @@ import {
   audioRunGroups,
   audioRunModelName,
   audioTakeTitle,
+  audioTakeTruncation,
   formatClock,
   formatRelativeTime,
   foldAudioStems,
@@ -217,6 +219,24 @@ describe("YuE2 runs on the shared audio surfaces", () => {
     const song = { id: "a1", type: "audio", displayName: "dream pop", extra: { yue2: {}, usagePolicy: policy } };
     expect(audioDownloadName(song)).toBe("yue2-song-a1-noncommercial.wav");
     expect(audioDownloadName({ id: "b", displayName: "Take 1" })).toBe("Take 1");
+  });
+
+  // A take cut short by its token budget must not look complete (sc-22988 E6/AT3).
+  it("names a truncated YuE2 take's cut-short phases and nothing for a complete take", () => {
+    const take = (truncated) => ({ id: "t", type: "audio", extra: { yue2: { truncated }, usagePolicy: policy } });
+    // Mutation that reds these: reading `extra.yue2.truncated` as always false.
+    expect(audioTakeTruncation(take({ abc: false, semantic: true }))).toBe(
+      "Truncated: the song hit its token budget, so this take is cut short.",
+    );
+    expect(audioTakeTruncation(take({ abc: true, semantic: true }))).toBe(
+      "Truncated: the score plan and song hit their token budgets, so this take is cut short.",
+    );
+    expect(audioAssetMetaLine(take({ abc: true, semantic: false }))).toMatch(/^Truncated/);
+    expect(audioTakeTruncation(take({ abc: false, semantic: false }))).toBeNull();
+    expect(audioTakeTruncation(take(null))).toBeNull();
+    expect(audioAssetMetaLine(take({ abc: false, semantic: false }))).not.toMatch(/Truncated/);
+    // Not a YuE2 take: nothing, whatever it carries.
+    expect(audioTakeTruncation({ id: "k", type: "audio", recipe: { model: "kokoro_82m" } })).toBeNull();
   });
 
   it("labels a YuE2 job and hides Run again", () => {

@@ -5,6 +5,7 @@ import {
   AudioClock,
   AudioDownloadButton,
   AudioPlayButton,
+  AudioTruncatedBadge,
   AudioWaveform,
   LoadedAudioElement,
   WAVEFORM_BARS,
@@ -160,7 +161,9 @@ export function AudioTakeCard({
         />
         <span className="audio-take__duration">{formatClock(duration)}</span>
       </div>
-      <p className="audio-take__prompt">{audioTakeTitle(run.job, asset)}</p>
+      <p className="audio-take__prompt">
+        <AudioTruncatedBadge asset={asset} /> {audioTakeTitle(run.job, asset)}
+      </p>
       <div className="audio-take__meta">
         <span>
           {run.modeLabel} · {run.modelName}
@@ -277,6 +280,7 @@ export function AudioPlayDeck({ run, asset, takeIndex, player, onRunAgain, onSen
         <strong className="audio-deck__title" title={audioTakeTitle(run?.job, asset)}>
           {audioTakeTitle(run?.job, asset)}
         </strong>
+        <AudioTruncatedBadge asset={asset} />
         <div className="audio-deck__head-actions">
           <AudioDownloadButton
             asset={asset}

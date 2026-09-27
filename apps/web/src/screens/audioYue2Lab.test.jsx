@@ -508,7 +508,25 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lastJobBody()).toEqual({ kind: "create", lyrics: "[verse]\nhello", planning: "full", score: "X:1\nK:C\nC4|", requestedGpu: "auto" });
   });
 
-  it("renders from a restored saved plan", async () => {
+  // A score exported from the lab opens with its licence header, which the native dialect refuses
+  // (it must start with `X:1`); previewing it sends the score without the header, as submitting does.
+  it("previews a lab-exported score without its licence header", async () => {
+    await openEnabledLab();
+    await click(buttonWithText(lab(), "Supply an ABC score"));
+    await typeText(
+      byLabel(lab(), "Supplied ABC score"),
+      "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY\nX:1\nK:C\nC4|",
+    );
+    await click(buttonWithText(lab(), "Preview score"));
+    await settle();
+    // Mutation that reds this: `inspectYue2Score(abc, token)` (the raw pasted text).
+    expect(JSON.parse(calls("/yue2/score/inspect").at(-1)[2].body)).toEqual({ abc: "X:1\nK:C\nC4|" });
+  });
+
+  // The engine (and now the server) refuses a restored plan whose words differ from the plan's
+  // own, so the lab sends the plan's RECORDED style and lyrics verbatim — never the Compose text
+  // typed before restoring — and shows them read-only.
+  it("renders from a restored saved plan with the plan's own style and lyrics", async () => {
     const plan = {
       id: "job_plan",
       type: "audio_generate",
@@ -516,18 +534,30 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       projectId: "project_1",
       createdAt: "2026-09-01T00:00:00Z",
       payload: { yue2: { kind: "plan", style: "folk" }, usagePolicy: POLICY },
-      result: { yue2: { run: { kind: "plan", dir: "yue2/runs/x", identity: "ab", planIdentity: "cd" }, usagePolicy: POLICY } },
+      result: {
+        yue2: {
+          run: { kind: "plan", dir: "yue2/runs/x", identity: "ab", planIdentity: "cd" },
+          request: { style: "folk ", lyrics: "[verse]\nplanned words", cot: "full", seed: 7 },
+          usagePolicy: POLICY,
+        },
+      },
     };
     await openEnabledLab(context({ jobs: [plan] }));
+    await typeText(byLabel(lab(), "Style"), "metal");
     await typeText(byLabel(lab(), "Lyrics"), "[verse]\nnew words");
     await click(buttonWithText(lab(), "Restore a saved plan"));
     await choose(byLabel(lab(), "Saved plan"), "job_plan");
+    expect(byLabel(lab(), "Lyrics").readOnly).toBe(true);
+    expect(byLabel(lab(), "Lyrics").value).toBe("[verse]\nplanned words");
+    expect(byLabel(lab(), "Style").readOnly).toBe(true);
+    expect(byLabel(lab(), "Style").value).toBe("folk ");
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Render from the saved plan"));
     await settle();
     expect(lastJobBody()).toEqual({
       kind: "fromPlan",
-      lyrics: "[verse]\nnew words",
+      style: "folk ",
+      lyrics: "[verse]\nplanned words",
       steps: 32,
       semanticSampling: SEMANTIC_SAMPLING,
       decoder: "legacy",
@@ -887,12 +917,30 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(audioLink).toEqual(["yue2-song-asset_song-noncommercial.wav"]);
   });
 
-  it("decodes a finished song again with the chosen decoder", async () => {
+  // The decoder of a cached decode is chosen on the run card; the lab-wide select (disabled for
+  // plan-only work) never leaks into it.
+  it("decodes a finished song again with the decoder chosen on its run card", async () => {
     await openEnabledLab(context({ jobs: [TRUNCATED], assets: [SONG_ASSET] }));
-    await choose(byLabel(lab(), "Decoder"), "standard");
-    await click(buttonWithText(container.querySelector('[data-testid="yue2-run-card"]'), "Decode again"));
+    await choose(byLabel(lab(), "Decoder"), "legacy");
+    const card = container.querySelector('[data-testid="yue2-run-card"]');
+    await choose(byLabel(card, "Decode again with"), "standard");
+    await click(buttonWithText(card, "Decode again"));
     await settle();
+    // Mutation that reds this: sending `s.decoder` (the lab-wide select) for a decode.
     expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "standard", requestedGpu: "auto" });
+  });
+
+  it("offers no Decode again until YuE2 and the chosen tier are installed", async () => {
+    await openEnabledLab(
+      context({ jobs: [TRUNCATED], assets: [SONG_ASSET], models: [...STANDARD, YUE1, yue2Entry({ installState: "missing" })] }),
+    );
+    const card = container.querySelector('[data-testid="yue2-run-card"]');
+    // Mutation that reds this: dropping `decodeBlocked` from the run card (the button stays live).
+    expect(buttonWithText(card, "Decode again").disabled).toBe(true);
+    expect(card.querySelector('[data-testid="yue2-decode-blocked"]').textContent).toBe("Install YuE2 first.");
+    await click(buttonWithText(card, "Decode again"));
+    await settle();
+    expect(calls("/yue2/jobs").length).toBe(0);
   });
 
   it("renders a refused submission with the server's reason, and re-gates a lapsed licence", async () => {
@@ -940,6 +988,52 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     // A preset restores controls; free text (style, lyrics, scores) is never part of a preset.
     expect(byLabel(lab(), "Tier").value).toBe("q8");
     expect(byLabel(lab(), "Style").value).toBe("changed");
+  });
+
+  // A preset is a reusable setup: the run-specific ids (the plan it restores, the version it covers)
+  // and the plan source that points at them are never part of it.
+  it("never saves run-specific ids or the plan source into a preset", async () => {
+    const plan = {
+      id: "job_plan",
+      type: "audio_generate",
+      status: "completed",
+      projectId: "project_1",
+      createdAt: "2026-09-01T00:00:00Z",
+      payload: { yue2: { kind: "plan", style: "folk" }, usagePolicy: POLICY },
+      result: { yue2: { run: { kind: "plan", dir: "yue2/runs/x", identity: "ab", planIdentity: "cd" }, usagePolicy: POLICY } },
+    };
+    await openEnabledLab(context({ jobs: [plan] }));
+    await click(buttonWithText(lab(), "Restore a saved plan"));
+    await choose(byLabel(lab(), "Saved plan"), "job_plan");
+    await choose(byLabel(lab(), "Tier"), "q8");
+    await type(byLabel(lab(), "Preset name"), "Restored");
+    await click(buttonStarting(lab(), "Save preset"));
+    await wait(500);
+    const saved = persistMock.mock.calls.at(-1)[0].advancedStudio.project_1.yue2lab.presets[0].settings;
+    // Mutation that reds this: removing the three keys from `PRESET_EXCLUDED`.
+    for (const key of ["restorePlanJobId", "coverVersionId", "planSource"]) {
+      expect(saved, key).not.toHaveProperty(key);
+    }
+    expect(saved.tier).toBe("q8");
+    // Applying it leaves the current plan source alone.
+    await click(buttonWithText(lab(), "Sample a new plan"));
+    await click(buttonWithText(lab().querySelector('[data-testid="yue2-presets"]'), "Restored"));
+    expect(buttonWithText(lab(), "Sample a new plan").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("ignores run-specific ids in a preset an earlier build saved", async () => {
+    window.localStorage.setItem(
+      "sceneworks-studio-yue2lab-project_1",
+      JSON.stringify({
+        optIn: true,
+        presets: [{ id: "p_old", name: "Old", settings: { planSource: "restore", restorePlanJobId: "job_gone", tier: "q8" } }],
+      }),
+    );
+    await openEnabledLab();
+    await click(buttonWithText(lab().querySelector('[data-testid="yue2-presets"]'), "Old"));
+    // Mutation that reds this: applying `preset.settings` unfiltered in `applyPreset`.
+    expect(buttonWithText(lab(), "Sample a new plan").getAttribute("aria-checked")).toBe("true");
+    expect(byLabel(lab(), "Tier").value).toBe("q8");
   });
 
   it("installs a derived tier through the deriver when YuE2 is not installed", async () => {
@@ -1130,6 +1224,32 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(note, "Import it as a score version"));
     await settle();
     expect(byLabel(lab(), "ABC score to import").value).toBe(huge);
+  });
+
+  // Lyrics and drafts are capped in the durable copy too; over their budget they say so, like a score.
+  it("marks lyrics and score drafts too large to restore as session-only", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nshort");
+    expect(lab().querySelector('[data-testid="yue2-lyrics-session-only"]')).toBeNull();
+    // Mutation that reds this: dropping the lyrics note (or `sessionOnlyFields` reporting nothing).
+    await typeText(byLabel(lab(), "Lyrics"), `[verse]\n${"la ".repeat(6000)}`);
+    expect(lab().querySelector('[data-testid="yue2-lyrics-session-only"]').textContent).toContain(
+      "Kept for this session only",
+    );
+
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    await click(buttonStarting(lab(), "Import ABC"));
+    expect(lab().querySelector('[data-testid="yue2-import-session-only"]')).toBeNull();
+    await typeText(byLabel(lab(), "ABC score to import"), `X:1\n${"C4|".repeat(12000)}`);
+    expect(lab().querySelector('[data-testid="yue2-import-session-only"]')).not.toBeNull();
+
+    await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
+    await settle();
+    await choose(byLabel(lab(), "Edit operation"), "set_lyrics");
+    expect(lab().querySelector('[data-testid="yue2-edit-session-only"]')).toBeNull();
+    await typeText(lab().querySelector(".yue2-edit-fields textarea"), `[verse]\n${"oh ".repeat(12000)}`);
+    expect(lab().querySelector('[data-testid="yue2-edit-session-only"]')).not.toBeNull();
   });
 
   it("keeps an in-progress edit draft across a tab change", async () => {

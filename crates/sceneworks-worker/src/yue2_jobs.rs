@@ -65,9 +65,12 @@ pub(crate) const RUN_LOCK_FILE: &str = ".yue2-run.lock";
 /// Engine progress is per token; posts are coalesced to at most one per interval.
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(500);
 
-/// Whether an `audio_generate` payload is a YuE2 job.
+/// Whether an `audio_generate` payload is a YuE2 job. `"yue2": null` is no block — as the API
+/// reads it — so such a payload stays a generic audio job.
 pub(crate) fn is_yue2_job(payload: &JsonObject) -> bool {
-    payload.contains_key(contract::PAYLOAD_KEY)
+    payload
+        .get(contract::PAYLOAD_KEY)
+        .is_some_and(|block| !block.is_null())
 }
 
 /// Run a YuE2 job with the runtime's audio registry.

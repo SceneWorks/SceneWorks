@@ -4,7 +4,12 @@ import { WorkPanel } from "../components/WorkPanel.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
 import { useAppContext } from "../context/AppContext.js";
-import { durableTextFits, loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
+import {
+  durableTextFits,
+  loadStudioSettings,
+  sessionOnlyFields,
+  useStudioSettingsWriter,
+} from "../hooks/useStudioSettings.js";
 import { writeLicenseAck } from "../licenseAcknowledgment.js";
 import { terminalStatuses } from "../jobTypes.js";
 import {
@@ -20,8 +25,10 @@ import {
   installJobStatusLabel,
   composeKind,
   restoreYue2Settings,
+  stripYue2ExportHeader,
   yue2ModelIdentity,
   yue2ModelInstalled,
+  yue2PlanRequest,
   yue2ProjectRuns,
   yue2FieldDisabledReason,
   yue2RequestProblems,
@@ -79,6 +86,11 @@ const PRESET_LIMIT = 12;
 // preset is a reusable setup, not a song.
 const PRESET_EXCLUDED = new Set([
   "presets",
+  // Run-specific: the saved plan a restore renders, the version a cover follows, and the plan
+  // source that points at them belong to one song, not to a reusable setup.
+  "planSource",
+  "restorePlanJobId",
+  "coverVersionId",
   "optIn",
   "tab",
   "lyrics",
@@ -96,6 +108,15 @@ const PRESET_EXCLUDED = new Set([
   "editDraft",
   "importDraft",
 ]);
+
+// A text or draft over the durable budget: it survives tab changes but not a relaunch.
+function SessionOnlyText({ testId }) {
+  return (
+    <p className="yue2-muted" data-testid={testId}>
+      Kept for this session only — it is too large to restore after a relaunch.
+    </p>
+  );
+}
 
 function Segmented({ label, value, options, onChange, disabledValues = [] }) {
   return (
@@ -274,6 +295,9 @@ export function Yue2SongLab({ header }) {
   const [settings, setSettings] = useState(saved);
   const update = useCallback((patch) => setSettings((current) => ({ ...current, ...patch })), []);
   useStudioSettingsWriter("yue2lab", projectId, settings, Boolean(preferencesHydrated) && Boolean(model));
+  // Texts and drafts the durable copy leaves out (over their cap, or dropped by the snapshot
+  // budget) survive only this session; each surface says so beside the text.
+  const sessionOnly = useMemo(() => sessionOnlyFields("yue2lab", settings), [settings]);
 
   // Server-side licence acknowledgment (sc-22999): the lab reads the server's record, never a
   // browser flag, so the acceptance survives a relaunch and lapses when the terms change.
@@ -430,7 +454,9 @@ export function Yue2SongLab({ header }) {
   async function inspect(key, abc) {
     setPreview({ key, inspection: null, error: null });
     try {
-      const inspection = await inspectYue2Score(abc, token);
+      // A lab-exported score opens with the `% SceneWorks YuE2 export:` licence header, which the
+      // native dialect (it requires `X:1` first) refuses — strip it, as a submission does.
+      const inspection = await inspectYue2Score(stripYue2ExportHeader(abc), token);
       setPreview({ key, inspection, error: null });
     } catch (error) {
       setPreview({ key, inspection: null, error });
@@ -473,7 +499,9 @@ export function Yue2SongLab({ header }) {
     setPresetName("");
   }
   function applyPreset(preset) {
-    setSettings((current) => restoreYue2Settings({ ...current, ...preset.settings, presets: current.presets, optIn: current.optIn }));
+    // A preset saved by an earlier build may still carry excluded keys; they never apply.
+    const controls = Object.fromEntries(Object.entries(preset.settings).filter(([key]) => !PRESET_EXCLUDED.has(key)));
+    setSettings((current) => restoreYue2Settings({ ...current, ...controls }));
   }
 
   if (!model) {
@@ -520,6 +548,12 @@ export function Yue2SongLab({ header }) {
     ) : null;
   const blocked = blockedTranscription(model);
   const restorable = runs.map(yue2RunView).filter((view) => view.restorable);
+  // A restored plan renders its own words: the Compose fields show them read-only and the request
+  // carries them verbatim (the server refuses any other style or lyrics for a saved plan).
+  const restoring = settings.tab === "compose" && kind === "fromPlan";
+  const planWords = restoring
+    ? yue2PlanRequest(restorable.find((view) => view.id === settings.restorePlanJobId))
+    : null;
   const tierProblem =
     settings.tier && !installedTiers.includes(settings.tier) ? `The ${settings.tier} tier is not installed yet.` : "";
   const readyToRun = installed && !tierProblem;
@@ -693,20 +727,31 @@ export function Yue2SongLab({ header }) {
                     aria-label="Style"
                     onChange={(event) => update({ style: event.target.value })}
                     placeholder="Genre, instruments, mood, vocal timbre…"
+                    readOnly={restoring}
                     rows={2}
-                    value={settings.style}
+                    value={restoring ? (planWords?.style ?? "") : settings.style}
                   />
                 </label>
+                {!restoring && sessionOnly.has("style") ? <SessionOnlyText testId="yue2-style-session-only" /> : null}
                 <label>
                   Lyrics
                   <textarea
                     aria-label="Lyrics"
                     onChange={(event) => update({ lyrics: event.target.value })}
                     placeholder={"[verse]\n…\n\n[chorus]\n…"}
+                    readOnly={restoring}
                     rows={6}
-                    value={settings.lyrics}
+                    value={restoring ? (planWords?.lyrics ?? "") : settings.lyrics}
                   />
                 </label>
+                {!restoring && sessionOnly.has("lyrics") ? <SessionOnlyText testId="yue2-lyrics-session-only" /> : null}
+                {restoring ? (
+                  <p className="yue2-muted" data-testid="yue2-plan-words">
+                    {planWords
+                      ? "The saved plan renders its own style and lyrics. To change them, plan again."
+                      : "Choose a saved plan — it renders its own style and lyrics."}
+                  </p>
+                ) : null}
               </div>
             ) : null}
 
@@ -798,7 +843,7 @@ export function Yue2SongLab({ header }) {
                   <button
                     className="prompt-cta"
                     disabled={submitting || composeProblems.length > 0 || !readyToRun}
-                    onClick={() => submit(kind)}
+                    onClick={() => submit(kind, kind === "fromPlan" ? { plan: planWords } : {})}
                     title={composeProblems.join(" ") || tierProblem || undefined}
                     type="button"
                   >
@@ -952,7 +997,9 @@ export function Yue2SongLab({ header }) {
                 projectId={projectId}
                 regenerationNotice={regenerationNotice}
                 draft={settings.editDraft}
+                draftSessionOnly={sessionOnly.has("editDraft")}
                 importDraft={settings.importDraft}
+                importDraftSessionOnly={sessionOnly.has("importDraft")}
                 // A score version's export is marked from the catalog's own declaration of the model.
                 policy={{
                   nonCommercial: identity.nonCommercial,
@@ -1091,7 +1138,8 @@ export function Yue2SongLab({ header }) {
                 key={job.id}
                 model={model}
                 onCancel={(target) => jobAction?.(target, "cancel")}
-                onDecodeAgain={(sourceJobId) => submit("decode", { sourceJobId })}
+                decodeBlocked={readyToRun ? null : tierProblem || "Install YuE2 first."}
+                onDecodeAgain={(sourceJobId, decoder) => submit("decode", { sourceJobId, decoder })}
                 onFetchVersionAbc={fetchVersionAbc}
                 onOpenVersion={(versionId) => update({ tab: "scores", selectedVersionId: versionId })}
                 onRestorePlan={(jobId) => update({ tab: "compose", planSource: "restore", restorePlanJobId: jobId })}
