@@ -141,7 +141,7 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
   return (
     <div className="yue2-gate" data-testid="yue2-gate">
       <div className="yue2-gate__head">
-        <strong>{identity.name}</strong>
+        <strong>Before you use {identity.name}</strong>
         <PolicyChips model={model} />
       </div>
       <p>
@@ -160,6 +160,7 @@ function Yue2Gate({ model, models, identity, ack, onAccept, busy, error, optIn, 
           <Icon.Warning size={15} />
           <span>
             Not for commercial use: {model.commercialUse.reason}
+            {/[.!?]$/.test(String(model.commercialUse.reason ?? "").trim()) ? "" : "."}
             {alternatives.length ? ` For commercial work use ${alternatives.map((alt) => alt.name).join(", ")}.` : ""}
             {model.commercialUse.alternativeNote ? ` ${model.commercialUse.alternativeNote}` : ""}
           </span>

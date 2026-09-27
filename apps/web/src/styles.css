@@ -19520,3 +19520,27 @@ pre.yue2-abc,
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+.yue2-lab .prompt-cta {
+  min-height: 40px;
+}
+
+.yue2-cta {
+  justify-items: start;
+}
+
+.yue2-lab label.checkline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.yue2-presets input {
+  flex: 0 1 220px;
+  width: 220px;
+}
+
+.yue2-compare__side .status-badge,
+.yue2-run__head .status-badge {
+  justify-self: start;
+}
