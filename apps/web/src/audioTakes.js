@@ -1,6 +1,6 @@
 import { terminalStatuses } from "./jobTypes.js";
 import { jobAudioResultAssets } from "./jobResultAssets.js";
-import { usagePolicyChips, yue2TakeFilename } from "./yue2Lab.js";
+import { usagePolicyChips, yue2TakeFilename } from "./yue2Policy.js";
 
 // Shared, pure derivations behind the Audio Studio redesign (epic 14361). The take grid,
 // the play deck and the Simple UI surfaces all read a run's mode, model, settings chips and
