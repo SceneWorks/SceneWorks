@@ -15,7 +15,8 @@ The receipt shape is described by
 as an atomically renamed **directory** under `docs/calibration/`; a set contains
 `receipt.json`, `receipt.md`, their exact-byte sidecars, and the four required
 `fixtures/<name>.json` artifacts with sidecars that name those full relative
-paths. The Markdown embeds the JSON semantic hash, and readers rehash and parse
+paths. The v2 producer also seals every fixture type for all five repeats.
+The Markdown embeds the JSON semantic hash, and readers rehash and parse
 every fixture, so an interrupted, missing, or mixed-generation set is rejected.
 Comparison reports are generated with `compare`:
 
@@ -44,9 +45,8 @@ kernel-maintained current and lifetime-peak physical footprints through
 inputs because the producer owns the MLX session and must sample active,
 cached, and peak allocator counters at the defined phase boundaries. The
 typed event stream uses high-water snapshots, not additive phase totals:
-immutable dense concat reports only the old-plus-incoming transient overhead
-above its retained merged successor, sequential token/layer events reconcile
-by their maximum, and the persistent successor is counted once. A
+sequential token/layer events reconcile by their maximum, and the persistent
+successor is counted once. A
 `product-cache_release` event with lifetime `released` records exact released
 K+V ownership. It is required lifecycle evidence and is excluded from both
 workspace attribution and full-cache-temporary detection. Post-run release is
@@ -64,24 +64,65 @@ exactly, with zero reconciliation tolerance. Fit-boundary occupancy uses live
 `kvLength`, so allocation beyond the native context does not masquerade as
 additional usable context. Existing exact-length v4 receipts remain readable.
 
-comparison refuses mismatched source/model/toolchain/hardware/power/thermal
+`compare` refuses mismatched source/model/toolchain/hardware/power/thermal
 identity, matrix, contract, or geometry and reports KV reduction,
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.
-`campaign` requires sealed
-receipts for both Llama and Qwen across every declared context/request/prefill
-and cold/warm coordinate. No campaign result is checked in yet: the real
-matrix remains open work in SC-20671, not a terminal-epic-only task.
+The current `campaign` reader requires a producer-published v2 aggregate with
+exactly eight sealed receipts: short, medium, memory-material, and fit-boundary
+for each of Llama and Qwen. Both memory-material selectors are warm, single
+request, single-shot prefill. The other rows cover cold starts, chunked prefill,
+and supported batching under the fixed schedule. It rejects missing, extra,
+duplicate, cross-schedule, cross-source/model, and artifact-mismatched rows.
+`campaign-legacy` is an explicit read path for historical v1 64-row aggregates;
+it does not classify them as current v2 evidence. No complete v2 campaign
+result is checked in yet.
+
+| family | band | request | prefill | process |
+| --- | --- | --- | --- | --- |
+| llama | short | single | chunked | cold |
+| llama | medium | supported-batch | single-shot | warm |
+| llama | memory-material | single | single-shot | warm |
+| llama | fit-boundary | single | chunked | cold |
+| qwen | short | single | single-shot | cold |
+| qwen | medium | supported-batch | chunked | warm |
+| qwen | memory-material | single | single-shot | warm |
+| qwen | fit-boundary | single | chunked | cold |
+
+The inference producer requires a safety policy file before parent or worker
+execution. Its schema version 1 fields are `rowDeadlineSeconds`, `pollMillis`,
+`termGraceMillis`, `hostFreeReserveBytes`, `childFootprintCapBytes`,
+`maxContextTokens`, `maxRequestTokens`, `stdoutCapBytes`, and `stderrCapBytes`.
+All values are positive integers within the exact JavaScript integer range;
+unknown fields fail. The v2 manifest binds the policy hash, computed from
+sorted-key, two-space JSON without a trailing newline, and a resume identity
+covering captured source, executable, model and
+reference inventories, prompt, schedule, and policy. SceneWorks requires the
+same trusted policy and sealed `identity.json` from the captured local resume
+directory when reading a v2 aggregate. The reader rehashes that identity and
+binds captured source and model inventories to every receipt. The manifest's
+self-reported resume hash alone is not independent provenance. Current checkout or inference-pin
+movement is not a reason to invalidate a captured measurement.
+
+```text
+node scripts/kv-baseline-harness.mjs campaign producer-campaign summary.json \
+  --safety-policy policy.json --resume-identity trusted-resume-dir/identity.json
+node scripts/kv-baseline-harness.mjs campaign-legacy historical-v1-campaign summary.json
+```
 
 The inference producer is the standalone `sc20671-kv-baseline` executable. Its
 `parent` mode consumes no caller-supplied coordinate list: it reads the frozen
-2 × 4 × 2 × 2 × 2 matrix, forks a new child for every cold row, and requires an
-in-process warm-up in each warm worker. Workers collect identity, geometry,
+eight-row covering schedule, forks a new child for every cold row, and requires
+an in-process warm-up in each warm worker. Workers collect identity, geometry,
 Darwin/MLX phase samples, allocation events, timings, output, prefix reuse, and
 cancellation from the product route; the parent accepts only the child’s sealed
-JSON/Markdown set. It copies all 64 validated child sets to a hidden staging
+JSON/Markdown set. It copies all eight validated child sets to a hidden staging
 directory and atomically renames one aggregate directory containing
-`campaign.json` and its sidecar. A missing worker, non-product field, stale
-sidecar, duplicate coordinate, or reused cold PID leaves no campaign directory.
+`campaign.json`, the captured policy and resume identity, and their required
+sidecars. Each row binds all four quality fixtures across five repeats. A
+missing worker, non-product field, stale
+sidecar, duplicate coordinate, reused cold PID, or safety refusal leaves no
+successful campaign directory. Intermediate row artifacts can support a
+same-identity resume, but they are not complete campaign publications.
 
 Before the parent or a worker loads a snapshot, inference commit
 `c781c09d2789538d3cff459257274cbc22109b25` seals these exact model identities and the

@@ -50,6 +50,21 @@ const LIFECYCLE = [
   "postRunRelease",
 ];
 const CONTEXT_BANDS = ["short", "medium", "memory-material", "fit-boundary"];
+export const SC20671_COVERING_SCHEDULE = Object.freeze([
+  ["llama", "short", "single", "chunked", "cold"],
+  ["llama", "medium", "supported-batch", "single-shot", "warm"],
+  ["llama", "memory-material", "single", "single-shot", "warm"],
+  ["llama", "fit-boundary", "single", "chunked", "cold"],
+  ["qwen", "short", "single", "single-shot", "cold"],
+  ["qwen", "medium", "supported-batch", "chunked", "warm"],
+  ["qwen", "memory-material", "single", "single-shot", "warm"],
+  ["qwen", "fit-boundary", "single", "chunked", "cold"],
+].map((row) => Object.freeze(row)));
+const CAMPAIGN_POLICY_FIELDS = [
+  "rowDeadlineSeconds", "pollMillis", "termGraceMillis", "hostFreeReserveBytes",
+  "childFootprintCapBytes", "maxContextTokens", "maxRequestTokens", "stdoutCapBytes",
+  "stderrCapBytes",
+];
 export const MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS = 1_000;
 export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
@@ -1589,20 +1604,43 @@ export function compareReceipts(dense, compressed) {
   };
 }
 
-export function validateCampaign(receipts) {
+function campaignCoordinate(receipt, separator = "/") {
+  return [
+    receipt.matrix.family, receipt.matrix.contextBand, receipt.matrix.requestMode,
+    receipt.matrix.prefillMode, receipt.matrix.processTemperature,
+  ].join(separator);
+}
+
+function campaignSchedule(version) {
+  if (version === 2) return SC20671_COVERING_SCHEDULE;
+  if (version === 1) {
+    return ["llama", "qwen"].flatMap((family) => CONTEXT_BANDS.flatMap((band) =>
+      ["single", "supported-batch"].flatMap((request) =>
+        ["chunked", "single-shot"].flatMap((prefill) =>
+          ["cold", "warm"].map((temperature) =>
+            [family, band, request, prefill, temperature])))));
+  }
+  fail("unsupported campaign schedule version");
+}
+
+export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
   if (!Array.isArray(receipts) || receipts.length === 0) fail("campaign has no sealed receipts");
+  const schedule = campaignSchedule(scheduleVersion);
   const coordinates = new Set();
   const familyModels = new Map();
+  const coldPids = new Set();
   let campaignIdentity;
   for (const receipt of receipts) {
     validateReceipt(receipt);
     if (receipt.mode !== "dense") fail("dense baseline campaign contains a non-dense receipt");
-    const coordinate = [
-      receipt.matrix.family, receipt.matrix.contextBand, receipt.matrix.requestMode,
-      receipt.matrix.prefillMode, receipt.matrix.processTemperature,
-    ].join("/");
+    const coordinate = campaignCoordinate(receipt);
     if (coordinates.has(coordinate)) fail(`duplicate campaign coordinate ${coordinate}`);
     coordinates.add(coordinate);
+    if (receipt.matrix.processTemperature === "cold") {
+      const pid = receipt.memory.phaseSamples[0].pid;
+      if (coldPids.has(pid)) fail("cold campaign coordinates reused a worker PID");
+      coldPids.add(pid);
+    }
     const globalIdentity = canonicalJson(Object.fromEntries([
       "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
       "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256", "os", "xcode",
@@ -1630,20 +1668,13 @@ export function validateCampaign(receipts) {
     if (prior && prior !== identity) fail(`model identity drift within ${receipt.matrix.family}`);
     familyModels.set(receipt.matrix.family, identity);
   }
-  const missing = [];
-  for (const family of ["llama", "qwen"]) {
-    for (const band of CONTEXT_BANDS) {
-      for (const request of ["single", "supported-batch"]) {
-        for (const prefill of ["chunked", "single-shot"]) {
-          for (const temperature of ["cold", "warm"]) {
-            const coordinate = [family, band, request, prefill, temperature].join("/");
-            if (!coordinates.has(coordinate)) missing.push(coordinate);
-          }
-        }
-      }
-    }
+  if (receipts.length !== schedule.length) {
+    fail(`campaign incomplete; expected exactly ${schedule.length} scheduled receipts`);
   }
-  if (missing.length) fail(`campaign incomplete; missing ${missing.length} coordinates`);
+  const expected = new Set(schedule.map((row) => row.join("/")));
+  if (coordinates.size !== expected.size || [...coordinates].some((coordinate) => !expected.has(coordinate))) {
+    fail("campaign coordinates differ from the frozen schedule");
+  }
   for (const family of ["llama", "qwen"]) {
     const bands = new Map(receipts
       .filter((receipt) => receipt.matrix.family === family)
@@ -1656,6 +1687,7 @@ export function validateCampaign(receipts) {
   }
   return {
     schemaVersion: SCHEMA_VERSION,
+    scheduleVersion,
     complete: true,
     receipts: receipts.length,
     coordinates: coordinates.size,
@@ -1663,42 +1695,268 @@ export function validateCampaign(receipts) {
   };
 }
 
-/**
- * Publish a complete matrix as one directory transaction.  Child receipt sets are read and
- * verified before copying; the public destination remains absent if a worker crashes, a sidecar
- * drifts, or any of the required 64 coordinates is missing.  This deliberately supersedes a
- * loose manifest file, which could otherwise describe a mixed generation of receipt directories.
- */
+export function campaignPolicySha256(policy) {
+  exactKeys(policy, ["schemaVersion", ...CAMPAIGN_POLICY_FIELDS], "campaign safety policy");
+  if (policy.schemaVersion !== 1) fail("unsupported campaign safety policy version");
+  for (const field of CAMPAIGN_POLICY_FIELDS) {
+    if (!Number.isSafeInteger(policy[field]) || policy[field] <= 0) {
+      fail(`campaign safety policy ${field} must be a positive safe integer`);
+    }
+  }
+  const deadlineMillis = BigInt(policy.rowDeadlineSeconds) * 1_000n;
+  if (BigInt(policy.pollMillis) >= deadlineMillis
+    || BigInt(policy.termGraceMillis) >= deadlineMillis) {
+    fail("campaign safety policy poll and grace must be below row deadline");
+  }
+  return sha256(canonicalJson(policy));
+}
+
+export function campaignResumeIdentitySha256(identity, policySha256) {
+  exactKeys(identity, [
+    "schemaVersion", "kind", "scheduleVersion", "coordinates", "inferenceRevision",
+    "sceneWorksRevision", "executableSha256", "promptSha256", "policySha256",
+    "llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference",
+  ], "campaign resume identity");
+  if (identity.schemaVersion !== 1 || identity.kind !== "sc-20671-resume-identity"
+    || identity.scheduleVersion !== 2
+    || canonicalJson(identity.coordinates) !== canonicalJson(SC20671_COVERING_SCHEDULE.map((row) => row.join("-")))) {
+    fail("campaign resume identity has a mismatched version or schedule");
+  }
+  for (const field of ["inferenceRevision", "sceneWorksRevision"]) {
+    gitRevision(identity[field], `campaign resume ${field}`);
+  }
+  for (const field of ["executableSha256", "promptSha256", "policySha256"]) {
+    digest(identity[field], `campaign resume ${field}`);
+  }
+  if (identity.policySha256 !== policySha256) {
+    fail("campaign resume identity safety policy differs from the trusted policy");
+  }
+  for (const field of ["llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference"]) {
+    const inventory = identity[field];
+    exactKeys(inventory, ["sha256", "bytes"], `campaign resume ${field}`);
+    digest(inventory.sha256, `campaign resume ${field} inventory`);
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0) {
+      fail(`campaign resume ${field} bytes must be a positive safe integer`);
+    }
+  }
+  return sha256(canonicalJson(identity));
+}
+
+function campaignArtifactNames(receipt, version) {
+  const names = ["receipt.json", "receipt.md", ...FIXTURES.map((fixture) => `fixtures/${fixture}.json`)];
+  for (let index = 1; index < CONTRACT.statistics.repeats; index += 1) {
+    for (const fixture of version === 2 ? FIXTURES
+      : receipt.matrix.processTemperature === "cold" ? ["kernel-fp32-reference"] : []) {
+      names.push(`fixtures/repeat-${index}/${fixture}.json`);
+    }
+  }
+  return names;
+}
+
+async function campaignFileBindings(directory, receipt, version) {
+  return Promise.all(campaignArtifactNames(receipt, version).map(async (name) => {
+    const file = path.join(directory, name);
+    const bytes = await readFile(file);
+    const sidecar = await readFile(`${file}.sha256`, "utf8");
+    if (sidecar !== `${sha256(bytes)}  ${name}\n`) {
+      fail(`campaign artifact sidecar differs from exact bytes for ${name}`);
+    }
+    return {
+      name,
+      sha256: sha256(bytes),
+      sidecarSha256: sha256(sidecar),
+    };
+  }));
+}
+
+async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy) {
+  const coordinate = campaignCoordinate(receipt, "-");
+  for (let repeat = 0; repeat < CONTRACT.statistics.repeats; repeat += 1) {
+    for (const fixture of FIXTURES) {
+      const name = repeat === 0
+        ? `fixtures/${fixture}.json`
+        : `fixtures/repeat-${repeat}/${fixture}.json`;
+      const artifact = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+      validateFixtureArtifact(artifact, fixture, receipt.quality.fixtureEvidence[fixture]);
+      const binding = object(artifact.binding, `campaign fixture ${name} binding`);
+      const candidate = object(binding.candidate, `campaign fixture ${name} candidate`);
+      const reference = object(binding.reference, `campaign fixture ${name} reference`);
+      if (binding.coordinate !== coordinate || binding.repeat !== repeat
+        || candidate.coordinateInventorySha256 !== receipt.provenance.modelFileSha256
+        || reference.coordinateInventorySha256 !== receipt.provenance.referenceModelSha256) {
+        fail(`campaign fixture ${name} producer coordinate or model binding differs`);
+      }
+      for (const arm of [candidate, reference]) {
+        if (!Number.isSafeInteger(arm.operationPromptTokens)
+          || arm.operationPromptTokens <= 0
+          || arm.operationPromptTokens > safetyPolicy.maxRequestTokens) {
+          fail(`campaign fixture ${name} prompt exceeds mandatory safety policy`);
+        }
+        if (arm.secondaryOperation !== null && arm.secondaryOperation !== undefined) {
+          const secondary = object(arm.secondaryOperation, `campaign fixture ${name} secondary operation`);
+          if (!Number.isSafeInteger(secondary.promptTokens)
+            || secondary.promptTokens <= 0
+            || secondary.promptTokens > safetyPolicy.maxRequestTokens) {
+            fail(`campaign fixture ${name} secondary prompt exceeds mandatory safety policy`);
+          }
+        }
+      }
+    }
+  }
+}
+
+/** Read a producer campaign only after binding its manifest to every sealed receipt artifact. */
+export async function readCampaignSet(directory, {
+  safetyPolicy,
+  resumeIdentity,
+  allowLegacy = false,
+} = {}) {
+  const manifest = await readSealedJson(path.join(directory, "campaign.json"));
+  object(manifest, "campaign manifest");
+  const version = manifest.schemaVersion;
+  if (version === 2) {
+    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "coordinates"], "campaign manifest");
+    if (manifest.kind !== "sc-20671-complete-covering-set" || manifest.scheduleVersion !== 2) {
+      fail("campaign v2 manifest has a mismatched kind or schedule");
+    }
+    if (safetyPolicy === undefined) fail("campaign v2 requires a safety policy");
+    digest(manifest.policySha256, "campaign policy seal");
+    if (manifest.policySha256 !== campaignPolicySha256(safetyPolicy)) {
+      fail("campaign safety policy identity differs from the manifest");
+    }
+    digest(manifest.resumeIdentitySha256, "campaign resume identity seal");
+    if (resumeIdentity === undefined) fail("campaign v2 requires a trusted resume identity");
+    if (manifest.resumeIdentitySha256 !== campaignResumeIdentitySha256(resumeIdentity, manifest.policySha256)) {
+      fail("campaign resume identity differs from the expected immutable inputs");
+    }
+    const publishedPolicy = await readFile(path.join(directory, "safety-policy.json"), "utf8");
+    const publishedIdentity = await readSealedJson(path.join(directory, "resume-identity.json"));
+    if (publishedPolicy !== canonicalJson(safetyPolicy)
+      || canonicalJson(publishedIdentity) !== canonicalJson(resumeIdentity)) {
+      fail("published campaign safety policy or resume identity differs from trusted inputs");
+    }
+  } else if (version === 1 && allowLegacy) {
+    exactKeys(manifest, ["schemaVersion", "kind", "coordinates"], "legacy campaign manifest");
+    if (manifest.kind !== "sc-20671-complete-coordinate-set") {
+      fail("legacy campaign manifest kind is invalid");
+    }
+  } else {
+    fail("unsupported or unapproved legacy campaign manifest version");
+  }
+  const schedule = campaignSchedule(version);
+  if (!Array.isArray(manifest.coordinates) || manifest.coordinates.length !== schedule.length) {
+    fail(`campaign manifest requires exactly ${schedule.length} scheduled rows`);
+  }
+  const allowed = new Set(schedule.map((row) => row.join("-")));
+  const seen = new Set();
+  const receipts = [];
+  for (const row of manifest.coordinates) {
+    exactKeys(row, ["coordinate", "receiptSha256", "workerPid", "files"], "campaign row");
+    if (typeof row.coordinate !== "string" || !allowed.has(row.coordinate)) {
+      fail("campaign manifest contains an unscheduled coordinate");
+    }
+    if (seen.has(row.coordinate)) fail("campaign manifest repeats a coordinate");
+    seen.add(row.coordinate);
+    digest(row.receiptSha256, "campaign receipt seal");
+    if (!Number.isSafeInteger(row.workerPid) || row.workerPid <= 0) {
+      fail("campaign manifest worker PID is invalid");
+    }
+    const receiptDirectory = path.join(directory, row.coordinate);
+    const receipt = await readReceiptSet(receiptDirectory);
+    if (campaignCoordinate(receipt, "-") !== row.coordinate
+      || receipt.receiptSha256 !== row.receiptSha256
+      || receipt.memory.phaseSamples[0].pid !== row.workerPid) {
+      fail("campaign manifest coordinate, receipt seal, or worker PID differs from the receipt");
+    }
+    if (version === 2
+      && (receipt.geometry.contextTargetTokens > safetyPolicy.maxContextTokens
+        || receipt.geometry.contextTargetTokens > safetyPolicy.maxRequestTokens
+        || receipt.geometry.queryLength > safetyPolicy.maxRequestTokens)) {
+      fail("campaign receipt geometry exceeds mandatory safety policy");
+    }
+    if (version === 2) {
+      const candidate = resumeIdentity[`${receipt.matrix.family}Candidate`];
+      const reference = resumeIdentity[`${receipt.matrix.family}Reference`];
+      if (receipt.provenance.inferenceRevision !== resumeIdentity.inferenceRevision
+        || receipt.provenance.sceneWorksRevision !== resumeIdentity.sceneWorksRevision
+        || receipt.provenance.modelFileSha256 !== candidate.sha256
+        || receipt.provenance.modelFileBytes !== candidate.bytes
+        || receipt.provenance.referenceModelSha256 !== reference.sha256
+        || receipt.provenance.referenceModelBytes !== reference.bytes) {
+        fail("campaign receipt source or model inventory differs from trusted resume identity");
+      }
+    }
+    // Historical v1 producers emitted all five repeats; the older JS fixture writer
+    // emitted the four base fixtures plus cold kernel repeats only.
+    const artifactVersion = version === 1 && row.files?.length === 2 + FIXTURES.length * CONTRACT.statistics.repeats
+      ? 2 : version;
+    const expectedFiles = await campaignFileBindings(receiptDirectory, receipt, artifactVersion);
+    if (version === 2) await validateCampaignFixtureBindings(receiptDirectory, receipt, safetyPolicy);
+    if (!Array.isArray(row.files) || row.files.length !== expectedFiles.length) {
+      fail("campaign manifest has an incomplete artifact inventory");
+    }
+    const files = new Map();
+    for (const file of row.files) {
+      exactKeys(file, ["name", "sha256", "sidecarSha256"], "campaign artifact");
+      if (typeof file.name !== "string" || files.has(file.name)) {
+        fail("campaign manifest repeats or omits an artifact name");
+      }
+      digest(file.sha256, "campaign artifact seal");
+      digest(file.sidecarSha256, "campaign artifact sidecar seal");
+      files.set(file.name, file);
+    }
+    for (const expected of expectedFiles) {
+      const actual = files.get(expected.name);
+      if (!actual || actual.sha256 !== expected.sha256
+        || actual.sidecarSha256 !== expected.sidecarSha256) {
+        fail("campaign artifact bytes or sidecar differ from the manifest");
+      }
+    }
+    receipts.push(receipt);
+  }
+  const actualEntries = (await readdir(directory)).sort();
+  const expectedEntries = [
+    "campaign.json", "campaign.json.sha256", ...seen,
+    ...(version === 2 ? ["safety-policy.json", "resume-identity.json", "resume-identity.json.sha256"] : []),
+  ].sort();
+  if (canonicalJson(actualEntries) !== canonicalJson(expectedEntries)) {
+    fail("campaign directory contains missing or unexpected entries");
+  }
+  return { manifest, summary: validateCampaign(receipts, { scheduleVersion: version }), receipts };
+}
+
+/** Publish a historical v1 64-row set; new v2 publication belongs to the guarded producer. */
 export async function writeCampaignSet(directory, receiptSetDirectories) {
   if (!Array.isArray(receiptSetDirectories) || receiptSetDirectories.length !== 64) {
     fail("complete campaign publication requires exactly 64 receipt-set directories");
   }
   const receipts = await Promise.all(receiptSetDirectories.map((source) => readReceiptSet(source)));
-  const summary = validateCampaign(receipts);
-  const coordinates = receipts.map((receipt) => [
-    receipt.matrix.family, receipt.matrix.contextBand, receipt.matrix.requestMode,
-    receipt.matrix.prefillMode, receipt.matrix.processTemperature,
-  ].join("-"));
+  validateCampaign(receipts, { scheduleVersion: 1 });
+  const coordinates = receipts.map((receipt) => campaignCoordinate(receipt, "-"));
   if (new Set(coordinates).size !== 64) fail("complete campaign has duplicate coordinate directories");
   const parent = path.dirname(directory);
   const base = path.basename(directory);
   const staging = path.join(parent, `.${base}.campaign-staging-${process.pid}-${randomUUID()}`);
   try {
     await mkdir(staging, { recursive: false });
+    const rows = [];
     for (let index = 0; index < receipts.length; index += 1) {
       await cp(receiptSetDirectories[index], path.join(staging, coordinates[index]), {
         recursive: true,
         errorOnExist: true,
         force: false,
       });
+      rows.push({
+        coordinate: coordinates[index],
+        receiptSha256: receipts[index].receiptSha256,
+        workerPid: receipts[index].memory.phaseSamples[0].pid,
+        files: await campaignFileBindings(path.join(staging, coordinates[index]), receipts[index], 1),
+      });
     }
     const manifest = {
-      ...summary,
+      schemaVersion: 1,
       kind: "sc-20671-complete-coordinate-set",
-      coordinateReceipts: receipts.map((receipt, index) => ({
-        coordinate: coordinates[index], receiptSha256: receipt.receiptSha256,
-        workerPid: receipt.memory.phaseSamples[0].pid,
-      })),
+      coordinates: rows,
     };
     await Promise.all([
       writeFile(path.join(staging, "campaign.json"), `${canonicalJson(manifest)}\n`, { flag: "wx" }),
@@ -1723,20 +1981,22 @@ export async function cancellationSafe(work, cleanup, signal) {
 function usage() {
   console.error(
     "usage: kv-baseline-harness.mjs record <input> <receipt-set-directory> | "
-      + "compare <dense-set> <compressed-set> <comparison> | campaign <receipt-set-directory> <manifest>",
+      + "compare <dense-set> <compressed-set> <comparison> | "
+      + "campaign <producer-campaign-directory> <summary.json> --safety-policy <policy.json> "
+      + "--resume-identity <trusted-resume-dir/identity.json> | "
+      + "campaign-legacy <v1-campaign-directory> <summary.json>",
   );
 }
 
 async function main() {
   const [command, first, second, third, ...extra] = process.argv.slice(2);
-  if (extra.length) fail("too many CLI arguments");
-  if (command === "record" && first && second && !third) {
+  if (command === "record" && first && second && !third && extra.length === 0) {
     const input = JSON.parse(await readFile(first, "utf8"));
     const receipt = await buildVerifiedReceipt(input);
     await writeReceiptSet(second, receipt);
     return;
   }
-  if (command === "compare" && first && second && third) {
+  if (command === "compare" && first && second && third && extra.length === 0) {
     const dense = await readReceiptSet(first);
     const compressed = await readReceiptSet(second);
     const comparison = compareReceipts(dense, compressed);
@@ -1744,11 +2004,23 @@ async function main() {
     await writeSealedJson(third, comparison);
     return;
   }
-  if (command === "campaign" && first && second && !third) {
-    const entries = await readdir(first, { withFileTypes: true });
-    const sets = entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort();
-    const receipts = await Promise.all(sets.map((name) => readReceiptSet(path.join(first, name))));
-    await writeSealedJson(second, validateCampaign(receipts));
+  if (command === "campaign" && first && second && third === "--safety-policy"
+    && extra.length === 3 && extra[1] === "--resume-identity") {
+    if (path.basename(extra[2]) !== "identity.json") {
+      fail("campaign requires the producer's sealed resume identity.json");
+    }
+    const safetyPolicy = JSON.parse(await readFile(extra[0], "utf8"));
+    const resumeIdentity = await readSealedJson(extra[2]);
+    const { summary } = await readCampaignSet(first, {
+      safetyPolicy,
+      resumeIdentity,
+    });
+    await writeSealedJson(second, summary);
+    return;
+  }
+  if (command === "campaign-legacy" && first && second && !third && extra.length === 0) {
+    const { summary } = await readCampaignSet(first, { allowLegacy: true });
+    await writeSealedJson(second, summary);
     return;
   }
   usage();

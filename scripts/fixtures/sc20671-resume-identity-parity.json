@@ -1,0 +1,36 @@
+{
+  "coordinates": [
+    "llama-short-single-chunked-cold",
+    "llama-medium-supported-batch-single-shot-warm",
+    "llama-memory-material-single-single-shot-warm",
+    "llama-fit-boundary-single-chunked-cold",
+    "qwen-short-single-single-shot-cold",
+    "qwen-medium-supported-batch-chunked-warm",
+    "qwen-memory-material-single-single-shot-warm",
+    "qwen-fit-boundary-single-chunked-cold"
+  ],
+  "executableSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "inferenceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "kind": "sc-20671-resume-identity",
+  "llamaCandidate": {
+    "bytes": 101,
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "llamaReference": {
+    "bytes": 103,
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "policySha256": "03b18fb4b6e8e729189ad1243fecc31934ff1b4aa011cdf00fb6489029a17d2a",
+  "promptSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "qwenCandidate": {
+    "bytes": 102,
+    "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "qwenReference": {
+    "bytes": 104,
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "sceneWorksRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "scheduleVersion": 2,
+  "schemaVersion": 1
+}

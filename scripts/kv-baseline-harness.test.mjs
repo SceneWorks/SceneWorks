@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_MODEL_CONTRACTS, buildReceipt, buildVerifiedReceipt, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -65,25 +65,42 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
       coordinate:probe.matrixCoordinate,
       repeat,
       candidate:{
-        ...(includeModel?{model:raw.provenance.modelId}:{}),
+        ...(includeModel?{
+          model:raw.provenance.modelId,
+          coordinateInventorySha256:raw.provenance.modelFileSha256,
+          operationPromptTokens:raw.geometry.contextPayloadTokens,
+        }:{}),
         operation:probe.operation,
         compileSetupMs:probe.setupMs,
         compileDispatchMs:probe.dispatchMs,
         operationEvidenceSha256:probe.operationEvidenceSha256,
       },
-      reference:{...(includeModel?{model:raw.provenance.referenceModelId}:{})},
+      reference:{...(includeModel?{
+        model:raw.provenance.referenceModelId,
+        coordinateInventorySha256:raw.provenance.referenceModelSha256,
+        operationPromptTokens:raw.geometry.contextPayloadTokens,
+      }:{})},
     },
     evidence,
     metrics:{parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:1},
   };
 }
 
-async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false }={}) {
+async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false, pid=9 }={}) {
   await mkdir(root, { recursive: true });
   const model = path.join(root, "model.safetensors");
   await writeFile(model, "weights");
   const raw = fixture(mode, coordinate);
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
+  raw.memory.phaseSamples = raw.memory.phaseSamples.map((sample) => ({ ...sample, pid }));
+  raw.warmup.workerPid = pid;
+  if (raw.warmup.required) {
+    raw.warmup.suiteSha256 = numericSemanticSha256({
+      probeEvidence: raw.timings.compileAttribution.probeEvidence,
+      sessionId: raw.warmup.sessionId,
+      workerPid: pid,
+    });
+  }
   raw.provenance = {
     ...raw.provenance,
     modelFilePath: model,
@@ -134,6 +151,94 @@ function denseWithAllocatedCapacity(base, capacity, kvLength) {
       if (event.role === "cache") event.bytes = physicalBytes;
     }
   });
+}
+function withCampaignPid(base, pid) {
+  return rebuildReceipt(base, (raw) => {
+    raw.memory.phaseSamples = raw.memory.phaseSamples.map((sample) => ({ ...sample, pid }));
+    raw.warmup.workerPid = pid;
+    if (raw.warmup.required) {
+      raw.warmup.suiteSha256 = numericSemanticSha256({
+        probeEvidence: raw.timings.compileAttribution.probeEvidence,
+        sessionId: raw.warmup.sessionId,
+        workerPid: pid,
+      });
+    }
+  });
+}
+const safetyPolicy = Object.freeze({
+  schemaVersion: 1, rowDeadlineSeconds: 600, pollMillis: 250,
+  termGraceMillis: 5000, hostFreeReserveBytes: 8_000_000_000,
+  childFootprintCapBytes: 16_000_000_000, maxContextTokens: 131_072,
+  maxRequestTokens: 131_072, stdoutCapBytes: 1_000_000, stderrCapBytes: 1_000_000,
+});
+async function writeCampaignManifest(directory, manifest) {
+  const bytes = `${canonicalJson(manifest)}\n`;
+  await writeFile(path.join(directory, "campaign.json"), bytes);
+  await writeFile(path.join(directory, "campaign.json.sha256"), `${sha256(bytes)}  campaign.json\n`);
+}
+function sampleResumeIdentity(policy) {
+  const candidate = { sha256: sha256("weights"), bytes: 7 };
+  const reference = { sha256: "9".repeat(64), bytes: 2000 };
+  return {
+    schemaVersion: 1, kind: "sc-20671-resume-identity", scheduleVersion: 2,
+    coordinates: SC20671_COVERING_SCHEDULE.map((row) => row.join("-")),
+    inferenceRevision: "b".repeat(40), sceneWorksRevision: "a".repeat(40),
+    executableSha256: "d".repeat(64), promptSha256: "c".repeat(64),
+    policySha256: campaignPolicySha256(policy),
+    llamaCandidate: candidate, qwenCandidate: candidate,
+    llamaReference: reference, qwenReference: reference,
+  };
+}
+async function writeEightCampaign(root, policy = safetyPolicy) {
+  const directory = path.join(root, "campaign");
+  await mkdir(directory);
+  const resumeIdentity = sampleResumeIdentity(policy);
+  const resumeIdentitySha256 = campaignResumeIdentitySha256(resumeIdentity, campaignPolicySha256(policy));
+  const rows = [];
+  for (const [index, entry] of SC20671_COVERING_SCHEDULE.entries()) {
+    const coordinate = {
+      family: entry[0], contextBand: entry[1], requestMode: entry[2],
+      prefillMode: entry[3], processTemperature: entry[4],
+    };
+    const slug = entry.join("-");
+    const receipt = await verifiedFixture(path.join(root, `source-${index}`), "dense", coordinate, {
+      pid: index + 100, inferenceShaped: true,
+    });
+    const receiptDirectory = path.join(directory, slug);
+    await writeReceiptSet(receiptDirectory, receipt);
+    for (let repeat = 1; repeat < 5; repeat += 1) {
+      for (const fixture of qualityFixtures) {
+        if (fixture === "kernel-fp32-reference" && coordinate.processTemperature === "cold") continue;
+        const name = `fixtures/repeat-${repeat}/${fixture}.json`;
+        const file = path.join(receiptDirectory, name);
+        await mkdir(path.dirname(file), { recursive: true });
+        const bytes = `${JSON.stringify(artifactFixture(receipt, fixture, repeat, { includeModel: true }))}\n`;
+        await writeFile(file, bytes);
+        await writeFile(`${file}.sha256`, `${sha256(bytes)}  ${name}\n`);
+      }
+    }
+    const names = (await readdir(receiptDirectory, { recursive: true, withFileTypes: true }))
+      .filter((entry) => entry.isFile() && !entry.name.endsWith(".sha256"))
+      .map((entry) => path.relative(receiptDirectory, path.join(entry.parentPath, entry.name)))
+      .sort();
+    const files = await Promise.all(names.map(async (name) => ({
+      name,
+      sha256: sha256(await readFile(path.join(receiptDirectory, name))),
+      sidecarSha256: sha256(await readFile(path.join(receiptDirectory, `${name}.sha256`))),
+    })));
+    rows.push({ coordinate: slug, receiptSha256: receipt.receiptSha256, workerPid: index + 100, files });
+  }
+  const manifest = {
+    schemaVersion: 2, kind: "sc-20671-complete-covering-set", scheduleVersion: 2,
+    policySha256: campaignPolicySha256(policy), resumeIdentitySha256,
+    coordinates: rows,
+  };
+  await writeFile(path.join(directory, "safety-policy.json"), canonicalJson(policy));
+  await writeFile(path.join(directory, "resume-identity.json"), canonicalJson(resumeIdentity));
+  await writeFile(path.join(directory, "resume-identity.json.sha256"),
+    `${resumeIdentitySha256}  resume-identity.json\n`);
+  await writeCampaignManifest(directory, manifest);
+  return { directory, manifest, resumeIdentity };
 }
 test("contract sidecar and valid comparison",async()=>{const raw=await readFile("config/kv-baseline-quality-contract.json");assert.equal(await readFile("config/kv-baseline-quality-contract.json.sha256","utf8"),`${sha256(raw)}  kv-baseline-quality-contract.json\n`);assert.equal(compareReceipts(fixture(),fixture("compressed")).persistentKvReduction,.5);});
 test("numeric semantic seals normalize exact f64 bits and object order",()=>{
@@ -284,7 +389,7 @@ test("published inference fixture bundles are required and bind cold probe evide
   await assert.rejects(readReceiptSet(published),/ENOENT/);
   await rm(dir,{recursive:true,force:true});
 });
-test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}assert.equal(validateCampaign(rows).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.5);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
+test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.5);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift, { scheduleVersion: 1 }),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift, { scheduleVersion: 1 }),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
 test("measured context bands reject zero, non-material, and non-boundary receipts",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.contextWindowTokens=0;}),/must be >= 1|positive integer/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{raw.memory.phaseSamples=raw.memory.phaseSamples.map((sample)=>({...sample,physFootprintBytes:10_000_000_000,physFootprintPeakBytes:10_000_000_000}));}),/memory-material/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"fit-boundary"}),(raw)=>{raw.geometry.contextWindowTokens=8192;raw.geometry.contextTargetTokens=7680;raw.geometry.contextPayloadTokens=7680;}),/fit-boundary|sealed llama contract/);});
 test("dense receipts distinguish live KV length from observed allocated capacity", () => {
   const padded = denseWithAllocatedCapacity(fixture(), 256, 32);
@@ -319,8 +424,136 @@ test("dense physical KV bytes reconcile exactly without padding tolerance", () =
     }
   }), /do not equal allocated capacity bytes/);
 });
-test("full 64-coordinate dense campaign and invalid sets",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])rows.push(fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature}));assert.equal(validateCampaign(rows).coordinates,64);assert.throws(()=>validateCampaign([rows[0]]),/incomplete/);assert.throws(()=>validateCampaign([fixture("compressed")]),/non-dense/);assert.throws(()=>validateCampaign([...rows,rows[0]]),/duplicate/);});
-test("complete campaign publication is one atomic 64-coordinate set",async()=>{const root=await mkdtemp("/tmp/kv20671-campaign-"),inputs=path.join(root,"workers"),destination=path.join(root,"published"),coordinates=[];await mkdir(inputs);for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])coordinates.push({family,contextBand,requestMode,prefillMode,processTemperature});const sets=[];for(let index=0;index<coordinates.length;index+=1){const source=path.join(inputs,`source-${index}`),set=path.join(inputs,String(index)),receipt=await verifiedFixture(source,"dense",coordinates[index]);await writeReceiptSet(set,receipt);sets.push(set);}await assert.rejects(writeCampaignSet(destination,sets.slice(1)),/exactly 64/);assert.equal((await rm(destination,{recursive:true,force:true})),undefined);await writeCampaignSet(destination,sets);const manifest=JSON.parse(await readFile(path.join(destination,"campaign.json"),"utf8"));assert.equal(manifest.coordinates,64);assert.equal(manifest.coordinateReceipts.length,64);assert.equal(await readFile(path.join(destination,"campaign.json.sha256"),"utf8"),`${sha256(await readFile(path.join(destination,"campaign.json"),"utf8"))}  campaign.json\n`);await rm(root,{recursive:true,force:true});});
+test("eight-row covering campaign requires the exact family, band, and process schedule", () => {
+  const rows = SC20671_COVERING_SCHEDULE.map((entry, index) => withCampaignPid(fixture("dense", {
+    family: entry[0], contextBand: entry[1], requestMode: entry[2],
+    prefillMode: entry[3], processTemperature: entry[4],
+  }), index + 100));
+  assert.equal(validateCampaign(rows).coordinates, 8);
+  assert.equal(validateCampaign(rows).scheduleVersion, 2);
+  assert.throws(() => validateCampaign(rows.slice(1)), /incomplete/);
+  assert.throws(() => validateCampaign([...rows.slice(0, 7), rows[0]]), /duplicate/);
+  const wrongSchedule = [...rows];
+  wrongSchedule[0] = withCampaignPid(fixture("dense", {
+    family: "llama", contextBand: "short", requestMode: "single",
+    prefillMode: "single-shot", processTemperature: "cold",
+  }), 999);
+  assert.throws(() => validateCampaign(wrongSchedule), /frozen schedule/);
+  const reusedColdPid = [...rows];
+  reusedColdPid[3] = withCampaignPid(rows[3], rows[0].memory.phaseSamples[0].pid);
+  assert.throws(() => validateCampaign(reusedColdPid), /reused a worker PID/);
+  const sourceDrift = [...rows];
+  sourceDrift[1] = rebuildReceipt(rows[1], (raw) => {
+    raw.provenance.inferenceRevision = "8".repeat(40);
+  });
+  assert.throws(() => validateCampaign(sourceDrift), /identity drift/);
+  const familyDrift = [...rows];
+  familyDrift[2] = rebuildReceipt(rows[2], (raw) => {
+    raw.provenance.referenceModelSha256 = "8".repeat(64);
+    raw.provenance.referenceModelId = sealedModelId("llama", "reference", "8".repeat(64));
+  });
+  assert.throws(() => validateCampaign(familyDrift), /model identity drift/);
+});
+test("campaign policy and resume identity seals match the Rust canonical parity fixtures", async () => {
+  const policyBytes = await readFile("scripts/fixtures/sc20671-safety-policy-parity.json", "utf8");
+  const identityBytes = await readFile("scripts/fixtures/sc20671-resume-identity-parity.json", "utf8");
+  const policy = JSON.parse(policyBytes);
+  const identity = JSON.parse(identityBytes);
+  const policySeal = "03b18fb4b6e8e729189ad1243fecc31934ff1b4aa011cdf00fb6489029a17d2a";
+  const identitySeal = "a9bcc30bc11a2c86a4057489e1e0c9bc1519f0802b6f576200562406a8d02112";
+  assert.equal(policyBytes, canonicalJson(policy));
+  assert.equal(identityBytes, canonicalJson(identity));
+  assert.equal(campaignPolicySha256(policy), policySeal);
+  assert.equal(campaignResumeIdentitySha256(identity, policySeal), identitySeal);
+  assert.throws(() => campaignPolicySha256({ ...policy, maxContextTokens: 0 }), /positive safe integer/);
+  assert.throws(() => campaignPolicySha256({ ...policy, maxContextTokens: Number.MAX_SAFE_INTEGER + 1 }), /positive safe integer/);
+  assert.throws(() => campaignPolicySha256({ ...policy, pollMillis: 10_000 }), /below row deadline/);
+  assert.throws(() => campaignResumeIdentitySha256({ ...identity, coordinates: identity.coordinates.slice(1) }, policySeal), /schedule/);
+});
+test("v2 campaign reader binds every row and artifact to trusted policy and resume inputs", async () => {
+  const root = await mkdtemp("/tmp/kv20671-covering-");
+  try {
+    const { directory, manifest, resumeIdentity } = await writeEightCampaign(root, safetyPolicy);
+    const trusted = { safetyPolicy, resumeIdentity };
+    assert.equal((await readCampaignSet(directory, trusted)).summary.coordinates, 8);
+    const policyFile = path.join(root, "policy.json");
+    const trustedResume = path.join(root, "resume");
+    const summaryFile = path.join(root, "summary.json");
+    await mkdir(trustedResume);
+    await writeFile(policyFile, canonicalJson(safetyPolicy));
+    await writeFile(path.join(trustedResume, "identity.json"), canonicalJson(resumeIdentity));
+    await writeFile(path.join(trustedResume, "identity.json.sha256"),
+      `${manifest.resumeIdentitySha256}  identity.json\n`);
+    await run(process.execPath, ["scripts/kv-baseline-harness.mjs", "campaign", directory,
+      summaryFile, "--safety-policy", policyFile, "--resume-identity",
+      path.join(trustedResume, "identity.json")]);
+    assert.equal(JSON.parse(await readFile(summaryFile, "utf8")).coordinates, 8);
+    await assert.rejects(run(process.execPath, ["scripts/kv-baseline-harness.mjs", "campaign",
+      directory, path.join(root, "missing-policy-summary.json")]), /usage:/);
+    await assert.rejects(readCampaignSet(directory), /requires a safety policy/);
+    await assert.rejects(readCampaignSet(directory, { safetyPolicy }), /requires a trusted resume identity/);
+    await assert.rejects(readCampaignSet(directory, {
+      ...trusted, resumeIdentity: { ...resumeIdentity, executableSha256: "b".repeat(64) },
+    }), /resume identity differs/);
+    await assert.rejects(readCampaignSet(directory, {
+      ...trusted, safetyPolicy: { ...safetyPolicy, rowDeadlineSeconds: 601 },
+    }), /safety policy identity differs/);
+    const constrainedPolicy = { ...safetyPolicy, maxContextTokens: 4096, maxRequestTokens: 4096 };
+    const constrainedIdentity = {
+      ...resumeIdentity, policySha256: campaignPolicySha256(constrainedPolicy),
+    };
+    const constrainedIdentitySha256 = campaignResumeIdentitySha256(
+      constrainedIdentity, constrainedIdentity.policySha256,
+    );
+    await writeFile(path.join(directory, "safety-policy.json"), canonicalJson(constrainedPolicy));
+    await writeFile(path.join(directory, "resume-identity.json"), canonicalJson(constrainedIdentity));
+    await writeFile(path.join(directory, "resume-identity.json.sha256"),
+      `${constrainedIdentitySha256}  resume-identity.json\n`);
+    await writeCampaignManifest(directory, {
+      ...manifest, policySha256: constrainedIdentity.policySha256,
+      resumeIdentitySha256: constrainedIdentitySha256,
+    });
+    await assert.rejects(readCampaignSet(directory, {
+      safetyPolicy: constrainedPolicy, resumeIdentity: constrainedIdentity,
+    }), /geometry exceeds mandatory safety policy/);
+    await writeFile(path.join(directory, "safety-policy.json"), canonicalJson(safetyPolicy));
+    await writeFile(path.join(directory, "resume-identity.json"), canonicalJson(resumeIdentity));
+    await writeFile(path.join(directory, "resume-identity.json.sha256"),
+      `${manifest.resumeIdentitySha256}  resume-identity.json\n`);
+    await writeCampaignManifest(directory, { ...manifest, coordinates: manifest.coordinates.slice(1) });
+    await assert.rejects(readCampaignSet(directory, trusted), /exactly 8 scheduled rows/);
+    const unscheduled = structuredClone(manifest);
+    unscheduled.coordinates[0].coordinate = "llama-short-single-single-shot-cold";
+    await writeCampaignManifest(directory, unscheduled);
+    await assert.rejects(readCampaignSet(directory, trusted), /unscheduled coordinate/);
+    const duplicate = structuredClone(manifest);
+    duplicate.coordinates[7] = structuredClone(duplicate.coordinates[0]);
+    await writeCampaignManifest(directory, duplicate);
+    await assert.rejects(readCampaignSet(directory, trusted), /repeats a coordinate/);
+    const wrongArtifact = structuredClone(manifest);
+    wrongArtifact.coordinates[0].files[0].sha256 = "f".repeat(64);
+    await writeCampaignManifest(directory, wrongArtifact);
+    await assert.rejects(readCampaignSet(directory, trusted), /artifact bytes or sidecar differ/);
+    const forgedIdentity = { ...manifest, resumeIdentitySha256: "b".repeat(64) };
+    await writeCampaignManifest(directory, forgedIdentity);
+    await assert.rejects(readCampaignSet(directory, trusted), /resume identity differs/);
+    const forgedModel = structuredClone(resumeIdentity);
+    forgedModel.llamaCandidate.sha256 = "f".repeat(64);
+    await writeCampaignManifest(directory, {
+      ...manifest,
+      resumeIdentitySha256: campaignResumeIdentitySha256(forgedModel, manifest.policySha256),
+    });
+    await writeFile(path.join(directory, "resume-identity.json"), canonicalJson(forgedModel));
+    await writeFile(path.join(directory, "resume-identity.json.sha256"),
+      `${campaignResumeIdentitySha256(forgedModel, manifest.policySha256)}  resume-identity.json\n`);
+    await assert.rejects(readCampaignSet(directory, { ...trusted, resumeIdentity: forgedModel }),
+      /source or model inventory differs/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+test("full 64-coordinate dense campaign and invalid sets",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])rows.push(fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature}));rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.throws(()=>validateCampaign([rows[0]], { scheduleVersion: 1 }),/incomplete/);assert.throws(()=>validateCampaign([fixture("compressed")], { scheduleVersion: 1 }),/incomplete|non-dense/);assert.throws(()=>validateCampaign([...rows,rows[0]], { scheduleVersion: 1 }),/incomplete|duplicate/);});
+test("complete campaign publication is one atomic 64-coordinate set",async()=>{const root=await mkdtemp("/tmp/kv20671-campaign-"),inputs=path.join(root,"workers"),destination=path.join(root,"published"),coordinates=[];await mkdir(inputs);for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])coordinates.push({family,contextBand,requestMode,prefillMode,processTemperature});const sets=[];for(let index=0;index<coordinates.length;index+=1){const source=path.join(inputs,`source-${index}`),set=path.join(inputs,String(index)),receipt=await verifiedFixture(source,"dense",coordinates[index],{pid:index+10});await writeReceiptSet(set,receipt);sets.push(set);}await assert.rejects(writeCampaignSet(destination,sets.slice(1)),/exactly 64/);assert.equal((await rm(destination,{recursive:true,force:true})),undefined);await writeCampaignSet(destination,sets);const manifest=JSON.parse(await readFile(path.join(destination,"campaign.json"),"utf8"));assert.equal(manifest.schemaVersion,1);assert.equal(manifest.coordinates.length,64);assert.equal((await readCampaignSet(destination,{allowLegacy:true})).summary.coordinates,64);await assert.rejects(readCampaignSet(destination),/legacy/);assert.equal(await readFile(path.join(destination,"campaign.json.sha256"),"utf8"),`${sha256(await readFile(path.join(destination,"campaign.json"),"utf8"))}  campaign.json\n`);await rm(root,{recursive:true,force:true});});
 
 test("output-role concat coexistence participates in transient reconciliation",()=>{
   const base=fixture();
