@@ -65,6 +65,8 @@ import { promisify } from "node:util";
 
 import { isDeepStrictEqual } from "node:util";
 
+import { connectWatchdogCompletion } from "./lib/watchdog-completion.mjs";
+
 import { fileSha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { generateSilence, generateTestRecording } from "./lib/yue2-test-recording.mjs";
@@ -2314,6 +2316,12 @@ async function runCase(ctx, item, planned, records, sampler) {
 
 export async function main(argv = process.argv.slice(2)) {
   const options = parseArgs(argv);
+  const completion = await connectWatchdogCompletion();
+  try { return await runAcceptance(options, completion); }
+  finally { completion.close(); }
+}
+
+async function runAcceptance(options, completion) {
   if (process.platform !== PLATFORMS[options.platform].os) fail(`--platform ${options.platform} runs on ${PLATFORMS[options.platform].os}, not ${process.platform}`);
   const out = path.resolve(options.out);
   const evidence = path.join(out, "evidence");
@@ -2383,6 +2391,7 @@ export async function main(argv = process.argv.slice(2)) {
   await writeJson(path.join(evidence, "summary.json"), summary);
   await writeFile(path.join(evidence, "summary.md"), renderMarkdown(summary));
   console.log(`verdict: ${summary.verdict} → ${path.join(evidence, "summary.md")}`);
+  await completion.complete(evidence);
   return exitCodeFor(summary);
 }
 
