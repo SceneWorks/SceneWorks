@@ -507,19 +507,6 @@ mod tests {
     use super::*;
     use gen_core::{SongDecoder, SongPlanning};
 
-    fn boundary_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "yue2-stage-boundary-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir(&dir).unwrap();
-        dir
-    }
-
     fn wait_request(dir: &Path) -> Value {
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
@@ -547,7 +534,8 @@ mod tests {
 
     #[test]
     fn a_stage_cannot_advance_until_the_external_sample_is_acknowledged() {
-        let dir = boundary_dir();
+        let fixture = tempfile::tempdir().unwrap();
+        let dir = fixture.path().to_owned();
         let marks_path = dir.join("stages.jsonl");
         let mut marks = StageMarks::open(&marks_path, &dir, "metal-watchdog");
         marks.mark("load");
@@ -571,12 +559,12 @@ mod tests {
             marks.marks.iter().map(|mark| mark.0).collect::<Vec<_>>(),
             ["load", "plan"]
         );
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
     fn missing_or_stale_stage_ack_fails_closed() {
-        let dir = boundary_dir();
+        let fixture = tempfile::tempdir().unwrap();
+        let dir = fixture.path().to_owned();
         let mut boundary = StageBoundary::new(&dir, "metal-watchdog");
         let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             boundary.wait_for_sample_until("load", Duration::from_millis(40));
@@ -602,7 +590,6 @@ mod tests {
         }));
         writer.join().unwrap();
         assert!(stale.is_err());
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     fn case(json: Value) -> Result<ProfileCase, serde_json::Error> {
