@@ -1,6 +1,7 @@
 // sc-23001: the YuE2 memory-profile harness — plan, identity keying, stage attribution, currency.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -25,7 +26,9 @@ import {
   parseStageMarks,
   parseWatchdogSamples,
   planCapture,
+  readDurableWatchdogEvents,
   readSources,
+  startBoundaryWatcher,
   stagePeaks,
   validatePlan,
   validateRecord,
@@ -34,6 +37,14 @@ import {
 const sources = await readSources();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const GIB = 1024 ** 3;
+
+async function waitUntil(check) {
+  const deadline = Date.now() + 2000;
+  while (!check()) {
+    if (Date.now() >= deadline) assert.fail("timed out waiting for boundary test state");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 // What a current (v2) capture's outcome.json states about its run (`outcome_json`).
 const RUN_FIELDS = Object.freeze({
@@ -191,6 +202,51 @@ test("Metal boundary needs two new serial watchdog samples after the request is 
   assert.throws(() => boundaryAcknowledgment({ ...request, stage: "semantic" }, state, [], "metal"), /changed at the same sequence/);
   assert.throws(() => boundaryAcknowledgment({ ...request, requestedAt: 101 }, state, [], "metal"), /changed at the same sequence/);
   assert.throws(() => boundaryAcknowledgment({ ...request, sequence: 2 }, {}, [], "metal"), /not one/);
+});
+
+test("Metal watcher does not ack flushed watchdog events before journal fsync, and fails closed on sync error", async () => {
+  const event = (eventSequence, at) => `${JSON.stringify({
+    event: "sample", eventSequence, at, physicalFootprintBytes: 42,
+  })}\n`;
+  for (const failSync of [false, true]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-watchdog-durability-"));
+    const journal = path.join(dir, "watchdog.jsonl");
+    await writeFile(path.join(dir, "request.json"), JSON.stringify({ sequence: 1, stage: "load", requestedAt: 100 }));
+    await writeFile(journal, event(1, 99));
+    let releaseSync;
+    let blocked = false;
+    const gate = new Promise((resolve) => { releaseSync = resolve; });
+    const reader = (file) => readDurableWatchdogEvents(file, async (handle, body) => {
+      if (body.includes('"eventSequence":3')) {
+        blocked = true;
+        await gate;
+        if (failSync) throw new Error("journal fsync failed");
+      }
+      await handle.sync();
+    });
+    const watcher = startBoundaryWatcher(dir, "metal", journal, reader);
+    try {
+      await waitUntil(() => watcher.sequence === 1);
+      await appendFile(journal, event(2, 101) + event(3, 102));
+      await waitUntil(() => blocked || watcher.failure !== null);
+      assert.equal(watcher.failure, null);
+      await assert.rejects(readFile(path.join(dir, "ack.json")), { code: "ENOENT" });
+      releaseSync();
+      if (failSync) {
+        await waitUntil(() => watcher.failure !== null);
+        assert.match((await watcher.stop()).message, /journal fsync failed/);
+        await assert.rejects(readFile(path.join(dir, "ack.json")), { code: "ENOENT" });
+      } else {
+        await waitUntil(() => existsSync(path.join(dir, "ack.json")) || watcher.failure !== null);
+        assert.equal(watcher.failure, null);
+        assert.equal(JSON.parse(await readFile(path.join(dir, "ack.json"), "utf8")).sampleSerial, 3);
+      }
+    } finally {
+      releaseSync();
+      await watcher.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
 });
 
 test("CUDA boundary accepts only a fresh successful nvidia-smi call after observation", () => {

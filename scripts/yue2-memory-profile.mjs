@@ -594,7 +594,25 @@ async function atomicJson(file, value) {
   await rename(temp, file);
 }
 
-function startBoundaryWatcher(dir, backend, observations) {
+/** The watchdog flushes a line before its fsync; commit the bytes we read before using them. */
+export async function readDurableWatchdogEvents(file, sync = (handle) => handle.sync()) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const body = await handle.readFile("utf8");
+    await sync(handle, body);
+    return body;
+  } finally {
+    await handle.close();
+  }
+}
+
+export function startBoundaryWatcher(dir, backend, observations, readEvents = readDurableWatchdogEvents) {
   const state = {};
   let busy = false;
   let error = null;
@@ -613,7 +631,16 @@ function startBoundaryWatcher(dir, backend, observations) {
         : observations.samples;
       if (backend === "cuda" && observations.error) throw observations.error;
       const ack = boundaryAcknowledgment(request, state, entries, backend);
-      if (ack) await atomicJson(path.join(dir, "ack.json"), ack);
+      if (ack) {
+        if (backend === "metal") {
+          const durable = await readEvents(observations);
+          const committed = (durable ?? "").split("\n").slice(0, -1).filter(Boolean).map(JSON.parse)
+            .some((event) => event.event === "sample" && event.eventSequence === ack.sampleSerial &&
+              event.at === ack.sampleAt && event.physicalFootprintBytes === ack.sampleBytes);
+          if (!committed) fail("watchdog sample changed before durable acknowledgment");
+        }
+        await atomicJson(path.join(dir, "ack.json"), ack);
+      }
     } catch (cause) {
       error = cause;
     } finally {
@@ -621,7 +648,11 @@ function startBoundaryWatcher(dir, backend, observations) {
     }
   };
   const timer = setInterval(() => { if (!busy) pending = tick(); }, 25);
-  return { stop: async () => { clearInterval(timer); await pending; return error; } };
+  return {
+    get sequence() { return state.sequence; },
+    get failure() { return error; },
+    stop: async () => { clearInterval(timer); await pending; return error; },
+  };
 }
 
 function spawnAndWait(command, args, options) {
