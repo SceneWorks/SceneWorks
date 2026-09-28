@@ -900,20 +900,27 @@ fn cuda_offloads_the_ar_path_when_the_solve_needs_it() {
         est.weights.ar_only_bytes
     );
 
-    let unified = production
-        .stage(Yue2Stage::AcousticPrefill)
-        .unwrap()
-        .total_bytes();
-    let load = production.stage(Yue2Stage::Load).unwrap().total_bytes();
-    assert!(
-        load <= unified,
-        "precondition: the load fits the unified pool"
+    // Metal has its own allocator costs and one memory pool. Derive its budget from its
+    // own estimate: copying AR weights to the host cannot lower that floor as it can on CUDA.
+    let smallest = Yue2Controls {
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    let resident = priced(&s, Yue2Backend::Metal, smallest);
+    let offloaded = priced(
+        &s,
+        Yue2Backend::Metal,
+        Yue2Controls {
+            offload_ar: true,
+            ..smallest
+        },
     );
-    let message = refused(decide("yue2", &s, Some(&metal(unified)), 0));
-    assert!(
-        message.contains("acoustic flow-matching solve"),
-        "{message}"
-    );
+    assert_eq!(resident.stages, offloaded.stages);
+    let floor = resident.unified_floor().1;
+    refused(decide("yue2", &s, Some(&metal(floor - 1)), 0));
+    let fits = admitted(decide("yue2", &s, Some(&metal(floor)), 0));
+    assert!(!fits.controls.offload_ar);
 }
 
 /// Over budget: refused BEFORE anything loads, naming the binding stage, the shortfall and a lighter
@@ -1421,7 +1428,7 @@ fn the_catalog_floors_are_the_estimators_smallest_admissible_default_render() {
     assert_eq!(
         candle["measured"],
         json!(false),
-        "no YuE2 memory is measured yet"
+        "saved stage lower bounds do not complete terminal calibration"
     );
     let smallest = |offload_ar| Yue2Controls {
         offload_ar,
