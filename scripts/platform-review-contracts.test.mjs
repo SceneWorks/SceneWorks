@@ -951,12 +951,13 @@ function jobBlock(workflow, at) {
 
 // SC-23002: the YuE2 terminal CUDA evidence job. Dispatch-only, one real-weights card shared with the
 // other GPU-measuring jobs, the release app built with backend-candle, the acceptance driver and the
-// profile campaign, receipts uploaded before the verdict -- and never the CC BY-NC audio.
+// profile campaign by default, receipts uploaded before the verdict -- and never the CC BY-NC audio.
 test("windows-candle runs the YuE2 terminal acceptance and profile only on dispatch, on the real-weights card", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
-  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision"));
+  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision") && names.includes("yue2_acceptance_only"));
   assert.equal(defaults.run_yue2_terminal_cuda, "false");
+  assert.equal(defaults.yue2_acceptance_only, "false");
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
@@ -972,6 +973,11 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   // The ordinary lane stands down for this dispatch: it would share the measured GPU.
   const candleWorker = jobBlock(workflow, workflow.indexOf("  candle-worker:\n"));
   assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda\)/m);
+  const ordinaryDispatchGuard = stepBody(candleWorker, "Refuse combined manual measurement profiles");
+  assert.match(ordinaryDispatchGuard, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
+  assert.match(ordinaryDispatchGuard, /RUN_YUE2_TERMINAL_CUDA: \$\{\{ inputs\.run_yue2_terminal_cuda \}\}/);
+  assert.match(ordinaryDispatchGuard, /if \(\$env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and \$env:RUN_YUE2_TERMINAL_CUDA -ne 'true'\) \{/);
+  assert.match(ordinaryDispatchGuard, /throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'/);
 
   const step = (name) => {
     const start = job.indexOf(`      - name: ${name}\n`);
@@ -984,6 +990,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(validate, /inference_revision must equal the Cargo\.toml inference pin/);
   assert.match(step("Disable unstable sccache wrapper for the YuE2 terminal build"), /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   const inference = step("Check out the exact YuE2 terminal inference source");
+  assert.match(inference, /if: \$\{\{ !inputs\.yue2_acceptance_only \}\}/);
   assert.match(inference, /repository: SceneWorks\/inference/);
   assert.match(inference, /ref: \$\{\{ inputs\.inference_revision \}\}/);
   assert.match(inference, /persist-credentials: false/);
@@ -995,6 +1002,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(acceptance, vcvars);
   assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-home "%YUE2_TERMINAL_STATE%\\hf-home" --api-bin target\\release\\sceneworks-rust-api\.exe/);
   const profile = step("Run the YuE2 memory profile campaign (CUDA)");
+  assert.match(profile, /if: \$\{\{ !inputs\.yue2_acceptance_only \}\}/);
   assert.match(profile, vcvars);
   // The profile resolves the acceptance run's installed weights from the same per-run HF home.
   assert.match(profile, /set HF_HUB_CACHE=\n {10}set HUGGINGFACE_HUB_CACHE=\n {10}set HF_HOME=%YUE2_TERMINAL_STATE%\\hf-home\n/);
@@ -1003,14 +1011,18 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   // Receipts only: the app state (which holds the audio) is never an upload path, and audio is excluded.
   const upload = step("Upload the YuE2 terminal records and receipts (no audio)");
   assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /name: sc-23002-yue2-cuda\$\{\{ inputs\.yue2_acceptance_only && '-acceptance-only' \|\| '' \}\}/);
   assert.match(upload, /!\*\*\/\*\.wav/);
   assert.doesNotMatch(upload, /YUE2_TERMINAL_STATE|app-data|E:\\/);
-  // The verdict is enforced only after the receipts are uploaded, and covers both harnesses.
+  // The verdict follows receipt upload. The standard run requires both harnesses; an
+  // acceptance-only rerun explicitly reports that it has no new profile verdict.
   const verdict = step("Enforce the YuE2 terminal verdict after receipt upload");
   assert.ok(job.indexOf("Upload the YuE2 terminal records") < job.indexOf("Enforce the YuE2 terminal verdict"));
   assert.match(verdict, /steps\.yue2_acceptance\.outcome/);
   assert.match(verdict, /steps\.yue2_profile\.outcome/);
-  assert.match(verdict, /if \(\$env:ACCEPTANCE_OUTCOME -ne 'success' -or \$env:PROFILE_OUTCOME -ne 'success'\) \{/);
+  assert.match(verdict, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
+  assert.match(verdict, /memory profile was intentionally skipped; use separately retained profile evidence/);
+  assert.match(verdict, /if \(\$env:ACCEPTANCE_OUTCOME -ne 'success' -or \(\$env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and \$env:PROFILE_OUTCOME -ne 'success'\)\) \{/);
   assert.match(verdict, /throw "YuE2 terminal evidence failed after upload/);
 });
 

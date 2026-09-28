@@ -156,6 +156,14 @@ gh workflow run windows-candle.yml --ref feature/sc-22988-yue2 \
   -f run_yue2_terminal_cuda=true -f inference_revision=<the Cargo.toml inference pin>
 ```
 
+For an acceptance-only rerun after a valid profile has already been captured, explicitly add
+`-f yue2_acceptance_only=true` to that dispatch. It requires `run_yue2_terminal_cuda=true`;
+the default remains the complete acceptance-plus-profile campaign. The rerun skips the profile
+and its inference-source checkout, names its artifact `acceptance-only`, and records in the job
+summary that it has no new profile verdict. Retain the earlier profile artifact and assess its
+five captures separately; for the current CUDA campaign, that is run
+[36357082332](https://github.com/SceneWorks/SceneWorks/actions/runs/36357082332).
+
 The `yue2-terminal-cuda` job does the following:
 - runs on `[self-hosted, Windows, X64, cuda, real-weights]` in `windows-candle-gpu-real-weights`;
 - refuses to share the dispatch with another measurement flag, and refuses an `inference_revision`
@@ -166,7 +174,8 @@ The `yue2-terminal-cuda` job does the following:
   `E:\sceneworks-terminal\sc-23002-yue2\<run>` (a cold ~11 GB YuE2 install plus the ~2.76 GB
   conditional cover closure; the shared
   `E:\huggingface\hub` is never used);
-- runs the CUDA profile campaign on that data dir and HF home;
+- runs the CUDA profile campaign on that data dir and HF home unless the explicit
+  `yue2_acceptance_only` rerun flag is set;
 - uploads the evidence and receipts (never audio) before it enforces the verdict.
 
 The ordinary `candle-worker` lane stands down for this dispatch, because every `cuda` listener
