@@ -16,7 +16,8 @@
 //! semantic tokens run its AR path, the acoustic flow matching runs the AR path over the song
 //! prefix **and** the NAR twins, and the VAE decodes while the MoT is still loaded. So the model's
 //! weights are resident in EVERY stage, and each stage adds only its own transient working set,
-//! which the engine releases before the next stage starts. The floor is therefore
+//! whose tensors the engine releases before the next stage starts. Metal allocations can remain
+//! pooled after tensor release, so its stages retain the preceding estimated high-water. The floor is
 //! `max over stages (resident weights + that stage's working set)` — never a sum over stages and
 //! never a V1-style max over independently loaded models:
 //!
@@ -62,11 +63,11 @@
 //!
 //! # Evidence
 //!
-//! No YuE2 render has been measured on Metal or CUDA yet; the one final calibration campaign is the
-//! terminal story's (sc-23002, `config/yue2-memory-profile-plan.json`). Until then every Metal figure
-//! is an estimate pending that campaign, CUDA carries measured weights under shape-derived
-//! activations, and the decode tile constant is the engine's own CPU measurement (sc-22993). Every
-//! refusal says which ([`Yue2Evidence`]).
+//! Metal includes the pinned allocator's per-buffer KV rounding, a process/allocator reserve
+//! covering the saved sc-23002 stage observations, and a retained stage high-water floor. These
+//! sampled observations are lower bounds, not a universal measured bound or a completed terminal
+//! calibration. CUDA carries measured weights under shape-derived activations; the decode tile
+//! constant is the engine's CPU measurement (sc-22993). Every refusal says which ([`Yue2Evidence`]).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,6 +152,15 @@ const WAVEFORM_COPIES: u64 = 3;
 const CUDA_GGML_ROW_PADDING: u64 = 512;
 /// `candle_quant_kernels::FP8_COMPUTE_CAP_FLOOR`: the FP8 AR mode needs CUDA sm_89+.
 const FP8_COMPUTE_CAP_FLOOR: f32 = 8.9;
+
+/// Metal process/allocator footprint not represented by the named tensor terms. The largest
+/// saved sc-23002 residual after KV rounding and retained stage high-water is the q8 load:
+/// 6_554_737_000 observed
+/// minus 4_259_655_808 resident bytes = 2.137 GiB; round up to the next quarter GiB (2.25).
+/// Fixtures in `yue2_admission/fixtures/metal-stage-peaks.json` retain the exact observations.
+/// This is an empirical allowance, not attribution to mapped pages, an extra cache, or a bound
+/// established on every host/request. It is independent of CUDA's device-only 2 GiB reserve.
+const METAL_PROCESS_RESERVE_BYTES: u64 = 9 << 28;
 
 // ---- Transcription (SheetSage2 + MERT-v2-FullSong, `candle-audio-sheetsage2`) -----------------------
 
@@ -895,8 +905,7 @@ pub(crate) enum Yue2Evidence {
     /// CUDA: weights measured on CUDA (sc-22995); activations shape-derived and the decode tile
     /// CPU-measured — pending the terminal calibration campaign (sc-23002).
     CudaMeasuredWeightsEstimatePending,
-    /// Metal: no YuE2 Metal measurement exists — an estimate pending the terminal calibration
-    /// campaign (sc-23002).
+    /// Metal: shape-derived terms plus saved stage observations; terminal calibration remains pending.
     MetalEstimatePending,
 }
 
@@ -930,8 +939,8 @@ impl Yue2Evidence {
                  decode tile CPU-measured — an estimate pending the terminal calibration (sc-23002)"
             }
             Self::MetalEstimatePending => {
-                "no YuE2 Metal measurement exists yet — this is a shape-derived estimate pending \
-                 the terminal calibration (sc-23002)"
+                "Metal shape estimates include allocator rounding and a reserve covering saved stage \
+                 observations; terminal calibration remains pending (sc-23002)"
             }
         }
     }
@@ -984,6 +993,16 @@ impl Yue2Estimate {
 
 fn kv_cache_bytes(positions: u64, dense: u64) -> u64 {
     LAYERS * 2 * KV_HEADS * HEAD_DIM * positions.min(CONTEXT) * dense
+}
+
+/// Candle `1e6aa85` Metal `zeros_impl -> allocate_zeros -> allocate_buffer` rounds each
+/// new buffer to a power-of-two bucket (reuse can keep an older, larger allocation).
+/// M2 `StaticKvCache::new` allocates one K and one V tensor
+/// per layer (not one combined allocation), each with the requested prefix + token capacity.
+/// Keep this padding separate from logical KV bytes and from the empirical process reserve.
+fn metal_kv_padding_bytes(positions: u64, dense: u64) -> u64 {
+    let tensor = KV_HEADS * HEAD_DIM * positions.min(CONTEXT) * dense;
+    LAYERS * 2 * (tensor.next_power_of_two() - tensor)
 }
 
 /// One AR prefill forward's transient working set over `keys` visible keys: the score tiles of one
@@ -1054,11 +1073,10 @@ fn transcription_terms(secs: u64, transcriber_bytes: u64, backend: Yue2Backend) 
     ]
 }
 
-/// The host-pool bytes a weights file mapped during a load costs on `backend`. Mapped safetensors
-/// pages are clean and file-backed: in unified memory (Metal, CPU) they are not Metal buffers, do not
-/// count against the GPU working set (or the process footprint) and are reclaimable, so they cost
-/// nothing there. On CUDA they sit in host RAM beside the device copy and are charged to the host
-/// pool, which is compared with `MemAvailable`.
+/// CUDA charges the mapped source file to host RAM beside the device copy. Unified backends
+/// do not charge its full file size: clean file-backed pages are reclaimable. This does not
+/// imply that the Metal load costs only its resident tensors: its measured process/allocator
+/// overhead is charged separately by `METAL_PROCESS_RESERVE_BYTES`.
 fn mapped_file_bytes(backend: Yue2Backend, file_bytes: u64) -> u64 {
     match backend {
         Yue2Backend::Cuda => file_bytes,
@@ -1120,6 +1138,13 @@ pub(crate) fn estimate(
             branches * kv_cache_bytes(positions, dense),
             0,
         ));
+        if backend == Yue2Backend::Metal {
+            terms.push(term(
+                "Metal KV buffer allocation padding",
+                branches * metal_kv_padding_bytes(positions, dense),
+                0,
+            ));
+        }
         terms.push(term(
             "AR prefill workspace",
             ar_prefill_workspace_bytes(positions, dense),
@@ -1185,7 +1210,21 @@ pub(crate) fn estimate(
                 ),
             ],
         });
+        if backend == Yue2Backend::Metal {
+            stages.last_mut().unwrap().terms.push(term(
+                "Metal KV buffer allocation padding",
+                metal_kv_padding_bytes(cache_positions, dense),
+                0,
+            ));
+        }
         let mut solve = vec![restored()];
+        if backend == Yue2Backend::Metal {
+            solve.push(term(
+                "Metal KV buffer allocation padding",
+                metal_kv_padding_bytes(cache_positions, dense),
+                0,
+            ));
+        }
         if offload {
             solve.push(term(
                 "AR-only weights offloaded to host",
@@ -1235,6 +1274,29 @@ pub(crate) fn estimate(
                 term("song waveform", waveform_bytes(song_frames), 0),
             ],
         });
+    }
+    if backend == Yue2Backend::Metal {
+        // The pinned Candle Metal allocator pools buffers by size; releasing a tensor does not
+        // establish an equal drop in process footprint. Retain the preceding stage's floor,
+        // including through acoustic prefill/solve and reduced-tile decode. This is a maximum,
+        // not a sum of mutually exclusive caches or repeated process reserves.
+        let mut high_water = 0;
+        for stage in &mut stages {
+            stage.terms.push(term(
+                "Metal process and allocator reserve",
+                METAL_PROCESS_RESERVE_BYTES,
+                0,
+            ));
+            let current = stage.total_bytes();
+            if current < high_water {
+                stage.terms.push(term(
+                    "Metal retained stage high-water",
+                    high_water - current,
+                    0,
+                ));
+            }
+            high_water = high_water.max(current);
+        }
     }
     Ok(Yue2Estimate {
         tier: shape.tier,
