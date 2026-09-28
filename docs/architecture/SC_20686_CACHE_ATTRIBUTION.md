@@ -42,9 +42,12 @@ sidecar. The inference reducer verifies the complete bundle before publication.
 
 The Windows backend starts each child suspended, assigns it to a kill-on-close Job Object, then
 resumes it. It checks host memory and selected-GPU UUID telemetry and fails closed on missing,
-`N/A`, or unattributable GPU memory. Windows Job Object and GPU telemetry behavior still needs
-real-runner CI verification; source implementation alone does not qualify the host. The current
-adapter also refuses an arm before model spawn because a source-backed transient peak bound for
+`N/A`, or unattributable GPU memory. The native child/grandchild ownership, memory-cap, and
+termination smoke passed on the Windows runner in
+[CI run 36431524700](https://github.com/SceneWorks/inference/actions/runs/36431524700/job/108958837629)
+at inference `5115cf7f4c5e7ca868a7caf312423f728889a99e`, without GPU execution. Actual GPU
+telemetry and model admission remain unverified. The current adapter refuses an arm before
+model spawn because a source-backed transient peak bound for
 these routes has not been established. Host/GPU polling and operator-entered caps cannot prove an
 instantaneous allocation safe. These constraints do not reduce the fixed coverage.
 
