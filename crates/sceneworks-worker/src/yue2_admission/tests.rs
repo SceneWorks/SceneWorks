@@ -1913,11 +1913,21 @@ fn metal_profile_fixtures() -> Value {
 }
 
 fn fixture_shape(fixture: &Value) -> Yue2Shape {
-    let case: crate::yue2_memory_profile::ProfileCase =
-        serde_json::from_value(fixture["case"].clone()).unwrap();
-    // Reuse the production profile/job request construction, including its CFG defaults.
-    let request =
-        crate::yue2_memory_profile::case_request(&case, std::path::Path::new("unused")).unwrap();
+    // Use the platform-independent production job builder, including its CFG defaults.
+    // The GPU profile harness is not compiled in Linux's default-feature test configuration.
+    let case = &fixture["case"];
+    let mut body = case["request"].clone();
+    body["kind"] = json!("create");
+    body["tier"] = case["tier"].clone();
+    body["decoder"] = case["decoder"].clone();
+    let spec = serde_json::from_value(body).unwrap();
+    sceneworks_core::yue2_score::jobs::validate_request(&spec).unwrap();
+    let request = crate::yue2_jobs::build_request(
+        &spec,
+        &crate::yue2_jobs::Inputs::default(),
+        std::path::Path::new("unused"),
+        gen_core::CancelFlag::new(),
+    );
     shape(
         Yue2Tier::from_key(fixture["case"]["tier"].as_str().unwrap()).unwrap(),
         &request,
@@ -1934,10 +1944,19 @@ fn metal_estimates_cover_every_saved_stage_peak() {
             Yue2Backend::Metal,
             Yue2Controls::production(),
         );
-        let corrected = crate::yue2_memory_profile::estimate_json(&est);
         for (stage, observed) in fixture["measuredStages"].as_object().unwrap() {
             let peak = observed["peakBytes"].as_u64().unwrap();
-            let reserved = corrected["stages"][stage]["totalBytes"].as_u64().unwrap();
+            // Metal has one pool; the measured acoustic span covers both alternating phases.
+            let reserved = est
+                .stages
+                .iter()
+                .filter(|entry| match entry.stage {
+                    Yue2Stage::AcousticPrefill | Yue2Stage::AcousticSolve => stage == "acoustic",
+                    other => stage == other.key(),
+                })
+                .map(Yue2StageResidency::total_bytes)
+                .max()
+                .expect("measured stage is priced");
             assert!(observed["samples"].as_u64().unwrap() > 0);
             assert!(
                 reserved >= peak,
