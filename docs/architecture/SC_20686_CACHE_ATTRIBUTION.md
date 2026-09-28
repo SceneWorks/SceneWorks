@@ -28,10 +28,11 @@ an identical completed arm. The adapter is inert unless called with `--campaign`
 has no observer or receipt overhead.
 
 Both single and matrix campaigns require `--safety-policy` and an absolute external `--resume-dir`.
-The strict schema-version-1 policy requires backend `linux-cuda`, positive process deadlines and
-polling/grace periods, host-free reserve and child-footprint cap, stdout/stderr/event caps, a selected
-CUDA GPU UUID, GPU-free reserve, and child GPU cap. The resume identity binds the canonical resolved
-inputs, policy, coverage, source map, and adapter hashes. Each successful normal or cancel arm is
+The strict schema-version-1 policy requires a host-matched `linux-cuda` or `windows-cuda` backend,
+positive process deadlines and polling/grace periods, host-free reserve and child-footprint cap,
+stdout/stderr/event caps, a selected CUDA GPU UUID, GPU-free reserve, and child GPU cap. The resume
+identity binds the canonical resolved inputs, policy, coverage, source map, and adapter hashes.
+Each successful normal or cancel arm is
 preserved as a sealed unit with observer events, bounded logs, media or verified absence, process
 samples, and clean supervisor exit/reap. Corrupt, incomplete, or identity-mismatched units cannot be
 reused. A watchdog failure is an incomplete campaign, not a product cancellation or terminal No-go.
@@ -39,11 +40,13 @@ The final `sc-20686-campaign-bundle-v5` seals `safety-policy.json`, `resume-iden
 inputs, coverage/source map, per-arm artifacts, rows, and media through `campaign.json` and its
 sidecar. The inference reducer verifies the complete bundle before publication.
 
-The current adapter refuses an arm before model spawn because a source-backed transient peak bound
-for these routes has not been established. Host/GPU polling and operator-entered caps cannot prove
-an instantaneous allocation safe. The configured SceneWorks CUDA real-weight runners are Windows;
-the `linux-cuda` policy requires a qualified Linux CUDA execution host or a separately reviewed
-supervisor backend before this campaign can run there. Neither constraint reduces the fixed coverage.
+The Windows backend starts each child suspended, assigns it to a kill-on-close Job Object, then
+resumes it. It checks host memory and selected-GPU UUID telemetry and fails closed on missing,
+`N/A`, or unattributable GPU memory. Windows Job Object and GPU telemetry behavior still needs
+real-runner CI verification; source implementation alone does not qualify the host. The current
+adapter also refuses an arm before model spawn because a source-backed transient peak bound for
+these routes has not been established. Host/GPU polling and operator-entered caps cannot prove an
+instantaneous allocation safe. These constraints do not reduce the fixed coverage.
 
 For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
 directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
