@@ -925,15 +925,16 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail("memory-material dense KV is below the frozen process-footprint share");
   }
   if (receipt.matrix.contextBand === "fit-boundary"
-    && (receipt.geometry.capacity > receipt.geometry.contextWindowTokens
-      || receipt.geometry.capacity * 10_000
+    && (receipt.geometry.kvLength > receipt.geometry.contextWindowTokens
+      || receipt.geometry.kvLength * 10_000
         < receipt.geometry.contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS)) {
-    fail("fit-boundary cache occupancy is below the frozen admission ratio");
+    fail("fit-boundary live context is outside the frozen admission ratio");
   }
-  if (receipt.mode === "dense"
-    && Math.abs(receipt.memory.persistentKvBytes - expectedDenseKvBytes)
-      > receipt.memory.reconciliation.toleranceBytes) {
-    fail("dense persistent KV bytes are outside the reconciliation tolerance");
+  if (receipt.mode === "dense" && receipt.memory.reconciliation.toleranceBytes !== 0) {
+    fail("dense persistent KV reconciliation tolerance must be zero");
+  }
+  if (receipt.mode === "dense" && receipt.memory.persistentKvBytes !== expectedDenseKvBytes) {
+    fail("dense persistent KV bytes do not equal allocated capacity bytes");
   }
 
   exactKeys(

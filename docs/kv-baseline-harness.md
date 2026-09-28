@@ -8,7 +8,7 @@ outcomes, cancellation cleanup, and typed allocation events. The harness
 rejects incomplete runs, identity drift, a missing or hash-mismatched model
 file at record time, any non-nominal thermal state, failed cleanup, and any
 detected full-cache temporary in a compressed run. Dense receipts retain the
-product's measured immutable-concat coexistence as deliberate baseline evidence.
+product's measured cache allocation and transient coexistence as baseline evidence.
 
 The receipt shape is described by
 `packages/schemas/kv-baseline-receipt.schema.json`. Producers write each receipt
@@ -54,6 +54,16 @@ measured against the loaded-model boundary: MLX active and allocator-cache
 tolerances are exactly zero, while a frozen 512 MiB Darwin-footprint allowance
 bounds process-resident Metal/JIT runtime pages that MLX does not report as live
 tensors or allocator cache.
+
+`geometry.kvLength` is the maximum live token offset; `geometry.capacity` is
+the producer-observed allocated token capacity of the retained K/V buffers.
+Block growth, trim, and restored prefixes can make capacity exceed live length
+without a universal rounding formula. Dense persistent bytes must equal
+`batch × layers × kvHeads × capacity × headDimension × elementBytes × 2`
+exactly, with zero reconciliation tolerance. Fit-boundary occupancy uses live
+`kvLength`, so allocation beyond the native context does not masquerade as
+additional usable context. Existing exact-length v4 receipts remain readable.
+
 comparison refuses mismatched source/model/toolchain/hardware/power/thermal
 identity, matrix, contract, or geometry and reports KV reduction,
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.

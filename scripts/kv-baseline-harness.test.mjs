@@ -120,6 +120,21 @@ function rebuildReceipt(receipt, edit) {
   edit(raw);
   return buildReceipt(raw);
 }
+function denseWithAllocatedCapacity(base, capacity, kvLength) {
+  return rebuildReceipt(base, (raw) => {
+    const physicalBytes = formula(raw.geometry.batch, capacity);
+    raw.geometry.capacity = capacity;
+    raw.geometry.kvLength = kvLength;
+    raw.memory.persistentKvBytes = physicalBytes;
+    raw.memory.denseTheoreticalKvBytes = physicalBytes;
+    raw.memory.reconciliation.expectedDenseKvBytes = physicalBytes;
+    raw.memory.reconciliation.observedPersistentKvBytes = physicalBytes;
+    raw.memory.phaseSamples = memoryPhases(physicalBytes);
+    for (const event of raw.memory.allocationEvents) {
+      if (event.role === "cache") event.bytes = physicalBytes;
+    }
+  });
+}
 test("contract sidecar and valid comparison",async()=>{const raw=await readFile("config/kv-baseline-quality-contract.json");assert.equal(await readFile("config/kv-baseline-quality-contract.json.sha256","utf8"),`${sha256(raw)}  kv-baseline-quality-contract.json\n`);assert.equal(compareReceipts(fixture(),fixture("compressed")).persistentKvReduction,.5);});
 test("numeric semantic seals normalize exact f64 bits and object order",()=>{
   const first={z:91.014,a:{workerPid:9,values:[91.01400000000001,1]}};
@@ -271,6 +286,39 @@ test("published inference fixture bundles are required and bind cold probe evide
 });
 test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}assert.equal(validateCampaign(rows).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.5);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
 test("measured context bands reject zero, non-material, and non-boundary receipts",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.contextWindowTokens=0;}),/must be >= 1|positive integer/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{raw.memory.phaseSamples=raw.memory.phaseSamples.map((sample)=>({...sample,physFootprintBytes:10_000_000_000,physFootprintPeakBytes:10_000_000_000}));}),/memory-material/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"fit-boundary"}),(raw)=>{raw.geometry.contextWindowTokens=8192;raw.geometry.contextTargetTokens=7680;raw.geometry.contextPayloadTokens=7680;}),/fit-boundary|sealed llama contract/);});
+test("dense receipts distinguish live KV length from observed allocated capacity", () => {
+  const padded = denseWithAllocatedCapacity(fixture(), 256, 32);
+  assert.equal(padded.geometry.kvLength, 32);
+  assert.equal(padded.geometry.capacity, 256);
+  assert.equal(padded.memory.persistentKvBytes, formula(1, 256));
+  assert.doesNotThrow(() => validateReceipt(padded));
+  // A restored or trimmed cache may retain more allocation than its live context.
+  const boundary = fixture("dense", { family: "qwen", contextBand: "fit-boundary" });
+  assert.doesNotThrow(() => validateReceipt(denseWithAllocatedCapacity(
+    boundary, boundary.geometry.contextWindowTokens + 1, boundary.geometry.kvLength,
+  )));
+  assert.throws(() => rebuildReceipt(boundary, (raw) => {
+    raw.geometry.kvLength = Math.floor(raw.geometry.contextWindowTokens * 0.89);
+  }), /fit-boundary live context/);
+  // Existing v4 receipts with exact-length capacity remain readable.
+  assert.doesNotThrow(() => validateReceipt(boundary));
+  assert.throws(() => rebuildReceipt(padded, (raw) => {
+    raw.geometry.capacity = raw.geometry.kvLength - 1;
+  }), /capacity is below kvLength/);
+});
+test("dense physical KV bytes reconcile exactly without padding tolerance", () => {
+  const padded = denseWithAllocatedCapacity(fixture(), 256, 32);
+  assert.throws(() => rebuildReceipt(padded, (raw) => {
+    raw.memory.reconciliation.toleranceBytes = formula(1, 224);
+  }), /tolerance must be zero/);
+  assert.throws(() => rebuildReceipt(padded, (raw) => {
+    raw.memory.persistentKvBytes -= 1;
+    raw.memory.reconciliation.observedPersistentKvBytes -= 1;
+    for (const event of raw.memory.allocationEvents) {
+      if (event.role === "cache") event.bytes -= 1;
+    }
+  }), /do not equal allocated capacity bytes/);
+});
 test("full 64-coordinate dense campaign and invalid sets",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])rows.push(fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature}));assert.equal(validateCampaign(rows).coordinates,64);assert.throws(()=>validateCampaign([rows[0]]),/incomplete/);assert.throws(()=>validateCampaign([fixture("compressed")]),/non-dense/);assert.throws(()=>validateCampaign([...rows,rows[0]]),/duplicate/);});
 test("complete campaign publication is one atomic 64-coordinate set",async()=>{const root=await mkdtemp("/tmp/kv20671-campaign-"),inputs=path.join(root,"workers"),destination=path.join(root,"published"),coordinates=[];await mkdir(inputs);for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])coordinates.push({family,contextBand,requestMode,prefillMode,processTemperature});const sets=[];for(let index=0;index<coordinates.length;index+=1){const source=path.join(inputs,`source-${index}`),set=path.join(inputs,String(index)),receipt=await verifiedFixture(source,"dense",coordinates[index]);await writeReceiptSet(set,receipt);sets.push(set);}await assert.rejects(writeCampaignSet(destination,sets.slice(1)),/exactly 64/);assert.equal((await rm(destination,{recursive:true,force:true})),undefined);await writeCampaignSet(destination,sets);const manifest=JSON.parse(await readFile(path.join(destination,"campaign.json"),"utf8"));assert.equal(manifest.coordinates,64);assert.equal(manifest.coordinateReceipts.length,64);assert.equal(await readFile(path.join(destination,"campaign.json.sha256"),"utf8"),`${sha256(await readFile(path.join(destination,"campaign.json"),"utf8"))}  campaign.json\n`);await rm(root,{recursive:true,force:true});});
 
