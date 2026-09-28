@@ -5,6 +5,7 @@ use crate::model_artifacts::{
     ModelArtifactResolver, ResolvedBundleClosure, ResolvedBundleMember,
     MODEL_ARTIFACT_CONTRACT_VERSION,
 };
+use fs2::FileExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tempfile::TempDir;

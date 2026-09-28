@@ -1,0 +1,62 @@
+{
+  "action": "run",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "memoryBytes": 137438953472,
+    "metalDevice": "Apple M5 Max",
+    "mlxMemoryLimitBytes": 130567005798,
+    "model": "Mac17,6",
+    "osVersion": "26.6.2",
+    "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+    "wiredLimitBytes": 87044670532
+  },
+  "planned": {
+    "backend": "mlx",
+    "calibrationFingerprint": "qwen-image-mlx-shared-ladder-2026-08-01-v1",
+    "evidenceScope": "authoritative",
+    "expectedResult": "passed",
+    "fixture": "qwen-image-bf16-seed15511-step2",
+    "loadShape": "deferred_materialization",
+    "logicalCaseId": "implan-0f9b913f7c18cfb7682a",
+    "modelLoadGroup": null,
+    "modelLoadPolicy": "fresh_per_case",
+    "negative": false,
+    "sourceProvenance": "physical_mlx_v1",
+    "strategy": {
+      "engagedRungs": [
+        "resident"
+      ],
+      "parameters": {},
+      "rung": "resident"
+    },
+    "target": {
+      "geometry": {
+        "batch": 1,
+        "frames": 1,
+        "height": 1024,
+        "width": 1024
+      },
+      "mode": "text_to_image",
+      "modelId": "qwen_image",
+      "overlay": "none",
+      "provider": "qwen_image",
+      "tier": "bf16"
+    }
+  },
+  "repositories": {
+    "inference": {
+      "closureDigest": "45bd0786f98e59629a1bd3248c1f9351c15b5be5d1825104e7bb60d7b639a3b2",
+      "dirty": false,
+      "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+    },
+    "sceneWorks": {
+      "dirty": false,
+      "matrixSourceRevision": "source-tree:e455aa6baa14bf123838100a8af8c29a746459e4403d6ad3365b13a971f61eda",
+      "revision": "9ecc0854d07eef4e984acc2fad46ba52112d6583"
+    }
+  },
+  "repositoryPaths": {
+    "inference": "/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/inf-M",
+    "sceneWorks": "/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/campaign-mlx"
+  }
+}

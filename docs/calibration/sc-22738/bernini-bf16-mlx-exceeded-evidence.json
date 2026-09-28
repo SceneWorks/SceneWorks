@@ -1,0 +1,62 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "be9d56982ba0889511212c5b0f8a6be695f4a8cb3e72518b68b47acd1c212081",
+        "repository": "SceneWorks/bernini-mlx",
+        "resolvedRevision": "533d688f16c8f33dc832890c1e16c11921a2019a",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "bernini-image-bf16-mlx-dual-expert-ladder-v1",
+      "capturedAt": "2026-09-06T22:19:35.203Z",
+      "ceilingBytes": 94822600832,
+      "eventFileSha256": "f5c23a79fc565e5758786ea3fc9f320027c4b22a7a2e9b96ed41dd37c6f0655c",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-15a6249c248c324c0fab",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-053a90c4241a956df63f",
+      "observedFootprintBytes": 97147294328,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_97147294328",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "72f9dfc2f351367de90fd1bd36080879808f2badd90222405e7aa222381f7a7c",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f1d1c845ef638d74d7aeaaf1f6f4cb7fda42d709cee9a13320ab698c56a3d401",
+          "revision": "157c6f991e6d134fb6331751ff740d6029a6329a"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 49,
+          "height": 480,
+          "width": 848
+        },
+        "mode": "text_to_video",
+        "modelId": "bernini",
+        "overlay": "none",
+        "provider": "bernini",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}

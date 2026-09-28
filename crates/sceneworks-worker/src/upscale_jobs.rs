@@ -1052,14 +1052,18 @@ pub(crate) async fn run_image_upscale_job(
 
     // Decode the source off the async runtime thread (sc-8909 / F-107): the full read + decode is
     // blocking and would otherwise stall the heartbeat before the upscale even starts.
-    let source_image = {
+    // The source may carry native transparency (sc-24111). Neither upscale engine can be handed a
+    // fourth channel — Real-ESRGAN's ONNX export is `(1, 3, H, W)` and SeedVR2 returns three — so
+    // the alpha plane is split off here and re-attached at the write, resampled to the upscaled
+    // geometry. `None` for an opaque source, which leaves that lane exactly as it was.
+    let (source_image, source_alpha) = {
         let source_path = source_path.clone();
         tokio::task::spawn_blocking(move || {
             crate::image_decode::decode_image_any(&source_path)
                 .map_err(|e| {
                     WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
                 })
-                .map(|decoded| decoded.to_rgb8())
+                .map(|decoded| crate::image_jobs::split_alpha(&decoded))
         })
         .await
         .map_err(|e| task_join_error("upscale source decode task", e))??
@@ -1206,9 +1210,15 @@ pub(crate) async fn run_image_upscale_job(
             src_h,
         )
     });
+    // Re-attach the plane the engine could not see. `write_single_child_asset` keys its encode on
+    // the variant it is handed, so an RGBA source lands as an RGBA PNG with its workflow chunk.
+    let written = match crate::image_jobs::reattach_alpha(upscaled, source_alpha.as_ref()) {
+        crate::image_jobs::GeneratedPixels::Rgb(rgb) => image::DynamicImage::ImageRgb8(rgb),
+        crate::image_jobs::GeneratedPixels::Rgba(rgba) => image::DynamicImage::ImageRgba8(rgba),
+    };
     let result = write_single_child_asset(
         &project_path,
-        image::DynamicImage::ImageRgb8(upscaled),
+        written,
         SingleChildAssetSpec {
             filename_stem: &format!("upscaled_x{factor}"),
             mode: "image_upscale",
@@ -1431,6 +1441,11 @@ pub(crate) async fn run_dataset_upscale_job(
             &job.id,
             cancel,
             tokio::task::spawn_blocking(move || {
+                // Deliberately RGB, unlike the library-asset lane above (sc-24111). This writes a
+                // TRAINING dataset derivative, and the trainers consume three channels — a
+                // four-channel derivative would be a format the consumer cannot read. A dataset
+                // item that was transparent is flattened here, by the dataset contract rather than
+                // by an oversight; the user-facing asset it was imported from keeps its alpha.
                 let source_image = crate::image_decode::decode_image_any(&item_image_path)
                     .map_err(|e| {
                         WorkerError::InvalidPayload(format!("Image could not be loaded: {e}"))

@@ -1,0 +1,224 @@
+diff -ruN a/mlx/backend/common/load.cpp b/mlx/backend/common/load.cpp
+--- a/mlx/backend/common/load.cpp	2026-09-01 19:06:22
++++ b/mlx/backend/common/load.cpp	2026-09-02 05:23:18
+@@ -1,10 +1,16 @@
+ // Copyright © 2023 Apple Inc.
+ 
+ #include <algorithm>
++#include <chrono>
++#include <cstring>
++#include <iostream>
++#include <thread>
++#include <vector>
+ #include <utility>
+ 
+ #include "mlx/primitives.h"
+ #include "mlx/scheduler.h"
++#include "mlx/stream_error.h"
+ 
+ namespace {
+ 
+@@ -35,7 +41,39 @@
+                     offset = offset_,
+                     reader = reader_,
+                     swap_endianness_ = swap_endianness_]() mutable {
+-    reader->read(out_ptr, size * itemsize, offset);
++    // pmetal (sc-22414): stage the whole tensor on the heap, copy it in, then keep re-verifying
++    // the destination against the staging copy until two consecutive checks (>=150 ms apart)
++    // agree, rewriting on any mismatch. The freshly allocated Metal shared buffer's backing has
++    // been observed to lose a completed write (kernel copyout AND user-space memcpy alike)
++    // under a full page cache with dirty write-back; the loss shows up as clean zeros.
++    {
++      const size_t nbytes = size * itemsize;
++      std::vector<char> staging(nbytes);
++      reader->read(staging.data(), nbytes, offset);
++      std::memcpy(out_ptr, staging.data(), nbytes);
++      int clean = 0;
++      int rewrites = 0;
++      auto started = std::chrono::steady_clock::now();
++      while (clean < 2) {
++        std::this_thread::sleep_for(std::chrono::milliseconds(150));
++        if (std::memcmp(out_ptr, staging.data(), nbytes) == 0) {
++          ++clean;
++          continue;
++        }
++        size_t zero = 0;
++        for (size_t i = 0; i < nbytes; ++i) zero += (out_ptr[i] == 0);
++        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
++                      std::chrono::steady_clock::now() - started).count();
++        std::cerr << "[load] destination lost write after " << ms << " ms: nbytes=" << nbytes
++                  << " offset=" << offset << " zero_bytes=" << zero << " rewrite=" << ++rewrites
++                  << std::endl;
++        if (rewrites > 64) {
++          throw std::runtime_error("[load] destination buffer keeps losing data");
++        }
++        std::memcpy(out_ptr, staging.data(), nbytes);
++        clean = 0;
++      }
++    }
+     if (swap_endianness_) {
+       switch (itemsize) {
+         case 2:
+@@ -51,7 +89,18 @@
+     }
+   };
+   auto fut = io::thread_pool().enqueue(std::move(read_task)).share();
+-  scheduler::enqueue(stream(), [fut = std::move(fut)]() { fut.wait(); });
++  // pmetal (sc-22414): the read task runs inside a std::packaged_task, which captures any
++  // exception the reader throws into the future; upstream's wait() never re-raised it, so a
++  // failed read left `out` as its freshly allocated buffer while evaluation reported
++  // success. A throw from this stream task would terminate the process instead, so the
++  // failure is recorded for the host-side Event::wait() to raise (mlx/stream_error.h).
++  scheduler::enqueue(stream(), [fut = std::move(fut)]() {
++    try {
++      fut.get();
++    } catch (const std::exception& error) {
++      detail::set_stream_error(std::string("[Load] ") + error.what());
++    }
++  });
+ }
+ 
+ } // namespace mlx::core
+diff -ruN a/mlx/backend/metal/event.cpp b/mlx/backend/metal/event.cpp
+--- a/mlx/backend/metal/event.cpp	2026-09-02 04:13:22
++++ b/mlx/backend/metal/event.cpp	2026-09-02 04:13:22
+@@ -2,7 +2,10 @@
+ 
+ #include "mlx/backend/metal/event.h"
+ #include "mlx/scheduler.h"
++#include "mlx/stream_error.h"
+ 
++#include <mutex>
++
+ // pmetal (sc-5009 / sc-12780 / sc-12786): defined in eval.cpp, debug/test
+ // builds only. Drains a synthetically-injected command-buffer error so the
+ // upstream recoverable-error path can be exercised deterministically without
+@@ -68,6 +71,11 @@
+ 
+ void Event::wait() {
+   static_cast<metal::EventImpl*>(event_.get())->wait(value());
++  // pmetal (sc-22414): surface a failure recorded by a stream task (see mlx/stream_error.h) on
++  // the waiting thread, so it reaches the caller as an exception instead of vanishing.
++  if (auto error = detail::take_stream_error()) {
++    throw std::runtime_error(*error);
++  }
+ }
+ 
+ void Event::wait(Stream stream) {
+@@ -119,3 +127,35 @@
+ }
+ 
+ } // namespace mlx::core
++
++namespace mlx::core::detail {
++
++namespace {
++std::mutex& stream_error_mutex() {
++  // Leaked like the scheduler singleton: stream threads may record during static destruction.
++  static auto* mtx = new std::mutex();
++  return *mtx;
++}
++std::optional<std::string>& stream_error_slot() {
++  static auto* slot = new std::optional<std::string>();
++  return *slot;
++}
++} // namespace
++
++void set_stream_error(std::string message) {
++  std::lock_guard<std::mutex> lock(stream_error_mutex());
++  auto& slot = stream_error_slot();
++  if (!slot.has_value()) {
++    slot = std::move(message);
++  }
++}
++
++std::optional<std::string> take_stream_error() {
++  std::lock_guard<std::mutex> lock(stream_error_mutex());
++  auto& slot = stream_error_slot();
++  auto taken = slot;
++  slot.reset();
++  return taken;
++}
++
++} // namespace mlx::core::detail
+diff -ruN a/mlx/io/load.cpp b/mlx/io/load.cpp
+--- a/mlx/io/load.cpp	2026-09-01 19:06:22
++++ b/mlx/io/load.cpp	2026-09-02 03:01:18
+@@ -1,5 +1,8 @@
+ // Copyright © 2023-2026 Apple Inc.
+ #include <algorithm>
++#include <cerrno>
++#include <iostream>
++#include <vector>
+ #include <cstring>
+ #include <fstream>
+ #include <limits>
+@@ -360,15 +363,38 @@
+ }
+ 
+ void ParallelFileReader::read(char* data, size_t n, size_t offset) {
++  // pmetal (sc-22414): never pread() straight into the destination. The destination is a
++  // Metal shared buffer, and a kernel copyout into that mapping under a full page cache with
++  // dirty write-back was observed to silently leave the pages zero (or fail with EFAULT):
++  // a cold 2 GB embedding table read back as all zeros on its first use and the whole text
++  // encoder ran on empty input (LTX-2.5 measured-vs-warm parity breach, 2026-09-02). Reading
++  // each chunk into an ordinary heap buffer and copying it in from user space is retained
++  // reliably. Overhead is one chunk (<= batch_size_) per worker. The loop also retries
++  // EINTR, advances the file offset on short reads (upstream re-read the same range into
++  // the advanced buffer), and names the errno on failure.
+   auto readfn = [fd = fd_](size_t offset, size_t size, char* buffer) -> bool {
+-    while (size != 0) {
+-      auto m = pread(fd, buffer, size, offset);
++    std::vector<char> staging(size);
++    char* dst = staging.data();
++    size_t remaining = size;
++    size_t file_offset = offset;
++    while (remaining != 0) {
++      auto m = pread(fd, dst, remaining, file_offset);
++      if (m < 0 && errno == EINTR) {
++        continue;
++      }
+       if (m <= 0) {
++        std::cerr << "[read] pread(fd=" << fd << ", size=" << remaining << ", offset="
++                  << file_offset << ") returned " << m
++                  << (m < 0 ? std::string(": ") + std::strerror(errno)
++                            : std::string(" (EOF)"))
++                  << std::endl;
+         return false;
+       }
+-      buffer += m;
+-      size -= m;
++      dst += m;
++      remaining -= m;
++      file_offset += m;
+     }
++    std::memcpy(buffer, staging.data(), size);
+     return true;
+   };
+   std::vector<std::future<bool>> futs;
+diff -ruN a/mlx/stream_error.h b/mlx/stream_error.h
+--- a/mlx/stream_error.h	1969-12-31 19:00:00
++++ b/mlx/stream_error.h	2026-09-02 04:13:22
+@@ -0,0 +1,22 @@
++// pmetal (sc-22414): a process-global slot for failures raised inside stream tasks.
++//
++// A task queued on a CPU stream (for example the file read behind a lazy `Load`) has no path to
++// the eval that is waiting on it: an exception escaping the task terminates the process, and the
++// upstream code simply dropped it. Tasks record the failure here instead, and the host-side
++// `Event::wait()` — which every `eval` passes through — re-raises it on the waiting thread.
++#pragma once
++
++#include <optional>
++#include <string>
++
++#include "mlx/api.h"
++
++namespace mlx::core::detail {
++
++/// Record a stream-task failure. The first pending message wins until it is taken.
++MLX_API void set_stream_error(std::string message);
++
++/// Take (and clear) the pending stream-task failure, if any.
++MLX_API std::optional<std::string> take_stream_error();
++
++} // namespace mlx::core::detail

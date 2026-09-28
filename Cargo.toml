@@ -24,7 +24,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.8.7"
+version = "0.8.12"
 edition = "2021"
 rust-version = "1.88"
 license-file = "LICENSE"
@@ -145,4 +145,28 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "703d10d916e80a5fedd88be318159cb0ff553184" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "1744de6e5786687b1558af1df5c27efab762b875" }
+
+# Build the SHA-256 stack optimized even in the dev/test profile.
+#
+# `cargo test` compiles the whole graph unoptimized, and `sha2` unoptimized is roughly an order of
+# magnitude slower than its NEON path: the profile below is dominated by `core::ub_checks`,
+# `ptr::copy_nonoverlapping::precondition_check` and `is_aligned_to` inside `sha256_compress`, none
+# of which survive `opt-level = 3`.
+#
+# That cost is not hypothetical. `gen_core::runtime::ArtifactSeal::pin` content-pins every weights
+# file a provider contract resolves (`EncoderContract::source_for_load` ->
+# `PinnedEncoderSource::pin`), and since the sc-22667 inference pin the MLX providers register real
+# memory-strategy contracts, so the `mlx_fit_gate` resident-only audits hash their full-size encoder
+# fixtures on every cell. That single change took the macOS MLX workspace-test step from ~9 minutes
+# to ~58.
+#
+# Optimizing three leaf crates costs a few seconds of build time and changes no behavior.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.digest]
+opt-level = 3
+
+[profile.dev.package.block-buffer]
+opt-level = 3

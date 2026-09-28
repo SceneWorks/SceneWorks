@@ -54,16 +54,32 @@
       "required": ["source"],
       "properties": { "source": { "type": "string", "minLength": 1 } }
     },
-    "cellAnchor": {
-      "description": "The measured anchor covering this cell's (model, tier, backend lane), or null. `current` is the loader-closure currency term (sc-22511): REPORTED, never gated, and it may not move `state`. `derivable` is the anchor-level derivability term (epic 22505 feature-end fix round, E5): whether the lane's law accepts THIS anchor, read off the store's own `underivedReason` field; false publishes the cell as Anchored/underived, with the stated reason carried in `underivedReason`.",
+    "currencyAttestation": {
+      "description": "HOW an anchor's currency key was derived (sc-22667). null: at the record's own measurement revision. Otherwise the reviewed attestation from config/anchor-currency-attestations.json, copied into the store by anchor-loader-closure.mjs --stamp-anchors: the loader-closure diff from `measuredRevision` to `attestedRevision` was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged. Bounded to the one revision it names.",
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["id", "tier", "source", "current", "derivable"],
+      "required": ["measuredRevision", "attestedRevision", "attestedAt", "story", "class", "why", "witness"],
+      "properties": {
+        "measuredRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "attestedRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "attestedAt": { "type": "string", "minLength": 1 },
+        "story": { "type": "string", "minLength": 1 },
+        "class": { "enum": ["accounting-only", "witnessed-unchanged"] },
+        "why": { "type": "string", "minLength": 1 },
+        "witness": { "type": "string", "minLength": 1 }
+      }
+    },
+    "cellAnchor": {
+      "description": "The measured anchor covering this cell's (model, tier, backend lane), or null. `current` is the loader-closure currency term (sc-22511): REPORTED, never gated, and it may not move `state`. `currencyAttestation` says HOW the key behind `current` was derived (sc-22667). `derivable` is the anchor-level derivability term (epic 22505 feature-end fix round, E5): whether the lane's law accepts THIS anchor, read off the store's own `underivedReason` field; false publishes the cell as Anchored/underived, with the stated reason carried in `underivedReason`.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["id", "tier", "source", "current", "currencyAttestation", "derivable"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "tier": { "type": "string", "minLength": 1 },
         "source": { "type": "string", "minLength": 1 },
         "current": { "type": "boolean" },
+        "currencyAttestation": { "$ref": "#/$defs/currencyAttestation" },
         "derivable": { "type": "boolean" },
         "underivedReason": { "type": "string", "minLength": 1 }
       }
@@ -157,6 +173,7 @@
         "analyticOnlyCells",
         "anchoredCells",
         "staleAnchors",
+        "attestedAnchors",
         "fullModels"
       ],
       "properties": {
@@ -208,6 +225,7 @@
         "analyticOnlyCells": { "type": "integer", "minimum": 0 },
         "anchoredCells": { "type": "integer", "minimum": 0 },
         "staleAnchors": { "type": "integer", "minimum": 0 },
+        "attestedAnchors": { "type": "integer", "minimum": 0 },
         "fullModels": { "type": "integer", "minimum": 0 }
       }
     },
@@ -275,6 +293,7 @@
           "geometry",
           "source",
           "current",
+          "currencyAttestation",
           "cells"
         ],
         "properties": {
@@ -297,6 +316,7 @@
           },
           "source": { "type": "string", "minLength": 1 },
           "current": { "type": "boolean" },
+          "currencyAttestation": { "$ref": "#/$defs/currencyAttestation" },
           "cells": { "type": "integer", "minimum": 0 }
         }
       }

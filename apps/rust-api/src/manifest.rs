@@ -1,6 +1,6 @@
 use super::*;
 
-use fs2::FileExt as _;
+use sceneworks_core::file_lock::FileLock;
 
 const MANIFEST_CACHE_LIMIT: usize = 16;
 /// Max time to block on the cross-process manifest lock before erroring. Mirrors the
@@ -11,10 +11,12 @@ const MANIFEST_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 const MANIFEST_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(25);
 
 /// RAII holder for the cross-process advisory exclusive lock on a `<manifest>.lock`
-/// sibling. Released when the file handle drops. Acquired on a blocking thread since
-/// flock is synchronous (see [`acquire_manifest_file_lock`]).
+/// sibling. Released with an explicit `LOCK_UN`, not by `close(2)` alone, which leaves the
+/// lock held while any forked child still references the same open file description
+/// (sc-22738). Acquired on a blocking thread since flock is synchronous (see
+/// [`acquire_manifest_file_lock`]).
 pub(crate) struct ManifestFileLock {
-    _file: std::fs::File,
+    _lock: FileLock,
 }
 
 fn manifest_lock_path(manifest_path: &FsPath) -> PathBuf {
@@ -40,7 +42,7 @@ pub(crate) async fn acquire_manifest_file_lock(
     }
     let lock_path = manifest_lock_path(path);
     tokio::task::spawn_blocking(move || {
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -61,9 +63,10 @@ pub(crate) async fn acquire_manifest_file_lock(
         // which is correct on every platform.
         let contended = fs2::lock_contended_error().raw_os_error();
         loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(ManifestFileLock { _file: file }),
-                Err(error) if error.raw_os_error() == contended => {
+            match FileLock::try_exclusive_retryable(file) {
+                Ok(lock) => return Ok(ManifestFileLock { _lock: lock }),
+                Err((handle, error)) if error.raw_os_error() == contended => {
+                    file = handle;
                     if std::time::Instant::now() >= deadline {
                         return Err(ApiError::internal(format!(
                             "Timed out after {MANIFEST_LOCK_TIMEOUT:?} waiting for manifest lock {}",
@@ -72,7 +75,7 @@ pub(crate) async fn acquire_manifest_file_lock(
                     }
                     std::thread::sleep(MANIFEST_LOCK_POLL);
                 }
-                Err(error) => {
+                Err((_handle, error)) => {
                     return Err(ApiError::internal(format!(
                         "Failed to acquire manifest lock {}: {error}",
                         lock_path.display()
@@ -359,3 +362,44 @@ pub(crate) fn merge_object(base: &mut Value, override_value: Value) {
 // Re-exported `pub(crate)` so the crate-root `use manifest::*` keeps it available
 // to the rest of the api (and tests) under the same path as before.
 pub(crate) use sceneworks_core::jsonc::strip_jsonc_comments;
+
+#[cfg(test)]
+mod file_lock_tests {
+    use super::*;
+    use fs2::FileExt as _;
+
+    /// sc-22738: a released manifest lock must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, and `fork(2)` gives the child a reference to it, so a
+    /// close-only release only takes effect once every such reference is gone — and this process
+    /// forks constantly (media conversion spawns `sips`/`ffmpeg`, the worker binaries). The
+    /// assertion uses the non-blocking primitive so a regression is an assertion rather than a
+    /// 30-second spin-wait.
+    #[tokio::test]
+    async fn a_released_manifest_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        let directory = tempfile::tempdir().expect("temp directory");
+        let manifest = directory.path().join("user.loras.jsonc");
+
+        let held = acquire_manifest_file_lock(&manifest)
+            .await
+            .expect("manifest lock acquires");
+        let inherited = held
+            ._lock
+            .inherited_descriptor()
+            .expect("descriptor duplicates");
+        drop(held);
+
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(manifest_lock_path(&manifest))
+            .expect("probe opens lock file");
+        assert!(
+            probe.try_lock_exclusive().is_ok(),
+            "a manifest lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
+    }
+}

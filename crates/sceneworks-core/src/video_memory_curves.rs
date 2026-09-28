@@ -213,7 +213,9 @@ pub struct VideoCurveQuery<'a> {
     pub overlay: Option<&'a str>,
     pub rung: StrategyRung,
     pub load_shape: VideoCurveLoadShape,
-    pub closure_digest: &'a str,
+    /// There is deliberately NO closure-digest term (sc-22738). A curve's `closureDigest` is
+    /// capture provenance the probe tooling re-fits on; a request matches the curve on the
+    /// identity above whether or not the provider's closure has since moved.
     pub calibration_abi: u32,
     pub calibration_fingerprint: &'a str,
     pub decode_pass: VideoCurveDecodePass,
@@ -243,7 +245,6 @@ impl VideoPhasePeakBytes {
 #[derive(Debug, Clone, Copy)]
 pub struct VideoCurveEvaluation<'a> {
     pub curve_id: &'a str,
-    pub closure_digest: &'a str,
     pub phases: VideoPhasePeakBytes,
 }
 
@@ -277,7 +278,6 @@ impl VideoMemoryCurveBundle {
                 && curve.rung == query.rung
                 && curve.load_shape == query.load_shape
                 && curve.batch == query.geometry.batch
-                && curve.closure_digest == query.closure_digest
                 && curve.calibration_abi == query.calibration_abi
                 && curve.calibration_fingerprint == query.calibration_fingerprint
                 && curve.decode_pass == query.decode_pass
@@ -302,7 +302,6 @@ impl VideoMemoryCurveBundle {
         let evaluate = |phase: VideoAffineCrossCurve| phase.evaluate(pixels, query.geometry.frames);
         Some(VideoCurveEvaluation {
             curve_id: &curve.id,
-            closure_digest: &curve.closure_digest,
             phases: VideoPhasePeakBytes {
                 conditioning: evaluate(curve.phases.conditioning)?,
                 denoise: evaluate(curve.phases.denoise)?,
@@ -392,8 +391,12 @@ fn validate_video_memory_curve_bundle_ref(
         if !ids.insert(curve.id.clone()) {
             return Err(format!("duplicate video-memory curve id {:?}", curve.id));
         }
+        // The selector is the REQUEST identity (`VideoCurveQuery`), so it carries no closure
+        // digest (sc-22738): two curves that differ only by the closure they were fitted under
+        // would be indistinguishable at lookup time, and packaging both must be refused here
+        // rather than turning into an ambiguous — and therefore floored — cell at runtime.
         let selector = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}\0{}\0{}\0{:?}\0{}",
             curve.model_id,
             curve.model_family,
             curve.route,
@@ -409,7 +412,6 @@ fn validate_video_memory_curve_bundle_ref(
             curve.overlay,
             curve.rung,
             curve.load_shape,
-            curve.closure_digest,
             curve.calibration_abi,
             curve.calibration_fingerprint,
             curve.decode_pass,
@@ -1041,7 +1043,6 @@ mod tests {
             overlay: None,
             rung: StrategyRung::StagedResidency,
             load_shape: VideoCurveLoadShape::EagerMaterialization,
-            closure_digest: "87a27d5dcab7bfcbe962fb0cb6cd16a75e8e04f2c194bcaa0b14f633d4ff5db3",
             calibration_abi: crate::memory_calibration::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: "sc-18808-ltx-2-3-mlx-t2v-staged-capture-v1",
             decode_pass: VideoCurveDecodePass::SinglePass,
@@ -1052,6 +1053,34 @@ mod tests {
                 batch: 1,
             },
         }
+    }
+
+    /// sc-22738 (Michael's standing rule): a fitted curve matches on identity WITHOUT a closure
+    /// term, so a curve fitted under a provider closure the ledger has since moved past evaluates
+    /// exactly as a fresh fit would. The query type cannot even carry a digest; the only way to
+    /// demote here is to add the comparison back. MUTATION: re-adding a `closure_digest` conjunct
+    /// to `evaluate`'s filter (or a query field graded against the live ledger) turns this red
+    /// whenever the packaged curve is stale against the ledger — which it is today.
+    #[test]
+    fn a_curve_fitted_under_a_moved_closure_still_evaluates() {
+        let bundle = packaged_video_memory_curves().unwrap();
+        let curve = bundle
+            .curves
+            .iter()
+            .find(|curve| curve.model_id == "ltx_2_3" && curve.backend == VideoCurveBackend::Mlx)
+            .expect("the packaged LTX-2.3 MLX curve");
+        let live = crate::memory_calibration::packaged_closure_digest("mlx", "ltx_2_3");
+        if live.as_deref() == Some(curve.closure_digest.as_str()) {
+            eprintln!(
+                "note: the packaged ltx_2_3:mlx curve is currently fitted at the live closure, so \
+                 this test cannot distinguish a currency conjunct from none"
+            );
+        }
+        let evaluation = bundle
+            .evaluate(packaged_query())
+            .expect("the curve evaluates regardless of the closure it was fitted under");
+        assert_eq!(evaluation.curve_id, curve.id);
+        assert!(evaluation.phases.peak() > 0);
     }
 
     #[test]
@@ -1193,10 +1222,6 @@ mod tests {
         let mut query = packaged_query();
         query.backend = VideoCurveBackend::Candle;
         assert!(bundle.evaluate(query).is_none(), "foreign lane");
-
-        let mut query = packaged_query();
-        query.closure_digest = "0000000000000000000000000000000000000000000000000000000000000000";
-        assert!(bundle.evaluate(query).is_none(), "stale closure");
 
         let mut query = packaged_query();
         query.tier = "bf16";

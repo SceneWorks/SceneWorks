@@ -3159,6 +3159,264 @@
     },
     {
       "artifact": {
+        "repository": "SceneWorks/z-image-turbo-mlx",
+        "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+        "variant": "q4"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "z-image-mlx-independent-materialization-v4",
+      "capturedAt": "2026-09-03T23:24:14Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:z-image-shared-ladder",
+        "blockers": [],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 5833334792
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "peakAfterReset",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 5834701816
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 7589844352
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 14462448216
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 19383375180
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 14462448216
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 5833334792
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 289248964
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupActive",
+            "unit": "bytes",
+            "value": 5833334792
+          },
+          {
+            "name": "lifecycleMaximumFaultPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPeak",
+            "unit": "bytes",
+            "value": 14462448216
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupActive",
+            "unit": "bytes",
+            "value": 5833334792
+          },
+          {
+            "name": "lifecycleMaximumRecoveryPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "residentSetMaterializedBeforeWindow",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-z-image-q4-768-seed16402-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.1",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-2284d75c08c2a13f1b7e",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-0ca5c13114cf91e2b322",
+      "negativeMutation": {
+        "maximumError": 0.7529411764705882,
+        "meanError": 0.325798554379744,
+        "measured": true,
+        "parameters": {},
+        "result": "failed_as_expected"
+      },
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 5834701816,
+          "allocatorBytes": 5834737016,
+          "reclaimableBytes": 35200
+        },
+        "decode": {
+          "activeBytes": 14462448216,
+          "allocatorBytes": 14462448216,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 7589844352,
+          "allocatorBytes": 12510771316,
+          "reclaimableBytes": 4920926964
+        },
+        "overall": {
+          "activeBytes": 14462448216,
+          "allocatorBytes": 19383375180,
+          "reclaimableBytes": 4920926964
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 6174015488,
+        "decode": 15233712128,
+        "denoise": 13153337344,
+        "overall": 20401094656
+      },
+      "quality": {
+        "contract": "same seed, conditioning, sampling, precision, and loaded provider; selected rung versus unselected request",
+        "identicalInputs": true,
+        "identicalLatents": false,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.2196078431372549,
+        "meanError": 0,
+        "meanErrorThreshold": 0.01568627450980392,
+        "result": "passed"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "6e279d1ec72b0a5aba4820fe07883a18d31f3b13602936522b3b78cb30267ac3",
+          "dirty": false,
+          "revision": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:18f9220c0e37cd3f88d0c347eed1fac2711845e5456dfa258c3d916aebfb215a",
+          "revision": "480823385fc2530a4112a5840fe3237aaf2cde80"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 20401094656,
+          "name": "exact_fit",
+          "predictedBytes": 20401094656,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "post-cancel active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "post-error active/cache retention and the warm follow-up peak remained within the clean-warm control plus 2%",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Z-Image base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 768,
+          "width": 768
+        },
+        "mode": "text_to_image",
+        "modelId": "z_image_turbo",
+        "overlay": "none",
+        "provider": "z_image_turbo",
+        "tier": "q4"
+      }
+    },
+    {
+      "artifact": {
         "repository": "SceneWorks/qwen-image-mlx",
         "resolvedRevision": "8080a4171f1c8b7fca6c30491eafbe6ffab754bf",
         "variant": "bf16"

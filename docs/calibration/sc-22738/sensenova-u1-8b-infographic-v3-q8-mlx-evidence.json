@@ -1,0 +1,248 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx",
+        "resolvedRevision": "34f24bc8195f601cb90cb207acd4233eb7d0e2d3",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sensenova-u1-infographic-v3-q8-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-08T10:18:28Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:sensenova-u1-infographic-v3-shared-ladder",
+        "blockers": [
+          "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor composition and exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 23620312
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 19988804848
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 18502396840
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 22641352664
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 20092670048
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 18439482264
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 401853400
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 20092670048
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 18439482264
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 140
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "infographic-v3-mlx-q8-1024-seed22734-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-2c2fc5ed4f96de471730",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/sensenova-u1-8b-infographic-v3-mlx@34f24bc8195f601cb90cb207acd4233eb7d0e2d3:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-33b6fbd360b0b7af70cd",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 23620312,
+          "allocatorBytes": 23620372,
+          "reclaimableBytes": 60
+        },
+        "decode": {
+          "activeBytes": 18502396840,
+          "allocatorBytes": 21154944656,
+          "reclaimableBytes": 2652547816
+        },
+        "denoise": {
+          "activeBytes": 19988804848,
+          "allocatorBytes": 22421118912,
+          "reclaimableBytes": 2432314064
+        },
+        "overall": {
+          "activeBytes": 19988804848,
+          "allocatorBytes": 22641352664,
+          "reclaimableBytes": 2652547816
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 22213033984,
+        "denoise": 23555211264,
+        "overall": 23823646720
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, guidance, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "2e58d97a5d1f498588bea7a9c59d98b497908fb29b42a29055829c1aab7611db",
+          "dirty": false,
+          "revision": "e34d7b46a301376676bd8a60419190c7be9aa4f0"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:143554b99cd3cf79c14606402c31b448c4fc664504caca181bdd13ecca6a1dab",
+          "revision": "bc9b63a144dd3c4021b7b17f692c4d1891de0c1a"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 23823646720,
+          "name": "exact_fit",
+          "predictedBytes": 23823646720,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor composition and exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor composition and exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned SenseNova crate opens no memory-strategy request scope for the resident anchor composition and exposes no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX SenseNova-U1 Infographic V3 text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "sensenova_u1_8b_infographic_v3",
+        "overlay": "none",
+        "provider": "sensenova_u1_8b",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

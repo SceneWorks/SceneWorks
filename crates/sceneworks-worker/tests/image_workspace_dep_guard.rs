@@ -41,6 +41,7 @@ const EXPECTED_IMAGE_MEMBERS: &[&str] = &[
     "crates/sceneworks-core",
     "crates/sceneworks-image-quality",
     "crates/sceneworks-mcp",
+    "crates/sceneworks-memory-adapter",
     "crates/sceneworks-worker",
 ];
 

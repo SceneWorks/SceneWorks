@@ -1,7 +1,9 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 import { bundledLicenses, licensesIntro } from "../data/bundledLicenses.js";
 import { safeExternalUrl } from "../urls.js";
+
+const documentCache = new Map();
 
 // About → Licenses (sc-3778). Aggregates the third-party components SceneWorks
 // redistributes in the desktop bundle (ffmpeg GPLv3, onnxruntime MIT, …) and
@@ -13,11 +15,41 @@ export function LicensesScreen() {
   const components = bundledLicenses;
   const [selectedId, setSelectedId] = useState(components[0]?.id ?? null);
   const [docIndex, setDocIndex] = useState(0);
+  const [documentText, setDocumentText] = useState("");
+  const [documentError, setDocumentError] = useState("");
+  const [retryDocument, setRetryDocument] = useState(0);
 
   const selected = useMemo(
     () => components.find((component) => component.id === selectedId) ?? components[0] ?? null,
     [components, selectedId],
   );
+  const activeDoc = selected?.documents[docIndex] ?? selected?.documents[0];
+
+  useEffect(() => {
+    if (!activeDoc) return;
+    const cached = documentCache.get(activeDoc.url);
+    if (cached !== undefined) {
+      setDocumentText(cached);
+      setDocumentError("");
+      return;
+    }
+    const controller = new AbortController();
+    setDocumentText("");
+    setDocumentError("");
+    fetch(activeDoc.url, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.text();
+      })
+      .then((text) => {
+        documentCache.set(activeDoc.url, text);
+        setDocumentText(text);
+      })
+      .catch((error) => {
+        if (error.name !== "AbortError") setDocumentError(error.message);
+      });
+    return () => controller.abort();
+  }, [activeDoc, retryDocument]);
 
   const selectComponent = (id) => {
     setSelectedId(id);
@@ -31,8 +63,6 @@ export function LicensesScreen() {
       </section>
     );
   }
-
-  const activeDoc = selected.documents[docIndex] ?? selected.documents[0];
 
   return (
     <section className="page-frame licenses-screen">
@@ -108,10 +138,15 @@ export function LicensesScreen() {
             </div>
           ) : null}
 
-          {activeDoc ? (
+          {activeDoc && !documentError ? (
             <pre className="licenses-text" aria-label={`${selected.name} — ${activeDoc.label}`}>
-              {activeDoc.text}
+              {documentText || "Loading license text…"}
             </pre>
+          ) : documentError ? (
+            <div className="licenses-empty">
+              <p>Could not load this bundled license text: {documentError}</p>
+              <button type="button" onClick={() => setRetryDocument((value) => value + 1)}>Retry license text</button>
+            </div>
           ) : (
             <p className="licenses-empty">No license text on file for this component.</p>
           )}

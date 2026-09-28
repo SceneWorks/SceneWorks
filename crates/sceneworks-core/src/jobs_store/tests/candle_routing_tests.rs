@@ -177,6 +177,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
             CandleImageLane::MageEdit,
+            CandleImageLane::QwenImage21Edit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
             CandleImageLane::BerniniEdit,
@@ -258,6 +259,48 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         (edit("mage_flow_edit_base"), CandleImageLane::MageEdit),
         (edit("mage_flow_edit"), CandleImageLane::MageEdit),
         (edit("mage_flow_edit_turbo"), CandleImageLane::MageEdit),
+        // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
+        // txt2img id, so both the edit shape and the Character-Studio reference shape must be
+        // claimed by this bespoke lane before the generic gate can refuse them.
+        (edit("qwen_image_2_1"), CandleImageLane::QwenImage21Edit),
+        (
+            character("qwen_image_2_1"),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        // The `image_to_image` operation: a mode-less request carrying one reference. MLX claims it
+        // (the predicate is mode-independent), so Candle must too — the lane is keyed on the ordered
+        // reference list, never on `mode`.
+        (
+            reference("qwen_image_2_1"),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "text_to_image",
+                "referenceAssetIds": ["ref_1", "ref_2"]
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        // sc-24114: the same operation under its own `image_to_image` mode.
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "image_to_image",
+                "referenceAssetId": "ref_1"
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
+        (
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "edit_image",
+                "sourceAssetId": "source_1",
+                "maskAssetId": "mask_1",
+                "referenceAssetIds": ["ref_1", "ref_2"]
+            }),
+            CandleImageLane::QwenImage21Edit,
+        ),
         (reference("boogu_image"), CandleImageLane::BooguImg2Img),
         (
             reference("boogu_image_turbo"),
@@ -1768,6 +1811,341 @@ fn qwen_image_quant_and_lora_stay_on_candle() {
         "qwen_image",
         &object(json!({ "loras": [{ "name": "x", "path": "/x.safetensors" }] }))
     ));
+}
+
+/// sc-24109 — the IMAGE twin of `candle_video_routed_models_have_an_installable_off_mac_download`
+/// (sc-19558), which had no image counterpart at all.
+///
+/// Same defect class, unguarded on the larger of the two catalogs: the routing table decides which
+/// lane serves a request, the manifest decides what a user can obtain, and flipping `candle_routed`
+/// for a model whose every download row is `platforms: ["macos"]` routes the job to a lane that
+/// cannot fetch a single byte. `retain_downloads_for_os` strips those rows off-Mac, so the Windows
+/// or Linux user sees a model they can select and a download that installs nothing.
+///
+/// That is precisely the shape of THIS story's load-bearing manifest edit — dropping
+/// `platforms: ["macos"]` from `qwen_image_2_1`'s only artifact — and before this test nothing
+/// asserted it: re-adding the key left every suite green.
+///
+/// REACH: both sides are constructed here, not retyped. `CANDLE_ROUTED_MODELS` is the real derived
+/// constant from `IMAGE_MODEL_CAPS`, and `builtin_models()` parses the shipped manifest bytes, so a
+/// column flip on one side and a `platforms` edit on the other both reach this assertion.
+#[test]
+fn candle_routed_image_models_have_an_installable_off_mac_download() {
+    // Candle-routed image ids with NO catalog entry at all. EMPTY today, and asserted to be exact
+    // below: an entry-less candle-routed image model is not an exemption from this guard, it is a
+    // model nothing can install on any platform.
+    const NO_CATALOG_ENTRY: &[&str] = &[];
+
+    let models = super::builtin_models();
+    let entry = |id: &str| models.iter().find(|model| model["id"].as_str() == Some(id));
+
+    let mut without_entry: Vec<&str> = Vec::new();
+    for id in CANDLE_ROUTED_MODELS {
+        let Some(model) = entry(id) else {
+            without_entry.push(id);
+            continue;
+        };
+        for os in ["windows", "linux"] {
+            assert!(
+                super::primary_rows_on(model, os) > 0,
+                "{id} is candle-routed for images but has no primary download row installable on \
+                 {os} — flipping a candle column without an off-Mac artifact routes the job to a \
+                 lane that cannot obtain weights (sc-19558's image twin, sc-24109)"
+            );
+        }
+    }
+    assert_eq!(
+        without_entry, NO_CATALOG_ENTRY,
+        "the set of candle-routed image models with no catalog entry changed"
+    );
+
+    // Spelled out for this story's own id, because it is the one whose artifact was macOS-scoped
+    // until this change and the one a reviewer will come back to.
+    let qwen_2_1 = entry("qwen_image_2_1").expect("qwen_image_2_1 is in the builtin catalog");
+    for os in ["windows", "linux", "macos"] {
+        assert_eq!(
+            super::primary_rows_on(qwen_2_1, os),
+            3,
+            "all THREE of 2.1's tiers must be installable on {os} — the same bf16 snapshot and the \
+             same two packed re-host tiers serve both backends, so no row carries `platforms` \
+             scoping at all (sc-24112). A tier scoped to macOS would leave a Windows/Linux user \
+             with a tier picker whose entries cannot be obtained."
+        );
+    }
+}
+
+/// sc-24109: the SAME request contract that routes to MLX on a Mac must route to the Candle/CUDA
+/// lane off-Mac. The Candle port registers the same engine id (`qwen_image_2_1`) with the same
+/// seven presets, the same ÷32 stride, the same 40-step default, the same seed/count axis and the
+/// same true-CFG + negative-prompt pair, so there is no second request shape to validate — the
+/// routing verdict is the whole of the difference, and that is what is pinned here.
+///
+/// The mirror image of `qwen_image_2_1_routes_text_to_image_to_mlx_and_refuses_conditioning`: the
+/// conditioned carriers the MLX arm refuses are refused here too (the shared `CANDLE_IMAGE_CHECKS`
+/// gate does it for every family), so neither backend can be talked into a shape 2.1's empty
+/// conditioning set cannot serve.
+#[test]
+fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
+    assert!(CANDLE_ROUTED_MODELS.contains(&"qwen_image_2_1"));
+
+    // The routing VERDICT over the shapes the Image Studio produces. Stated narrowly on purpose:
+    // `image_request_candle_eligible` reads `mode` and the conditioning carriers and NOTHING else,
+    // so the geometry/steps/seed/count/guidance fields below are carried to prove they do not
+    // perturb the verdict — they are not themselves validated here. The contract's own numbers are
+    // asserted against the manifest at the bottom of this test, which is where a drift in them
+    // would actually show up.
+    for payload in [
+        json!({ "prompt": "a lighthouse" }),
+        json!({ "prompt": "p", "mode": "text_to_image" }),
+        json!({ "prompt": "p", "mode": "image_generation" }),
+        json!({ "prompt": "p", "width": 2048, "height": 2048, "steps": 40, "seed": 7 }),
+        json!({ "prompt": "p", "width": 2752, "height": 1536, "count": 4 }),
+        json!({ "prompt": "p", "width": 1536, "height": 2752 }),
+        json!({ "prompt": "p", "negativePrompt": "watermark", "advanced": { "guidanceScale": 4.0 } }),
+    ] {
+        assert!(
+            image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the candle lane must claim a plain 2.1 txt2img job: {payload}"
+        );
+        let mut job_payload = object(payload.clone());
+        job_payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+        let job = image_generate_job(Value::Object(job_payload));
+        assert!(
+            image_job_is_candle_eligible(&job),
+            "the full scheduler gate must claim it too: {payload}"
+        );
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+            "a candle worker must claim the job: {payload}"
+        );
+    }
+
+    // Every conditioned carrier is refused off-Mac exactly as it is on Mac: 2.1 declares an empty
+    // conditioning set on BOTH backends, so there is nowhere to put a source/reference/mask/pose.
+    for payload in [
+        json!({ "mode": "edit_image", "sourceAssetId": "src_1" }),
+        json!({ "prompt": "p", "referenceAssetId": "ref_1" }),
+        json!({ "prompt": "p", "referenceAssetIds": ["ref_1", "ref_2"] }),
+        json!({ "prompt": "p", "maskAssetId": "mask_1" }),
+        json!({ "prompt": "p", "advanced": { "poses": [{ "id": "p1" }] } }),
+        json!({ "prompt": "p", "advanced": { "phases": [{ "steps": 4 }] } }),
+    ] {
+        assert!(
+            !image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+            "2.1 declares no conditioning on candle either: {payload}"
+        );
+    }
+
+    // An adapter is handled DIFFERENTLY per backend, and both answers are deliberate:
+    //   * off-Mac the candle lane REFUSES it (`CandleImageRefusal::UserLora`), because the id's
+    //     `candle_lora` column is false — the provider declares `supports_lora`/`supports_lokr`
+    //     false, so the refusal names the missing adapter slot;
+    //   * on a Mac the MLX arm lets it through on purpose, so the engine answers with a typed
+    //     `Unsupported` instead of the job sitting unclaimable.
+    // On a Windows/Linux-only install there is no MLX worker to fall through to, so the candle
+    // refusal IS the terminal answer — which is why it has to carry the adapter-slot reason rather
+    // than a generic one.
+    assert!(!image_request_candle_eligible(
+        "qwen_image_2_1",
+        &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
+    ));
+    assert_eq!(
+        candle_image_first_refusal(
+            "qwen_image_2_1",
+            &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
+        ),
+        Some(CandleImageRefusal::UserLora),
+    );
+
+    // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
+    // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`
+    // block may override any of them — a per-backend override is exactly how "the same request
+    // contract" would quietly stop being the same.
+    let models = super::builtin_models();
+    let entry = models
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let limits = &entry["limits"];
+    assert_eq!(
+        limits["resolutions"],
+        json!([
+            "2048x2048",
+            "2400x1792",
+            "1792x2400",
+            "2528x1696",
+            "1696x2528",
+            "2752x1536",
+            "1536x2752"
+        ]),
+        "the seven upstream presets, in the engine's own order"
+    );
+    assert_eq!(
+        limits["hardMinSteps"],
+        json!(2),
+        "the engine refuses steps < 2"
+    );
+    assert_eq!(entry["defaults"]["steps"], json!(40), "DEFAULT_STEPS");
+    for backend in ["mlx", "candle"] {
+        let block = &entry[backend];
+        assert!(
+            block.is_object(),
+            "{backend} block must exist — both lanes are native for this id"
+        );
+        for key in ["limits", "defaults", "resolutions", "hardMinSteps", "steps"] {
+            assert!(
+                block.get(key).is_none(),
+                "`{backend}.{key}` would fork the request contract per backend; 2.1 has ONE"
+            );
+        }
+    }
+}
+
+/// sc-24108/sc-24109/sc-24112: the two `qwen_image_2_1` providers declare their quant surfaces
+/// SEPARATELY, and SceneWorks must never collapse them into one per-model-id list.
+///
+/// At sc-24109 the two DISAGREED — MLX `supported_quants: [Q4, Q8]`, Candle `[]` — and this test
+/// existed to stop the MLX pair leaking onto the Candle lane. Inference PR #1007 ports the packed
+/// loader to Candle (`AdaptLinear::linear_detect_gs` reads the same packed triples on the DiT and
+/// the Qwen3 tower), so the Candle provider now declares `[Q4, Q8]` too and a tier-select off-Mac
+/// is served rather than refused.
+///
+/// **That agreement is not a merge, and the distinction is the whole point of this test.** Nothing
+/// anywhere reads "the supported quants of `qwen_image_2_1`". `ModelCaps::candle_quant` is the
+/// Candle column and only the Candle column; the MLX lane's tier surface is the manifest's own
+/// `mlx` block; the catalog's `variant` rows are the INSTALL axis, which is a third thing again. A
+/// future revision that narrows one provider must be expressible by changing one of them, and the
+/// assertions below are written so that it is.
+///
+/// What has NOT changed on Candle: `spec.quantize` is a tier SELECTOR, not a transform request — a
+/// dense snapshot plus a quantize request is a typed `Unsupported` at load (candle cannot produce a
+/// packed tier itself). MLX differs: against the dense bf16 snapshot it load-time quantizes
+/// (`quant::installed_tier(root) == Tier::Bf16` prices a `GroupQuantized` projection). So the worker
+/// resolves the tier from the artifact on disk and sends no quantize against the bf16 root on either
+/// lane (`image_jobs::tier_key_for_resolved_dir`); the tier axis is an install-time choice.
+#[test]
+fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
+    // sc-24109: the model IS claimable off-Mac — a plain text-to-image job routes to the generic
+    // candle txt2img lane.
+    assert!(CANDLE_ROUTED_MODELS.contains(&"qwen_image_2_1"));
+    assert!(image_request_candle_eligible(
+        "qwen_image_2_1",
+        &object(json!({ "prompt": "a lighthouse" }))
+    ));
+
+    // A tier-select is now ADMITTED on the Candle lane for both bit widths the packed artefacts
+    // ship, because the candle provider serves them. Routing it away would send the job to the
+    // retired torch fallback — the exact "engine wired, router half missed" skew sc-9983 and
+    // sc-11020 each closed.
+    for bits in [4, 8] {
+        assert!(
+            image_request_candle_eligible(
+                "qwen_image_2_1",
+                &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": bits } }))
+            ),
+            "qwen_image_2_1 must serve a Q{bits} tier-select on the candle lane — its candle \
+             provider declares supported_quants: [Q4, Q8] after inference #1007"
+        );
+    }
+    // bf16 (an explicit opt-out of quantization) is a tier too, and it must stay routable.
+    assert!(image_request_candle_eligible(
+        "qwen_image_2_1",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 0 } }))
+    ));
+
+    // THE ANTI-MERGE ASSERTION. The Candle admission column is per-model-and-lane, and the proof
+    // that it is not a shared "quants of this model" list is that a sibling id with the same MLX
+    // surface can still refuse a candle tier-select. `qwen_image_edit` is exactly that: an MLX edit
+    // family whose candle service is the bespoke edit lane, with `candle_quant` false.
+    assert!(!image_request_candle_eligible(
+        "qwen_image_edit",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+    // And the base `qwen_image` (2512) lane is untouched by any of this. The contrast is the point —
+    // the two ids do not share a quant surface any more than they share weights.
+    assert!(image_request_candle_eligible(
+        "qwen_image",
+        &object(json!({ "prompt": "x", "advanced": { "mlxQuantize": 4 } }))
+    ));
+
+    let manifest: Value = serde_json::from_str(&crate::jsonc::strip_jsonc_comments(
+        crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = manifest["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog");
+    let downloads = entry["downloads"].as_array().expect("downloads array");
+
+    // The INSTALL axis: exactly three tiers, each a distinct `variant`, and the two packed ones
+    // come from the SceneWorks re-host while bf16 stays the upstream snapshot (the converter
+    // refuses to emit a bf16 tier — it IS the released snapshot).
+    let tiers: Vec<(&str, &str)> = downloads
+        .iter()
+        .map(|download| {
+            (
+                download["variant"].as_str().expect("every row is a tier"),
+                download["repo"].as_str().expect("repo"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        tiers,
+        vec![
+            ("bf16", "Qwen/Qwen-Image-2.1"),
+            ("q8", "SceneWorks/qwen-image-2-1-mlx"),
+            ("q4", "SceneWorks/qwen-image-2-1-mlx"),
+        ],
+        "three tiers, densest first; bf16 upstream and the packed pair from the re-host"
+    );
+
+    // …and all three are installable OFF-MAC. "The same three tiers on both backends" is only a
+    // meaningful claim if the candle route can obtain each of them: with `platforms: ["macos"]` on
+    // any row, `retain_downloads_for_os` strips it and every assertion above stays green while a
+    // Windows/Linux user can install nothing.
+    for os in ["windows", "linux"] {
+        assert_eq!(
+            super::primary_rows_on(entry, os),
+            3,
+            "all three of 2.1's tiers must survive retain_downloads_for_os on {os}"
+        );
+    }
+
+    // The MLX lane declares its DEFAULT TIER, which is a different statement from "these are the
+    // tiers": it is which one a job with no explicit `advanced.mlxQuantize` resolves to.
+    assert_eq!(
+        entry["mlx"]["quantize"],
+        json!(8),
+        "the MLX block declares the lane's default tier, not its tier set"
+    );
+    // The candle lane has NO manifest tier key at all, and must not grow one: its tier surface is
+    // the routing catalog's `candle_quant` column. A `candle.quantize` here would be a second,
+    // silently-diverging declaration of the same fact.
+    let candle = entry
+        .get("candle")
+        .expect("sc-24109 declares the off-Mac candle block");
+    for key in ["quantize", "tiers"] {
+        assert!(
+            candle.get(key).is_none(),
+            "`candle.{key}` would be a second declaration of the candle tier surface, which the \
+             routing catalog already owns"
+        );
+    }
+    // And still no MEASURED per-tier ladder on either lane — the derived floors ride
+    // `minMemoryGbByTier`, which carries no evidence class. (`vram_gate` pins the numbers.)
+    for key in ["vramGbByTier", "sequentialPeakGb", "measured"] {
+        assert!(
+            candle.get(key).is_none(),
+            "`candle.{key}` is a measured-evidence key and nothing about 2.1 has been measured"
+        );
+    }
 }
 
 #[test]

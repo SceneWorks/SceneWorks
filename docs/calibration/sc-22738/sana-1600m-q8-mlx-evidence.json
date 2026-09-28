@@ -1,0 +1,248 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/Sana_1600M_1024px_mlx",
+        "resolvedRevision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sana-base-q8-mlx-full-ladder-v1-resident",
+      "capturedAt": "2026-09-06T15:50:06Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:sana-1600m-shared-ladder",
+        "blockers": [
+          "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 420
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 4175528
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 7211557272
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 20650883012
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 53650711564
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 20653260240
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 6389464460
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 413065204
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 20653260240
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 6389464460
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 76
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "sana-1600m-mlx-q8-1024-seed22731-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-72d8be0139fb6a8b37d8",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/Sana_1600M_1024px_mlx@ac421696dd6eb0b41f446f4c45a53ccc057d82a1:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-46a6cfd0aa8ca22a8218",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 4175528,
+          "allocatorBytes": 4175528,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 20650883012,
+          "allocatorBytes": 53650711564,
+          "reclaimableBytes": 32999828552
+        },
+        "denoise": {
+          "activeBytes": 7211557272,
+          "allocatorBytes": 9810281080,
+          "reclaimableBytes": 2598723808
+        },
+        "overall": {
+          "activeBytes": 20650883012,
+          "allocatorBytes": 53650711564,
+          "reclaimableBytes": 32999828552
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 56371445760,
+        "denoise": 10334765056,
+        "overall": 56371445760
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "2368a168dbc66538aa1129e65d32757c75a2efee6c42bf9fe9c8121d062fea69",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ea5a5212b7f7f1314a63ca1e65f3f0a7b519712b4934f2a632406de086e1daf7",
+          "revision": "60b0d67fb0787be367c49dce190129f23856cbac"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 56371445760,
+          "name": "exact_fit",
+          "predictedBytes": 56371445760,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX SANA 1.6B base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "sana_1600m",
+        "overlay": "none",
+        "provider": "sana_1600m",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

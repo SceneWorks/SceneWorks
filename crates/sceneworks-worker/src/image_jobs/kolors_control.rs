@@ -551,6 +551,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
         use_pid,
         false,
         raw_budget,
+        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
         predicted_peak,
         0,
         gen_core::MemoryCacheState::Cold,

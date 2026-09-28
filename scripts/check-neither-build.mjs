@@ -24,12 +24,36 @@
 // -D warnings` — the parity lane's clippy, scoped to the two crates that carry the gated code
 // (`sceneworks-worker` holds the whole trap class; `sceneworks-rust-api` is included as belt-and-
 // suspenders since it links the same contract types).
+//
+// DISK (macOS/Docker path only): the target volume is keyed by checkout, so every worktree that has
+// ever run this check owns a 30-42 GB Docker volume, and nothing prunes them — including the
+// `sceneworks-neither-target` from before the keying and the volumes of worktrees that are gone.
+// Each run prints the volume it is about to use; `--prune` removes every OTHER
+// `sceneworks-neither-target*` volume (never this checkout's, never the shared toolchain/registry/
+// git caches) and exits:
+//
+//   node scripts/check-neither-build.mjs --prune        # reclaim, then exit
+//   node scripts/check-neither-build.mjs --prune --run  # reclaim, then run the check
+//
+// A volume in use by a running container is reported as skipped rather than force-removed.
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The target volume is keyed by the checkout it builds, because EVERY checkout mounts at the same
+// container path `/workspace`. A single shared target volume therefore makes cargo's fingerprints
+// collide across worktrees: whichever checkout built last leaves artifacts the next one reuses, and
+// the check reports errors from source it is not looking at ("no field `x` on type `y`" for a field
+// that is plainly there). The toolchain, registry and VCS volumes stay shared — those are keyed by
+// content, not by checkout, and they are the expensive ones.
+const TARGET_VOLUME = `sceneworks-neither-target-${createHash("sha256")
+  .update(repoRoot)
+  .digest("hex")
+  .slice(0, 12)}`;
 
 // The parity lane's clippy, scoped to the crates that carry the macOS/candle-gated code.
 const CLIPPY_ARGS = [
@@ -107,7 +131,7 @@ function runDocker() {
     "-v",
     "sceneworks-neither-git:/usr/local/cargo/git",
     "-v",
-    "sceneworks-neither-target:/workspace/target",
+    `${TARGET_VOLUME}:/workspace/target`,
     RUST_IMAGE,
     "bash",
     "-euc",
@@ -116,6 +140,8 @@ function runDocker() {
   ];
   console.log(
     `[neither] macOS host: reproducing the Linux 'neither' build in ${RUST_IMAGE}.\n` +
+      `          target volume: ${TARGET_VOLUME} (this checkout's; 30-42 GB once warm —\n` +
+      `          'node scripts/check-neither-build.mjs --prune' removes the others)\n` +
       `          docker ${dockerArgs.join(" ")}\n`,
   );
   const res = spawnSync("docker", dockerArgs, { stdio: "inherit", cwd: repoRoot });
@@ -123,14 +149,64 @@ function runDocker() {
   return res.status ?? 1;
 }
 
+/// Remove every `sceneworks-neither-target*` volume EXCEPT this checkout's: the orphans of deleted
+/// worktrees, and the unkeyed `sceneworks-neither-target` from before the per-checkout keying. The
+/// shared toolchain/registry/git volumes are never touched — they are keyed by content, they are
+/// small next to a target dir, and re-cloning the ~900 MB inference database is the slow path this
+/// script exists to avoid.
+function pruneTargetVolumes() {
+  if (!hasDocker()) {
+    console.error("[neither] --prune needs Docker (nothing to prune without it).");
+    return 1;
+  }
+  const listed = spawnSync("docker", ["volume", "ls", "--format", "{{.Name}}"], {
+    encoding: "utf8",
+  });
+  if (listed.error || listed.status !== 0) {
+    console.error(`[neither] could not list Docker volumes: ${listed.stderr || listed.error}`);
+    return 1;
+  }
+  const orphans = listed.stdout
+    .split("\n")
+    .map((name) => name.trim())
+    .filter((name) => name.startsWith("sceneworks-neither-target") && name !== TARGET_VOLUME);
+  console.log(`[neither] keeping this checkout's volume: ${TARGET_VOLUME}`);
+  if (orphans.length === 0) {
+    console.log("[neither] no other sceneworks-neither-target* volumes to prune.");
+    return 0;
+  }
+  for (const volume of orphans) {
+    const removed = spawnSync("docker", ["volume", "rm", volume], { encoding: "utf8" });
+    if (removed.status === 0) {
+      console.log(`[neither] removed ${volume}`);
+    } else {
+      // In use by a running container, or already gone. Never force and never fail the prune: a
+      // volume a live build is writing to is not this script's to destroy, and leaving it is the
+      // correct outcome rather than an error.
+      console.log(`[neither] skipped ${volume}: ${(removed.stderr || "").trim()}`);
+    }
+  }
+  return 0;
+}
+
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
   console.log(
     "Reproduce the CI 'parity' (Linux, no backend-candle) Rust clippy locally.\n\n" +
-      "  node scripts/check-neither-build.mjs        # or: npm run rust:check:neither\n\n" +
-      "Non-macOS hosts run it natively; macOS hosts run it in a Linux Docker container.\n" +
+      "  node scripts/check-neither-build.mjs          # or: npm run rust:check:neither\n" +
+      "  node scripts/check-neither-build.mjs --prune  # remove OTHER checkouts' target volumes\n" +
+      "  node scripts/check-neither-build.mjs --prune --run   # prune, then run the check\n\n" +
+      "Non-macOS hosts run it natively; macOS hosts run it in a Linux Docker container, whose\n" +
+      "per-checkout target volume (printed on every run) is 30-42 GB once warm.\n" +
       "Env: SCENEWORKS_NEITHER_IMAGE overrides the container image (default rust:bookworm).",
   );
   process.exit(0);
+}
+
+if (process.argv.includes("--prune")) {
+  const pruned = pruneTargetVolumes();
+  if (pruned !== 0 || !process.argv.includes("--run")) {
+    process.exit(pruned);
+  }
 }
 
 process.exit(process.platform === "darwin" ? runDocker() : runNative());

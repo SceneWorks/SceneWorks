@@ -7,11 +7,14 @@ import { fileURLToPath } from "node:url";
 
 import { digestOccurrences, recordsNeedingDigest } from "./backfill-closure-digests.mjs";
 import { deriveMargins } from "./derive-ladder-margins.mjs";
+import { PROVIDER_FAMILIES } from "./measure-memory-catalog.mjs";
 import { inferencePinFromCargo } from "./inference-closure-digest.mjs";
 import {
   CAPTURABILITY_SOURCE,
   MARGIN_SOURCE,
+  OVERLAY_PROVIDER_SOURCE,
   SOURCE_PATHS,
+  shippedControlOverlayProviders,
   adapterCapturableProviders,
   buildStaleLaneReport,
   evidenceBindings,
@@ -22,6 +25,7 @@ import {
   planLaneCoverage,
   rankLanes,
   recommendedMlxT2iLanes,
+  runEntryName,
 } from "./stale-lane-report.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,8 +72,13 @@ function record({
  * the surrounding match arms, so this fixture exercises the REAL parser end to end — string-literal
  * arms, an ALL_CAPS const arm when a provider is spelled `NAME=value`, and a lowercase fallback
  * binding carrying the refusal.
+ *
+ * sc-22737: the fixture also carries a `main`, because the bespoke pre-gate scan derives WHICH
+ * function is the run entry from `main`'s `"run"` arm rather than trusting a name — a guard that
+ * looks like a pre-gate inside a function reached THROUGH a gate (`run_qwen_provider`'s VAE probe)
+ * is not one. `entry` names the function `main` routes to when the pre-gates live outside `run`.
  */
-function adapterSource(providers, { extra = "" } = {}) {
+function adapterSource(providers, { extra = "", entry = "run" } = {}) {
   const consts = [];
   const arms = providers.map((provider) => {
     const named = /^([A-Z][A-Z0-9_]*)=(.+)$/.exec(provider);
@@ -85,6 +94,13 @@ ${arms.join("\n")}
             "synthetic five-rung calibration does not implement provider {other:?}"
         )),
     }
+}
+fn main() {
+    let response = match protocol::action(&request).unwrap() {
+        "probe" => probe(),
+        "run" => ${entry}(&request),
+        other => Err(format!("unsupported action {other:?}")),
+    };
 }
 ${extra}`;
 }
@@ -117,6 +133,10 @@ function fixtureFrom({
   // Every provider the fixtures declare has an arm BY DEFAULT, so pre-sc-18212 expectations (an
   // unmeasured lane is "pending capture") keep holding; capturability tests override these.
   adapterSources = { mlx: adapterSource(["alpha"]), candle: adapterSource(["beta", "gamma"]) },
+  // sc-22738: the strict-control overlay partition is derived from this table. The fixture default
+  // declares one overlay id no fixture lane uses, so the partition is empty here and the pre-sc-22738
+  // expectations (an armless lane is "uncapturable") keep holding; overlay tests override it.
+  controlWeightsSource = controlWeightsSourceFor(["fixture_only_control"]),
 }) {
   return {
     liveDigests: new Map(lanes),
@@ -128,7 +148,20 @@ function fixtureFrom({
     manifestBody: JSON.stringify({ models }, null, 2),
     plan,
     adapterSources,
+    controlWeightsSource,
   };
+}
+
+/** A `SHIPPED_CONTROL_WEIGHTS` table in the exact shape `shippedControlOverlayProviders` parses. */
+function controlWeightsSourceFor(engineIds) {
+  return [
+    "pub const SHIPPED_CONTROL_WEIGHTS: &[ShippedControlWeight] = &[",
+    ...engineIds.map(
+      (id) =>
+        `    ShippedControlWeight { engine_id: "${id}", repo: "org/repo", file: "f.safetensors", revision: "0" },`,
+    ),
+    "];",
+  ].join("\n");
 }
 
 /**
@@ -492,16 +525,25 @@ test("the real corpus report is internally consistent, whatever the corpus curre
   // ABSENT, which E8 forbids CI from failing on. The derivation directly above (missingLanes is
   // exactly the not-covered lanes, computed from the same three gates) is unchanged and still
   // grades the data that IS present.
-  // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable");
-  // measured armless lanes stay in the staleness partition and appear in `uncapturableLanes` as a
-  // second, cross-cutting membership.
+  // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable") —
+  // or, since sc-22738, in `overlayProviderLanes` when the provider is a strict-control overlay,
+  // which is a SCOPE partition rather than an adapter-work one. Measured armless lanes stay in the
+  // staleness partition and appear in one of those two lists as a second, cross-cutting membership.
+  const armless = [...report.uncapturableLanes, ...report.overlayProviderLanes].filter(
+    (lane) => lane.status === "uncapturable",
+  );
   const all = [
     ...report.staleLanes,
     ...report.currentLanes,
     ...report.unmeasuredLanes,
-    ...report.uncapturableLanes.filter((lane) => lane.status === "uncapturable"),
+    ...armless,
   ];
   const universe = [...all, ...report.undeclaredLanes];
+  assert.equal(
+    new Set(all.map((lane) => lane.lane)).size,
+    all.length,
+    "the four measurement partitions are disjoint",
+  );
 
   assert.equal(all.length, report.totals.declaredLanes);
   assert.equal(all.length, sources.liveDigests.size);
@@ -510,7 +552,7 @@ test("the real corpus report is internally consistent, whatever the corpus curre
     report.totals.staleLanes +
       report.totals.currentLanes +
       report.totals.unmeasuredLanes +
-      report.uncapturableLanes.filter((lane) => lane.status === "uncapturable").length,
+      armless.length,
   );
   assert.equal(report.totals.staleBindings, all.reduce((sum, lane) => sum + lane.bindings.stale, 0));
   assert.equal(report.totals.staleRecords, all.reduce((sum, lane) => sum + lane.records.stale, 0));
@@ -552,10 +594,32 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       `${lane.lane} capturable flag matches the parsed adapter arms`,
     );
   }
+  // sc-22738: the armless population splits in two. A strict-control overlay provider is reported
+  // as out of the E1 cell universe rather than as adapter work, and the two lists together are
+  // still exactly the lanes with no arm — nothing may fall out of both.
+  const overlayLanes = new Set(report.capturability.overlayProviderLanes);
+  assert.deepEqual(
+    universe
+      .filter((lane) => !lane.capturable && !overlayLanes.has(lane.lane))
+      .map((lane) => lane.lane)
+      .sort(),
+    [...report.capturability.uncapturableLanes].sort(),
+    "the uncapturable list is exactly the armless lanes that are not overlay providers",
+  );
+  assert.deepEqual(
+    report.overlayProviderLanes.map((lane) => lane.lane).sort(),
+    [...overlayLanes].sort(),
+    "the overlay-lane objects and the cross-cutting id list agree",
+  );
   assert.deepEqual(
     universe.filter((lane) => !lane.capturable).map((lane) => lane.lane).sort(),
-    [...report.capturability.uncapturableLanes].sort(),
-    "the uncapturable list is exactly the lanes without an arm",
+    [
+      ...new Set([
+        ...report.capturability.uncapturableLanes,
+        ...universe.filter((lane) => !lane.capturable && overlayLanes.has(lane.lane)).map((lane) => lane.lane),
+      ]),
+    ].sort(),
+    "every armless lane is reported under exactly one of the two headings",
   );
   for (const lane of report.unmeasuredLanes) {
     assert.ok(lane.capturable, `${lane.lane} is pending capture, so an adapter arm must exist`);
@@ -726,6 +790,360 @@ fn load(request: &Value) -> Result<Loaded, String> {
   assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha"]);
 });
 
+// sc-22729: the counterpart rule. A BESPOKE arm — one whose crate registers no generator, so the
+// adapter dispatches it with an early `if provider == <ID> { return … }` before the gated matches —
+// never reaches those gates, and intersecting them out reported a real working arm as
+// "uncapturable". `candle:instantid` (sc-22729) and `candle:ltx_2_5_distilled` (sc-22725) are both
+// dispatched that way; before this, a capture host booked for either was reported as wasted.
+test("a bespoke arm dispatched before the gated matches is capturable, not intersected away", () => {
+  const source = `
+const BESPOKE_ID: &str = "gamma";
+fn run(request: &Value) -> Result<Value, String> {
+    if provider == BESPOKE_ID {
+        return run_gamma(request);
+    }
+    if provider == "delta" {
+        return run_delta(request);
+    }
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+fn load(request: &Value) -> Result<Loaded, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(load_alpha()),
+        provider => {
+            return Err(format!(
+                "synthetic five-rung calibration does not implement provider {provider:?}"
+            ))
+        }
+    }
+}
+fn main() {
+    let response = match protocol::action(&request).unwrap() {
+        "run" => run(&request),
+        other => Err(format!("unsupported action {other:?}")),
+    };
+}
+`;
+  assert.deepEqual(adapterCapturableProviders(source, "synthetic"), ["alpha", "delta", "gamma"]);
+  // An unresolvable bespoke id is loud, exactly as an unresolvable gate arm is — never guessed.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("BESPOKE_ID: &str", "BESPOKE_ID: &u32"), "synthetic"),
+    /bespoke dispatch on BESPOKE_ID does not resolve to a &str const/,
+  );
+});
+
+// sc-22726. A BLOCK-bodied match arm carries no trailing comma after rustfmt, and this parser used
+// to split arms on depth-0 commas only — so a braced arm in the middle of a dispatch swallowed the
+// NEXT arm's pattern and silently dropped a real provider from the capturable set. The report then
+// read that lane as "NO ARM" and would have sent an operator to build an arm that already existed.
+// An arm now also ends at the depth-0 `}` that closes its block body, so every arm survives.
+test("a block-bodied arm in the middle of a dispatch does not swallow the arm after it", () => {
+  const source = `
+fn entry(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        "bespoke" => Ok(BESPOKE_PATH),
+        "zeta" => Ok(ZETA_PATH),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+fn load(request: &Value) -> Result<Loaded, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(load_alpha()),
+        "bespoke" => {
+            return Err("bespoke is served by its own arm".to_owned())
+        }
+        "zeta" => Ok(load_zeta()),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+`;
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "bespoke", "zeta"],
+    "the braced arm must not consume the `zeta` arm that follows it",
+  );
+  // A block body that is itself followed by a comma (`=> { ... },`, the hand-written spelling)
+  // must not produce a phantom empty arm either.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        `            return Err("bespoke is served by its own arm".to_owned())
+        }`,
+        `            return Err("bespoke is served by its own arm".to_owned())
+        },`,
+      ),
+      "synthetic",
+    ),
+    ["alpha", "bespoke", "zeta"],
+  );
+  // The expression-bodied spelling (`=> return Err(...),`) keeps its comma, so every arm survives.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        `        "bespoke" => {
+            return Err("bespoke is served by its own arm".to_owned())
+        }`,
+        `        "bespoke" => return Err("bespoke is served by its own arm".to_owned()),`,
+      ),
+      "synthetic",
+    ),
+    ["alpha", "bespoke", "zeta"],
+  );
+});
+
+// sc-22734. A family whose several engine ids share ONE arm body is spelled as a Rust OR-PATTERN
+// (`SENSENOVA_ID | SENSENOVA_FAST_ID`). The parser used to see the whole alternation as a single
+// pattern, match none of its shapes, and throw — so adding a shared arm to an adapter made the
+// WHOLE report unbuildable rather than reporting one more capturable lane.
+test("an or-pattern arm admits every engine id it names, by literal or by const", () => {
+  const source = `
+const SENSENOVA_ID: &str = "sensenova_u1_8b";
+const SENSENOVA_FAST_ID: &str = "sensenova_u1_8b_fast";
+fn entry(request: &Value) -> Result<&'static str, String> {
+    match planned_provider(request)? {
+        "alpha" => Ok(ALPHA_PATH),
+        SENSENOVA_ID | SENSENOVA_FAST_ID => sensenova_arm(request),
+        provider => Err(format!(
+            "synthetic five-rung calibration does not implement provider {provider:?}"
+        )),
+    }
+}
+`;
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // The literal spelling, and rustfmt's leading-`|` multi-line spelling, resolve identically.
+  assert.deepEqual(
+    adapterCapturableProviders(
+      source.replace(
+        "SENSENOVA_ID | SENSENOVA_FAST_ID =>",
+        '| "sensenova_u1_8b"\n        | "sensenova_u1_8b_fast" =>',
+      ),
+      "synthetic",
+    ),
+    ["alpha", "sensenova_u1_8b", "sensenova_u1_8b_fast"],
+  );
+  // An alternative is held to exactly the rules a lone pattern is: an undeclared const inside an
+  // or-pattern is still refused by name rather than silently dropped.
+  assert.throws(
+    () => adapterCapturableProviders(
+      source.replace("SENSENOVA_FAST_ID =>", "UNDECLARED_CONST =>"),
+      "synthetic",
+    ),
+    /UNDECLARED_CONST does not resolve to a &str const/,
+  );
+});
+
+// sc-22736. A VIDEO arm is dispatched by `run()` BEFORE the shared still gates — the LTX-2.5 shape
+// (`if provider == LTX25_ID { return … }`) and the Wan/SCAIL-2 shape (`if matches!(provider, A | B)
+// { return module::run(request); }`) — so it appears in NO refusal-carrying match and the
+// intersection rule alone reported every such lane `uncapturable` (candle:ltx_2_5_distilled,
+// candle:qwen_image_edit, and all four Wan/SCAIL-2 lanes). Mutations this kills: dropping the
+// bespoke-pre-gate union; matching the guard without the `return …(request)` tail (a plain
+// `if provider == X { … }` branch is not a dispatch); hiding the ids behind a helper call.
+test("a bespoke pre-gate routed before the shared gates makes its providers capturable", () => {
+  const source = adapterSource(["alpha"], {
+    entry: "run_entry",
+    extra: `
+const VIDEO_ID: &str = "video";
+const WAN_A_ID: &str = "wan_a";
+const WAN_B_ID: &str = "wan_b";
+fn run_entry(request: &Value) -> Result<Value, String> {
+    let provider = planned_provider(request)?;
+    if provider == VIDEO_ID {
+        return run_video_capture(request);
+    }
+    if matches!(
+        provider,
+        WAN_A_ID | WAN_B_ID | "literal_arm"
+    ) {
+        return wan_module::run(request);
+    }
+    // Not a dispatch: no early return on the request.
+    if provider == "not_dispatched" {
+        log(provider);
+    }
+    plain(request)
+}
+`,
+  });
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "literal_arm", "video", "wan_a", "wan_b"],
+  );
+  // sc-22737, MUTATION and behaviour change: a guard whose ids live behind a helper call used to be
+  // silently skipped, which reported a shipped arm's lanes as uncapturable. It now THROWS by shape.
+  assert.throws(
+    () =>
+      adapterCapturableProviders(
+        adapterSource(["alpha"], {
+          entry: "run_entry",
+          extra: `
+fn run_entry(request: &Value) -> Result<Value, String> {
+    if wan_module::implements(provider) {
+        return wan_module::run(request);
+    }
+    plain(request)
+}
+`,
+        }),
+        "synthetic",
+      ),
+    /guard shape this parser does not read/,
+  );
+  // An unresolved const in a pre-gate is loud, like an unresolved match arm.
+  assert.throws(
+    () =>
+      adapterCapturableProviders(
+        adapterSource(["alpha"], {
+          entry: "run_entry",
+          extra: `
+fn run_entry(request: &Value) -> Result<Value, String> {
+    if provider == GHOST_ID {
+        return run_ghost(request);
+    }
+    plain(request)
+}
+`,
+        }),
+        "synthetic",
+      ),
+    /bespoke dispatch on GHOST_ID does not resolve to a &str const/,
+  );
+});
+
+// sc-22737. Two more guard shapes ship in `candle.rs` and neither was read, so four working candle
+// lanes — `ltx_2_3_distilled`, `minimax_h3`, `sensenova_u1_8b`, `sensenova_u1_8b_fast` — were
+// reported "no adapter arm can serve these", the exact false negative the pre-gate union exists to
+// prevent. Each mutation below (drop the `||` chain, drop the `if let` form, break the arm table)
+// puts those lanes back to uncapturable or reds the parse.
+test("an ||-chained guard and an arm-table pre-gate both name their providers", () => {
+  const source = adapterSource(["alpha"], {
+    entry: "run_entry",
+    extra: `
+const SENSENOVA_ID: &str = "sensenova";
+const SENSENOVA_FAST_ID: &str = "sensenova_fast";
+const LTX23_ID: &str = "ltx_2_3_distilled";
+const MINIMAX_ID: &str = "minimax_h3";
+const LTX23_ARM: Arm = Arm {
+    engine_id: LTX23_ID,
+    model_id: "ltx_2_3",
+};
+const MINIMAX_ARM: Arm = Arm {
+    engine_id: MINIMAX_ID,
+    model_id: "minimax_h3",
+};
+const VIDEO_ARMS: [Arm; 2] = [LTX23_ARM, MINIMAX_ARM];
+fn video_arm(request: &Value) -> Result<Option<Arm>, String> {
+    let provider = planned_provider(request)?;
+    if !VIDEO_ARMS.iter().any(|arm| arm.engine_id == provider) {
+        return Ok(None);
+    }
+    VIDEO_ARMS.iter().copied().find(|arm| arm.engine_id == provider).map(Some).ok_or_else(|| "no".to_owned())
+}
+fn run_entry(request: &Value) -> Result<Value, String> {
+    let provider = planned_provider(request)?;
+    if provider == SENSENOVA_ID || provider == SENSENOVA_FAST_ID {
+        return run_sensenova_capture(request);
+    }
+    if let Some(arm) = video_arm(request)? {
+        return run_video_capture(request, arm);
+    }
+    plain(request)
+}
+`,
+  });
+  assert.deepEqual(
+    adapterCapturableProviders(source, "synthetic"),
+    ["alpha", "ltx_2_3_distilled", "minimax_h3", "sensenova", "sensenova_fast"],
+  );
+  // MUTATION: the arm table loses an element's `engine_id`. The pre-gate can no longer say which
+  // providers it serves, and refuses rather than reporting the survivors.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("    engine_id: MINIMAX_ID,\n", ""), "synthetic"),
+    /element MINIMAX_ARM declares no engine_id/,
+  );
+  // MUTATION: the helper stops iterating a single const table, so which providers it answers `Some`
+  // for is no longer derivable from the source.
+  assert.throws(
+    () => adapterCapturableProviders(source.replaceAll("VIDEO_ARMS.iter()", "arm_table().iter()"), "synthetic"),
+    /iterates 0 const arm tables/,
+  );
+  // The `if let` binding must be the one the dispatch forwards; anything else is a shape this
+  // parser has not been taught, not a pre-gate to guess about.
+  assert.throws(
+    () => adapterCapturableProviders(source.replace("run_video_capture(request, arm)", "run_video_capture(request, other)"), "synthetic"),
+    /guard shape this parser does not read/,
+  );
+});
+
+// A guard that opens `run_qwen_provider` (`if protocol::expected_failure(request) { return
+// run_qwen_vae_probe(request); }`) has the exact shape of a pre-gate and is NOT one — that function
+// is reached only through the shared gate. The scan is therefore bounded by the run entry `main`
+// names, and by the first gate inside it.
+test("the pre-gate scan is bounded by the run entry main names and by the first gate", () => {
+  const withDownstreamGuard = adapterSource(["alpha"], {
+    extra: `
+fn run_downstream(request: &Value) -> Result<Value, String> {
+    if protocol::expected_failure(request) {
+        return run_probe(request);
+    }
+    plain(request)
+}
+`,
+  });
+  // `main` routes "run" to `run`, so the guard inside `run_downstream` is never scanned.
+  assert.deepEqual(adapterCapturableProviders(withDownstreamGuard, "synthetic"), ["alpha"]);
+  // MUTATION: make it the entry, and the same guard is refused by shape.
+  assert.throws(
+    () => adapterCapturableProviders(withDownstreamGuard.replace('"run" => run(&request)', '"run" => run_downstream(&request)'), "synthetic"),
+    /guard shape this parser does not read/,
+  );
+  // A `main` with no "run" arm leaves the scan with no entry to be exhaustive over: loud, not empty.
+  assert.throws(
+    () => adapterCapturableProviders(withDownstreamGuard.replace('"run" => run(&request),', ""), "synthetic"),
+    /declares no "run" => <entry>\(&request\) arm/,
+  );
+});
+
+// The shapes above are fixtures; this is the shipped source. Both adapter bins must expose a run
+// entry the scan can find, and every pre-gate in it must parse — a rename or a new guard shape reds
+// here rather than quietly shrinking the capturable set.
+/// This is the assertion that grades a NEW pre-gate against the real adapters. sc-22738 added one
+/// to `mlx.rs#run` that REFUSES rather than dispatches — the measured lower-bound capture refusal,
+/// `if let Some(refusal) = … { return Err(refusal); }` — and the candidate test for a pre-gate was a
+/// bare `if let Some(`, so it threw here as an unreadable dispatch shape even though this parser's
+/// own rule says `return Err(…)` is a refusal. The candidate now requires an actual dispatch, and
+/// this test is what proves a refusing pre-gate leaves all 20+ real arms readable behind it.
+test("both shipped adapter bins expose a resolvable run entry whose pre-gates all parse", async () => {
+  for (const bin of ["mlx", "candle"]) {
+    const source = await readFile(path.join(ROOT, `crates/sceneworks-memory-adapter/src/bin/${bin}.rs`), "utf8");
+    const providers = adapterCapturableProviders(source, `${bin}.rs`);
+    assert.ok(providers.length > 20, `${bin}.rs dispatches ${providers.length} providers`);
+    assert.equal(runEntryName(source, `${bin}.rs`), "run");
+  }
+  // The four lanes sc-22737 unblocked, named: each is served by a pre-gate shape the parser now
+  // reads, and each read "uncapturable" before it did.
+  const candle = adapterCapturableProviders(
+    await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/bin/candle.rs"), "utf8"),
+    "candle.rs",
+  );
+  for (const provider of ["ltx_2_3_distilled", "minimax_h3", "sensenova_u1_8b", "sensenova_u1_8b_fast"]) {
+    assert.ok(candle.includes(provider), `candle.rs dispatches ${provider} through a bespoke pre-gate`);
+  }
+});
+
 test("losing the dispatch anchor is loud, never an empty (or full) capturable set", () => {
   assert.throws(
     () => adapterCapturableProviders("fn run() -> u32 { 42 }", "synthetic"),
@@ -873,4 +1291,112 @@ test("the human report separates pending capture from uncapturable, and prints t
   assert.match(text, /CAPTURE/);
   assert.match(text, /NO ARM/, "an armless stale lane is flagged in the ranked table");
   assert.ok(text.includes(CAPTURABILITY_SOURCE));
+});
+
+// sc-22738 (feature-end round 1). The strict-control OVERLAY partition.
+//
+// `config/inference-provider-closures.json` declares four lanes whose provider is a ControlNet
+// overlay of a base catalog entry — `candle:krea_2_turbo_control`, `candle:z_image_control`,
+// `mlx:krea_2_turbo_control`, `mlx:z_image_turbo_control`. None of them is a manifest model, so none
+// can ever be an epic 22723 E1 `<modelId>:<tier>:<backend>` cell and `measure-memory-catalog.mjs
+// --list` correctly never asks about them. Three of the four have no adapter arm, and the report
+// used to grade those "uncapturable" — telling the reader adapter work was outstanding for a lane
+// that is out of scope by construction. The declarations must STAY: production control renders load
+// under these provider ids and their route currency is graded per (backend, provider).
+test("strict-control overlay providers are reported as out of scope, not as uncapturable", async () => {
+  const sources = await loadSources();
+  const report = buildStaleLaneReport(sources);
+  const catalogIds = new Set(sources.manifest.models.map((model) => model.id));
+
+  // The partition is derived from the production allow-list, not from a list kept here.
+  assert.deepEqual(
+    report.capturability.overlayProviders,
+    [
+      ...shippedControlOverlayProviders(
+        sources.controlWeightsSource,
+        sources.manifest,
+        SOURCE_PATHS.controlWeights,
+      ),
+    ],
+  );
+  assert.ok(
+    report.capturability.overlayProviders.length > 0,
+    "the control allow-list still names at least one non-catalog overlay engine",
+  );
+  for (const provider of report.capturability.overlayProviders) {
+    assert.ok(!catalogIds.has(provider), `${provider} is a catalog model, not an overlay provider`);
+  }
+  // `sdxl` is an engine_id in the SAME table and IS a catalog model; it must never be partitioned
+  // out, or a real tiered lane could leave the uncapturable grading through this door.
+  assert.ok(catalogIds.has("sdxl"));
+  assert.ok(!report.capturability.overlayProviders.includes("sdxl"));
+
+  // Every declared closure lane whose provider is an overlay lands under the overlay heading, and
+  // none of them is graded uncapturable.
+  const declaredOverlay = [...sources.liveDigests.keys()]
+    .filter((lane) =>
+      report.capturability.overlayProviders.includes(lane.split(":").slice(1).join(":")),
+    )
+    .sort();
+  assert.ok(declaredOverlay.length > 0, "the closure table still declares an overlay-provider lane");
+  assert.deepEqual(report.capturability.overlayProviderLanes.slice().sort(), declaredOverlay);
+
+  // …and the partition is the RIGHT one, judged from three sources the report does not consult
+  // together: a declared closure lane is outside the E1 cell universe exactly when its provider is
+  // neither a manifest model (so `--list` can key no `<modelId>:<tier>:<backend>` cell on it) nor
+  // any `PROVIDER_FAMILIES` engine provider (so no anchor can name it). Without this the case would
+  // only check the derivation against itself: dropping `z_image_control` from
+  // `SHIPPED_CONTROL_WEIGHTS` would move `candle:z_image_control` back under "uncapturable" and
+  // every self-referential assertion above would still hold.
+  const familyProviders = new Set(
+    Object.entries(PROVIDER_FAMILIES).map(([key, family]) => family.provider ?? key),
+  );
+  assert.deepEqual(
+    declaredOverlay,
+    [...sources.liveDigests.keys()]
+      .filter((lane) => {
+        const provider = lane.split(":").slice(1).join(":");
+        return !catalogIds.has(provider) && !familyProviders.has(provider);
+      })
+      .sort(),
+    "the overlay partition must be exactly the declared lanes no E1 cell can ever key on",
+  );
+  for (const lane of declaredOverlay) {
+    assert.ok(
+      !report.capturability.uncapturableLanes.includes(lane),
+      `${lane} is an overlay provider and must not be graded uncapturable`,
+    );
+  }
+  assert.equal(report.totals.overlayProviderLanes, report.overlayProviderLanes.length);
+
+  const text = formatReport(report);
+  assert.match(
+    text,
+    /STRICT-CONTROL OVERLAY PROVIDERS — OUT OF THE E1 CELL UNIVERSE, not uncapturable/,
+  );
+  assert.ok(text.includes(OVERLAY_PROVIDER_SOURCE));
+  for (const lane of declaredOverlay) assert.ok(text.includes(lane), `${lane} is printed`);
+});
+
+// The derivation fails CLOSED: it may never quietly yield an empty partition, which would put the
+// overlay lanes back under "uncapturable" without anything saying so.
+test("the overlay-provider derivation refuses a table it cannot read", () => {
+  const manifest = { models: [{ id: "sdxl" }] };
+  assert.throws(
+    () => shippedControlOverlayProviders("// the table moved", manifest, "x.rs"),
+    /SHIPPED_CONTROL_WEIGHTS is no longer a parseable table/,
+  );
+  assert.throws(
+    () =>
+      shippedControlOverlayProviders(
+        "pub const SHIPPED_CONTROL_WEIGHTS: &[ShippedControlWeight] = &[\n];",
+        manifest,
+        "x.rs",
+      ),
+    /names no engine_id at all/,
+  );
+  assert.throws(
+    () => buildStaleLaneReport({ ...twoLaneFixture(), controlWeightsSource: undefined }),
+    /SHIPPED_CONTROL_WEIGHTS is no longer a parseable table/,
+  );
 });

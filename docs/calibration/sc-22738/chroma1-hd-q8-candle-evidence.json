@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/chroma1-hd-mlx",
+        "resolvedRevision": "9d99afe1ebca67032476756bc70d4a7152bc1bd5",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "chroma1-hd-q8-cuda-request-scoped-staged-residency-v1",
+      "capturedAt": "2026-09-10T16:44:42Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:chroma1_hd-five-rung-reference",
+        "blockers": [
+          "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12116295680
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 17317232640
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 12084838400
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 17317232640
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-chroma1-hd-q8-1024-seed16402-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c5e1913f5ba8d889cccc",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/chroma1-hd-mlx@9d99afe1ebca67032476756bc70d4a7152bc1bd5:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-8d52f989822155d6e79f",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 12116295680,
+          "allocatorBytes": 12116295680,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 12084838400,
+          "allocatorBytes": 12084838400,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 17317232640,
+          "allocatorBytes": 17317232640,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 17317232640,
+          "allocatorBytes": 17317232640,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "c9cff157bfecc6efa20fa93d525e2e123f16325262904f1828cab486794062e0",
+          "dirty": false,
+          "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f8e8a0fc8eee3762ae7fd4c07e26ac2a1e631b4b766fb486147e1f66c9fd7dd1",
+          "revision": "a29b85d9f6d6e64c87ae308d3b2a8301e6f671dc"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Chroma1-HD base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "chroma1_hd",
+        "overlay": "none",
+        "provider": "chroma1_hd",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

@@ -29,6 +29,41 @@ export const VIDEO_MODES = [
 // Audio generation modes the Audio Studio exposes (epic 13400 C0/C1 mirror these keys).
 export const AUDIO_MODES = ["speech", "music", "sfx", "voiceclone"];
 
+// Vector Studio modes. A manifest must declare the mode and the selected native backend provider;
+// install state is evaluated separately so a missing-but-eligible model can be offered for download.
+export const VECTOR_MODES = ["image_to_svg", "text_to_svg"];
+
+export function vectorModelServesMode(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return false;
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  return model?.vector?.providers?.[backend]?.available === true;
+}
+
+export function vectorModelAvailability(model, mode, caps) {
+  if (model?.type !== "vector" || !VECTOR_MODES.includes(mode) || !model?.capabilities?.includes(mode)) {
+    return { available: false, reason: "unsupported_mode" };
+  }
+  const backend = caps?.platform === "macos" || caps?.platform === "darwin" ? "mlx" : "candle";
+  const provider = model?.vector?.providers?.[backend];
+  if (provider?.available !== true) {
+    return { available: false, reason: provider?.reason ?? "provider_not_linked", backend };
+  }
+  if (model?.installState !== "installed" || model?.cacheState !== "complete") {
+    return {
+      available: false,
+      reason: model?.cacheState === "incomplete" ? "model_incomplete" : "model_missing",
+      backend,
+    };
+  }
+  return { available: true, reason: null, backend, providerId: provider.id };
+}
+
+export function vectorModelUsable(model, caps) {
+  return model?.type === "vector" && VECTOR_MODES.some((mode) => vectorModelServesMode(model, mode, caps));
+}
+
 // Conditioning kinds that mark a voice-clone (voice-conversion / speaker-embedding) model —
 // distinct from ACE-Step's "AudioEdit" conditioning, which is a music-editing signal, not a
 // reference/identity signal. Compared case-insensitively so manifest casing never matters.
@@ -121,10 +156,15 @@ export function videoModelUsable(model, caps) {
 //                  MOSS-TTSD, sc-13676). A streaming / multi-speaker TTS has no fixed voice list (it
 //                  speaks in its own voice(s)), so that capability is its speech signal — never a
 //                  hardcoded id.
-//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend). → ACE-Step.
+//   * music      — advertises audio-editing ops (audio.editModes[]: inpaint/repaint/extend) → ACE-Step,
+//                  OR sings segmented lyrics (audio.supportsSegmentedLyrics → the six YuE lyrics2song
+//                  checkpoints, sc-19383). A lyrics-to-song model has no edit surface, so the lyrics
+//                  capability is its music signal; without it YuE CoT would fall through to sfx.
 //   * voiceclone — conditions on a reference / speaker-identity embedding
 //                  (audio.conditioning ⊇ ReferenceAudio | VoiceEmbedding). → OpenVoice V2, Chatterbox-VE.
 //                  ACE-Step's conditioning is "AudioEdit" (a music-edit signal), so it does NOT match.
+//                  YuE ICL's ReferenceAudio is a SONG prompt (a lyrics2song model), not a voice to clone,
+//                  so a model that sings segmented lyrics never serves voiceclone.
 //   * sfx        — a general text-to-audio generator (audio.sampleRates[]) that is none of the above. → MOSS.
 function audioBlock(model) {
   return model?.audio && typeof model.audio === "object" ? model.audio : null;
@@ -151,6 +191,11 @@ function audioHasEditModes(audio) {
   return Array.isArray(audio?.editModes) && audio.editModes.length > 0;
 }
 
+// A lyrics-to-song model (backend Capabilities.supports_segmented_lyrics — YuE, sc-19383).
+function audioSingsSegmentedLyrics(audio) {
+  return audio?.supportsSegmentedLyrics === true;
+}
+
 function audioGenerates(audio) {
   // A generative (text→waveform) model advertises the sample rates it emits.
   return Array.isArray(audio?.sampleRates) && audio.sampleRates.length > 0;
@@ -170,10 +215,10 @@ export function audioModelServesMode(model, mode) {
     return audioHasVoices(audio) || audioSupportsStreaming(audio) || audioSupportsMultiSpeaker(audio);
   }
   if (mode === "music") {
-    return audioHasEditModes(audio);
+    return audioHasEditModes(audio) || audioSingsSegmentedLyrics(audio);
   }
   if (mode === "voiceclone") {
-    return audioHasVoiceCloneConditioning(audio);
+    return audioHasVoiceCloneConditioning(audio) && !audioSingsSegmentedLyrics(audio);
   }
   if (mode === "sfx") {
     return (
@@ -182,6 +227,7 @@ export function audioModelServesMode(model, mode) {
       !audioSupportsStreaming(audio) &&
       !audioSupportsMultiSpeaker(audio) &&
       !audioHasEditModes(audio) &&
+      !audioSingsSegmentedLyrics(audio) &&
       !audioHasVoiceCloneConditioning(audio)
     );
   }

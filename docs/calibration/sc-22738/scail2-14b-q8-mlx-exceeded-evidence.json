@@ -1,0 +1,62 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "40dead9f160a35b37e1121d68b64a2d22901082a234c30282e694024ab80d3be",
+        "repository": "SceneWorks/scail2-mlx",
+        "resolvedRevision": "ce88cfdb1008f395e9c820e525e6db7b6695f7b3",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "scail2-14b-q8-mlx-resident-eager-v1",
+      "capturedAt": "2026-09-08T09:52:07.363Z",
+      "ceilingBytes": 94822600832,
+      "eventFileSha256": "5c0b9720f572b4ea1c3451be60624a054f33cbbfacd83477789159e9ccb5127c",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-b66d77965d2999ba9bcc",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-afafd6ba2bcc2a4fcfb6",
+      "observedFootprintBytes": 104236837336,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_104236837336",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "d5430d8ae94837cfe0b267dfa05a35b3587945710a41ad37271b42ca7926316a",
+          "dirty": false,
+          "revision": "e34d7b46a301376676bd8a60419190c7be9aa4f0"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:643f66d2ed26e30f94add8bb102d4574683edd6b9ee958515084ad54be1ba650",
+          "revision": "6fe0da8361bc0c8d5f283d993903ae3a9babe68d"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 77,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "animation",
+        "modelId": "scail2_14b",
+        "overlay": "none",
+        "provider": "scail2_14b",
+        "tier": "q8"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}

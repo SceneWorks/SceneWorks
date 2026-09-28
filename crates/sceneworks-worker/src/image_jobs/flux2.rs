@@ -346,6 +346,7 @@ fn flux2_edit_resolved_quant(
     reconcile_resolved_tier_quant(
         requested_for_reconcile,
         weights_dir,
+        &request.model_manifest_entry,
         !dense_text_encoder,
         model_id,
         job_id,
@@ -843,6 +844,7 @@ async fn generate_flux2_edit_stream(
         (adapter_count > 0).then(|| format!("adapters:{adapter_count}")),
     );
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        conditioning_windows: None,
         width,
         height,
         count: 1,
@@ -1399,6 +1401,7 @@ async fn generate_flux2_dev_control_stream(
         None => memory_plan,
     };
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        conditioning_windows: None,
         width,
         height,
         count: 1,

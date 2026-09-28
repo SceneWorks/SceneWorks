@@ -6,9 +6,9 @@
 //! but workers always re-probe its exact path and physical identity before constructing a loader.
 
 use super::{ArtifactLocation, ResolvedModelArtifact};
+use crate::file_lock::FileLock;
 use crate::hf_home::safe_repo_dir_name;
 use crate::store_util::{atomic_write, random_hex};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::fs::{File, OpenOptions};
 use std::path::{Component, Path, PathBuf};
@@ -704,16 +704,15 @@ impl ExternalLibraryBindingStore {
             .map_err(|error| ExternalLibraryError(error.to_string()))
     }
 
-    fn lock_shared(&self) -> Result<File, ExternalLibraryError> {
-        let file = self.open_lock()?;
-        FileExt::lock_shared(&file)?;
-        Ok(file)
+    /// The returned guard IS the lock: dropping it releases with `LOCK_UN` rather than by
+    /// `close(2)` alone, which would keep reading as held while any forked child still references
+    /// the same open file description (see [`FileLock`]).
+    fn lock_shared(&self) -> Result<FileLock, ExternalLibraryError> {
+        Ok(FileLock::shared(self.open_lock()?)?)
     }
 
-    fn lock_exclusive(&self) -> Result<File, ExternalLibraryError> {
-        let file = self.open_lock()?;
-        FileExt::lock_exclusive(&file)?;
-        Ok(file)
+    fn lock_exclusive(&self) -> Result<FileLock, ExternalLibraryError> {
+        Ok(FileLock::exclusive(self.open_lock()?)?)
     }
 
     fn open_lock(&self) -> Result<File, ExternalLibraryError> {

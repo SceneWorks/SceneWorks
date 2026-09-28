@@ -1,0 +1,189 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "inventorySha256": "e033daa365de2a1a95e31817c4a1dc9c1e2d5a549412c4ad1c150d5275239f92",
+        "repository": "SceneWorks/ltx-2.5-mlx",
+        "resolvedRevision": "081658ce6886cacba20817ce0359bbefef706ff2",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-candle-ladder-v1",
+      "capturedAt": "2026-09-09T14:51:26Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:ltx-2.5",
+        "blockers": [
+          "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 56274976768
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 60370714624
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 69463965696
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 69463965696
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 145
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 24
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-5-candle-q8-768x512-f145-fps24-seed18755",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-dc4ac6f6d8e504429cb2",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.5-mlx@081658ce6886cacba20817ce0359bbefef706ff2:q8:transformer=distilled:decoder=conv:f145:768x512:fps24:seed18755",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-86b5a76deba023e203a7",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 56274976768,
+          "allocatorBytes": 56274976768,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 69463965696,
+          "allocatorBytes": 69463965696,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 60370714624,
+          "allocatorBytes": 60370714624,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 69463965696,
+          "allocatorBytes": 69463965696,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "4fe5f67937f38d4eb73938d9ea1006160c948da619461110ba02e9f32a5e34b8",
+          "dirty": false,
+          "revision": "e34d7b46a301376676bd8a60419190c7be9aa4f0"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:8b85b9529614cf83176c00c2bce284e8d955af96b8401fe8f8886684a0cadd9d",
+          "revision": "90d67d0f825dedea234f44f28fa9cbc5ce5cab7d"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "SC-18783 LTX-2.5 Candle capture measured the selected real provider path; promotion remains gated on terminal CUDA repetition/quality evidence; advanced INT8-ConvRot/NVFP4 receipt production remains inference-owned",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle LTX-2.5 text-to-video base recipe (including the official dev refinement LoRA) executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "decoder": "conv",
+        "geometry": {
+          "batch": 1,
+          "frames": 145,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_5",
+        "overlay": "none",
+        "provider": "ltx_2_5_distilled",
+        "tier": "q8",
+        "transformerVariant": "distilled"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

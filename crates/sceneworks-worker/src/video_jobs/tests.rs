@@ -834,25 +834,21 @@ fn bernini_r2v_rejects_missing_excess_and_duplicate_asset_ids_before_loading() {
     validate_r2v_reference_ids(&exact).expect("one ordered wrapper may contain eight distinct ids");
 }
 
-/// Closure currency must use the resolved provider id, not the catalog alias. On macOS the Wan
-/// 5B route therefore resolves the lane key `mlx:wan2_2_ti2v_5b`; the generated closure catalog is
-/// stamped only after the final inference head is frozen.
+/// The shared video funnel resolves NO closure currency (sc-22738): a packaged curve, anchor or
+/// bound matches a request on its identity alone, so the funnel must not read the provider
+/// closure ledger at all — the lookup this test used to pin (keyed on the active lane and the
+/// resolved provider id) is what made a moved closure floor a live request. The lane key itself
+/// is still the resolved provider id, not the catalog alias: on macOS the Wan 5B route resolves
+/// `mlx:wan2_2_ti2v_5b`.
 #[cfg(target_os = "macos")]
 #[test]
-fn video_admission_closure_currency_uses_lane_and_resolved_provider() {
+fn video_admission_resolves_no_closure_currency_and_keys_the_lane_on_the_resolved_provider() {
     const WAN: &str = include_str!("wan.rs");
-    let lookup = WAN
-        .split_once("let admission_closure_digest =")
-        .expect("shared video funnel resolves closure currency")
-        .1
-        .split_once(";")
-        .expect("closure lookup statement closes")
-        .0;
     assert!(
-        lookup.contains("packaged_closure_digest(")
-            && lookup.contains("crate::video_admission::LANE.as_key()")
-            && lookup.contains("input.engine_id"),
-        "closure lookup must key the active lane and resolved provider: {lookup}"
+        !WAN.contains("admission_closure_digest")
+            && !WAN.contains("packaged_closure_digest(")
+            && !WAN.contains("expected_closure_digest"),
+        "the shared video funnel must not resolve or thread a closure digest (sc-22738)"
     );
     assert_eq!(
         format!(
@@ -2035,7 +2031,7 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     let mut settings = Settings::from_env();
     settings.data_dir = data_dir.path().to_path_buf();
     let api = ApiClient::new(&settings);
-    let job = reference_audio_job_snapshot();
+    let job = reference_audio_job_snapshot("job-sc17160");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.create_project("sc17160").expect("project creates");
     let project_path = PathBuf::from(&project.path);
@@ -2167,8 +2163,15 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
                     "the reference must reach the engine at its audio VAE's rate, not the \
                      asset's {SOURCE_RATE} Hz"
                 );
-                assert_eq!(audio.channels, 1, "the source layout is left alone");
-                audio.samples.len()
+                // sc-24070: normalized onto the engine's fixed two-channel layout, exactly like
+                // the rate above. The source assets here are mono.
+                assert_eq!(
+                    audio.channels, 2,
+                    "the reference reaches the engine as stereo"
+                );
+                // PER-CHANNEL, so the rate assertion below stays a statement about the RATE after
+                // sc-24070 made the track two channels wide rather than one.
+                audio.samples.len() / usize::from(audio.channels)
             }
             other => panic!("expected ReferenceAudio, got {other:?}"),
         })
@@ -2192,13 +2195,250 @@ async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_pa
     );
 }
 
+/// The video reference command stays byte-identical PCM-16 now that YuE's ICL decode shares its builder.
+#[test]
+fn reference_audio_command_is_byte_identical_pcm16_normalization() {
+    use super::reference_audio::reference_audio_ffmpeg_args;
+    let args = reference_audio_ffmpeg_args(Path::new("/in/voice.wav"), Path::new("/out/ref.wav"));
+    assert_eq!(
+        args,
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-i",
+            "/in/voice.wav",
+            "-map",
+            "0:a:0",
+            "-vn",
+            "-ar",
+            "32000",
+            "-ac",
+            "2",
+            "-c:a",
+            "pcm_s16le",
+            "/out/ref.wav",
+        ]
+    );
+}
+
+/// sc-24070: the normalization command pins the engine's CHANNEL layout as well as its rate.
+///
+/// The ffmpeg-free half of the defect, so it runs on every lane including hosted macOS CI, which
+/// ships no ffmpeg. The engine's `ref2va` layout reserves soundtrack rows for exactly
+/// `AUDIO_OUTPUT_CHANNELS` (2) while its encoder produces rows per channel SUPPLIED, and its own
+/// `check_audio` gates only the rate — so a mono reference was refused after the full model load
+/// ("556 reference soundtrack rows against a layout reserving 1112", real-weight render
+/// 2026-09-20). `-ac` is what makes mono reachable, and it must be the one `-ac` in the command:
+/// a second one would silently win and this asserts the single occurrence.
+#[test]
+fn reference_audio_normalization_pins_the_engines_channel_layout() {
+    use super::reference_audio::{
+        reference_audio_ffmpeg_args, REFERENCE_AUDIO_CHANNELS, REFERENCE_AUDIO_SAMPLE_RATE,
+    };
+
+    // The value ffmpeg would read for `flag` — and an assertion that there is only ONE, since a
+    // later duplicate silently wins and would make either assertion below meaningless.
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a String> {
+        let at = args.iter().position(|arg| arg == flag)?;
+        assert_eq!(
+            args.iter().filter(|arg| *arg == flag).count(),
+            1,
+            "{flag} must appear exactly once — a later duplicate would silently win: {args:?}"
+        );
+        args.get(at + 1)
+    }
+
+    let args = reference_audio_ffmpeg_args(Path::new("/in/voice.wav"), Path::new("/out/ref.wav"));
+    let channels = REFERENCE_AUDIO_CHANNELS.to_string();
+    let rate = REFERENCE_AUDIO_SAMPLE_RATE.to_string();
+    assert_eq!(
+        value_after(&args, "-ac"),
+        Some(&channels),
+        "a mono voice clip must reach the engine as dual mono, and a wider one downmixed, because \
+         the packed layout reserves rows for exactly {REFERENCE_AUDIO_CHANNELS} channels: {args:?}"
+    );
+    assert_eq!(
+        value_after(&args, "-ar"),
+        Some(&rate),
+        "the rate normalization (sc-18650) stays: {args:?}"
+    );
+    // The channel flag is a normalization of the INPUT, so it has to sit in the output-option run
+    // before the destination rather than after it, where ffmpeg would read it as an input option
+    // for a file it is writing.
+    let ac = args
+        .iter()
+        .position(|arg| arg == "-ac")
+        .expect("-ac present");
+    let dest = args
+        .iter()
+        .position(|arg| arg.ends_with("ref.wav"))
+        .expect("destination present");
+    assert!(ac < dest, "-ac must precede the output file: {args:?}");
+    assert!(
+        args.iter().any(|arg| arg == "pcm_s16le"),
+        "`read_wav_pcm16` decodes PCM s16 only: {args:?}"
+    );
+}
+
+/// sc-24070, the measured half: a MONO asset resolves to a two-channel dual-mono track and a
+/// STEREO one passes through with its width intact.
+///
+/// Every SceneWorks TTS producer (Kokoro included) emits mono, so this is the shape "a voice to
+/// match" actually arrives in. Skips when no ffmpeg is reachable, exactly as the sibling resolver
+/// test does — hosted macOS CI has none, and `ffmpeg_reachable` still fails loudly on a lane that
+/// declared one via `SCENEWORKS_REQUIRE_FFMPEG` (sc-19549).
+#[tokio::test]
+async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_mono() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_mono: \
+             ffmpeg not found"
+        );
+        return;
+    }
+
+    let data_dir = tempfile::tempdir().expect("temp dir creates");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data_dir.path().to_path_buf();
+    let api = ApiClient::new(&settings);
+    let job = reference_audio_job_snapshot("job-sc24070");
+    let store = ProjectStore::new(settings.data_dir.clone(), "worker");
+    let project = store.create_project("sc24070").expect("project creates");
+    let project_path = PathBuf::from(&project.path);
+
+    // The engine's own rate, so this test is about CHANNELS only and a resample cannot move the
+    // per-channel counts it asserts.
+    const RATE: u32 = 32_000;
+    // 0.2 s — long enough for a real filter window.
+    const FRAMES: usize = 6_400;
+    // A DC level rather than silence: a dropped-and-zero-filled second channel is then visible,
+    // where duplicated silence would not be. Distinct per channel on the stereo asset, so a
+    // downmix-to-mono-then-upmix would be caught too.
+    let pid = std::process::id();
+    for (asset_id, name, channels, samples) in [
+        (
+            "asset_mono_voice",
+            format!("mono-{pid}.wav"),
+            1u16,
+            vec![0.25f32; FRAMES],
+        ),
+        (
+            "asset_stereo_voice",
+            format!("stereo-{pid}.wav"),
+            2u16,
+            (0..FRAMES)
+                .flat_map(|_| [0.25f32, -0.5f32])
+                .collect::<Vec<f32>>(),
+        ),
+    ] {
+        let media_rel = format!("assets/audio/{name}");
+        let media_path = project_path.join(&media_rel);
+        std::fs::create_dir_all(media_path.parent().expect("audio dir"))
+            .expect("audio dir creates");
+        write_wav_pcm16(
+            &AudioTrack {
+                samples,
+                sample_rate: RATE,
+                channels,
+            },
+            &media_path,
+        )
+        .expect("wav writes");
+        store
+            .persist_generated_asset(
+                &project.id,
+                "job-sc24070",
+                "genset-sc24070",
+                &json!({
+                    "type": "audio",
+                    "assetId": asset_id,
+                    "mediaPath": media_rel,
+                    "mimeType": "audio/wav",
+                    "displayName": name,
+                    "createdAt": "2026-09-20T00:00:00Z",
+                }),
+            )
+            .expect("audio asset persists");
+    }
+
+    let request = request_with_audio(&project.id, &["asset_mono_voice", "asset_stereo_voice"]);
+    let conditioning =
+        resolve_reference_audio_conditioning(&api, &settings, &job, &request, &project_path)
+            .await
+            .expect("a mono reference must resolve — it is the only shape SceneWorks TTS emits");
+    assert_eq!(conditioning.len(), 2);
+
+    // The ENGINE's track (`gen_core::AudioTrack`), not the worker-local `AudioTrack` the fixtures
+    // above are written from — the resolver's whole job is the conversion between them.
+    let tracks: Vec<&gen_core::AudioTrack> = conditioning
+        .iter()
+        .map(|item| match item {
+            gen_core::Conditioning::ReferenceAudio { audio, .. } => audio,
+            other => panic!("expected ReferenceAudio, got {other:?}"),
+        })
+        .collect();
+
+    for (index, track) in tracks.iter().enumerate() {
+        assert_eq!(
+            track.channels, 2,
+            "reference {index} must reach the engine at the two channels its packed layout \
+             reserves rows for"
+        );
+        let per_channel = track.samples.len() / 2;
+        assert!(
+            per_channel.abs_diff(FRAMES) <= 128,
+            "reference {index}: {FRAMES} frames in must stay {FRAMES} frames out at an unchanged \
+             {RATE} Hz, got {per_channel}"
+        );
+    }
+
+    // The mono source arrives as DUAL mono — both channels carry the same waveform, not one
+    // waveform and one silent channel.
+    let mono = tracks[0];
+    let mismatched = mono
+        .samples
+        .chunks_exact(2)
+        .filter(|frame| (frame[0] - frame[1]).abs() > 1.0 / 32_768.0)
+        .count();
+    assert_eq!(
+        mismatched,
+        0,
+        "an upmixed mono reference must be DUAL mono: {mismatched} of {} frames differ between \
+         the two channels",
+        mono.samples.len() / 2
+    );
+
+    // ...and the stereo source is NOT flattened on the way through: its two distinct channels
+    // survive, so "always normalize to two" never became "always downmix then duplicate".
+    let stereo = tracks[1];
+    let distinct = stereo
+        .samples
+        .chunks_exact(2)
+        .filter(|frame| (frame[0] - frame[1]).abs() > 0.1)
+        .count();
+    assert!(
+        distinct * 10 > stereo.samples.len() / 2 * 9,
+        "a stereo reference must pass through with both channels intact: only {distinct} of {} \
+         frames still differ",
+        stereo.samples.len() / 2
+    );
+}
+
 /// A [`JobSnapshot`] for the reference-audio resolver tests. The resolver spawns ffmpeg through the
 /// shared runner, which uses the id only to name the scratch directory and to address the
 /// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
 /// elapses inside a sub-second transcode.
-fn reference_audio_job_snapshot() -> JobSnapshot {
+///
+/// **The id is a parameter because it is the scratch directory's name.** The resolver stages every
+/// reference under `<temp>/sw-reference-audio-<job id>-<index>` and REMOVES that directory on every
+/// exit, so two tests sharing one id delete each other's work mid-transcode and read each other's
+/// `reference.wav` — which is exactly what the two resolver tests did to each other when the
+/// sc-24070 one reused this snapshot verbatim. One id per test keeps them independent under
+/// `cargo test`'s default parallelism.
+fn reference_audio_job_snapshot(id: &str) -> JobSnapshot {
     serde_json::from_value(json!({
-        "id": "job-sc17160",
+        "id": id,
         "type": "video_generate",
         "status": "running",
         "projectId": null,
@@ -3977,6 +4217,96 @@ fn shared_video_funnel_reaches_auto_duration_and_temporal_provider_fields() {
     );
     assert_eq!(request.auto_duration, Some(range));
     assert_eq!(request.temporal_upsample_rounds, Some(2));
+}
+
+/// sc-23402. The reference-image short edge the job asked for reaches the engine's
+/// `GenerationRequest`, and a request that named none leaves the field absent so gen-core's own
+/// default (2048) applies — the funnel neither invents a value nor drops one.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_video_funnel_carries_the_reference_image_short_edge_to_the_request() {
+    let probe = |short_edge: Option<u32>| -> Option<u32> {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let generator = ProbeGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "minimax_h3_ref",
+                family: "minimax_h3",
+                backend: "test",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            request: captured.clone(),
+            adapter_reports: Default::default(),
+            audio: None,
+        };
+        let input = VideoGenInput {
+            engine_id: "minimax_h3_ref",
+            prompt: "a courier".to_owned(),
+            width: 576,
+            height: 320,
+            frames: 125,
+            fps: 24,
+            reference_image_short_edge: short_edge,
+            ..VideoGenInput::default()
+        };
+        run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+            .expect("probe generation");
+        let request = captured.lock().unwrap().clone().expect("captured request");
+        request.reference_image_short_edge
+    };
+    assert_eq!(probe(Some(1536)), Some(1536));
+    assert_eq!(probe(Some(1024)), Some(1024));
+    assert_eq!(
+        probe(None),
+        None,
+        "an absent knob stays absent so the engine's own default resolves it"
+    );
+    // The recorded default and the engine's resolver are the same number.
+    assert_eq!(
+        sceneworks_core::video_request::effective_reference_image_short_edge(None),
+        gen_core::effective_reference_image_short_edge(&gen_core::GenerationRequest {
+            reference_image_short_edge: None,
+            ..Default::default()
+        }),
+    );
+}
+
+/// The `advanced.referenceImageShortEdge` parse the MiniMax-H3 arms run before any weight is read
+/// (sc-23402) — admitted inside 1024..=2048, refused outside it rather than clamped.
+#[test]
+fn minimax_h3_reference_short_edge_is_parsed_from_advanced_and_refused_out_of_range() {
+    let advanced = |value: Value| -> serde_json::Map<String, Value> {
+        json!({ "referenceImageShortEdge": value })
+            .as_object()
+            .cloned()
+            .expect("object")
+    };
+    assert_eq!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(
+            &serde_json::Map::new()
+        )
+        .expect("an absent knob parses"),
+        None
+    );
+    assert_eq!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(&advanced(json!(
+            1536
+        )))
+        .expect("1536 is admitted"),
+        Some(1536)
+    );
+    assert!(
+        sceneworks_core::video_request::requested_reference_image_short_edge(&advanced(json!(512)))
+            .is_err(),
+        "below the floor is refused, never clamped"
+    );
 }
 
 /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.

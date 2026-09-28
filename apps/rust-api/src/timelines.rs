@@ -45,7 +45,11 @@ pub(crate) async fn update_timeline(
 ) -> Result<Json<Value>, ApiError> {
     Ok(Json(
         project_call(state, move |store| {
-            store.save_existing_timeline(&project_id, &timeline_id, payload.timeline)
+            let mut timeline = payload.timeline;
+            if let Some(revision) = payload.expected_revision {
+                timeline["revision"] = json!(revision);
+            }
+            store.save_existing_timeline(&project_id, &timeline_id, timeline)
         })
         .await?,
     ))
@@ -60,7 +64,7 @@ pub(crate) async fn create_timeline_export(
     let timeline_result = project_call(state.clone(), {
         let project_id = project_id.clone();
         let timeline_id = timeline_id.clone();
-        move |store| store.timeline_file_and_document(&project_id, &timeline_id)
+        move |store| store.snapshot_timeline_export(&project_id, &timeline_id)
     })
     .await?;
     let timeline_name = timeline_result
@@ -73,6 +77,12 @@ pub(crate) async fn create_timeline_export(
     job_payload.insert("projectId".to_owned(), Value::String(project_id.clone()));
     job_payload.insert("timelineId".to_owned(), Value::String(timeline_id));
     job_payload.insert("timelineName".to_owned(), Value::String(timeline_name));
+    job_payload.insert(
+        "timelineRevision".to_owned(),
+        json!(sceneworks_core::film_timeline::revision(
+            &timeline_result.document
+        )),
+    );
     job_payload.insert(
         "timelinePath".to_owned(),
         Value::String(timeline_result.file.relative_path),
@@ -141,4 +151,17 @@ pub(crate) async fn extract_timeline_frame(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+pub(crate) async fn deliver_film_timeline(
+    State(state): State<AppState>,
+    Path((project_id, timeline_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<Value>,
+) -> Result<Json<Value>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.deliver_film_timeline(&project_id, &timeline_id, payload)
+        })
+        .await?,
+    ))
 }

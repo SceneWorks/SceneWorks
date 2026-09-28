@@ -1,7 +1,7 @@
 {
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "703d10d916e80a5fedd88be318159cb0ff553184",
+    "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "engines": [
@@ -722,6 +722,28 @@
           "identity": "qwen-wan-z16-v1",
           "channels": 16,
           "contentHash": "fnv1a64:9f750a16272a301a"
+        }
+      }
+    },
+    {
+      "id": "qwen_image_2_1",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 64,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "perChannel",
+          "identity": "qwen-image-2-1-z64-v1",
+          "channels": 64,
+          "contentHash": "fnv1a64:883e8e82efcd5df1"
         }
       }
     },
@@ -7920,6 +7942,217 @@
       ]
     },
     {
+      "id": "qwen_image_2_1",
+      "composed": false,
+      "selectorDigest": "sha256:f24cdf8d700fcf6cdba2b042e917d58b4fca22cda9b8a2ac29e43ab23961d011",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
       "id": "qwen_image_edit",
       "composed": true,
       "selectorDigest": "sha256:c6b95a7272ba813982908a39ba8b821d67cefbf0665ae4d77ea37030beb96387",
@@ -9358,6 +9591,188 @@
             "bounded_decode",
             "staged_residency"
           ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "wan2_2_i2v_14b",
+      "composed": false,
+      "selectorDigest": "sha256:0b1809bce428e3b1b3772c1a6fc8b829fa9697034c73417e59cbdd1eb8aac191",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "wan2_2_t2v_14b",
+      "composed": false,
+      "selectorDigest": "sha256:0b1809bce428e3b1b3772c1a6fc8b829fa9697034c73417e59cbdd1eb8aac191",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
         }
       ]
@@ -15380,6 +15795,90 @@
     },
     {
       "provider": "qwen_image",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1",
       "tier": "q8",
       "mode": "text_to_image",
       "overlay": "none",

@@ -1,0 +1,253 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/flux1-schnell-mlx",
+        "resolvedRevision": "bba3ae01dfd94089f173c05edd4e1a4c551f2599",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "flux1-schnell-q8-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-06T12:28:16Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:flux1-schnell-shared-ladder",
+        "blockers": [
+          "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 264480
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 19726271500
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 33281798688
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 74715741312
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 33283356000
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 17930887128
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 665667120
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 33283356000
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 17930887128
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 98
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "flux1-schnell-mlx-q8-1024-seed22726-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-128e5df63efad3abfed4",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-schnell-mlx@bba3ae01dfd94089f173c05edd4e1a4c551f2599:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-329b7355bf8a55483a27",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 264480,
+          "allocatorBytes": 265536,
+          "reclaimableBytes": 1056
+        },
+        "decode": {
+          "activeBytes": 33281798688,
+          "allocatorBytes": 74715741312,
+          "reclaimableBytes": 41433942624
+        },
+        "denoise": {
+          "activeBytes": 19726271500,
+          "allocatorBytes": 23741211220,
+          "reclaimableBytes": 4014939720
+        },
+        "overall": {
+          "activeBytes": 33281798688,
+          "allocatorBytes": 74715741312,
+          "reclaimableBytes": 41433942624
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 78517370880,
+        "denoise": 24964497408,
+        "overall": 78517370880
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "57ac1eb79a27c835615b7f72a744a2c9e0f3795be84a3ec52b64eb99028145c3",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:736abb1d3ce02ae8f50d1fb60334578e75b3251b8fc6cecf111e499a5985a37f",
+          "revision": "20b22952b39e22ec8f4e156bb2721806fd115601"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 78517370880,
+          "name": "exact_fit",
+          "predictedBytes": 78517370880,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned FLUX.1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX FLUX.1-schnell base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "flux_schnell",
+        "overlay": "none",
+        "provider": "flux1_schnell",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

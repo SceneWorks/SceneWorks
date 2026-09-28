@@ -161,6 +161,10 @@
       "candle": true,
       "mlx": true
     },
+    "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
     "qwen_image_edit": {
       "mlx": true
     },
@@ -247,6 +251,24 @@
       "candle": false
     },
     "stable_audio_3_small_sfx_base": {
+      "candle": false
+    },
+    "yue_en_cot": {
+      "candle": false
+    },
+    "yue_en_icl": {
+      "candle": false
+    },
+    "yue_jp_kr_cot": {
+      "candle": false
+    },
+    "yue_jp_kr_icl": {
+      "candle": false
+    },
+    "yue_zh_cot": {
+      "candle": false
+    },
+    "yue_zh_icl": {
       "candle": false
     },
     "z_image": {

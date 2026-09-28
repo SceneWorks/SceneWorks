@@ -21,13 +21,68 @@ name: Server Candle (Linux/NVIDIA)
 
 on:
   workflow_dispatch:
+    inputs:
+      starvector_terminal_operation:
+        description: Run the ordinary Linux build or bridge one terminal operation from this existing default-branch workflow.
+        required: true
+        default: standard
+        type: choice
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b]
+      inference_revision:
+        description: Exact merged inference commit for terminal provisioning.
+        required: false
+        default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+        type: string
+      inference_preflight_run_id:
+        description: Exact inference preflight workflow run id.
+        required: false
+        default: "35252281219"
+        type: string
+      inference_preflight_artifact:
+        description: Complete inference preflight artifact name.
+        required: false
+        default: starvector-terminal-preflight-c5c8c2a73bc5fe9517200c32389c20bf4a670e3d-35252281219-1
+        type: string
+      mac_app_data_source:
+        description: Absolute macOS source-produced app-data root.
+        required: false
+        type: string
+      mac_hf_home_source:
+        description: Absolute macOS isolated Hugging Face source root.
+        required: false
+        type: string
+      windows_app_data_source:
+        description: Absolute Windows source-produced app-data root.
+        required: false
+        type: string
+      windows_hf_home_source:
+        description: Absolute Windows isolated Hugging Face source root.
+        required: false
+        type: string
+      permanent_pin:
+        description: Exact permanent inference pin for the one terminal campaign.
+        required: false
+        default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+        type: string
+      campaign_run_id:
+        description: Unique terminal campaign identity.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
 
 concurrency:
-  group: server-candle-linux-${{ github.ref }}
-  cancel-in-progress: true
+  # Every terminal phase shares one non-canceling bridge queue. An unrelated
+  # ordinary Linux compile must not cancel a source/provision/readiness/campaign
+  # caller, and a later terminal phase must wait for its predecessor to finish.
+  group: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge' }}
+  cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
   build-candle:
+    if: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
     runs-on: ubuntu-22.04
     env:
       # compute_80 PTX the driver JITs forward to sm_120 — one binary covers
@@ -108,4 +163,126 @@ jobs:
         with:
           name: sceneworks-api-candle-linux
           path: target/release/sceneworks-rust-api
+          if-no-files-found: error
+
+  # GitHub exposes workflow_dispatch only for files that already exist on the
+  # default branch. This standing manual workflow is therefore the narrow
+  # bridge that can call the feature branch's source/provision/readiness/campaign
+  # reusable workflows before the final feature-to-main merge.
+  starvector-source-closure:
+    if: ${{ inputs.starvector_terminal_operation == 'source' }}
+    uses: ./.github/workflows/starvector-terminal-source.yml
+    secrets: inherit
+
+  starvector-provision:
+    if: ${{ inputs.starvector_terminal_operation == 'provision' }}
+    uses: ./.github/workflows/starvector-terminal-provision.yml
+    with:
+      inference_revision: ${{ inputs.inference_revision }}
+      inference_preflight_run_id: ${{ inputs.inference_preflight_run_id }}
+      inference_preflight_artifact: ${{ inputs.inference_preflight_artifact }}
+      mac_app_data_source: ${{ inputs.mac_app_data_source }}
+      mac_hf_home_source: ${{ inputs.mac_hf_home_source }}
+      windows_app_data_source: ${{ inputs.windows_app_data_source }}
+      windows_hf_home_source: ${{ inputs.windows_hf_home_source }}
+    secrets: inherit
+
+  starvector-readiness:
+    if: ${{ inputs.starvector_terminal_operation == 'readiness' }}
+    uses: ./.github/workflows/starvector-terminal-readiness.yml
+    with:
+      permanent_pin: ${{ inputs.permanent_pin }}
+    secrets: inherit
+
+  starvector-campaign:
+    if: ${{ inputs.starvector_terminal_operation == 'campaign' }}
+    uses: ./.github/workflows/starvector-terminal.yml
+    with:
+      permanent_pin: ${{ inputs.permanent_pin }}
+      campaign_run_id: ${{ inputs.campaign_run_id }}
+    secrets: inherit
+
+  # Fixed-input product-route diagnostic for the otherwise idle Windows CUDA
+  # host. It is deliberately separate from terminal readiness and acceptance:
+  # no result from this job is consumed by the terminal receipt.
+  starvector-diagnostic-candle-1b:
+    if: ${{ inputs.starvector_terminal_operation == 'diagnostic-candle-1b' }}
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 90
+    env:
+      STARVECTOR_TERMINAL_GPU_ID: "0"
+      STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"
+      STARVECTOR_TERMINAL_ROOT: D:\sceneworks-terminal
+      STARVECTOR_TERMINAL_WEIGHTS_ROOT: D:\sceneworks-terminal\weights
+      STARVECTOR_TERMINAL_LEASE_ROOT: C:\ProgramData\SceneWorks\terminal-leases
+      STARVECTOR_TERMINAL_LEASE_HELPER: ${{ github.workspace }}\target\release\starvector_terminal_lease.exe
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve fixed offline diagnostic inputs
+        shell: powershell
+        run: |
+          $plan = Get-Content -Raw release\starvector-terminal-campaign-v1.json | ConvertFrom-Json
+          $corpusPin = $plan.inference_contract.revision
+          if ($corpusPin -notmatch '^[a-f0-9]{40}$') { throw 'sealed corpus source pin is invalid' }
+          $pinEnvironment = node scripts\lib\starvector-terminal-pin-paths.mjs "$env:STARVECTOR_TERMINAL_ROOT" "$corpusPin"
+          if ($LASTEXITCODE -ne 0) { throw 'immutable corpus path resolution failed' }
+          $corpusPath = $pinEnvironment | Where-Object { $_ -like 'STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT=*' }
+          if (@($corpusPath).Count -ne 1) { throw 'immutable corpus path resolution was ambiguous' }
+          "STARVECTOR_DIAGNOSTIC_CORPUS_PIN=$corpusPin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "STARVECTOR_DIAGNOSTIC_OUTPUT=$env:RUNNER_TEMP\starvector-diagnostic-candle-1b" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $corpusPath | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $currentPin = node scripts\starvector-terminal-diagnostic.mjs source-pin "$env:GITHUB_WORKSPACE"
+          if ($LASTEXITCODE -ne 0 -or $currentPin -notmatch '^[a-f0-9]{40}$') { throw 'current source inference pin resolution failed' }
+          "STARVECTOR_DIAGNOSTIC_PERMANENT_PIN=$currentPin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Run fixed CUDA 1B product-route diagnostic
+        # CUDA 12.9 rejects the newer VS18/MSVC 14.51 toolset. Match the shipping
+        # Windows CUDA lanes exactly: select VS2022 BuildTools in this shell so
+        # both the helper build and the product service's child Cargo build
+        # inherit MSVC 14.44 and its x64 host compiler.
+        shell: cmd
+        run: |
+          node scripts\starvector-terminal-diagnostic.mjs prepare "%GITHUB_WORKSPACE%" "%STARVECTOR_DIAGNOSTIC_OUTPUT%" "%STARVECTOR_TERMINAL_WEIGHTS_ROOT%" "%STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT%" "%STARVECTOR_DIAGNOSTIC_PERMANENT_PIN%" "%STARVECTOR_DIAGNOSTIC_CORPUS_PIN%" "%GITHUB_SHA%" "%STARVECTOR_TERMINAL_LEASE_ROOT%" "%STARVECTOR_TERMINAL_LEASE_HELPER%" || exit /b 1
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
+          where cl.exe >nul || exit /b 1
+          if not exist "%NVCC_CCBIN%\cl.exe" exit /b 1
+          REM A restarted runner may lack the reviewed git dependency. Fetch only
+          REM Cargo.lock source dependencies; model and corpus acquisition remains
+          REM forbidden by the product-route environment and local input contract.
+          cargo fetch --locked || exit /b 1
+          cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease || exit /b 1
+          node scripts\starvector-terminal-diagnostic.mjs run "%GITHUB_WORKSPACE%" "%STARVECTOR_DIAGNOSTIC_OUTPUT%" "%STARVECTOR_TERMINAL_WEIGHTS_ROOT%" "%STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT%" "%STARVECTOR_DIAGNOSTIC_PERMANENT_PIN%" "%STARVECTOR_DIAGNOSTIC_CORPUS_PIN%" "%GITHUB_SHA%" "%STARVECTOR_TERMINAL_LEASE_ROOT%" "%STARVECTOR_TERMINAL_LEASE_HELPER%" || exit /b 1
+      - name: Verify owned product service cleanup
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          $stopped = Join-Path $env:STARVECTOR_DIAGNOSTIC_OUTPUT 'product-service-stopped.json'
+          $active = Join-Path $env:STARVECTOR_DIAGNOSTIC_OUTPUT 'product-service-provenance.json'
+          $startFailed = Join-Path $env:STARVECTOR_DIAGNOSTIC_OUTPUT 'product-service-start-failed.json'
+          $needsStop = Test-Path -LiteralPath $active
+          if (!$needsStop -and (Test-Path -LiteralPath $startFailed)) {
+            $failure = Get-Content -Raw -LiteralPath $startFailed | ConvertFrom-Json
+            $needsStop = $failure.cleanup.status -eq 'failed' -and $null -ne $failure.active_state
+          }
+          if ($needsStop -and !(Test-Path -LiteralPath $stopped)) {
+            node scripts\starvector-terminal-product-service.mjs stop "$env:STARVECTOR_DIAGNOSTIC_OUTPUT"
+            if ($LASTEXITCODE -ne 0) { throw 'fallback product service cleanup failed' }
+          }
+          $state = "$env:RUNNER_TEMP\starvector-diagnostic-candle-1b-product-service-state"
+          if (Test-Path -LiteralPath $state) { throw 'owned diagnostic service state remains after cleanup' }
+      - name: Seal diagnostic artifact inventory
+        if: ${{ always() }}
+        shell: powershell
+        run: |
+          if (Test-Path -LiteralPath $env:STARVECTOR_DIAGNOSTIC_OUTPUT) {
+            $inventory = node scripts\hash-artifact-inventory.mjs --root "$env:STARVECTOR_DIAGNOSTIC_OUTPUT"
+            if ($LASTEXITCODE -ne 0) { throw 'diagnostic artifact inventory failed' }
+            $inventory | Out-File -LiteralPath "$env:STARVECTOR_DIAGNOSTIC_OUTPUT\artifact-inventory.json" -Encoding utf8
+          }
+      - name: Upload diagnostic-only CUDA evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: starvector-diagnostic-candle-1b-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\starvector-diagnostic-candle-1b
           if-no-files-found: error

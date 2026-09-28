@@ -798,14 +798,19 @@ pub(super) const MINIMAX_H3_AUDIO_SAMPLE_RATE: u32 =
     super::reference_audio::REFERENCE_AUDIO_SAMPLE_RATE;
 
 /// Channels a reference soundtrack is extracted at — stereo, the shape the joint model both emits
-/// and was conditioned on. The engine accepts any positive channel count, so this is a choice
-/// rather than a constraint, and downmixing to mono would discard the stereo image of the very clip
-/// the caller supplied as the reference.
+/// and was conditioned on.
+///
+/// **A constraint, not a choice (sc-24070).** The `ref2va` packed layout reserves soundtrack rows
+/// for exactly this many channels regardless of what the reference carries, so any other width is
+/// refused deep inside the denoise loop. An ALIAS of the ungated
+/// [`super::reference_audio::REFERENCE_AUDIO_CHANNELS`], which records the measurement, for the
+/// same anti-drift reason [`MINIMAX_H3_AUDIO_SAMPLE_RATE`] is one.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 = 2;
+pub(super) const MINIMAX_H3_REFERENCE_AUDIO_CHANNELS: u32 =
+    super::reference_audio::REFERENCE_AUDIO_CHANNELS as u32;
 
 /// Fewest 24 fps frames a reference clip may normalize to — **13**.
 ///
@@ -1430,6 +1435,12 @@ pub(super) async fn generate_minimax_h3_using(
     // The turbo recipe (sc-18726) is resolved BEFORE the adapters so a contradictory pair of
     // accelerators is refused by name rather than after a LoRA file has been opened and classified.
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
+    // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
+    // independently — this is the earlier of two gates, not a replacement for it.
+    let reference_image_short_edge =
+        sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?;
     let adapters = resolve_minimax_h3_adapters(settings, request)?;
     let raw_settings = minimax_h3_raw_settings(
         request,
@@ -1484,6 +1495,7 @@ pub(super) async fn generate_minimax_h3_using(
         // 4-step recipe wants a lower one, so it is a real per-request axis rather than a constant.
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
+        reference_image_short_edge,
         ..VideoGenInput::default()
     };
     let decoded = generate_video_using(
@@ -1606,6 +1618,12 @@ pub(super) async fn generate_candle_minimax_h3(
     let conditioning =
         resolve_minimax_h3_conditioning(api, settings, job, request, project_path, frames).await?;
     let (steps, scheduler_shift, turbo) = minimax_h3_sampling(request)?;
+    // sc-23402. Parsed (and RANGE-REFUSED) here rather than left to the engine's own `validate` so a
+    // typo costs a payload parse instead of a 53 GB text-encoder load. The engine still refuses it
+    // independently — this is the earlier of two gates, not a replacement for it.
+    let reference_image_short_edge =
+        sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
+            .map_err(WorkerError::InvalidPayload)?;
     let adapters = resolve_minimax_h3_adapters(settings, request)?;
     let load = resolve_candle_minimax_h3_load(settings, request)?;
     let adapter_bytes =
@@ -1661,6 +1679,7 @@ pub(super) async fn generate_candle_minimax_h3(
         steps,
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
+        reference_image_short_edge,
         offload_policy: OffloadPolicy::Sequential,
         ..VideoGenInput::default()
     };

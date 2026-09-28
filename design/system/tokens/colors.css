@@ -1,0 +1,122 @@
+/* SceneWorks — color system (verbatim from SceneWorks apps/web styles.css).
+ *
+ * OKLCH throughout. Light is the default (:root); dark overrides in
+ * [data-theme="dark"]. The accent is HUE-DRIVEN: --accent-h / --warm-h are set
+ * per palette at the bottom, and every accent ramp derives from them, so a
+ * single [data-accent="…"] swap on a root element recolors the whole app.
+ *
+ * Drive both attributes on a root element (SceneWorks sets them on <html>):
+ *   document.documentElement.setAttribute("data-theme",  "dark");   // or "light"
+ *   document.documentElement.setAttribute("data-accent", "violet"); // any id below
+ */
+
+:root {
+  /* Light theme (default) — cool grays with a hint of blue (hue 240, very low chroma) */
+  --bg: oklch(0.985 0.005 240);
+  --bg-2: oklch(0.965 0.008 240);
+  --surface: #ffffff;
+  --surface-2: oklch(0.97 0.006 240);
+  --surface-hover: oklch(0.955 0.01 240);
+  --border: oklch(0.91 0.01 240);
+  --border-strong: oklch(0.84 0.012 240);
+  --text: oklch(0.22 0.012 240);
+  --text-muted: oklch(0.5 0.012 240);
+  --text-faint: oklch(0.66 0.01 240);
+
+  /* Accent — hue-driven (see palette blocks). teal (178 / 235) is the default. */
+  --accent-h: 178; /* @kind other */
+  --accent: oklch(0.66 0.11 var(--accent-h));
+  --accent-strong: oklch(0.55 0.13 var(--accent-h));
+  --accent-soft: oklch(0.94 0.04 var(--accent-h));
+  --accent-fg: #ffffff;
+
+  /* AI accent — a fixed violet that distinguishes *generative* affordances from
+     the swappable teal primary. Hue-locked (300), NOT driven by --accent-h. */
+  --ai: oklch(0.55 0.16 300);
+  --ai-strong: oklch(0.47 0.18 300);
+  --ai-soft: oklch(0.95 0.04 300);
+  --ai-fg: #ffffff;
+
+  /* Brand palette — fixed brand colors, theme-independent. */
+  --ink: #0f1622;
+  --mist: #b9babb;
+  --paper: #fbfaf6;
+  --teal: #2fa193;
+
+  /* Scene-cut mark + wordmark. Teal is fixed; ground/seam/strong flip per theme. */
+  --logo-ground: var(--ink);
+  --logo-seam: var(--paper);
+  --wordmark-strong: var(--ink);
+
+  /* Secondary + semantic */
+  --warm-h: 235; /* @kind other */
+  --warm: oklch(0.72 0.11 var(--warm-h));
+  --warm-soft: oklch(0.95 0.03 var(--warm-h));
+  --danger: oklch(0.62 0.18 25);
+  --danger-soft: oklch(0.95 0.04 25);
+  --warn: oklch(0.66 0.15 70);
+  --warn-soft: oklch(0.94 0.07 80);
+  --success: oklch(0.62 0.13 155);
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 1px rgba(15, 23, 42, 0.03);
+  --shadow-md: 0 4px 14px rgba(15, 23, 42, 0.07), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-lg: 0 22px 50px rgba(15, 23, 42, 0.12), 0 4px 12px rgba(15, 23, 42, 0.06);
+  --shadow-glow: 0 0 0 4px color-mix(in oklch, var(--accent) 18%, transparent);
+
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: oklch(0.165 0.012 240);
+  --bg-2: oklch(0.145 0.012 240);
+  --surface: oklch(0.205 0.012 240);
+  --surface-2: oklch(0.235 0.014 240);
+  --surface-hover: oklch(0.255 0.014 240);
+  --border: oklch(0.285 0.014 240);
+  --border-strong: oklch(0.36 0.016 240);
+  --text: oklch(0.96 0.008 240);
+  --text-muted: oklch(0.72 0.012 240);
+  --text-faint: oklch(0.56 0.012 240);
+
+  --accent: oklch(0.74 0.11 var(--accent-h));
+  --accent-strong: oklch(0.82 0.12 var(--accent-h));
+  --accent-soft: oklch(0.3 0.06 var(--accent-h));
+  --accent-fg: oklch(0.16 0.012 240);
+
+  --ai: oklch(0.7 0.15 300);
+  --ai-strong: oklch(0.78 0.16 300);
+  --ai-soft: oklch(0.32 0.08 300);
+  --ai-fg: oklch(0.16 0.012 240);
+
+  /* On dark: mark ground → mist (full square reads), seam → ink, wordmark → paper. */
+  --logo-ground: var(--mist);
+  --logo-seam: var(--ink);
+  --wordmark-strong: var(--paper);
+
+  --warm: oklch(0.78 0.11 var(--warm-h));
+  --warm-soft: oklch(0.32 0.05 var(--warm-h));
+  --danger-soft: oklch(0.3 0.06 25);
+  --warn: oklch(0.82 0.14 80);
+  --warn-soft: oklch(0.33 0.07 70);
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 6px 18px rgba(0, 0, 0, 0.38), 0 1px 2px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 30px 60px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.4);
+  color-scheme: dark;
+}
+
+/* ---------- Accent palettes (user-selectable) ----------
+   Each sets the accent + secondary hue; the light/dark ramps above consume them.
+   `teal` keeps the fixed #2fa193 brand mark; the rest derive a matching --teal. */
+[data-accent="teal"]    { --accent-h: 178 /* @kind other */; --warm-h: 235 /* @kind other */; }
+[data-accent="indigo"]  { --accent-h: 274 /* @kind other */; --warm-h: 320 /* @kind other */; --teal: oklch(0.58 0.16 274); }
+[data-accent="cobalt"]  { --accent-h: 252 /* @kind other */; --warm-h: 205 /* @kind other */; --teal: oklch(0.55 0.16 252); }
+[data-accent="violet"]  { --accent-h: 305 /* @kind other */; --warm-h: 268 /* @kind other */; --teal: oklch(0.55 0.18 305); }
+[data-accent="coral"]   { --accent-h: 28  /* @kind other */; --warm-h: 350 /* @kind other */; --teal: oklch(0.62 0.16 28); }
+[data-accent="amber"]   { --accent-h: 80  /* @kind other */; --warm-h: 45  /* @kind other */; --teal: oklch(0.72 0.13 80);
+                          --accent-fg: oklch(0.24 0.03 80); }
+[data-accent="emerald"] { --accent-h: 152 /* @kind other */; --warm-h: 128 /* @kind other */; --teal: oklch(0.56 0.14 152); }
+/* Amber's accent is bright enough to need dark text on chips/buttons in light mode;
+   in dark mode the default ink fg is already correct, so restore it. */
+[data-theme="dark"][data-accent="amber"] { --accent-fg: oklch(0.16 0.012 240); }

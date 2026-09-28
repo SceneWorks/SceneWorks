@@ -2,6 +2,14 @@
 use super::support::*;
 
 #[test]
+fn vector_detail_default_allows_five_minutes_per_svg() {
+    assert_eq!(
+        crate::dto::VectorDetailBudget::default().max_wall_time_ms,
+        300_000
+    );
+}
+
+#[test]
 fn terminal_model_lifecycle_jobs_invalidate_catalog_snapshots() {
     for job_type in [
         crate::JobType::ModelDownload,
@@ -251,6 +259,9 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
         ("video_extend", "/api/v1/video/jobs"),
         ("video_bridge", "/api/v1/video/jobs"),
         ("person_replace", "/api/v1/video/jobs"),
+        // Vector Studio is a typed `vector_generate` capability. `image_to_svg` is a payload
+        // mode owned by its dedicated fixture route, never a generic job type.
+        ("vector_generate", "/api/v1/image/vectorize/jobs"),
         // Audio Studio (sc-13404): the audio route injects the model's manifest entry too, so an
         // `audio_generate` job enqueued raw through the generic route must be rejected the same way.
         ("audio_generate", "/api/v1/audio/jobs"),
@@ -278,6 +289,1257 @@ async fn generic_jobs_route_rejects_generation_types_with_their_typed_route() {
             "{job_type}: error must name {typed_route}, got {body}"
         );
     }
+}
+
+fn write_vector_test_manifest(config_dir: &std::path::Path, capabilities: &[&str]) {
+    write_vector_test_manifest_with_provider_state(config_dir, capabilities, true);
+}
+
+fn write_vector_test_manifest_with_provider_state(
+    config_dir: &std::path::Path,
+    capabilities: &[&str],
+    provider_available: bool,
+) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    let provider = |id| {
+        if provider_available {
+            json!({ "id": id, "available": true })
+        } else {
+            json!({ "id": id, "available": false, "reason": "pending_terminal_inference_pin" })
+        }
+    };
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [{
+                "id": "starvector_test",
+                "name": "StarVector test",
+                "type": "vector",
+                "family": "starvector",
+                "adapter": "starvector",
+                "capabilities": capabilities,
+                "vector": { "providers": {
+                    "mlx": provider("mlx-starvector-1b"),
+                    "candle": provider("candle-starvector-1b")
+                } },
+                "downloads": [{
+                    "provider": "huggingface",
+                    "repo": "SceneWorks/starvector-test",
+                    "revision": "2222222222222222222222222222222222222222",
+                    "files": ["config.json", "model.safetensors"]
+                }],
+            }],
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models write");
+    write_empty_sibling_manifests(config_dir);
+    let installed = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root")
+        .join("data/models/SceneWorks__starvector-test");
+    std::fs::create_dir_all(&installed).expect("test vector install dir creates");
+    std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+        .expect("test vector receipt writes");
+    std::fs::write(installed.join("config.json"), b"{}").expect("test config writes");
+    std::fs::write(installed.join("model.safetensors"), b"weights").expect("test weights write");
+}
+
+fn write_vector_workflow_test_manifest(
+    config_dir: &std::path::Path,
+    raster_revision: &str,
+    vector_revision: &str,
+) {
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_vec_pretty(&json!({
+            "schemaVersion": 1,
+            "models": [
+                {
+                    "id": "flux_schnell",
+                    "name": "Raster test",
+                    "type": "image",
+                    "family": "flux",
+                    "adapter": "flux_diffusers",
+                    "capabilities": ["text_to_image"],
+                    "defaults": { "count": 1, "resolution": { "width": 512, "height": 512 } },
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "SceneWorks/raster-workflow-test",
+                        "revision": raster_revision,
+                        "files": ["config.json", "model.safetensors"]
+                    }]
+                },
+                {
+                    "id": "starvector_test",
+                    "name": "Vector test",
+                    "type": "vector",
+                    "family": "starvector",
+                    "adapter": "starvector",
+                    "capabilities": ["image_to_svg"],
+                    "vector": {
+                        "acceptsTextGuidance": false,
+                        "providers": {
+                            "mlx": { "id": "mlx-starvector-test", "available": true },
+                            "candle": { "id": "candle-starvector-test", "available": true }
+                        }
+                    },
+                    "downloads": [{
+                        "provider": "huggingface",
+                        "repo": "SceneWorks/vector-workflow-test",
+                        "revision": vector_revision,
+                        "files": ["config.json", "model.safetensors"]
+                    }]
+                }
+            ]
+        }))
+        .expect("manifest serializes"),
+    )
+    .expect("builtin models write");
+    write_empty_sibling_manifests(config_dir);
+    let root = config_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("test root");
+    for repo in [
+        "SceneWorks__raster-workflow-test",
+        "SceneWorks__vector-workflow-test",
+    ] {
+        let installed = root.join("data/models").join(repo);
+        std::fs::create_dir_all(&installed).expect("workflow install dir creates");
+        std::fs::write(installed.join(".sceneworks-download-complete.json"), b"{}")
+            .expect("workflow receipt writes");
+        std::fs::write(installed.join("config.json"), b"{}").expect("config writes");
+        std::fs::write(installed.join("model.safetensors"), b"weights").expect("weights write");
+    }
+}
+
+#[test]
+fn prompt_vector_revision_identity_rejects_mutable_missing_and_conflicting_primaries() {
+    let revision = "1111111111111111111111111111111111111111";
+    assert_eq!(
+        crate::generation::authoritative_workflow_revision(&json!({
+            "downloads": [{ "revision": revision }]
+        }))
+        .expect("one immutable revision"),
+        revision
+    );
+    for downloads in [
+        json!([]),
+        json!([{ "revision": "main" }]),
+        json!([{ "revision": revision }, { "revision": "main" }]),
+        json!([
+            { "revision": revision },
+            { "revision": "2222222222222222222222222222222222222222" }
+        ]),
+    ] {
+        let error = crate::generation::authoritative_workflow_revision(&json!({
+            "downloads": downloads
+        }))
+        .expect_err("ambiguous identity refuses");
+        assert_eq!(error.code, Some("vector_workflow_artifact_ambiguous"));
+    }
+}
+
+#[test]
+fn prompt_vector_intermediate_ownership_is_server_authored_and_worker_facts_are_replaced() {
+    let public_request: crate::dto::ImageJobRequest = serde_json::from_value(json!({
+        "projectId": "project-1",
+        "prompt": "ordinary image",
+        "workflowParentId": "job_forged",
+        "workflowId": "vwf_forged"
+    }))
+    .expect("image request parses");
+    assert!(public_request.workflow_parent_id.is_none());
+    assert!(public_request.workflow_id.is_none());
+
+    let payload = json!({
+        "workflowParentId": "job_parent1",
+        "workflowId": "vwf_workflow1"
+    })
+    .as_object()
+    .expect("payload object")
+    .clone();
+    let mut writes = vec![json!({
+        "assetId": "asset-1",
+        "vectorWorkflowOwnership": {
+            "workflowId": "vwf_worker_forgery",
+            "parentJobId": "job_worker_forgery"
+        }
+    })];
+    crate::jobs::stamp_vector_workflow_asset_writes(
+        &crate::JobType::ImageGenerate,
+        &payload,
+        "job_child1",
+        &mut writes,
+    );
+    assert_eq!(
+        writes[0]["vectorWorkflowOwnership"],
+        json!({
+            "role": "retained_intermediate",
+            "publication": "unpublished",
+            "workflowId": "vwf_workflow1",
+            "parentJobId": "job_parent1",
+            "childJobId": "job_child1",
+            "hidden": true,
+        })
+    );
+
+    crate::jobs::stamp_vector_workflow_asset_writes(
+        &crate::JobType::VideoGenerate,
+        &payload,
+        "job_child1",
+        &mut writes,
+    );
+    assert!(writes[0].get("vectorWorkflowOwnership").is_none());
+}
+
+#[tokio::test]
+async fn prompt_vector_workflow_persists_a_nonclaimable_parent_and_cancel_cascades() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_workflow_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt vectors" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    let (status, parent) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a geometric fox mark",
+            "negativePrompt": "photographic texture",
+            "rasterModel": "flux_schnell",
+            "vectorModel": "starvector_test",
+            "seed": 17,
+            "sampling": { "seed": 91 },
+            "detailBudget": {
+                "maxNewTokens": 2048,
+                "maxSvgBytes": 131072,
+                "maxWallTimeMs": 60000
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{parent}");
+    assert_eq!(parent["type"], "vector_generate");
+    assert_eq!(parent["status"], "pending_workflow");
+    assert_eq!(parent["stage"], "pending_workflow");
+    assert!(parent["payload"]["sourceAssetId"].is_null());
+    let workflow = &parent["payload"]["workflow"];
+    assert_eq!(workflow["kind"], "create_from_prompt");
+    assert_eq!(workflow["disclosure"], "raster_to_vector");
+    assert_eq!(
+        workflow["intermediateVisibility"],
+        "hidden_retained_on_success"
+    );
+    assert_eq!(
+        workflow["rasterStage"]["revision"],
+        "1111111111111111111111111111111111111111"
+    );
+    assert_eq!(
+        workflow["vectorStage"]["revision"],
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(workflow["vectorStage"]["mode"], "image_to_svg");
+    assert_eq!(parent["payload"]["sampling"]["seed"], 91);
+    assert_eq!(workflow["vectorStage"]["sampling"]["seed"], 91);
+    let parent_id = parent["id"].as_str().expect("parent id");
+    let child_id = workflow["childJobId"].as_str().expect("child id");
+
+    let (_, child) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["type"], "image_generate");
+    assert_eq!(child["status"], "queued");
+    assert_eq!(child["payload"]["workflowParentId"], parent_id);
+    assert_eq!(child["payload"]["workflowId"], workflow["id"]);
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{parent_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["status"], "canceled");
+    let (_, child) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{child_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(child["status"], "canceled");
+    let (_, assets) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets"),
+        Value::Null,
+    )
+    .await;
+    assert!(assets.as_array().expect("assets").is_empty());
+
+    let (_, bulk_parent) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        json!({
+            "projectId": project_id,
+            "prompt": "a monoline heron",
+            "rasterModel": "flux_schnell",
+            "vectorModel": "starvector_test"
+        }),
+    )
+    .await;
+    let bulk_parent_id = bulk_parent["id"].as_str().expect("bulk parent id");
+    let bulk_child_id = bulk_parent["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("bulk child id");
+    let (status, bulk) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/cancel-pending",
+        json!({ "projectId": project_id }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{bulk}");
+    assert_eq!(bulk["canceled"], 2);
+    for id in [bulk_parent_id, bulk_child_id] {
+        let (_, canceled) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(canceled["status"], "canceled");
+    }
+}
+
+#[tokio::test]
+async fn prompt_vector_replay_creates_both_stages_anew_and_revision_drift_is_typed() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_workflow_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Prompt replay" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let body = json!({
+        "projectId": project_id,
+        "prompt": "a single-line owl",
+        "rasterModel": "flux_schnell",
+        "vectorModel": "starvector_test",
+        "seed": 23
+    });
+    let (status, original) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        body.clone(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{original}");
+    let original_id = original["id"].as_str().expect("original id");
+    let original_child = original["payload"]["workflow"]["childJobId"]
+        .as_str()
+        .expect("original child");
+    let original_vector_seed = original["payload"]["sampling"]["seed"]
+        .as_u64()
+        .expect("omitted vector seed resolves before workflow persistence");
+    assert_eq!(
+        original["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
+        original_vector_seed
+    );
+
+    let (status, replay) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{original_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{replay}");
+    assert_eq!(replay["sourceJobId"], original_id);
+    assert_eq!(replay["attempts"], 2);
+    assert_ne!(replay["id"], original["id"]);
+    assert_ne!(
+        replay["payload"]["workflow"]["id"],
+        original["payload"]["workflow"]["id"]
+    );
+    assert_ne!(replay["payload"]["workflow"]["childJobId"], original_child);
+    assert_eq!(replay["payload"]["sampling"]["seed"], original_vector_seed);
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["sampling"]["seed"],
+        original_vector_seed
+    );
+    assert_eq!(
+        replay["payload"]["workflow"]["rasterStage"]["revision"],
+        original["payload"]["workflow"]["rasterStage"]["revision"]
+    );
+    assert_eq!(
+        replay["payload"]["workflow"]["vectorStage"]["revision"],
+        original["payload"]["workflow"]["vectorStage"]["revision"]
+    );
+
+    let (_, before) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(before.as_array().expect("jobs").len(), 4);
+    let mut drifted = body;
+    drifted["expectedRasterRevision"] = json!("3333333333333333333333333333333333333333");
+    drifted["expectedVectorRevision"] = json!("2222222222222222222222222222222222222222");
+    let (status, drift) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/prompt/jobs",
+        drifted,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{drift}");
+    assert_eq!(drift["code"], "vector_workflow_revision_drift");
+    assert_eq!(drift["context"]["stage"], "raster");
+    let (_, after) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(after.as_array().expect("jobs").len(), 4);
+}
+
+#[tokio::test]
+async fn vector_route_resolves_default_seed_once_and_preserves_explicit_and_replayed_seeds() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg", "text_to_svg"],
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector seed persistence" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{source}");
+    let source_asset_id = source["id"].as_str().expect("source id").to_owned();
+
+    let (status, generated) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source_asset_id
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{generated}");
+    assert_eq!(
+        generated["payload"]["sampling"]["temperature"],
+        json!(0.2_f32)
+    );
+    let generated_seed = generated["payload"]["sampling"]["seed"]
+        .as_u64()
+        .expect("default request persists a resolved seed");
+    u32::try_from(generated_seed).expect("server-generated seed remains exactly representable");
+    let generated_id = generated["id"].as_str().expect("job id");
+    for operation in ["retry", "duplicate"] {
+        let (status, replay) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{generated_id}/{operation}"),
+            json!({"payloadChanges": {}}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{operation}: {replay}");
+        assert_eq!(
+            replay["payload"]["sampling"]["seed"], generated_seed,
+            "{operation} must reuse the persisted effective seed"
+        );
+    }
+
+    let (status, explicit) = request(
+        app,
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_svg",
+            "model": "starvector_test",
+            "prompt": "a minimal seed mark",
+            "sampling": { "seed": 42 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{explicit}");
+    assert_eq!(explicit["payload"]["sampling"]["seed"], 42);
+}
+
+#[tokio::test]
+async fn vector_route_reports_typed_unavailable_backend_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest_with_provider_state(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg"],
+        false,
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source["id"]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["code"], "vector_backend_unavailable");
+    assert_eq!(body["context"]["reason"], "pending_terminal_inference_pin");
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(jobs.as_array().expect("jobs").is_empty());
+}
+
+#[test]
+fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
+    let cases = [
+        (
+            "starvector_1b",
+            "1b",
+            "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+            5_147_481_592u64,
+            5_142_705_320u64,
+            true,
+            None,
+            json!([
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00002.safetensors",
+                "model-00002-of-00002.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "vocab.json"
+            ]),
+        ),
+        (
+            "starvector_8b",
+            "8b",
+            "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+            15_015_835_105u64,
+            15_014_294_040u64,
+            true,
+            None,
+            json!([
+                "README.md",
+                "added_tokens.json",
+                "config.json",
+                "merges.txt",
+                "model-00001-of-00004.safetensors",
+                "model-00002-of-00004.safetensors",
+                "model-00003-of-00004.safetensors",
+                "model-00004-of-00004.safetensors",
+                "model.safetensors.index.json",
+                "preprocessor_config.json",
+                "processor_config.json",
+                "special_tokens_map.json",
+                "tokenizer_config.json",
+                "vocab.json"
+            ]),
+        ),
+    ];
+
+    for (
+        id,
+        tier,
+        revision,
+        closure_bytes,
+        static_floor_bytes,
+        provider_available,
+        provider_reason,
+        files,
+    ) in cases
+    {
+        let model = crate::models::embedded_builtin_catalog_entry(|entry| {
+            entry.get("id").and_then(Value::as_str) == Some(id)
+        })
+        .expect("embedded manifest parses")
+        .unwrap_or_else(|| panic!("{id} entry exists"));
+        assert_eq!(model["type"], "vector");
+        assert_eq!(model["capabilities"], json!(["image_to_svg"]));
+        assert_eq!(model["adapter"], "starvector");
+        assert_eq!(model["vector"]["acceptsTextGuidance"], false);
+        assert!(model["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .all(|capability| capability != "text_to_svg"));
+        for backend in ["mlx", "candle"] {
+            assert_eq!(
+                model["vector"]["providers"][backend]["id"],
+                format!("{backend}-starvector-{tier}")
+            );
+            assert_eq!(
+                model["vector"]["providers"][backend]["available"],
+                provider_available
+            );
+            assert_eq!(
+                model["vector"]["providers"][backend]
+                    .get("reason")
+                    .and_then(Value::as_str),
+                provider_reason
+            );
+        }
+        assert_eq!(model["vector"]["deviceAdmission"]["schemaVersion"], 1);
+        assert_eq!(
+            model["vector"]["deviceAdmission"]["basis"],
+            "exact_safetensors_bytes"
+        );
+        assert_eq!(model["vector"]["deviceAdmission"]["measured"], false);
+        assert_eq!(
+            model["vector"]["deviceAdmission"]["staticWeightFloorBytes"],
+            static_floor_bytes
+        );
+        if id == "starvector_8b" {
+            let candidate = &model["vector"]["deviceAdmission"]["terminalCandidate"];
+            let plan: Value = serde_json::from_str(include_str!(
+                "../../../../release/starvector-terminal-campaign-v1.json"
+            ))
+            .expect("terminal campaign plan");
+            assert_eq!(
+                candidate["inferenceRevision"],
+                plan["inference_contract"]["revision"]
+            );
+            assert_eq!(
+                candidate["corpusSha256"],
+                "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
+            );
+            let closure_check = std::process::Command::new("node")
+                .args([
+                    "scripts/starvector-production-closure.mjs",
+                    "check-manifest",
+                ])
+                .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
+                .output()
+                .expect("run the authoritative source-closure checker");
+            assert!(
+                closure_check.status.success(),
+                "source closure mismatch: {}",
+                String::from_utf8_lossy(&closure_check.stderr)
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["mlx"],
+                json!([{
+                    "deviceClass": "apple_unified_memory",
+                    "totalBytes": 137_438_953_472u64
+                }])
+            );
+            assert_eq!(
+                candidate["supportedDevices"]["candle"],
+                json!([{
+                    "deviceClass": "nvidia_dedicated_vram",
+                    "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+                    "totalBytes": 102_641_958_912u64
+                }])
+            );
+        }
+
+        let download = &model["downloads"][0];
+        assert_eq!(
+            download["repo"],
+            format!("starvector/starvector-{tier}-im2svg")
+        );
+        assert_eq!(download["revision"], revision);
+        assert_eq!(download["estimatedSizeBytes"], closure_bytes);
+        assert_eq!(download["footprint"]["diskSizeBytes"], closure_bytes);
+        assert_eq!(download["files"], files);
+        assert!(download["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .all(|file| !file.as_str().unwrap_or_default().ends_with(".py")));
+        assert_eq!(
+            model["licenseUrl"],
+            format!("https://huggingface.co/starvector/starvector-{tier}-im2svg/tree/{revision}")
+        );
+        assert!(download["files"]
+            .as_array()
+            .expect("files")
+            .contains(&json!("README.md")));
+        assert_eq!(
+            model["ui"]["promptGuide"]["path"],
+            format!("/prompt-guides/starvector-{tier}.md")
+        );
+    }
+}
+
+#[test]
+fn builtin_starvector_license_provenance_covers_both_immutable_model_cards() {
+    let licenses: Value =
+        serde_json::from_str(include_str!("../../../desktop/licenses/manifest.json"))
+            .expect("desktop license manifest parses");
+    let component = licenses["components"]
+        .as_array()
+        .expect("license components")
+        .iter()
+        .find(|component| component["id"] == "starvector-1b")
+        .expect("StarVector license component");
+    assert_eq!(
+        component["models"],
+        json!(["starvector_1b", "starvector_8b"])
+    );
+    assert_eq!(component["license"], "Apache-2.0");
+    let usage = component["usage"].as_str().expect("usage");
+    for revision in [
+        "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
+        "518beea8dcb5f7a37c5911e92d1d62a76beee7f9",
+    ] {
+        assert!(usage.contains(revision));
+    }
+    assert!(usage.contains("model card"));
+    assert!(usage.contains("never executes"));
+    assert!(usage.contains("no separate NOTICE"));
+
+    let provenance = include_str!("../../../desktop/licenses/starvector-1b/README.md");
+    assert!(provenance.contains("starvector/starvector-1b-im2svg@380ab95"));
+    assert!(provenance.contains("starvector/starvector-8b-im2svg@518beea"));
+    assert!(provenance.contains("model card"));
+    assert!(provenance.contains("excludes both repositories' Python modules"));
+}
+
+#[tokio::test]
+async fn vector_route_reports_typed_missing_and_incomplete_model_manager_recovery() {
+    let _env = isolate_hf_cache();
+    for (cache_state, expected_reason) in [
+        ("missing", "model_missing"),
+        ("incomplete", "model_incomplete"),
+    ] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let config_dir = temp_dir.path().join("config/manifests");
+        write_vector_test_manifest(&config_dir, &["image_to_svg"]);
+        let installed = temp_dir
+            .path()
+            .join("data/models/SceneWorks__starvector-test");
+        std::fs::remove_file(installed.join(".sceneworks-download-complete.json"))
+            .expect("remove complete marker");
+        if cache_state == "incomplete" {
+            std::fs::remove_dir_all(&installed).expect("remove managed install");
+            let snapshot = temp_dir.path().join(
+                "data/cache/huggingface/hub/models--SceneWorks--starvector-test/snapshots/abc123",
+            );
+            std::fs::create_dir_all(&snapshot).expect("partial HF snapshot creates");
+            std::fs::write(snapshot.join("config.json"), "{}").expect("partial file writes");
+        } else {
+            std::fs::remove_dir_all(&installed).expect("missing install removes directory");
+        }
+        let app = create_app(test_settings(&temp_dir)).expect("app creates");
+        let (_, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Vector" }),
+        )
+        .await;
+        let project_id = project["id"].as_str().expect("project id");
+        let (_, source) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            "source.png",
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/vectorize/jobs",
+            json!({
+                "projectId": project_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": source["id"]
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{cache_state}: {body}");
+        assert_eq!(body["code"], "vector_model_unavailable");
+        assert_eq!(body["context"]["reason"], expected_reason);
+        assert_eq!(body["context"]["downloadable"], true);
+        assert!(body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Model Manager"));
+        let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+        assert!(jobs.as_array().expect("jobs").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn vector_route_validates_and_stamps_typed_image_to_svg_request() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(
+        &temp_dir.path().join("config/manifests"),
+        &["image_to_svg", "text_to_svg"],
+    );
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (status, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let source_asset_id = source["id"].as_str().expect("source id");
+
+    let (status, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "projectName": "Vector Project",
+            "mode": "image_to_svg",
+            "model": "starvector_test",
+            "sourceAssetId": source_asset_id,
+            "prompt": "keep the silhouette",
+            "sampling": { "temperature": 0.1, "topP": 0.95, "seed": 42 },
+            "detailBudget": { "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 300000 }
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["type"], "vector_generate");
+    assert_eq!(created["requestedGpu"], "auto");
+    assert_eq!(created["payload"]["mode"], "image_to_svg");
+    assert_eq!(created["payload"]["model"], "starvector_test");
+    assert_eq!(created["payload"]["sourceAssetId"], source_asset_id);
+    assert_eq!(created["payload"]["sampling"]["seed"], 42);
+    assert_eq!(created["payload"]["detailBudget"]["maxSvgBytes"], 131072);
+    assert_eq!(created["payload"]["detailBudget"]["maxWallTimeMs"], 300000);
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["adapter"],
+        "starvector"
+    );
+    assert_eq!(
+        created["payload"]["modelManifestEntry"]["capabilities"],
+        json!(["image_to_svg", "text_to_svg"])
+    );
+    assert!(created["payload"].get("fixtureSvg").is_none());
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "text-only-vector-worker",
+            "gpuId": "test-gpu-1",
+            "gpuName": "Test GPU",
+            "capabilities": ["gpu", "vector_text_to_svg"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, wrong_claim) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "text-only-vector-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(wrong_claim["job"].is_null());
+    claim_job_as_worker(
+        &app,
+        created["id"].as_str().expect("job id"),
+        "image-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+
+    let (status, text_created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/vectorize/jobs",
+        json!({
+            "projectId": project_id,
+            "mode": "text_to_svg",
+            "model": "starvector_test",
+            "prompt": "a minimal geometric fox"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(text_created["payload"]["mode"], "text_to_svg");
+    assert!(text_created["payload"]["sourceAssetId"].is_null());
+    let (status, text_claim) = request(
+        app,
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "text-only-vector-worker" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(text_claim["job"]["id"], text_created["id"]);
+}
+
+/// The vector worker and API share a two-phase completion boundary: the worker reports a flat
+/// `assetWrites` fact, then the API validates/persists its sidecar and rewrites the job result to
+/// `assets` / `assetIds`. A missing required sidecar field leaves the job terminal with raw
+/// `assetWrites`, so exercise the production worker fact builder through the real progress route.
+#[tokio::test]
+async fn vector_worker_fact_publishes_through_the_api_sidecar_contract() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Vector publication" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
+    let (_, source) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let source_asset_id = source["id"].as_str().expect("source id");
+
+    let create = |app: axum::Router| {
+        let project_id = project_id.clone();
+        let source_asset_id = source_asset_id.to_owned();
+        async move {
+            request(
+                app,
+                "POST",
+                "/api/v1/image/vectorize/jobs",
+                json!({
+                    "projectId": project_id,
+                    "mode": "image_to_svg",
+                    "model": "starvector_test",
+                    "sourceAssetId": source_asset_id,
+                    "prompt": "keep the silhouette"
+                }),
+            )
+            .await
+        }
+    };
+    let fact = |asset_id: &str, generation_set_id: &str| {
+        sceneworks_worker::build_vector_asset_fact(
+            asset_id,
+            generation_set_id,
+            512,
+            512,
+            "2026-09-18T00:00:00Z",
+            "image_to_svg",
+            "starvector_test",
+            "starvector",
+            "keep the silhouette",
+            Some(source_asset_id),
+            json!({ "temperature": 0.2, "topP": 0.9, "topK": 0, "repetitionPenalty": 1.0, "repetitionContext": 0, "seed": 7 }),
+            json!({ "maxNewTokens": 2048, "maxSvgBytes": 131072, "maxWallTimeMs": 90000 }),
+            None,
+        )
+    };
+
+    let (status, legacy_job) = create(app.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{legacy_job}");
+    let legacy_job_id = legacy_job["id"].as_str().expect("legacy job id");
+    claim_job_as_worker(
+        &app,
+        legacy_job_id,
+        "legacy-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+    let mut legacy_fact = fact("asset_vector_legacy", "genset_vector_legacy");
+    legacy_fact
+        .as_object_mut()
+        .expect("fact object")
+        .remove("displayName");
+    let legacy_media = legacy_fact["mediaPath"]
+        .as_str()
+        .expect("legacy media path");
+    std::fs::create_dir_all(
+        project_path
+            .join(legacy_media)
+            .parent()
+            .expect("media parent"),
+    )
+    .expect("legacy media dir creates");
+    std::fs::write(
+        project_path.join(legacy_media),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .expect("legacy vector writes");
+    let (status, rejected) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{legacy_job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Done", "workerId": "legacy-vector-worker",
+            "result": { "generationSetId": "genset_vector_legacy", "assetWrites": [legacy_fact] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{rejected}");
+    assert!(rejected["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("displayName")));
+
+    let (status, generated_job) = create(app.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{generated_job}");
+    let generated_job_id = generated_job["id"].as_str().expect("generated job id");
+    claim_job_as_worker(
+        &app,
+        generated_job_id,
+        "fixed-vector-worker",
+        &["gpu", "vector_image_to_svg"],
+    )
+    .await;
+    let generated_fact = fact("asset_vector_fixed", "genset_vector_fixed");
+    let generated_media = generated_fact["mediaPath"]
+        .as_str()
+        .expect("generated media path");
+    std::fs::create_dir_all(
+        project_path
+            .join(generated_media)
+            .parent()
+            .expect("media parent"),
+    )
+    .expect("generated media dir creates");
+    std::fs::write(
+        project_path.join(generated_media),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>",
+    )
+    .expect("generated vector writes");
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{generated_job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "Done", "workerId": "fixed-vector-worker",
+            "result": { "generationSetId": "genset_vector_fixed", "assetWrites": [generated_fact] }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert!(completed["result"].get("assetWrites").is_none());
+    assert_eq!(
+        completed["result"]["assetIds"],
+        json!(["asset_vector_fixed"])
+    );
+    assert_eq!(
+        completed["result"]["assets"][0]["displayName"],
+        "keep the silhouette #1"
+    );
+    assert_eq!(completed["result"]["assets"][0]["type"], "vector");
+
+    let (status, published) = request(
+        app,
+        "GET",
+        &format!("/api/v1/projects/{project_id}/assets?includeRejected=true&includeTrashed=true"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{published}");
+    let fixed = published
+        .as_array()
+        .expect("asset list")
+        .iter()
+        .find(|asset| asset["id"] == "asset_vector_fixed")
+        .expect("published vector asset");
+    assert_eq!(fixed["displayName"], "keep the silhouette #1");
+    assert_eq!(fixed["type"], "vector");
+}
+
+#[tokio::test]
+async fn vector_route_rejects_bad_source_ownership_media_and_model_capability_before_enqueue() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_vector_test_manifest(&temp_dir.path().join("config/manifests"), &["image_to_svg"]);
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project_a) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Project A" }),
+    )
+    .await;
+    let (_, project_b) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Project B" }),
+    )
+    .await;
+    let project_a_id = project_a["id"].as_str().expect("project A id");
+    let project_b_id = project_b["id"].as_str().expect("project B id");
+    let (_, raster) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_a_id}/assets"),
+        "source.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let raster_id = raster["id"].as_str().expect("raster id");
+    let (status, video) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_a_id}/assets"),
+        "source.mp4",
+        "video/mp4",
+        b"mp4-bytes",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let video_id = video["id"].as_str().expect("video id");
+
+    for (body, expected_status) in [
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test"
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": video_id
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_b_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id
+            }),
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "text_to_svg",
+                "model": "starvector_test",
+                "prompt": "a mark"
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id,
+                "fixtureSvg": "<svg/>"
+            }),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({
+                "projectId": project_a_id,
+                "mode": "image_to_svg",
+                "model": "starvector_test",
+                "sourceAssetId": raster_id,
+                "detailBudget": {
+                    "maxNewTokens": 2048,
+                    "maxSvgBytes": 131072,
+                    "maxWallTimeMs": 300001
+                }
+            }),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (status, _) = request(app.clone(), "POST", "/api/v1/image/vectorize/jobs", body).await;
+        assert_eq!(status, expected_status);
+    }
+
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(jobs.as_array().expect("jobs array").len(), 0);
 }
 
 /// The other half of the guard: the job types the generic route legitimately serves keep
@@ -4132,6 +5394,43 @@ fn write_audio_manifest(config_dir: &std::path::Path) {
               "ui": { "label": "MOSS-TTSD v0.5 (Multi-Speaker)" }
             },
             {
+              "id": "yue_en_cot",
+              "name": "YuE English CoT",
+              "family": "yue",
+              "type": "audio",
+              "audio": {
+                "languages": ["en"], "sampleRates": [44100], "supportsGuidance": true,
+                "supportsSegmentedLyrics": true, "supportsRepetitionPenalty": true
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-cot-candle", "variant": "bf16", "files": ["bf16/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s2-1b-general-candle", "coRequisite": true, "componentId": "stage2", "variant": "q4", "subdir": "q4", "files": ["q4/*"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-cot-candle" },
+              "ui": { "label": "YuE English CoT" }
+            },
+            {
+              "id": "yue_en_icl",
+              "name": "YuE English ICL",
+              "family": "yue",
+              "type": "audio",
+              "audio": {
+                "languages": ["en"], "sampleRates": [44100], "conditioning": ["ReferenceAudio"],
+                "supportsGuidance": true, "supportsSegmentedLyrics": true,
+                "supportsRepetitionPenalty": true, "supportsReferenceRegion": true,
+                "supportsOutputLimiter": true
+              },
+              "downloads": [
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q4", "default": true, "files": ["q4/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "q8", "files": ["q8/*"] },
+                { "provider": "huggingface", "repo": "SceneWorks/yue-s1-7b-anneal-en-icl-candle", "variant": "bf16", "files": ["bf16/*"] }
+              ],
+              "paths": { "model": "${HF_CACHE}/SceneWorks/yue-s1-7b-anneal-en-icl-candle" },
+              "ui": { "label": "YuE English ICL" }
+            },
+            {
               "id": "not-audio-img",
               "name": "Not Audio",
               "family": "z_image",
@@ -4820,6 +6119,303 @@ async fn create_audio_job_rejects_empty_prompt() {
     assert!(body["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("prompt")));
+}
+
+/// A project + app over the audio manifest (which carries `yue_en_cot` / `yue_en_icl`), for the
+/// YuE job-surface tests (sc-19384).
+async fn yue_audio_app() -> (tempfile::TempDir, axum::Router, String) {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_audio_manifest(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Song Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    (temp_dir, app, project_id)
+}
+
+/// The full YuE R5 control set (sc-19384): every knob a `POST /api/v1/audio/jobs` carries — genre
+/// tags (prompt), lyrics, segments, per-segment token budget, repetition penalty, seed, guidance
+/// on + scale, ICL mode + reference (single AND dual) + window, tier — reaches the worker payload
+/// verbatim, with the model's manifest entry injected.
+#[tokio::test]
+async fn create_audio_job_maps_the_full_yue_control_set() {
+    let (_temp_dir, app, project_id) = yue_audio_app().await;
+    let lyrics = "[verse]\nwalking down the empty street\n[chorus]\nsing it loud";
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "yue_en_icl",
+            "prompt": "uplifting pop female vocal airy",
+            "lyrics": lyrics,
+            "segments": 3,
+            "maxNewTokensPerSegment": 1500,
+            "repetitionPenalty": 1.25,
+            "seed": 11,
+            "guidanceEnabled": true,
+            "guidance": 1.5,
+            "iclMode": "dual",
+            "iclVocalAssetId": "asset_vocal",
+            "iclInstrumentalAssetId": "asset_inst",
+            "iclStartSecs": 5.0,
+            "iclEndSecs": 25.0,
+            "quantTier": "q8",
+            "outputLimiter": "rescale",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "audio_generate");
+    let payload = &job["payload"];
+    for (key, expected) in [
+        ("model", json!("yue_en_icl")),
+        ("prompt", json!("uplifting pop female vocal airy")),
+        ("lyrics", json!(lyrics)),
+        ("segments", json!(3)),
+        ("maxNewTokensPerSegment", json!(1500)),
+        ("repetitionPenalty", json!(1.25)),
+        ("seed", json!(11)),
+        ("guidanceEnabled", json!(true)),
+        ("guidance", json!(1.5)),
+        ("iclMode", json!("dual")),
+        ("iclVocalAssetId", json!("asset_vocal")),
+        ("iclInstrumentalAssetId", json!("asset_inst")),
+        ("iclStartSecs", json!(5.0)),
+        ("iclEndSecs", json!(25.0)),
+        ("quantTier", json!("q8")),
+        ("outputLimiter", json!("rescale")),
+    ] {
+        assert_eq!(
+            payload[key], expected,
+            "{key} must reach the worker payload"
+        );
+    }
+    assert_eq!(payload["modelManifestEntry"]["id"], "yue_en_icl");
+
+    // Single-track ICL and guidance OFF are accepted too.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "yue_en_icl",
+            "prompt": "rock",
+            "lyrics": lyrics,
+            "guidanceEnabled": false,
+            "iclMode": "single",
+            "iclReferenceAssetId": "asset_mix",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclReferenceAssetId"], "asset_mix");
+    assert_eq!(job["payload"]["guidanceEnabled"], false);
+
+    // A CoT render with no reference is the plain lyrics2song path.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_cot", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+
+    // An `_icl` checkpoint with NO reference is a plain prompt run (upstream allows it; epic R1).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({ "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("iclMode").is_none());
+
+    // A start with no end is accepted: the window ends at upstream's 30 s default (the worker
+    // builds the 5–30 s region — asserted in the worker's from_payload test).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/audio/jobs",
+        json!({
+            "projectId": project_id, "model": "yue_en_icl", "prompt": "rock", "lyrics": lyrics,
+            "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 5.0,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["iclStartSecs"], 5.0);
+    assert!(job["payload"].get("iclEndSecs").is_none());
+}
+
+/// ICL modes are reachable only on an in-context-learning checkpoint (sc-19384): an ICL request to a
+/// CoT model is a validation error (400), and so is an `_icl` checkpoint with no reference, a
+/// half-specified mode, an unknown mode, and an ill-ordered window. The YuE-only knobs are refused
+/// on a model that does not declare them, and the controls YuE does not read are refused on YuE.
+#[tokio::test]
+async fn create_audio_job_rejects_invalid_yue_requests() {
+    let (_temp_dir, app, project_id) = yue_audio_app().await;
+    let lyrics = "[verse]\nla la la";
+    let cases: Vec<(&str, Value, &str)> = vec![
+        (
+            "ICL mode on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclMode": "single", "iclReferenceAssetId": "a" }),
+            "in-context-learning",
+        ),
+        (
+            "ICL dual on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclMode": "dual", "iclVocalAssetId": "v", "iclInstrumentalAssetId": "i" }),
+            "in-context-learning",
+        ),
+        (
+            "start at the default 30 s end with no explicit end",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 30.0 }),
+            "iclEndSecs must be greater",
+        ),
+        (
+            "dual mode missing the instrumental",
+            json!({ "model": "yue_en_icl", "iclMode": "dual", "iclVocalAssetId": "v" }),
+            "iclInstrumentalAssetId",
+        ),
+        (
+            "single mode with a vocal id",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclVocalAssetId": "v" }),
+            "iclReferenceAssetId",
+        ),
+        (
+            "unknown ICL mode",
+            json!({ "model": "yue_en_icl", "iclMode": "triple", "iclReferenceAssetId": "a" }),
+            "iclMode must be one of",
+        ),
+        (
+            "ICL fields without a mode",
+            json!({ "model": "yue_en_icl", "iclReferenceAssetId": "a" }),
+            "need an iclMode",
+        ),
+        (
+            "reversed time range",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": 20.0, "iclEndSecs": 10.0 }),
+            "iclEndSecs must be greater",
+        ),
+        (
+            "negative start",
+            json!({ "model": "yue_en_icl", "iclMode": "single", "iclReferenceAssetId": "a", "iclStartSecs": -1.0 }),
+            "iclStartSecs must be between",
+        ),
+        (
+            "window on a CoT checkpoint",
+            json!({ "model": "yue_en_cot", "iclStartSecs": 0.0, "iclEndSecs": 10.0 }),
+            "need an iclMode",
+        ),
+        (
+            "zero segments",
+            json!({ "model": "yue_en_cot", "segments": 0 }),
+            "segments must be",
+        ),
+        (
+            "zero token budget",
+            json!({ "model": "yue_en_cot", "maxNewTokensPerSegment": 0 }),
+            "maxNewTokensPerSegment must be",
+        ),
+        (
+            // The stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1`
+            // for its prompt, so 16383 leaves none — refused here, not after the 7B load.
+            "token budget leaving no stage-1 prompt room",
+            json!({ "model": "yue_en_cot", "maxNewTokensPerSegment": 16383 }),
+            "maxNewTokensPerSegment must be between 1 and 16382",
+        ),
+        (
+            "non-positive repetition penalty",
+            json!({ "model": "yue_en_cot", "repetitionPenalty": 0.0 }),
+            "repetitionPenalty must be",
+        ),
+        (
+            "guidance scale with guidance off",
+            json!({ "model": "yue_en_cot", "guidanceEnabled": false, "guidance": 1.5 }),
+            "guidanceEnabled is false",
+        ),
+        (
+            "guidance ON scale at or below 1",
+            json!({ "model": "yue_en_cot", "guidance": 1.0 }),
+            "greater than 1",
+        ),
+        (
+            "unknown tier",
+            json!({ "model": "yue_en_cot", "quantTier": "q2" }),
+            "quantTier must be",
+        ),
+        (
+            "missing lyrics",
+            json!({ "model": "yue_en_cot", "lyrics": null }),
+            "lyrics are required",
+        ),
+        (
+            "steps on YuE",
+            json!({ "model": "yue_en_cot", "steps": 30 }),
+            "steps is not a control",
+        ),
+        (
+            "segments on a one-pass model",
+            json!({ "model": "acestep_v15_turbo", "segments": 2 }),
+            "does not render segmented lyrics",
+        ),
+        (
+            "repetition penalty on a model without it",
+            json!({ "model": "acestep_v15_turbo", "repetitionPenalty": 1.1 }),
+            "does not take a repetitionPenalty",
+        ),
+        (
+            "tier on an untiered model",
+            json!({ "model": "acestep_v15_turbo", "quantTier": "q4" }),
+            "does not ship a q4 tier",
+        ),
+        (
+            "guidance switch on a non-song model",
+            json!({ "model": "moss_sfx_v2", "guidanceEnabled": false }),
+            "does not take guidanceEnabled",
+        ),
+        (
+            "unknown output limiter",
+            json!({ "model": "yue_en_cot", "outputLimiter": "normalize" }),
+            "outputLimiter must be one of",
+        ),
+        (
+            "output limiter on a non-song model",
+            json!({ "model": "acestep_v15_turbo", "outputLimiter": "rescale" }),
+            "does not take an outputLimiter",
+        ),
+        (
+            // `yue_en_cot` here declares segmented lyrics but NOT `supportsOutputLimiter`: the
+            // gate is the limiter's own flag, not the segmented-lyrics one.
+            "output limiter on a segmented model without the limiter flag",
+            json!({ "model": "yue_en_cot", "outputLimiter": "clamp" }),
+            "does not take an outputLimiter",
+        ),
+    ];
+    for (name, overrides, needle) in cases {
+        let mut body = json!({ "projectId": project_id, "prompt": "pop", "lyrics": lyrics });
+        for (key, value) in overrides.as_object().expect("override object") {
+            body[key] = value.clone();
+        }
+        let (status, response) = request(app.clone(), "POST", "/api/v1/audio/jobs", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}: {response}");
+        assert!(
+            response["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(needle)),
+            "{name}: expected a detail containing {needle:?}, got {response}"
+        );
+    }
 }
 
 // The queue-lifecycle tests below drive `POST /api/v1/jobs` — claim, cancel, retry,
@@ -6378,6 +7974,474 @@ async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     assert_eq!(
         std::path::Path::new(job["payload"]["imagePath"].as_str().unwrap()),
         expected
+    );
+}
+
+/// sc-24113: Qwen-Image 2.1's official prompt rewriting rides the EXISTING `prompt_refine` seam.
+///
+/// The point of this test is what it does NOT find: no new route, no new job type, no second LLM
+/// runtime. The rewrite is a `task` discriminator on `POST /api/v1/prompts/refine`, exactly as the
+/// film planner and the two caption tasks are, and the checkpoints it runs are Qwen3.5/3.6
+/// (`qwen3_5`) — the same architecture the optional `film_planner_qwen3_6_27b` entry already loads
+/// on the native TextLlm lane.
+///
+/// Three request shapes matter and all three are here: the text-to-image rewrite (no references),
+/// the edit rewrite (ordered references, which is what SELECTS the I2I checkpoint in the worker),
+/// and the over-cap refusal.
+#[tokio::test]
+async fn qwen_image_rewrite_rides_the_prompt_refine_seam_with_ordered_references() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Rewrite Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let mut asset_ids = Vec::new();
+    for index in 1..=11 {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("Reference{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+
+    // 1. TEXT-TO-IMAGE: no references at all. This is NOT an error — it is the shape that selects
+    //    the T2I rewriter in the worker, and it is why the rewrite is not a "vision task" (which
+    //    would require an image and waive the prompt).
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "a cinematic harbour at dusk",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["type"], "prompt_refine",
+        "no new job type is introduced"
+    );
+    assert_eq!(job["payload"]["task"], "qwen_image_rewrite");
+    assert_eq!(job["payload"]["modelId"], "qwen_image_2_1");
+    assert_eq!(job["payload"]["prompt"], "a cinematic harbour at dusk");
+    assert!(
+        job["payload"].get("imagePaths").is_none(),
+        "a text-to-image rewrite carries no references: {job}"
+    );
+
+    // ... and the prompt is still REQUIRED, unlike a true vision task. A rewrite with nothing to
+    // rewrite is a caller error, not a picture-driven request.
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "   ",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "a rewrite needs a prompt");
+
+    // 2. EDIT: ordered references. They arrive as the PLURAL `imagePaths` array in request order —
+    //    even at one reference — because the rewriter's `<imageN>` numbering is positional, so a
+    //    scalar `imagePath` would have no position to be "reference 1" of.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "put the courier in the second scene",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[0], asset_ids[1]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let paths = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("ordered reference paths");
+    assert_eq!(paths.len(), 2);
+    let first_order: Vec<String> = paths
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+
+    // Swapping the two references produces a DIFFERENT payload order. The rewrite must see exactly
+    // the list the render will condition on, in the same order, or its `ratio_follow: "<image1>"`
+    // names a different picture than the one the user put first.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "put the courier in the second scene",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[1], asset_ids[0]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let swapped_order: Vec<String> = job["payload"]["imagePaths"]
+        .as_array()
+        .expect("ordered reference paths")
+        .iter()
+        .map(|value| value.as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(swapped_order.len(), 2);
+    assert_ne!(
+        swapped_order, first_order,
+        "reordering the references must reorder the rewrite's view of them"
+    );
+    assert_eq!(
+        swapped_order,
+        first_order.iter().rev().cloned().collect::<Vec<_>>(),
+        "and it must be exactly the reversal, not an arbitrary reshuffle"
+    );
+
+    // A single reference still uses the plural key.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "recolour the jacket",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": [asset_ids[0]],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["imagePaths"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert!(job["payload"].get("imagePath").is_none());
+
+    // 3. TEN is legal — the rewrite's ceiling is the RENDER's ceiling, not the mood board's 6.
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "compose all of them",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids[..10],
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "10 references are legal: {job}"
+    );
+    assert_eq!(
+        job["payload"]["imagePaths"].as_array().map(Vec::len),
+        Some(10)
+    );
+
+    // ... and the 11th is refused, naming the cap.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "compose all of them",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 10"),
+        "names the rewrite's own cap: {body}"
+    );
+
+    // The unrelated mood-board cap is UNCHANGED at 6 — widening the rewrite must not widen it.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "image_describe",
+            "prompt": "",
+            "projectId": project_id,
+            "sourceAssetIds": asset_ids[..7],
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at most 6"),
+        "the mood board keeps its own ceiling: {body}"
+    );
+}
+
+/// sc-24113: the rewrite's RESULT reaches the client as an editable prompt plus a separate
+/// aspect-ratio suggestion, and the user's original prompt is never replaced.
+///
+/// Driven with a FIXTURE reply through the same claim + worker-owned progress shape production
+/// uses, so no model runs. What is asserted is the CONTRACT the UI reads: `originalPrompt` and
+/// `refinedPrompt` are both present and different, and `rewriteSuggestion` carries a legal preset
+/// the user may accept or ignore.
+#[tokio::test]
+async fn a_qwen_rewrite_result_offers_an_editable_prompt_beside_the_untouched_original() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Rewrite Result Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({
+            "task": "qwen_image_rewrite",
+            "prompt": "a cinematic harbour at dusk",
+            "modelId": "qwen_image_2_1",
+            "projectId": project_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+
+    // The worker's completion shape for this task, with the rewriter's JSON already parsed into
+    // the two halves the UI needs (see `crates/sceneworks-worker/src/qwen_prompt_rewrite.rs`).
+    complete_prompt_refine_job(
+        &app,
+        &job_id,
+        json!({
+            "originalPrompt": "a cinematic harbour at dusk",
+            "refinedPrompt": "A wide harbour at dusk, fishing boats moored along a stone quay, \
+                              amber light raking across wet cobbles",
+            "rewriteSuggestion": {
+                "whRatio": "16:9",
+                "ratioFollow": "",
+                "resolution": "2752x1536",
+                "rewriter": "t2i",
+                "rewriterModelId": "qwen_image_2_1_pe_t2i"
+            },
+            "executionIdentity": {
+                "provider": "native",
+                "model": "Qwen/Qwen-Image-2.1-PE-T2I",
+                "backend": "fixture",
+                "thinkingMode": "auto"
+            }
+        }),
+    )
+    .await;
+
+    let (status, completed) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["status"], "completed");
+
+    let result = &completed["result"];
+    // The ORIGINAL survives. This is the whole "never replaced silently" guarantee at the data
+    // layer: the client renders the rewrite in an editable box beside the prompt it came from, and
+    // nothing has overwritten anything until the user presses Apply.
+    assert_eq!(result["originalPrompt"], "a cinematic harbour at dusk");
+    assert_ne!(
+        result["refinedPrompt"], result["originalPrompt"],
+        "the rewrite must be offered as a distinct value, not folded into the original"
+    );
+    // The rewrite arrives as PLAIN TEXT, not as the rewriter's JSON envelope — the user has to be
+    // able to edit it, and nobody should have to parse Qwen's schema to show it in a textarea.
+    let refined = result["refinedPrompt"].as_str().expect("refined prompt");
+    assert!(!refined.trim_start().starts_with('{'), "{refined}");
+    assert!(refined.contains("harbour"), "{refined}");
+
+    // The aspect suggestion is SEPARATE and names a legal preset — one of the seven the Aspect
+    // menu already offers, so accepting it is the same as picking it by hand.
+    assert_eq!(result["rewriteSuggestion"]["whRatio"], "16:9");
+    assert_eq!(result["rewriteSuggestion"]["resolution"], "2752x1536");
+    assert_eq!(
+        result["rewriteSuggestion"]["rewriterModelId"],
+        "qwen_image_2_1_pe_t2i"
+    );
+}
+
+/// sc-24113: direct prompting works with NEITHER rewriter installed — no download, no prompt to
+/// install, no degraded path.
+///
+/// The catalog fixture carries Qwen-Image 2.1 and BOTH rewriters, with the rewriters marked
+/// `autoDownload: false` exactly as the shipped manifest does. A plain image job must then be
+/// created without either of them being touched, and — the part that would be easy to get wrong —
+/// without a `prompt_refine` job appearing anywhere as a side effect.
+#[tokio::test]
+async fn direct_prompting_needs_neither_rewriter_installed() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": { "hardMinSteps": 2, "minDimension": 32, "maxDimension": 2752, "requiresDimensionsMultipleOf": 32 },
+              "ui": { "label": "Qwen Image 2.1" }
+            },
+            {
+              "id": "qwen_image_2_1_pe_t2i",
+              "name": "Qwen Image 2.1 Prompt Rewriter (text-to-image)",
+              "family": "qwen-image-2-1-pe",
+              "type": "utility",
+              "adapter": "prompt-refine",
+              "autoDownload": false,
+              "capabilities": [],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1-PE-T2I", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Qwen Image 2.1 Prompt Rewriter (text-to-image)" }
+            },
+            {
+              "id": "qwen_image_2_1_pe_i2i",
+              "name": "Qwen Image 2.1 Prompt Rewriter (image editing)",
+              "family": "qwen-image-2-1-pe",
+              "type": "utility",
+              "adapter": "prompt-refine",
+              "autoDownload": false,
+              "capabilities": [],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1-PE-I2I", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Qwen Image 2.1 Prompt Rewriter (image editing)" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Direct Prompting Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Neither rewriter is auto-downloaded. That is the manifest fact the "no download, no prompt to
+    // install" guarantee rests on, so assert it rather than assuming it.
+    let (status, catalog) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let models = catalog.as_array().expect("catalog is an array");
+    for rewriter in ["qwen_image_2_1_pe_t2i", "qwen_image_2_1_pe_i2i"] {
+        let entry = models
+            .iter()
+            .find(|model| model["id"] == rewriter)
+            .unwrap_or_else(|| panic!("{rewriter} is in the catalog"));
+        assert_eq!(
+            entry["autoDownload"],
+            json!(false),
+            "{rewriter} must be an explicit, optional download: {entry}"
+        );
+    }
+
+    // A plain generation succeeds with neither installed, at the model's own defaults.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a cinematic harbour at dusk",
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "direct prompting must work with no rewriter installed: {body}"
+    );
+    assert_eq!(body["payload"]["width"], 2048);
+    assert_eq!(body["payload"]["height"], 2048);
+    assert_eq!(body["payload"]["prompt"], "a cinematic harbour at dusk");
+
+    // ... and no rewrite was triggered as a side effect. Rewriting is a USER ACTION: an image job
+    // must never enqueue one on its own, the way an Ideogram plain-text job enqueues magic-prompt.
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array()
+            .expect("jobs is an array")
+            .iter()
+            .all(|job| job["type"] != "prompt_refine"),
+        "generating must not enqueue a rewrite: {jobs:?}"
     );
 }
 
@@ -10011,6 +12075,1055 @@ async fn video_fps_outside_the_post_preset_models_menu_is_rejected() {
         .as_str()
         .unwrap_or_default()
         .contains("fps must be between 1 and 60"));
+}
+
+/// sc-24108: the IMAGE half of the same gate. `limits.hardMinSteps` was video-only — its two
+/// rejection seams were `create_video_job` and the worker's video lane — so an image model with a
+/// real sampling floor had nowhere to declare it. Qwen-Image 2.1's engine refuses `steps < 2`, and
+/// without this gate `advanced.steps: 1` travelled all the way to the MLX provider and died there,
+/// which reaches the user as a failed render instead of a 400 naming the floor.
+///
+/// The fixture makes the two homes disagree the same way the video test does: one image model with
+/// no floor, one with 2. Both halves are asserted — the refusal AND the at-floor admission — so a
+/// gate that simply rejected every step count could not pass.
+#[tokio::test]
+async fn image_steps_under_the_models_hard_floor_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unfloored_image",
+              "name": "Unfloored",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unfloored", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Unfloored" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": { "hardMinSteps": 2 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Step Floor Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Under the floor: refused at enqueue, naming the model, the floor and what was asked.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "1 step under Qwen Image 2.1's 2-step floor must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1"),
+        "names the model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 2 sampling steps"),
+        "states the floor: {detail}"
+    );
+    assert!(
+        detail.contains("asks for 1."),
+        "states what was asked: {detail}"
+    );
+
+    // At the floor: admitted, and the count travels VERBATIM — the gate refuses, never rewrites.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 2 }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "2 is at the floor: {body}");
+    assert_eq!(body["payload"]["advanced"]["steps"], 2);
+
+    // An image model that declares NO floor is untouched: absent means no floor, so every other
+    // image model in the catalog is byte-for-byte unchanged by this gate.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unfloored_image",
+            "prompt": "a lighthouse",
+            "advanced": { "steps": 1 }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model with no declared floor must still admit 1 step: {body}"
+    );
+}
+
+/// sc-24114: the declared sampler / scheduler MENU is enforced at image enqueue. Qwen-Image 2.1's
+/// providers publish a curated solver menu and honour it; a name on no lane's menu would be silently
+/// dropped back to the engine default by the worker, so it is a 400 naming the menu. A member is
+/// admitted verbatim, and a model that declares no menu is untouched.
+#[tokio::test]
+async fn image_sampler_off_the_models_menu_is_rejected() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "menuless_image",
+              "name": "Menuless",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/menuless", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8 },
+              "limits": {},
+              "ui": { "label": "Menuless" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40 },
+              "limits": {
+                "samplers": ["default", "euler", "er_sde"],
+                "schedulers": ["default", "karras", "beta57"]
+              },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Image Sampler Menu Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let post = |model: &'static str, advanced: Value| {
+        let app = app.clone();
+        let body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse",
+            "advanced": advanced
+        });
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    let (status, body) = post(
+        "qwen_image_2_1",
+        json!({ "sampler": "er_sde", "scheduler": "beta57" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a menu member is admitted: {body}"
+    );
+    assert_eq!(body["payload"]["advanced"]["sampler"], "er_sde");
+
+    for advanced in [
+        json!({ "sampler": "dpmpp_3m" }),
+        json!({ "scheduler": "polyexponential" }),
+    ] {
+        let (status, body) = post("qwen_image_2_1", advanced.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{advanced} is off the menu: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1") && detail.contains("does not offer"),
+            "{detail}"
+        );
+    }
+
+    let (status, body) = post("menuless_image", json!({ "sampler": "dpmpp_3m" })).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "no declared menu ⇒ untouched: {body}"
+    );
+}
+
+/// sc-24113: the rest of Qwen-Image 2.1's declared control surface, enforced at image enqueue —
+/// the ORDERED reference ceiling and the FREE-SIZE envelope.
+///
+/// Both gates are new to the image lane and both had the same hole before this story. The API's
+/// `validate_image_job` never looked at `referenceAssetIds` at all (the only image-side caps were
+/// per-family constants deep in the worker, which silently TRUNCATE), and it enforced one blanket
+/// 256..=4096 with no stride for every model in the catalog. For a native-resolution model that is
+/// both too narrow and too wide: 2.1 renders from 32 px — below the blanket floor — up to 2752 — far
+/// below the blanket ceiling — on a 32-px grid. An off-grid or over-cap size therefore passed every
+/// check in the app and died inside the provider, reaching the user as a failed render rather than
+/// a 400 naming the bound.
+///
+/// The fixture makes the two homes disagree the way the step-floor test above does: one image model
+/// that declares nothing, one that declares the full envelope. Every assertion has its admitting
+/// twin, so a gate that simply rejected everything could not pass.
+#[tokio::test]
+async fn image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unbounded_image",
+              "name": "Unbounded",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8, "resolution": "1024x1024" },
+              "limits": {},
+              "ui": { "label": "Unbounded" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": {
+                "resolutions": ["2048x2048", "2400x1792", "2752x1536"],
+                "count": [1, 2, 4, 8],
+                "minDimension": 32,
+                "maxDimension": 2752,
+                "requiresDimensionsMultipleOf": 32,
+                "maxReferenceAssets": 10,
+                "hardMinSteps": 2
+              },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Controls Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // Eleven REAL raster assets. sc-24110 added a per-entry half to this gate — each ordered
+    // reference must actually be a raster image the project owns — so the ids here have to exist
+    // for the COUNT and ORDER assertions below to be reading what they claim to read rather than
+    // tripping the per-entry check first.
+    let mut uploaded: Vec<String> = Vec::new();
+    for index in 0..11 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        uploaded.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let refs = |count: usize| -> Vec<String> { uploaded[..count].to_vec() };
+
+    // TEN references: admitted, and — the load-bearing half — the list arrives in the SAME ORDER it
+    // was sent. Order is semantic for this family: the template numbers the images (<image1> …) and
+    // block-causal attention makes each visible only to what follows, so a reordered payload is a
+    // different render, not a cosmetic difference.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(10),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "10 references are legal: {body}"
+    );
+    assert_eq!(
+        body["payload"]["referenceAssetIds"],
+        json!(refs(10)),
+        "the ordered list must travel verbatim"
+    );
+
+    // ... and swapping two of them is a DIFFERENT payload, not a normalized-away one. This is the
+    // assertion that would catch a future "sort or de-dupe the references" change.
+    let swapped = json!([uploaded[1], uploaded[0], uploaded[2]]);
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": swapped,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["payload"]["referenceAssetIds"], swapped);
+    assert_ne!(
+        body["payload"]["referenceAssetIds"],
+        json!([uploaded[0], uploaded[1], uploaded[2]]),
+        "reordering the references must change the request"
+    );
+
+    // ELEVEN: refused at enqueue, naming the cap and the count. Refused rather than truncated,
+    // because dropping one renumbers every reference after it.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(11),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "an 11th reference must be refused at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1"),
+        "names the model: {detail}"
+    );
+    assert!(detail.contains("up to 10"), "states the cap: {detail}");
+    assert!(detail.contains("11"), "states what was asked: {detail}");
+
+    // A model that declares NO cap is untouched: absent means no opinion, so every other image
+    // model in the catalog is byte-for-byte unchanged by this gate.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unbounded_image",
+            "mode": "edit_image",
+            "prompt": "swap the sky",
+            "referenceAssetIds": refs(11),
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "a model with no declared reference cap is unchanged: {body}"
+    );
+
+    // FREE SIZE — the declared envelope admits a size the blanket 256 floor would have refused
+    // outright, with no model ever getting a say.
+    for (width, height) in [(32u32, 32u32), (2752, 1536), (1024, 2048)] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "{width}x{height} is inside the declared envelope and on the grid: {body}"
+        );
+        // The geometry travels VERBATIM — the gate refuses, it never coerces. Image dimensions
+        // have silently coerced in this codebase before (sc-12400), which is exactly how a wrong
+        // size reached the engine unnoticed.
+        assert_eq!(body["payload"]["width"], width);
+        assert_eq!(body["payload"]["height"], height);
+    }
+
+    // Over the declared ceiling, below the declared floor, and off the declared grid: each a 400
+    // naming its own bound, none of them a silent refit.
+    for (width, height, needle) in [
+        (2784u32, 2048u32, "2752"),
+        (2048, 2784, "2752"),
+        (2048, 2050, "32-pixel grid"),
+        (2050, 2048, "32-pixel grid"),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{width}x{height} is outside the declared envelope: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains(needle),
+            "{width}x{height} must name `{needle}`: {detail}"
+        );
+    }
+
+    // The blanket floor did NOT move for anyone else. A model that declares no `minDimension`
+    // still refuses a sub-256 side — the check moved one layer down, it did not loosen.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "unbounded_image",
+            "prompt": "a lighthouse",
+            "width": 64,
+            "height": 64,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "widening the shape check must not lower the floor for an undeclared model: {body}"
+    );
+    assert!(
+        body["detail"].as_str().unwrap_or_default().contains("256"),
+        "the historical floor is still the one that refuses it: {body}"
+    );
+
+    // COUNT — the declared ladder tops out at 8, which is also the API's blanket ceiling, so both
+    // halves are asserted against the same number from opposite sides.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 8,
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "8 is the declared maximum: {body}"
+    );
+    assert_eq!(body["payload"]["count"], 8);
+
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 9,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "9 is past the ceiling");
+
+    // SEED and NEGATIVE PROMPT + TRUE-CFG GUIDANCE round-trip verbatim. They are not gated by
+    // anything — which is the point: they are part of the declared surface and nothing in this
+    // story may have started rewriting them.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "seed": 4242,
+            "negativePrompt": "watermark, blurry",
+            "advanced": { "steps": 40, "guidanceScale": 4.0 },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["payload"]["seed"], 4242);
+    assert_eq!(body["payload"]["negativePrompt"], "watermark, blurry");
+    assert_eq!(body["payload"]["advanced"]["steps"], 40);
+    assert_eq!(body["payload"]["advanced"]["guidanceScale"], 4.0);
+
+    // TRANSPARENCY — the toggle rides `advanced.transparentBackground` and round-trips untouched,
+    // so the worker's `qwen_alpha` adapter sees exactly what the user asked for. ⚠️ The key name is
+    // stable (it is a SceneWorks request axis); the ENGINE-side names it maps to are provisional
+    // pending inference sc-24111 and are spelled only in `crates/sceneworks-worker/src/qwen_alpha.rs`
+    // and `apps/web/src/qwenAlpha.js`.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "a cut-out courier on a transparent background",
+            "advanced": { "transparentBackground": true },
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        body["payload"]["advanced"]["transparentBackground"],
+        json!(true),
+        "the transparency request must reach the worker verbatim"
+    );
+
+    // ... and an omitted toggle stays omitted. Defaulting it to `false` would write a new key onto
+    // every image job in the app for a value that means "the default".
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "prompt": "an opaque courier",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(
+        body["payload"]["advanced"]
+            .get("transparentBackground")
+            .is_none(),
+        "an opaque render must put nothing new on the wire: {body}"
+    );
+}
+
+/// sc-24112 — the declared request-geometry ENVELOPE (`admissionGeometry`) is enforced at ENQUEUE,
+/// not only in the worker. 2752x2752 passes every per-side check (`maxDimension: 2752`, the 32-px
+/// grid) and is still 7.57 Mpx against the 4.30 Mpx largest-preset area; before this the API
+/// accepted it and the job failed later in the worker. Driven off the SHIPPED catalog entry, so the
+/// envelope under test is the declared one, with an admitting twin at the widest real preset.
+///
+/// *Mutation that reds this:* removing the `refuse_over_envelope` call from `create_image_job`.
+#[tokio::test]
+async fn image_jobs_outside_the_declared_admission_envelope_are_refused_at_enqueue() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entry = shipped["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1")
+        .expect("qwen_image_2_1 is in the shipped catalog")
+        .clone();
+    assert!(
+        entry.get("admissionGeometry").is_some(),
+        "precondition: the shipped entry declares its envelope"
+    );
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string(&json!({ "schemaVersion": 1, "models": [entry] }))
+            .expect("fixture serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Envelope Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let enqueue = |width: u32, height: u32| {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/image/jobs",
+            json!({
+                "projectId": project_id,
+                "model": "qwen_image_2_1",
+                "prompt": "a lighthouse",
+                "width": width,
+                "height": height,
+            }),
+        )
+    };
+
+    let (status, body) = enqueue(2752, 1536).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the widest shipped preset is inside the envelope: {body}"
+    );
+
+    let (status, body) = enqueue(2752, 2752).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "2752x2752 is over the declared area: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("4300800"),
+        "must name the declared area: {detail}"
+    );
+    assert!(
+        detail.contains("refused rather than silently resized"),
+        "{detail}"
+    );
+}
+
+/// sc-24110 — the parts of the ordered-conditioning contract the count gate above cannot see.
+///
+/// `image_reference_count_and_free_size_are_bounded_by_the_models_declared_limits` owns the CEILING
+/// and the ORDER; both read `limits.maxReferenceAssets`, which stays the single source of truth for
+/// the number. What it cannot express is everything else the ordered list can be wrong about, and
+/// each of these was a render failure or a silently different render before:
+///
+///   * the cap is over the FLATTENED list. The engine receives ONE list, and on this model
+///     `sourceAssetId` and `maskAssetId` are entries in it — a mask is an ordinary reference the
+///     prompt names, not a mask tensor. Counting `referenceAssetIds` alone would admit
+///     `source + mask + 9` as "nine references" and hand the worker eleven images.
+///   * a conditioned mode with NOTHING to condition on. The conditioned modes ARE the conditioning
+///     call; falling back to text-to-image would render something the caller did not ask for.
+///   * a per-reference `strength`. Upstream's condition images have no strength at all, and the
+///     engine refuses anything but unset-or-1.0 — after the weights are loaded.
+///   * an entry that is not a raster image this project owns. The worker would fail the job at
+///     decode time, by which point a job exists and a GPU has been claimed.
+#[tokio::test]
+async fn qwen_image_2_1_edit_validates_the_whole_ordered_conditioning_list() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "unbounded_image",
+              "name": "Unbounded",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/unbounded", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 8, "resolution": "1024x1024" },
+              "limits": {},
+              "ui": { "label": "Unbounded" }
+            },
+            {
+              "id": "qwen_image_2_1",
+              "name": "Qwen Image 2.1",
+              "family": "qwen-image-2-1",
+              "type": "image",
+              "adapter": "qwen_image_2_1",
+              "capabilities": ["text_to_image", "image_to_image", "edit_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "Qwen/Qwen-Image-2.1", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": { "steps": 40, "resolution": "2048x2048", "count": 1 },
+              "limits": { "hardMinSteps": 2, "maxReferenceAssets": 10 },
+              "ui": { "label": "Qwen Image 2.1" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Ordered Conditioning" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    // TWELVE distinct assets. The count below is over DISTINCT ids — the ordered list is deduped,
+    // because the ordinary Image-Editor payload names its working image in both `sourceAssetId` and
+    // the head of `referenceAssetIds`. A fixture whose carriers OVERLAP would therefore be counting
+    // fewer images than it names, and an "eleven" case built from overlapping slices is really a
+    // nine: it would pass against a gate that had no flattening at all.
+    let mut assets: Vec<String> = Vec::new();
+    for index in 0..12 {
+        let (_, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("reference-{index}.png"),
+            "image/png",
+            b"png-bytes",
+        )
+        .await;
+        assets.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let post = |body: Value| {
+        let app = app.clone();
+        async move { request(app, "POST", "/api/v1/image/jobs", body).await }
+    };
+
+    // ── The cap is over the FLATTENED list: source + mask + 9 is ELEVEN images, not nine.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[2..11]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "source + mask + 9 DISTINCT references is eleven images in ONE ordered list: {body}"
+    );
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("up to 10"),
+        "{body}"
+    );
+
+    // …and the same three carriers at TEN are admitted, so the count is a count and not a
+    // blanket refusal of the mask/source carriers.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "maskAssetId": assets[1],
+        "referenceAssetIds": assets[2..10]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "source + mask + 8 DISTINCT references is exactly ten: {body}"
+    );
+    assert_eq!(
+        body["payload"]["maskAssetId"], assets[1],
+        "the mask travels as an ordinary ordered reference — it is NOT stripped"
+    );
+
+    // ── DEDUPE, at the count the cap is measured against. This is the ORDINARY Image-Editor
+    // payload: the web leads `referenceAssetIds` with the working image and ALSO sets
+    // `sourceAssetId`, so the same asset is named twice. Counting it twice would burn one of the
+    // model's ten slots on a duplicate and renumber every reference after it — and would reject a
+    // legal ten-image edit as eleven.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4],
+                              assets[5], assets[6], assets[7], assets[8], assets[9]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the working image named twice is ONE image — ten distinct ids is at the cap, not over it: {body}"
+    );
+
+    // …and the dedupe is not a way to sneak past the cap: eleven DISTINCT ids still refuse, even
+    // when one of them is also the source.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "sourceAssetId": assets[0],
+        "referenceAssetIds": [assets[0], assets[1], assets[2], assets[3], assets[4], assets[5],
+                              assets[6], assets[7], assets[8], assets[9], assets[10]]
+    }))
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "eleven distinct images is still eleven: {body}"
+    );
+
+    // ── ZERO references on a conditioned mode.
+    for mode in ["edit_image", "character_image"] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": mode,
+            "prompt": "compose these"
+        }))
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{mode} with nothing to condition on must be refused: {body}"
+        );
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1"),
+            "names the model: {detail}"
+        );
+        assert!(detail.contains("supplies none"), "{detail}");
+    }
+
+    // ── STRENGTH, refused in the ENGINE's terms. 1.0 IS full weight and is admitted.
+    for (advanced, admitted) in [
+        (json!({ "strength": 0.5 }), false),
+        (json!({ "referenceStrength": 0.8 }), false),
+        (json!({ "strength": 1.0 }), true),
+    ] {
+        let (status, body) = post(json!({
+            "projectId": project_id,
+            "model": "qwen_image_2_1",
+            "mode": "edit_image",
+            "prompt": "compose these",
+            "referenceAssetIds": [assets[0]],
+            "advanced": advanced
+        }))
+        .await;
+        if admitted {
+            assert_eq!(
+                status,
+                StatusCode::CREATED,
+                "a strength of exactly 1.0 is what full weight spells: {body}"
+            );
+        } else {
+            assert_eq!(
+                status,
+                StatusCode::BAD_REQUEST,
+                "{advanced} must be refused: {body}"
+            );
+            let detail = body["detail"].as_str().unwrap_or_default();
+            assert!(
+                detail.contains("full weight") && detail.contains("no strength"),
+                "the refusal must carry the engine's reason: {detail}"
+            );
+        }
+    }
+
+    // ── PER-ENTRY existence and format, naming the ORDINAL — on a route where position is
+    // semantic, "reference 2" is something the caller can act on where a bare id is not.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "not-an-asset"]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("reference 2"),
+        "names the ordinal, not just the id: {body}"
+    );
+
+    // ── A malformed carrier fails CLOSED rather than reading as "not supplied".
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "mode": "edit_image",
+        "prompt": "compose these",
+        "referenceAssetIds": [assets[0], "  "]
+    }))
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // ── Every one of these is armed by the SAME declaration as the cap, so a model that declares
+    // nothing pays none of it — not the refusals, and not the asset reads.
+    for body in [
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these"
+        }),
+        json!({
+            "projectId": project_id, "model": "unbounded_image", "mode": "edit_image",
+            "prompt": "compose these", "referenceAssetIds": ["not-an-asset"],
+            "advanced": { "strength": 0.5 }
+        }),
+    ] {
+        let (status, response) = post(body.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::CREATED,
+            "a model declaring no cap is byte-for-byte unchanged: {body} -> {response}"
+        );
+    }
+
+    // ── And plain text-to-image on the capped model is not this gate's business either.
+    let (status, body) = post(json!({
+        "projectId": project_id,
+        "model": "qwen_image_2_1",
+        "prompt": "a lighthouse"
+    }))
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
 }
 
 /// sc-19426: `limits.hardMinSteps` is enforced at enqueue against the POST-PRESET model's floor,

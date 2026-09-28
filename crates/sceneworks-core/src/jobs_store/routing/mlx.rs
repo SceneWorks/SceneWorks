@@ -13,7 +13,7 @@ use crate::jobs_store::routing::{
     has_malformed_optional_string, has_nonempty_array, has_nonempty_nested_array,
     has_nonempty_or_malformed_array, has_nonempty_or_malformed_nested_array,
     has_nonempty_or_malformed_string, has_nonempty_string, has_nonnull_or_malformed_nested_carrier,
-    krea_edit_has_unsupported_carrier, SENSENOVA_MODEL_IDS,
+    krea_edit_has_unsupported_carrier, qwen_image_2_1_reference_ids, SENSENOVA_MODEL_IDS,
 };
 
 /// Epic 3018 routing — does this image job belong on the in-process Rust MLX
@@ -66,6 +66,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
+        "qwen_image_2_1" => qwen_image_2_1_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
@@ -331,6 +332,77 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
         return false;
     }
     true
+}
+
+/// Qwen-Image 2.1 (epic 24107) MLX-routing conditions: plain text-to-image, **and** (sc-24110) the
+/// reference / local-editing shape — ONE ordered list of condition images.
+///
+/// Upstream ships a SINGLE pipeline (S3 contract): text-to-image is that call with no condition
+/// images, and edit / multi-reference / local editing are the same call with an ordered list. There
+/// is no second request shape, no `strength`, no mask tensor and no inpainting — which is why this
+/// predicate has exactly two arms rather than an edit sibling like
+/// [`qwen_edit_mlx_eligible`]. The provider declares `Reference` + `MultiReference` on BOTH backends
+/// and deliberately does NOT declare `Mask`.
+///
+/// What is still refused, and why it is a per-shape truth rather than "not wired yet":
+///   * `advanced.poses` / `controls` / `controlnets` — 2.1 has no control branch at all, so a pose
+///     job would be silently rendered as something else (the sc-5968 class of defect);
+///   * a malformed carrier — fails closed, never "not supplied".
+///
+/// `maskAssetId` is NOT refused, and that is the point of the story: a mask on this model is an
+/// ORDINARY ordered reference the prompt names, never `Conditioning::Mask`. Note this is admitted
+/// for DIRECT API CALLERS AND WORKFLOW REPLAY, not for the Image Editor — the Editor gates its
+/// mask tool on `image_inpaint`, which this model deliberately does not declare, so its UI never
+/// produces a `maskAssetId` for 2.1 at all. A carrier the product cannot currently emit still has
+/// to route correctly when an API client, a saved recipe or a shared workflow supplies one. See
+/// [`qwen_image_2_1_reference_ids`] for the order both backends and the worker read.
+///
+/// `loras` is deliberately NOT inspected. The engine refuses adapters with a typed `Unsupported`,
+/// which surfaces as an actionable job failure; refusing here instead would leave the job
+/// unclaimable by anything on a Mac-only install and it would sit queued forever — the Anima defect
+/// of sc-10523.
+pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    // sc-24113 (#2916) landed a version of this predicate that refused `maskAssetId` outright. That
+    // is over-refusal against the S3 contract: 2.1 has no mask TENSOR, but a mask IMAGE is an
+    // ordinary ordered reference the prompt names ("use the second image as the mask") — the
+    // engine's own refusal text says so. The carrier is admitted for DIRECT API CALLERS AND
+    // WORKFLOW REPLAY; the Image Editor gates its own mask tool on `image_inpaint`, which this
+    // model does not declare, so no UI path produces one here. What #2916 was right about is that
+    // `Conditioning::Mask` must never be SENT; that is enforced where the conditioning list is
+    // built, not by dropping the carrier at the door.
+    // `image_to_image` (sc-24114) is the manifest's declared single-reference operation, and in
+    // upstream terms it is simply a 1-reference edit — the same ordered-list call. Leaving it off
+    // this list made a declared capability unroutable on BOTH lanes (candle delegates here), and
+    // the gap reason then blamed pose/strict-control for a plain reference request.
+    if !matches!(
+        payload.get("mode").and_then(Value::as_str),
+        None | Some(
+            "image_generation"
+                | "text_to_image"
+                | "image_to_image"
+                | "edit_image"
+                | "character_image"
+        )
+    ) {
+        return false;
+    }
+    if has_nonempty_array(payload, "controls")
+        || has_nonempty_array(payload, "controlnets")
+        || has_nonempty_nested_array(payload, "advanced", "poses")
+    {
+        return false;
+    }
+    // Everything else turns on ONE question: is the ordered conditioning list well-formed? An
+    // EMPTY list is the text-to-image call and a non-empty one is the edit call — the same
+    // upstream pipeline either way — so both claim, and the mode is not consulted again. Only a
+    // MALFORMED carrier refuses, and it fails closed rather than being read as "not supplied".
+    //
+    // Two things are deliberately NOT decided here. The CEILING is enforced once, at enqueue, from
+    // `limits.maxReferenceAssets`; and "a conditioned mode with no references" is an enqueue-time
+    // 400, not a routing verdict. Both for the same reason: a job that already exists must stay
+    // CLAIMABLE so the worker can fail it out loud, rather than sitting queued forever behind a
+    // predicate nothing can satisfy (the Anima defect, sc-10523).
+    qwen_image_2_1_reference_ids(payload).is_some()
 }
 
 /// Qwen-Image-Edit (sc-3397/sc-3398) MLX-routing conditions. The `qwen_image_edit` /

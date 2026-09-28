@@ -1,0 +1,465 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-mlx-memory-ladder-v2",
+      "capturedAt": "2026-09-07T12:05:55Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2-3-provider-contract-video",
+        "blockers": [
+          "LTX-2.3 q8 cancellation cleanup at Denoise changed the warm recovery clip: against the measured clip max=1.000000, mean=0.195839, rms=0.294225 over thresholds max=0.011765, mean=0.003922, rms=0.005882; against the clean warm control max=1.000000, mean=0.195839, rms=0.294225; the recovery clip's own mean level is 0.240306 with a non-degenerate first frame. Recorded as measured evidence rather than discarding the capture, whose peaks come from the cold first render",
+          "LTX-2.3 q8 injected error cleanup at Denoise changed the warm recovery clip: against the measured clip max=1.000000, mean=0.195839, rms=0.294225 over thresholds max=0.011765, mean=0.003922, rms=0.005882; against the clean warm control max=1.000000, mean=0.195839, rms=0.294225; the recovery clip's own mean level is 0.240306 with a non-degenerate first frame. Recorded as measured evidence rather than discarding the capture, whose peaks come from the cold first render"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 2132203316
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35460548970
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 25061143178
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 21585137844
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 36281874596
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 37245419520
+          },
+          {
+            "name": "denoiseEntryActive",
+            "unit": "bytes",
+            "value": 22866228438
+          },
+          {
+            "name": "decodeEntryActive",
+            "unit": "bytes",
+            "value": 2148649588
+          },
+          {
+            "name": "stagedGemmaBytes",
+            "unit": "bytes",
+            "value": 26388550536
+          },
+          {
+            "name": "stagedConnectorBytes",
+            "unit": "bytes",
+            "value": 6344493078
+          },
+          {
+            "name": "stagedTextEncoderBytes",
+            "unit": "bytes",
+            "value": 32733043614
+          },
+          {
+            "name": "stagedTransformerBytes",
+            "unit": "bytes",
+            "value": 20614103249
+          },
+          {
+            "name": "costagedGiantsBytes",
+            "unit": "bytes",
+            "value": 53347146863
+          },
+          {
+            "name": "tierArtifactBytes",
+            "unit": "bytes",
+            "value": 29728713314
+          },
+          {
+            "name": "admissionWeightsFloorBytes",
+            "unit": "bytes",
+            "value": 57890283852
+          },
+          {
+            "name": "admissionDecodeWorkingSetBytes",
+            "unit": "bytes",
+            "value": 19476906240
+          },
+          {
+            "name": "admissionPredictedPeakBytes",
+            "unit": "bytes",
+            "value": 77367190092
+          },
+          {
+            "name": "admissionHardwareBytes",
+            "unit": "bytes",
+            "value": 137438953472
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 121
+          },
+          {
+            "name": "latentTemporalDepth",
+            "unit": "count",
+            "value": 16
+          },
+          {
+            "name": "latentTokens",
+            "unit": "count",
+            "value": 6144
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 30
+          },
+          {
+            "name": "audioTrackDecoded",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "decodeTilingEngaged",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeWritableFrameCap",
+            "unit": "count",
+            "value": 682
+          },
+          {
+            "name": "decodeTileSpatialPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "decodeTileOverlapPx",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "spatialDecodeTiles",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "mlxMemoryLimitBytes",
+            "unit": "bytes",
+            "value": 130567005798
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 72
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 78
+          },
+          {
+            "name": "warmRepeatPeak",
+            "unit": "bytes",
+            "value": 36512258566
+          },
+          {
+            "name": "warmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268099216
+          },
+          {
+            "name": "warmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaxFaultPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268099216
+          },
+          {
+            "name": "lifecycleMaxFaultPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleMaxRecoveryPeak",
+            "unit": "bytes",
+            "value": 36596452038
+          },
+          {
+            "name": "lifecycleMaxRecoveryPostCleanupActive",
+            "unit": "bytes",
+            "value": 3268099216
+          },
+          {
+            "name": "lifecycleMaxRecoveryPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "cancelRecoveryVersusMeasuredMaximumErrorMilliPer255",
+            "unit": "count",
+            "value": 255000
+          },
+          {
+            "name": "cancelRecoveryVersusMeasuredMeanErrorMilliPer255",
+            "unit": "count",
+            "value": 49939
+          },
+          {
+            "name": "cancelRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+            "unit": "count",
+            "value": 75027
+          },
+          {
+            "name": "cancelRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+            "unit": "count",
+            "value": 255000
+          },
+          {
+            "name": "cancelRecoveryVersusCleanWarmMeanErrorMilliPer255",
+            "unit": "count",
+            "value": 49939
+          },
+          {
+            "name": "cancelRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+            "unit": "count",
+            "value": 75027
+          },
+          {
+            "name": "errorRecoveryVersusMeasuredMaximumErrorMilliPer255",
+            "unit": "count",
+            "value": 255000
+          },
+          {
+            "name": "errorRecoveryVersusMeasuredMeanErrorMilliPer255",
+            "unit": "count",
+            "value": 49939
+          },
+          {
+            "name": "errorRecoveryVersusMeasuredRootMeanSquareErrorMilliPer255",
+            "unit": "count",
+            "value": 75027
+          },
+          {
+            "name": "errorRecoveryVersusCleanWarmMaximumErrorMilliPer255",
+            "unit": "count",
+            "value": 255000
+          },
+          {
+            "name": "errorRecoveryVersusCleanWarmMeanErrorMilliPer255",
+            "unit": "count",
+            "value": 49939
+          },
+          {
+            "name": "errorRecoveryVersusCleanWarmRootMeanSquareErrorMilliPer255",
+            "unit": "count",
+            "value": 75027
+          },
+          {
+            "name": "measuredClipMeanLevelMilliPer255",
+            "unit": "count",
+            "value": 59086
+          },
+          {
+            "name": "cancelRecoveryFirstFrameDegenerate",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "cancelRecoveryMeanLevelMilliPer255",
+            "unit": "count",
+            "value": 61278
+          },
+          {
+            "name": "errorRecoveryFirstFrameDegenerate",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "errorRecoveryMeanLevelMilliPer255",
+            "unit": "count",
+            "value": 61278
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-mlx-q8-768x512-f121-fps30-seed18946",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-8bdb7f97e5ca748f694a",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q8+gemma",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-32181e9c4e5ed4ae9258",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35460548970,
+          "allocatorBytes": 36281874596,
+          "reclaimableBytes": 821325626
+        },
+        "decode": {
+          "activeBytes": 21585137844,
+          "allocatorBytes": 21585137844,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 25061143178,
+          "allocatorBytes": 25061143178,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35460548970,
+          "allocatorBytes": 36281874596,
+          "reclaimableBytes": 821325626
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 37245419520,
+        "decode": 22682796032,
+        "denoise": 26373783552,
+        "overall": 37245419520
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, frames, fps, tier, provider contract and selected request scope; measured clip versus a clean warm repeat, compared over every frame",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "0725fe02437fca63c466831c818af05ec004b012e83d39fe851504f1dc14635a",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:2476a29e7af09dd179c9a7d4693b5fd9b7422229aeb6f9338651de803758c2f1",
+          "revision": "f06192ac7f67723882e37b7eac2aeab7060d162f"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 37245419520,
+          "name": "exact_fit",
+          "predictedBytes": 37245419520,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider contract rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider contract rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the selected request scope repeated deterministically within the declared clip-wide envelope",
+          "result": "passed"
+        },
+        {
+          "cleanupVerified": true,
+          "name": "cancel",
+          "reason": "typed cancellation at the selected rung boundary returned the typed outcome and cleaned up within the clean-warm ALLOCATOR bounds, and a recovery render followed inside the same peak and retention bounds; what that recovery clip CONTAINS is reported in diagnostics, and any excursion from the determinism envelope is named in blockers (sc-22738)",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "cleanupVerified": true,
+          "name": "error",
+          "reason": "provider fault injection at the selected rung boundary returned the typed outcome and cleaned up within the clean-warm ALLOCATOR bounds, and a recovery render followed inside the same peak and retention bounds; what that recovery clip CONTAINS is reported in diagnostics, and any excursion from the determinism envelope is named in blockers (sc-22738)",
+          "result": "passed",
+          "warmFollowUpPassed": true
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX LTX-2.3 base-only text-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 121,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

@@ -855,6 +855,21 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
+    // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
+    // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
+    // the null SHA, so without this the job would queue a fetch that cannot resolve and the user
+    // would see an opaque download failure instead of the reason.
+    if is_pending_artifact_download(&download) {
+        return Err(ApiError::bad_request(format!(
+            "Model '{model_id}' declares the '{}' tier but its artifact is not published yet; \
+             install a different tier.",
+            download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+        )));
+    }
     // The selected `download` is always the primary/tier entry — `model_download` and
     // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
     // installed as if it were the model itself.
@@ -2177,47 +2192,15 @@ pub(crate) async fn delete_model_variant(
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
     let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
-        let repo = download
-            .get("repo")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let files = string_array_field(&download, "files");
-        // A tier with no `files` scope is the whole repo (a single-variant "default"), not a
-        // deletable slice of a shared cache — refuse rather than risk wiping every tier. The UI
-        // only offers this on real quant tiers (bf16/q8/q4), which always carry a `files` glob.
-        if files.is_empty() {
-            return Err(ApiError::bad_request(format!(
-                "Tier '{variant}' has no file scope; delete the whole model instead"
-            )));
-        }
-        let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
-        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
-        // Some families expose load-time quant choices over one dense snapshot (Mage-Flow):
-        // their q4/q8/bf16 entries intentionally overlap. Protect every path still referenced
-        // by a sibling logical tier; a delete then truthfully reclaims zero bytes rather than
-        // corrupting the snapshot used by the remaining choices.
-        let retained_files = model
-            .get("downloads")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                !is_co_requisite_download(entry)
-                    && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
-                    && entry
-                        .get("variant")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| !value.eq_ignore_ascii_case(&variant))
-            })
-            .flat_map(|entry| string_array_field(entry, "files"))
-            .collect::<Vec<_>>();
+        let scope = tier_delete_scope(&model, &download, &variant)?;
+        let repo_cache = huggingface_repo_cache_path(data_dir, &scope.repo);
+        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&scope.repo)));
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
         remove_tier_artifacts(
             repo_cache,
             managed_dir,
-            &files,
-            &retained_files,
+            &scope.files,
+            &scope.retained_files,
             &allowed_roots,
             true,
         )
@@ -2292,6 +2275,97 @@ pub(crate) async fn delete_model_variant(
     })))
 }
 
+/// What one per-tier delete removes: the repo it lives in, the globs that select its files, and
+/// the globs a sibling tier in the SAME repo still owns.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TierDeleteScope {
+    pub(crate) repo: String,
+    pub(crate) files: Vec<String>,
+    pub(crate) retained_files: Vec<String>,
+}
+
+/// Whether a tier row with NO `files` scope is still reclaimable on its own (sc-24112): no other
+/// download row of the same model — tier, alternate or co-requisite — names its `repo`, so that
+/// repo's whole snapshot IS this tier. `qwen_image_2_1`'s bf16 tier is the released upstream
+/// snapshot, the only row on `Qwen/Qwen-Image-2.1`, while its q8/q4 live in the SceneWorks re-host;
+/// deleting it can strand nothing. A scope-less row on a repo a sibling shares is still the model,
+/// not a slice of it, and stays refused.
+pub(crate) fn is_sole_repo_tier(model: &Value, download: &Value) -> bool {
+    // Only a DECLARED tier: an untagged single-download row is the "default" pseudo-variant, which
+    // the per-tier route cannot address at all.
+    let tagged = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .is_some_and(|variant| !variant.trim().is_empty());
+    let Some(repo) = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .filter(|_| tagged)
+    else {
+        return false;
+    };
+    let sharers = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+        .count();
+    sharers == 1
+}
+
+/// Scope a per-tier delete of `variant` (its catalog row is `download`).
+///
+/// A row with a `files` scope deletes that slice and protects every path a sibling logical tier in
+/// the same repo still references (Mage-Flow's overlapping load-time tiers reclaim zero bytes
+/// rather than corrupting the snapshot the remaining choices use). A row with NO scope is refused
+/// ("delete the whole model instead") unless it is the sole row on its repo
+/// ([`is_sole_repo_tier`]), in which case the whole repo snapshot is the tier and every file in it
+/// goes.
+pub(crate) fn tier_delete_scope(
+    model: &Value,
+    download: &Value,
+    variant: &str,
+) -> Result<TierDeleteScope, ApiError> {
+    let repo = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        if is_sole_repo_tier(model, download) {
+            return Ok(TierDeleteScope {
+                repo,
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            });
+        }
+        return Err(ApiError::bad_request(format!(
+            "Tier '{variant}' has no file scope; delete the whole model instead"
+        )));
+    }
+    let retained_files = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            !is_co_requisite_download(entry)
+                && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
+                && entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.eq_ignore_ascii_case(variant))
+        })
+        .flat_map(|entry| string_array_field(entry, "files"))
+        .collect::<Vec<_>>();
+    Ok(TierDeleteScope {
+        repo,
+        files,
+        retained_files,
+    })
+}
 /// Result of removing a single quant tier's on-disk artifacts (sc-12024).
 #[derive(Default)]
 pub(crate) struct TierRemoval {
@@ -4096,6 +4170,9 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     // Re-read under the lock: a concurrent backfill may have rewritten the file.
     let kept = receipt_entries(managed_path)
         .into_iter()
@@ -4112,9 +4189,70 @@ fn repair_torn_backfilled_receipts(managed_path: &FsPath, data_dir: &FsPath) {
     if let Some(object) = receipt.as_object_mut() {
         object.insert("receipts".to_owned(), Value::Array(kept));
     }
-    let _ = serde_json::to_vec_pretty(&receipt)
-        .ok()
-        .and_then(|bytes| std::fs::write(&receipt_path, bytes).ok());
+    let _ = sceneworks_core::download_receipt::write(&receipt_path, &receipt);
+}
+
+/// Heal legacy install identity before the catalog and local-cache eligibility read it.
+fn repair_missing_snapshot_revisions(managed: &FsPath, model: &Value, data_dir: &FsPath) {
+    use sceneworks_core::download_receipt;
+    let marker = managed.join(".sceneworks-download-complete.json");
+    if !marker.is_file() {
+        return;
+    }
+    let Ok(_lock) = download_receipt::lock(managed) else {
+        return;
+    };
+    let Ok(bytes) = std::fs::read(&marker) else {
+        return;
+    };
+    let Ok(mut receipt) = serde_json::from_slice::<Value>(&bytes) else {
+        return;
+    };
+    let family_complete = model_family_tier_predicate(model);
+    let repair = |entry: &mut Value| {
+        if entry
+            .get("modelId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| Some(id) != model.get("id").and_then(Value::as_str))
+        {
+            return false;
+        }
+        let Some(repo) = entry.get("repo").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some(root) = huggingface_repo_cache_path(data_dir, repo) else {
+            return false;
+        };
+        let Some(revision) = download_receipt::recover_revision(entry, &root) else {
+            return false;
+        };
+        let Ok((_, snapshot)) = sceneworks_core::hf_home::model_source_library(data_dir)
+            .discover_snapshot(repo, Some(&revision))
+        else {
+            return false;
+        };
+        let files = string_array_field(entry, "resolvedFiles");
+        if !snapshot_tier_is_loadable(&snapshot, &files, family_complete)
+            || !listed_shard_indexes_are_complete(&snapshot, &files)
+        {
+            return false;
+        }
+        entry["snapshotRevision"] = Value::String(revision);
+        true
+    };
+    // The newest receipt is mirrored at the top level. Repair both representations without
+    // rebuilding the envelope or dropping unrelated variants and fields.
+    let mut changed = repair(&mut receipt);
+    if let Some(entries) = receipt.get_mut("receipts").and_then(Value::as_array_mut) {
+        for entry in entries {
+            changed |= repair(entry);
+        }
+    }
+    if changed {
+        if let Err(error) = download_receipt::write(&marker, &receipt) {
+            tracing::warn!(%error, path = %marker.display(), "could not repair missing snapshot revisions");
+        }
+    }
 }
 
 fn backfill_current_receipt(
@@ -4188,9 +4326,15 @@ fn backfill_current_receipt(
     if receipts.is_empty() {
         return;
     }
+    if std::fs::create_dir_all(managed_path).is_err() {
+        return;
+    }
     let _write_guard = RECEIPT_BACKFILL_WRITE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Ok(_receipt_lock) = sceneworks_core::download_receipt::lock(managed_path) else {
+        return;
+    };
     if !receipt_file_sets(managed_path, &context.repo, Some(model_id)).is_empty() {
         return;
     }
@@ -4218,14 +4362,10 @@ fn backfill_current_receipt(
         .as_object_mut()
         .unwrap()
         .insert("receipts".to_owned(), Value::Array(merged));
-    let _ = std::fs::create_dir_all(managed_path);
-    let _ = serde_json::to_vec_pretty(&receipt).ok().and_then(|bytes| {
-        std::fs::write(
-            managed_path.join(".sceneworks-download-complete.json"),
-            bytes,
-        )
-        .ok()
-    });
+    let _ = sceneworks_core::download_receipt::write(
+        &managed_path.join(".sceneworks-download-complete.json"),
+        &receipt,
+    );
 }
 
 #[cfg(test)]
@@ -4488,6 +4628,88 @@ mod download_receipt_tests {
     // real HF cache when HF_HOME is set. Serialize on the same `HF_ENV_LOCK`; never add a second lock.
     use crate::tests::support::isolate_hf_cache;
 
+    #[test]
+    fn discovery_repairs_legacy_snapshot_revisions_and_restores_cache_eligibility() {
+        use sceneworks_core::model_artifacts::artifact_selection::{
+            local_cache_eligibility_for_model, LocalCacheCoverage,
+        };
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let repo = "owner/receipt-repair";
+        let rev = "1111111111111111111111111111111111111111";
+        let snapshot = huggingface_repo_cache_path(data, repo)
+            .unwrap()
+            .join("snapshots")
+            .join(rev);
+        std::fs::create_dir_all(snapshot.join("q4")).unwrap();
+        std::fs::write(snapshot.join("q4/model.safetensors"), b"weights").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        // A newer catalog pin must never be substituted for the snapshot actually installed.
+        let model = json!({"id":"repair", "downloads":[{"provider":"huggingface", "repo":repo,
+            "revision":"2222222222222222222222222222222222222222", "variant":"q4", "default":true, "files":["q4/*"]}]});
+        for revision in [None, Some(Value::Null), Some(json!("")), Some(json!("  "))] {
+            let mut entry = json!({"repo":repo, "modelId":"repair", "variant":"q4", "backfilled":true,
+                "resolvedFiles":["q4/model.safetensors"], "customField":"preserved"});
+            if let Some(revision) = revision {
+                entry["snapshotRevision"] = revision;
+            }
+            let sibling = json!({"repo":repo,"modelId":"other","variant":"q8", "snapshotRevision":rev,
+                "resolvedFiles":["q8/model.safetensors"]});
+            let mut top = entry.clone();
+            top["receipts"] = json!([entry, sibling]);
+            std::fs::write(&marker, serde_json::to_vec(&top).unwrap()).unwrap();
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::None
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            let bytes = std::fs::read(&marker).unwrap();
+            let after: Value = serde_json::from_slice(&bytes).unwrap();
+            top["snapshotRevision"] = json!(rev);
+            top["receipts"][0]["snapshotRevision"] = json!(rev);
+            assert_eq!(
+                after, top,
+                "only missing revisions change, including the mirrored top-level receipt"
+            );
+            assert_eq!(
+                local_cache_eligibility_for_model(&model, "macos", Some("q4"), data).coverage,
+                LocalCacheCoverage::Full
+            );
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+            assert_eq!(
+                std::fs::read(&marker).unwrap(),
+                bytes,
+                "repeat discovery is idempotent"
+            );
+        }
+    }
+
+    #[test]
+    fn snapshot_revision_repair_does_not_pin_a_torn_shard_set() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let repo = "owner/torn-repair";
+        let root = huggingface_repo_cache_path(temp.path(), repo).unwrap();
+        let snapshot = root.join("snapshots/1111111111111111111111111111111111111111");
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            br#"{"weight_map":{"a":"missing.safetensors"}}"#,
+        )
+        .unwrap();
+        let managed = temp.path().join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        let marker = managed.join(".sceneworks-download-complete.json");
+        let receipt = json!({"repo":repo,"modelId":"repair", "resolvedFiles":["model.safetensors.index.json"]});
+        let before = serde_json::to_vec(&receipt).unwrap();
+        std::fs::write(&marker, &before).unwrap();
+        repair_missing_snapshot_revisions(&managed, &json!({"id":"repair"}), temp.path());
+        assert_eq!(std::fs::read(&marker).unwrap(), before);
+    }
+
     fn builtin_models_entry(model_id: &str) -> Value {
         let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
             .iter()
@@ -4504,6 +4726,138 @@ mod download_receipt_tests {
             .find(|entry| entry.get("id").and_then(Value::as_str) == Some(model_id))
             .cloned()
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
+    }
+
+    /// The optional native film planner must describe a loadable official checkpoint, not merely a
+    /// repository directory. Its first pin predated the weights and held only metadata; that exact
+    /// snapshot plus its completed download receipt must remain unavailable. The current pin is a
+    /// 15-shard indexed checkpoint, and one wildcard-matching shard is still a torn install.
+    #[test]
+    fn qwen36_film_planner_requires_the_current_complete_indexed_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let model = builtin_models_entry("film_planner_qwen3_6_27b");
+        let download = model_download(&model).expect("Qwen planner download");
+        let repo = download["repo"].as_str().unwrap();
+        let current_revision = "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9";
+        let obsolete_revision = "70215ea87f5a6ae62bb56822396c1b42f1a18e0b";
+        assert_eq!(download["revision"], current_revision);
+        assert_eq!(
+            download["files"],
+            json!([
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "model.safetensors.index.json",
+                "model-*.safetensors"
+            ])
+        );
+        assert_eq!(
+            download["breaking"], true,
+            "only the unusable README-only receipt needs stale-install refusal"
+        );
+
+        let root = huggingface_repo_cache_path(data, repo).unwrap();
+        let obsolete = root.join("snapshots").join(obsolete_revision);
+        std::fs::create_dir_all(&obsolete).unwrap();
+        std::fs::write(obsolete.join("README.md"), b"model card only").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "repo": repo,
+                "modelId": "film_planner_qwen3_6_27b",
+                "variant": "default",
+                "manifestFiles": [],
+                "resolvedFiles": ["README.md"],
+                "snapshotRevision": obsolete_revision
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let readme_only = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !readme_only.installed,
+            "an old completed receipt cannot make a metadata-only snapshot usable"
+        );
+        assert!(
+            readme_only
+                .missing_required_files
+                .iter()
+                .any(|file| file == "config.json"),
+            "missing loader artifacts stay visible: {:?}",
+            readme_only.missing_required_files
+        );
+
+        let current = root.join("snapshots").join(current_revision);
+        std::fs::create_dir_all(&current).unwrap();
+        for file in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ] {
+            std::fs::write(current.join(file), b"{}").unwrap();
+        }
+        let shard_name = |ordinal: usize| format!("model-{ordinal:05}-of-00015.safetensors");
+        std::fs::write(current.join("model.safetensors.index.json"), b"{not json").unwrap();
+        std::fs::write(current.join(shard_name(1)), b"first shard").unwrap();
+        let invalid_index =
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !invalid_index.installed
+                && invalid_index.cache_incomplete
+                && invalid_index
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model.safetensors.index.json"),
+            "an explicitly required invalid index cannot make a wildcard shard set usable: {:?}",
+            invalid_index.missing_required_files
+        );
+
+        let weight_map = (1..=15)
+            .map(|ordinal| {
+                (
+                    format!("tensor.{ordinal}"),
+                    Value::String(shard_name(ordinal)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        std::fs::write(
+            current.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({ "weight_map": weight_map })).unwrap(),
+        )
+        .unwrap();
+
+        let partial = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !partial.installed && partial.cache_incomplete,
+            "one shard matches the wildcard but cannot satisfy a 15-shard index; missing={:?}",
+            partial.missing_required_files
+        );
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file == &shard_name(15)),
+            "the index names the missing shards: {:?}",
+            partial.missing_required_files
+        );
+
+        for ordinal in 2..=15 {
+            std::fs::write(current.join(shard_name(ordinal)), b"shard").unwrap();
+        }
+        let complete = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            complete.installed,
+            "complete indexed snapshot; missing={:?}",
+            complete.missing_required_files
+        );
+        assert!(complete.missing_required_files.is_empty());
     }
 
     /// Manifest `files` entries are match patterns, not literal names — Eros's shared Gemma
@@ -5355,12 +5709,9 @@ mod download_receipt_tests {
     /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
     /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
     /// `install_state_for` never enters the backfill at all — delete the guard and that test still
-    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
-    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
-    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
-    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
-    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
-    /// declared those files and they are all there — so this fixture is the guard alone.)
+    /// passes. A flat explicit filter now also refuses the torn set at catalog-health time, so this
+    /// test calls the backfill seam directly to keep its independent guard covered, then proves the
+    /// public install state reports the same missing shard.
     #[test]
     fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
         let _env = isolate_hf_cache();
@@ -5389,29 +5740,32 @@ mod download_receipt_tests {
                 "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
             }]
         });
-        let marker = data_dir
-            .join("models")
-            .join(safe_download_dir(repo))
-            .join(".sceneworks-download-complete.json");
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
 
-        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
-        assert!(
-            state.installed,
-            "fixture precondition: every declared pattern is present, so cache health reads \
-             installed and the backfill lane is genuinely entered"
-        );
+        let context = model_download_context(&model).unwrap().unwrap();
+        backfill_current_receipt(&managed, &model, &context, data_dir);
         assert!(
             !marker.exists(),
-            "backfill must refuse to record a set whose own shard index names a file that never \
-             landed — nothing else on this lane is watching"
+            "backfill must independently refuse an index whose shard never landed"
+        );
+
+        let state = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !state.installed
+                && state.cache_incomplete
+                && state
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model-00001-of-00002.safetensors"),
+            "filtered cache health must refuse the same torn set: {:?}",
+            state.missing_required_files
         );
 
         // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
         // guard discriminates on shard completeness rather than never writing for this shape.
         std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
-        assert!(
-            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
-        );
+        assert!(install_state_for(Some(context), &model, data_dir).installed);
         let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(receipt["backfilled"], true);
         assert!(
@@ -6455,9 +6809,12 @@ fn install_state_for(
         // even a non-default one — must never surface as an incomplete/repairable cache (sc-9907),
         // because that rendered a false "Cached files are incomplete" warning + Fix button on a
         // perfectly good install. Single-variant models keep the default-tier contract below.
+        let mut tier_dependencies_missing = false;
         let (cache_installed, cache_incomplete, mut missing_required_files) =
             if model_has_variant_matrix(model) {
                 let variants = model_variant_states(model, data_dir);
+                tier_dependencies_missing =
+                    variants.iter().any(|variant| variant.dependencies_missing);
                 let any_installed = variants.iter().any(|variant| variant.installed);
                 // A TORN tier — some of its files present but not all — is a genuine repair candidate:
                 // it will fail to load, and re-downloading that tier fixes it. A never-fetched tier is
@@ -6523,6 +6880,7 @@ fn install_state_for(
         // BEFORE it is read, so an affected install self-heals on the next scan instead of needing a
         // manual delete — and so the backfill below can re-record the tier honestly.
         repair_torn_backfilled_receipts(&managed_path, data_dir);
+        repair_missing_snapshot_revisions(&managed_path, model, data_dir);
         let receipt_file_sets = receipt_file_sets(
             &managed_path,
             &download_context.repo,
@@ -6562,7 +6920,10 @@ fn install_state_for(
                             .and_then(Value::as_bool)
                             .unwrap_or(false)
                 });
-        let usable_stale = stale_files_present && !breaking_update;
+        // A receipt proves the primary files exist, not that their dependencies still do.
+        // Do not let it override missing dependencies. A partial nonbreaking primary update
+        // may still use its complete older receipt.
+        let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
         let installed_path = if cache_installed || cache_incomplete || usable_stale {
             cache_path.clone()
@@ -6586,8 +6947,11 @@ fn install_state_for(
         let tier_scoped: Vec<Value> = model_co_requisite_downloads(model)
             .into_iter()
             .filter(|download| co_requisite_variant(download).is_some())
+            .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
             .collect();
-        if !tier_scoped.is_empty() {
+        // Current matrix variants already check their matching dependency sets with the primary.
+        // Retain the dependency floor when a receipt is supplying an older primary instead.
+        if (!model_has_variant_matrix(model) || usable_stale) && !tier_scoped.is_empty() {
             let tiers: std::collections::BTreeSet<String> = tier_scoped
                 .iter()
                 .filter_map(co_requisite_variant)
@@ -6789,6 +7153,8 @@ struct ModelVariantState {
     installed_path: Option<String>,
     /// This tier's incomplete-cache signal (some but not all `files` present).
     cache_incomplete: bool,
+    /// A present primary is missing required companions; primary-only receipts cannot repair this.
+    dependencies_missing: bool,
     /// Files this tier is missing from the cache (empty when complete or absent).
     missing_required_files: Vec<String>,
     /// This tier's estimated download size (from `downloads[].estimatedSizeBytes` /
@@ -6797,6 +7163,19 @@ struct ModelVariantState {
     /// The raw `downloads[].footprint` object (disk size + optional measured memory), passed
     /// through verbatim for the RAM-suggestion surfaces (sc-8509/8516). `Null` when absent.
     footprint: Value,
+    /// This tier is DECLARED but its artifact is not published yet (`downloads[].pendingArtifact`,
+    /// sc-24112). The picker still lists it — the tier axis is real — but it can never be queued,
+    /// never reads `installed`, and is rendered unavailable rather than as a download button.
+    pending_artifact: bool,
+    /// Whether the PER-TIER delete can reclaim this tier on its own (never for a pending row):
+    /// true when the row carries a non-empty `files` scope, OR when it is a scope-less tier that is
+    /// the sole row on its repo ([`is_sole_repo_tier`]) — `qwen_image_2_1`'s bf16 tier, which IS
+    /// the whole upstream snapshot and shares that repo with nothing. A scope-less row on a repo a
+    /// sibling shares is the model rather than a slice of it, and `DELETE
+    /// /models/:id/variants/:variant` refuses it with "delete the whole model instead", so the UI
+    /// must not offer a per-tier delete for it. Both answers come from [`tier_delete_scope`]'s own
+    /// rule, so the button and the route cannot disagree.
+    tier_deletable: bool,
 }
 
 // Whether `model`'s `downloads` array is a quant-matrix — i.e. at least one supported entry carries
@@ -6847,13 +7226,11 @@ fn no_model_index_family_predicate(family: &str, model_id: &str) -> Option<fn(&F
         // not the family — picks the predicate. Dispatched through the SHARED id list the worker's tier
         // resolver uses, so an id the worker would not tighten is not tightened here either.
         "sensenova-u1" => tc::sensenova_tier_predicate(model_id),
-        // sc-19078: the MiniMax-H3 tiers ship two DiT partition dirs (`{tier}/transformer` and
-        // `{tier}/transformer_ref`) and NO `model_index.json` at either level, so the coarse
-        // `q4/transformer/*` glob is satisfied by a single landed file out of fourteen shards. Like
-        // SenseNova the id — not the family — picks the predicate: the two catalog entries share the
-        // `minimax-h3` family but own DIFFERENT partitions of one repo, so a family-only predicate
-        // would have to demand both and report a reference-only install as torn forever.
-        "minimax-h3" => tc::minimax_h3_tier_predicate(model_id),
+        // Both MiniMax-H3 entries load both DiT partitions. Each partition's glob can match
+        // an interrupted download, so require both indexed shard sets before advertising a tier.
+        "minimax-h3" if tc::minimax_h3_tier_predicate(model_id).is_some() => {
+            Some(|dir| tc::minimax_h3_tier_complete(dir) && tc::minimax_h3_ref_tier_complete(dir))
+        }
         _ => None,
     }
 }
@@ -6989,6 +7366,42 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // A tier is usable only with its own required companions. Checking these only at
+            // model level let a complete q4 encoder certify bf16 and hid its repair action.
+            // An absent primary remains absent even if shared files from another tier exist.
+            let mut dependencies_missing = false;
+            if installed || cache_incomplete {
+                for download in model_co_requisite_downloads_for_variant(
+                    model,
+                    entry.get("variant").and_then(Value::as_str),
+                )
+                .into_iter()
+                .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
+                {
+                    let health = co_requisite_cache_health(data_dir, &download);
+                    if health.as_ref().is_some_and(|health| health.installed) {
+                        continue;
+                    }
+                    installed = false;
+                    cache_incomplete = true;
+                    dependencies_missing = true;
+                    let repo = download
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let missing = health
+                        .map(|health| health.missing_files)
+                        .filter(|files| !files.is_empty())
+                        .unwrap_or_else(|| string_array_field(&download, "files"));
+                    if missing.is_empty() {
+                        missing_required_files.push(repo.to_owned());
+                    } else {
+                        missing_required_files
+                            .extend(missing.iter().map(|file| format!("{repo}/{file}")));
+                    }
+                }
+            }
+
             let installed_path = if cache_installed || cache_incomplete {
                 cache_path
             } else if managed_installed {
@@ -6996,6 +7409,15 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             } else {
                 None
             };
+            // sc-24112: a DECLARED-but-unpublished tier can never be installed, whatever the cache
+            // probe above happened to find. Forcing it here rather than filtering the row out keeps
+            // the tier in the picker (the axis is real) while making every downstream
+            // "installed?"/"queue it?" answer false through the ONE field they all read.
+            let pending_artifact = is_pending_artifact_download(entry);
+            if pending_artifact {
+                installed = false;
+                cache_incomplete = false;
+            }
             ModelVariantState {
                 variant: entry
                     .get("variant")
@@ -7006,10 +7428,14 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 installed,
                 installed_path: installed_path.map(|path| path.display().to_string()),
                 cache_incomplete,
+                dependencies_missing,
                 missing_required_files,
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
                 footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
+                pending_artifact,
+                tier_deletable: !pending_artifact
+                    && (!files.is_empty() || is_sole_repo_tier(model, entry)),
             }
         })
         .collect()
@@ -7084,7 +7510,19 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
             json!({
                 "variant": variant.variant,
                 "installed": variant.installed,
-                "installState": if variant.installed { "installed" } else { "missing" },
+                // sc-24112: a pending tier is neither installed nor installable. `"pending"` is a
+                // THIRD install state rather than `"missing"` so the web can say "not published
+                // yet" instead of offering a download button that would queue a fetch of a
+                // revision that does not resolve.
+                "installState": if variant.pending_artifact {
+                    "pending"
+                } else if variant.installed {
+                    "installed"
+                } else {
+                    "missing"
+                },
+                "pendingArtifact": variant.pending_artifact,
+                "tierDeletable": variant.tier_deletable,
                 "cacheState": if variant.cache_incomplete {
                     "incomplete"
                 } else if variant.installed {
@@ -7451,6 +7889,30 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
         // Explicit empty wins over permissive family fallback in the validator.
         compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
         compatibility.insert("supported".to_owned(), Value::Bool(false));
+    }
+}
+
+/// A manifest that DECLARES `loraCompatibility.families: []` (e.g. `qwen_image_2_1`, whose engine
+/// refuses adapters) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
+/// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
+/// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
+/// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on
+/// exactly the models the API refuses. An explicit `supported` already on the entry is kept.
+fn mark_empty_lora_advertisement_unsupported(object: &mut JsonObject) {
+    let Some(compatibility) = object
+        .get_mut("loraCompatibility")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if compatibility
+        .get("families")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        compatibility
+            .entry("supported".to_owned())
+            .or_insert(Value::Bool(false));
     }
 }
 
@@ -8200,6 +8662,7 @@ fn apply_model_catalog_entry(
     apply_mac_and_mlx_fields(object, data_dir);
     apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
+    mark_empty_lora_advertisement_unsupported(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
     // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
@@ -8631,86 +9094,10 @@ mod model_size_concurrency_tests {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
             .expect("builtin manifest parses");
-        // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
-        // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
-        // from 81 to 82.
-        //
-        // sc-17627 then declared the three person-vision utilities that were previously job-time
-        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
-        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
-        // and `person_detector` (one platform-scoped row each, so exactly one survives
-        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
-        // swapped its repo rather than adding one, so it does not move these counts.
-        //
-        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
-        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
-        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
-        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
-        // windows/linux 82 → 83.
-        //
-        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
-        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
-        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
-        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
-        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
-        // 83 → 84.
-        //
-        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
-        // each gain its exact pinned download context while macOS keeps the same one.
-        //
-        // sc-18481 retired AuraSR from the installable catalog because every production backend
-        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
-        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
-        //
-        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
-        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
-        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
-        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
-        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
-        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
-        // `None`. That asymmetry is the point of running this loop per OS.
-        //
-        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
-        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
-        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
-        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
-        // windows/linux gain exactly one at that point. SC-20756 later adds the distinct hosted
-        // `q4/transformer_ref/*` context for the reference partition.
-        //
-        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
-        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
-        // `default: true` row, so the off-Mac context is now
-        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
-        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
-        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
-        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
-        // platforms never fetch.
-        //
-        // SC-20756 then makes the already-hosted Ref2VA tiers installable off-Mac; the pinned
-        // provider has admitted that conditioning surface since sc-17157.
-        //
-        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
-        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
-        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
-        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
-        // download row, so every OS gains exactly one.
-        //
-        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
-        // the shared 87 / 84 / 84, six independent deltas all apply:
-        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
-        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
-        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
-        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
-        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
-        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
-        //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
-        // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
-        // 88/85/85 (epic, at the previous sync); neither is right once both land. SC-18780 then
-        // publishes the single cross-platform LTX 2.5 turnkey context, giving 90 / 87 / 87.
-        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
-        for (os, expected_distinct_contexts) in
-            [("macos", 90_usize), ("windows", 87), ("linux", 87)]
-        {
+        // The cache is keyed by `(repo, files)`, so shared model rows deliberately collapse to one
+        // entry. Assert the invariant the production scan needs instead of sealing today's catalog
+        // population: every platform's distinct contexts fit together and remain addressable.
+        for os in ["macos", "windows", "linux"] {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
                 .as_array()
@@ -8723,17 +9110,27 @@ mod model_size_concurrency_tests {
                     keys.insert((context.repo, context.files));
                 }
             }
-            assert_eq!(
-                keys.len(),
-                expected_distinct_contexts,
-                "{os} builtin download-context count changed; reconsider cache capacity"
-            );
+            assert!(!keys.is_empty(), "{os} has no builtin download contexts");
             assert!(
                 keys.len() <= MODEL_SIZE_CACHE_LIMIT,
                 "{os} builtin catalog has {} distinct download contexts but cache holds only {}",
                 keys.len(),
                 MODEL_SIZE_CACHE_LIMIT
             );
+
+            let keys: Vec<_> = keys.into_iter().collect();
+            let mut cache = ModelSizeCache::default();
+            for (index, key) in keys.iter().cloned().enumerate() {
+                cache.insert(key, index as u64 + 1);
+            }
+            assert_eq!(cache.entries.len(), keys.len());
+            for (index, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    cache.get(key),
+                    Some(Some(index as u64 + 1)),
+                    "{os} context {key:?} was evicted from a cache that should fit the catalog"
+                );
+            }
         }
     }
 
@@ -9252,8 +9649,8 @@ pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requi
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
 pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
-    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
-    model_download_for_variant,
+    co_requisite_variant, is_pending_artifact_download, model_co_requisite_downloads,
+    model_co_requisite_downloads_for_variant, model_download_for_variant,
 };
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
@@ -9418,6 +9815,52 @@ fn huggingface_filtered_cache_health(
     // Whether the COARSE check found none of the filter's patterns present — the "cleanly absent
     // tier" signal, captured before the tier-completeness augmentation below can add entries.
     let coarse_all_absent = missing.len() == files.len();
+
+    // A flat sharded Transformers checkpoint commonly declares an index plus `model-*.safetensors`.
+    // The glob is satisfied by the FIRST shard, so the coarse pattern check alone can call a torn
+    // 15-shard model installed. Evaluate every candidate revision as one coherent snapshot and fold
+    // in the shard set declared by its selected index. This reuses the whole-repo/receipt validator;
+    // no tensor bytes or headers are read, only the small index and one stat per named shard.
+    let has_flat_shard_glob = files.iter().any(|pattern| {
+        !pattern.contains('/')
+            && pattern_contains_glob(pattern)
+            && pattern.to_ascii_lowercase().ends_with(".safetensors")
+    });
+    let indexed_health = has_flat_shard_glob.then(|| {
+        snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let files_on_disk = snapshot_files(snapshot);
+                let selected_indexes = files_on_disk
+                    .iter()
+                    .filter(|file| {
+                        file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX)
+                            && files.iter().any(|pattern| pattern_matches(pattern, file))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selected_indexes.is_empty() {
+                    return None;
+                }
+                let mut candidate_missing = files
+                    .iter()
+                    .filter(|pattern| !snapshot_contains_pattern(snapshot, pattern))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for shard in torn_shard_indexes_in(snapshot, &selected_indexes) {
+                    if !candidate_missing.contains(&shard) {
+                        candidate_missing.push(shard);
+                    }
+                }
+                Some(candidate_missing)
+            })
+            .min_by_key(Vec::len)
+    });
+    if let Some(Some(indexed_missing)) = indexed_health {
+        // Required metadata, index and shards must coexist in ONE revision. Replacing the coarse
+        // cross-snapshot result also prevents different revisions from satisfying different files.
+        missing = indexed_missing;
+    }
 
     // Flat diffusers snapshots (Mage-Flow's logical q4/q8/bf16 load-time choices) list the
     // root `model_index.json` plus component globs rather than one `<tier>/*` subdir. The coarse
@@ -10362,6 +10805,78 @@ mod variant_install_tests {
                 }
             ]
         })
+    }
+
+    #[test]
+    fn tier_dependencies_cannot_be_borrowed_from_a_sibling_or_a_receipt() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let components = "SceneWorks/encoders";
+        let mut model = quant_matrix_model(repo);
+        for tier in ["q4", "q8", "bf16"] {
+            model["downloads"].as_array_mut().unwrap().push(json!({
+                "provider": "huggingface", "repo": components, "coRequisite": true,
+                "variant": tier, "files": [format!("{tier}/encoder.bin")]
+            }));
+        }
+        seed_cache(data.path(), repo, &["bf16/model.safetensors"]);
+        seed_cache(
+            data.path(),
+            components,
+            &["q4/encoder.bin", "bf16/encoder.bin"],
+        );
+        let state =
+            || install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state().installed); // Also backfills the primary receipt.
+        let receipt = data.path().join("models").join(safe_download_dir(repo));
+        assert!(!receipt_file_sets(&receipt, repo, Some("matrix_model")).is_empty());
+
+        std::fs::remove_file(
+            huggingface_repo_cache_path(data.path(), components)
+                .unwrap()
+                .join("snapshots/abc123/bf16/encoder.bin"),
+        )
+        .unwrap();
+        let broken = state();
+        assert!(
+            !broken.installed,
+            "q4's encoder and the bf16 primary receipt cannot certify bf16"
+        );
+        assert!(broken.cache_incomplete);
+        assert!(broken
+            .missing_required_files
+            .contains(&format!("{components}/bf16/encoder.bin")));
+        let variants = model_variant_states(&model, data.path());
+        for tier in ["q4", "q8"] {
+            let variant = variants.iter().find(|v| v.variant == tier).unwrap();
+            assert!(
+                !variant.installed && !variant.cache_incomplete,
+                "absent primary {tier}"
+            );
+        }
+
+        seed_cache(data.path(), components, &["bf16/encoder.bin"]);
+        assert!(state().installed);
+        assert!(!state().cache_incomplete);
+    }
+
+    #[test]
+    fn optional_tier_dependencies_do_not_block_an_installed_primary() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let mut model = quant_matrix_model(repo);
+        model["downloads"].as_array_mut().unwrap().push(json!({
+            "provider": "huggingface", "repo": "SceneWorks/optional", "coRequisite": true,
+            "variant": "q4", "required": "soft", "files": ["optional.bin"]
+        }));
+        seed_cache(data.path(), repo, &["q4/model.safetensors"]);
+        let variants = model_variant_states(&model, data.path());
+        let q4 = variants.iter().find(|v| v.variant == "q4").unwrap();
+        assert!(q4.installed && !q4.cache_incomplete);
+        let state = install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state.installed && !state.cache_incomplete);
     }
 
     #[test]
@@ -11503,6 +12018,131 @@ mod variant_install_tests {
         );
     }
 
+    /// sc-24112 — a DECLARED-but-unpublished tier (`pendingArtifact`).
+    ///
+    /// The catalog keeps ENUMERATING it, because the tier axis has to be real before the bytes
+    /// exist: the memory ladder, both fit gates, the tier picker and the download panel are all
+    /// built and tested against the tier that is coming. What it must never be is *installable* —
+    /// its revision is the null SHA, so a queued fetch cannot resolve and the user would see an
+    /// opaque download failure instead of the reason.
+    ///
+    /// The flags below are what every downstream surface reads, so this is the one place the rule
+    /// is decided rather than re-derived per consumer.
+    #[test]
+    fn a_pending_artifact_tier_is_listed_but_never_installed() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        // Make q8 pending, exactly as the shipped `qwen_image_2_1` rows are.
+        downloads[1]["pendingArtifact"] = json!(true);
+        downloads[1]["revision"] =
+            json!(sceneworks_core::model_artifacts::artifact_selection::PENDING_ARTIFACT_REVISION);
+
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| s.variant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["q4", "q8", "bf16"],
+            "a pending tier is still ENUMERATED — the tier axis is a catalog declaration, not a \
+             statement about what is on disk"
+        );
+        let q8 = states
+            .iter()
+            .find(|state| state.variant == "q8")
+            .expect("q8 is enumerated");
+        assert!(q8.pending_artifact);
+        assert!(
+            !q8.installed && !q8.cache_incomplete,
+            "a pending tier reads neither installed nor incomplete, whatever the cache probe \
+             happened to find — there is nothing it could legitimately have found"
+        );
+        assert!(
+            !q8.tier_deletable,
+            "nothing was ever fetched, so there is nothing for the per-tier delete to reclaim"
+        );
+        // Its siblings are untouched: this is a per-row fact, not a switch that disables the matrix.
+        for variant in ["q4", "bf16"] {
+            let state = states
+                .iter()
+                .find(|state| state.variant == variant)
+                .expect("sibling tier");
+            assert!(!state.pending_artifact);
+            assert!(
+                state.tier_deletable,
+                "{variant} carries a `files` scope, so its per-tier delete can reclaim it alone"
+            );
+        }
+    }
+
+    /// The other half of `tier_deletable`: a tier with NO `files` scope.
+    ///
+    /// `DELETE /models/:id/variants/:variant` refuses it ("delete the whole model instead"),
+    /// because a whole-repo row IS the model rather than a slice of it — deleting it would wipe a
+    /// cache other tiers may share. Before sc-24112 every variant row carried a glob and the
+    /// delete handler's own comment assumed it always would; `qwen_image_2_1`'s bf16 tier is the
+    /// whole upstream snapshot and broke that assumption, so the UI needs this stated rather than
+    /// inferred — otherwise it renders a Delete button that always errors.
+    #[test]
+    fn a_whole_repo_tier_reports_that_it_cannot_be_reclaimed_alone() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+
+        let states = model_variant_states(&model, data.path());
+        let bf16 = states
+            .iter()
+            .find(|state| state.variant == "bf16")
+            .expect("bf16 is enumerated");
+        assert!(
+            !bf16.tier_deletable,
+            "a tier with no file scope cannot be deleted on its own; the API refuses it and the \
+             UI must not offer it"
+        );
+        assert!(
+            states
+                .iter()
+                .filter(|state| state.variant != "bf16")
+                .all(|state| state.tier_deletable),
+            "the scoped siblings still reclaim normally"
+        );
+    }
+
+    /// sc-24112 — a scope-less tier that is the SOLE row on its repo IS reclaimable on its own: that
+    /// repo's whole snapshot is the tier. The split-repo layout (`qwen_image_2_1`'s bf16 is the
+    /// upstream snapshot, its q8/q4 the SceneWorks re-host) otherwise left a 30.86 GiB tier with no
+    /// per-tier delete at all. The shared-repo case above stays refused.
+    #[test]
+    fn a_scope_less_tier_alone_on_its_repo_is_deletable() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+        downloads[2]["repo"] = json!("Upstream/dense");
+
+        let states = model_variant_states(&model, data.path());
+        assert!(
+            states.iter().all(|state| state.tier_deletable),
+            "the sole-repo bf16 and its scoped siblings all reclaim alone"
+        );
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        assert_eq!(
+            tier_delete_scope(&model, &bf16, "bf16").expect("scoped"),
+            TierDeleteScope {
+                repo: "Upstream/dense".to_owned(),
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            }
+        );
+        // …and the route's refusal still holds for a scope-less row whose repo IS shared.
+        let mut shared = model.clone();
+        shared["downloads"][0]["files"] = json!([]);
+        let shared_q4 = model_download_for_variant(&shared, "q4").expect("q4 row");
+        assert!(tier_delete_scope(&shared, &shared_q4, "q4").is_err());
+    }
+
     #[test]
     fn variant_footprint_disk_bytes_reads_required_field() {
         let entry = json!({ "footprint": { "diskSizeBytes": 42 } });
@@ -11892,6 +12532,77 @@ mod variant_delete_tests {
         assert!(!repo.join("snapshots/rev/q4").exists());
         // Only the exclusive blob's bytes count as reclaimed; the shared blob does not.
         assert_eq!(removal.reclaimed_bytes, 100);
+    }
+
+    /// sc-24112 — the SHIPPED `qwen_image_2_1` entry, as published at sc-24114 (no placeholder
+    /// flags left): deleting bf16 reclaims the whole upstream `Qwen/Qwen-Image-2.1` snapshot
+    /// (30.86 GiB in production, the tier's only bytes) and leaves the SceneWorks re-host holding
+    /// q8/q4 untouched. Before, the scope-less bf16 row could never be reclaimed per tier at all.
+    ///
+    /// *Mutation that reds this:* `is_sole_repo_tier` answering `false` — the scope is refused.
+    #[tokio::test]
+    async fn deleting_the_qwen_image_2_1_bf16_tier_reclaims_only_the_upstream_snapshot() {
+        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        let model = shipped["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .clone();
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        let scope = tier_delete_scope(&model, &bf16, "bf16").expect("bf16 is reclaimable alone");
+        assert_eq!(scope.repo, "Qwen/Qwen-Image-2.1");
+        assert!(scope.retained_files.is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let upstream = hub.join("models--Qwen--Qwen-Image-2.1");
+        let rehost = hub.join("models--SceneWorks--qwen-image-2-1-mlx");
+        seed(
+            &upstream,
+            "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+            "u1",
+            300,
+        );
+        seed(&upstream, "text_encoder/model.safetensors", "u2", 200);
+        seed(&upstream, "model_index.json", "u3", 10);
+        seed(&rehost, "q8/transformer/model.safetensors", "r8", 70);
+        seed(&rehost, "q4/transformer/model.safetensors", "r4", 40);
+
+        let removal = remove_tier_artifacts(
+            Some(upstream.clone()),
+            None,
+            &scope.files,
+            &scope.retained_files,
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            removal.reclaimed_bytes, 510,
+            "every upstream blob is the bf16 tier's"
+        );
+        assert!(!upstream.join("blobs/u1").exists());
+        assert!(!upstream.join("snapshots/rev/model_index.json").exists());
+        // The re-host — the q8/q4 tiers — is a different repo and is never scanned.
+        assert!(rehost.join("blobs/r8").exists());
+        assert!(rehost.join("blobs/r4").exists());
+        assert!(rehost
+            .join("snapshots/rev/q8/transformer/model.safetensors")
+            .exists());
+        assert!(rehost
+            .join("snapshots/rev/q4/transformer/model.safetensors")
+            .exists());
     }
 
     #[tokio::test]
@@ -12755,6 +13466,47 @@ mod imported_lora_advertisement_tests {
             withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    /// A manifest-declared `families: []` (Qwen Image 2.1) is refused by the LoRA validator, so the
+    /// catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers every
+    /// LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
+    /// advertisements, and an explicit `supported`, are left alone.
+    #[test]
+    fn a_declared_empty_lora_advertisement_is_marked_unsupported() {
+        let mut qwen =
+            json!({ "id": "qwen_image_2_1", "loraCompatibility": { "families": [], "types": [] } })
+                .as_object()
+                .expect("object")
+                .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen);
+        assert_eq!(
+            qwen["loraCompatibility"],
+            json!({ "families": [], "types": [], "supported": false })
+        );
+
+        let serving = json!({ "families": ["qwen-image"], "types": ["style"] });
+        let mut qwen_2512 = json!({ "id": "qwen_image", "loraCompatibility": serving.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen_2512);
+        assert_eq!(qwen_2512["loraCompatibility"], serving);
+
+        let mut absent = json!({ "id": "external_qwen", "loraCompatibility": {} })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut absent);
+        assert_eq!(absent["loraCompatibility"], json!({}));
+
+        let explicit = json!({ "families": [], "supported": true });
+        let mut kept = json!({ "id": "x", "loraCompatibility": explicit.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut kept);
+        assert_eq!(kept["loraCompatibility"], explicit);
     }
 
     #[test]

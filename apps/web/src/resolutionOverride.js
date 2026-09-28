@@ -36,17 +36,49 @@ function inRange(value) {
 // lockstep. Returns { min, max, step }; `step <= 1` means "no stride" (the common case).
 export function modelDimensionConstraints(model) {
   const step = Number(model?.limits?.requiresDimensionsMultipleOf);
+  // An explicitly DECLARED envelope wins over anything derived (sc-24113). `limits.minDimension` /
+  // `limits.maxDimension` are the model's own request bounds, which are not the same thing as the
+  // extremes of its preset ladder and for a native-resolution model are usually much wider:
+  // Qwen-Image 2.1 renders from 32 px to 2752, while its seven presets only span 1536..2752.
+  // Deriving from the ladder would have refused every legal small size on that model.
+  //
+  // Read INDEPENDENTLY of `step`, and independently of each other, so a model may declare a grid
+  // without a range, a range without a grid, or one edge of the range. Whatever is not declared
+  // falls back to the blanket bound, which is what keeps every already-shipped model unchanged.
+  const declaredMin = declaredDimension(model, "minDimension");
+  const declaredMax = declaredDimension(model, "maxDimension");
   if (!Number.isInteger(step) || step <= 1) {
-    return { min: MIN_IMAGE_DIMENSION, max: MAX_IMAGE_DIMENSION, step: 1 };
+    return {
+      min: declaredMin ?? MIN_IMAGE_DIMENSION,
+      max: declaredMax ?? MAX_IMAGE_DIMENSION,
+      step: 1,
+    };
   }
   const sides = Array.isArray(model?.limits?.resolutions)
     ? model.limits.resolutions
         .flatMap((entry) => String(entry).split("x").map((value) => Number(value)))
         .filter((value) => Number.isFinite(value) && value > 0)
     : [];
-  const min = sides.length ? Math.max(MIN_IMAGE_DIMENSION, Math.min(...sides)) : MIN_IMAGE_DIMENSION;
-  const max = sides.length ? Math.min(MAX_IMAGE_DIMENSION, Math.max(...sides)) : MAX_IMAGE_DIMENSION;
+  // The derived ladder range remains the fallback for a stride-declaring model that names no
+  // explicit envelope — Mage-Flow's 512..2048, unchanged.
+  const min =
+    declaredMin ??
+    (sides.length ? Math.max(MIN_IMAGE_DIMENSION, Math.min(...sides)) : MIN_IMAGE_DIMENSION);
+  const max =
+    declaredMax ??
+    (sides.length ? Math.min(MAX_IMAGE_DIMENSION, Math.max(...sides)) : MAX_IMAGE_DIMENSION);
   return { min, max, step };
+}
+
+// One declared side of the envelope, or `null` when it is absent or unusable.
+//
+// A zero, negative, fractional or non-numeric bound is not a constraint anyone could satisfy, so it
+// falls back to undeclared rather than making the model un-renderable — the same typo'd-manifest
+// tolerance the Rust reader (`image_dimension_envelope`) takes, and the two must agree or the UI
+// and the API would disagree about what is legal.
+function declaredDimension(model, key) {
+  const value = Number(model?.limits?.[key]);
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 function sideInRange(value, { min, max }) {

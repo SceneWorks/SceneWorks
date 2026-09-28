@@ -635,6 +635,7 @@ async fn generate_krea_multiphase_stream(
             false,
             true,
             budget,
+            raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
             predicted_peak_gb,
             adapter_resident_bytes,
             if reclaimable_gb > 0.0 {
@@ -663,6 +664,7 @@ async fn generate_krea_multiphase_stream(
     .with_resolved_artifact_tier(resolved_mlx_artifact_tier(&weights_dir, quant_bits))?;
     #[cfg(target_os = "macos")]
     let memory_inputs = crate::mlx_fit_gate::MlxRequestInputs {
+        conditioning_windows: None,
         width,
         height,
         count: request.count,

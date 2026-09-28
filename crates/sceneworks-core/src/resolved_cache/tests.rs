@@ -4,6 +4,7 @@ use crate::model_artifacts::{
     ArtifactIdentity, ArtifactMemberRole, ArtifactProvenance, ArtifactSourceLibrary,
     ResolvedBundleClosure, ResolvedBundleMember, MODEL_ARTIFACT_CONTRACT_VERSION,
 };
+use fs2::FileExt;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::process::Command;
@@ -2173,4 +2174,60 @@ fn a_produced_bundle_whose_declared_output_is_a_symlink_is_never_published() {
         outside.is_file(),
         "the refusal never touches what the link pointed at"
     );
+}
+
+/// Released cache locks must be free IMMEDIATELY, even while a descriptor this process handed to a
+/// child still references the same open file description.
+///
+/// `flock(2)` locks live on the open file description, and `fork(2)` gives the child a reference to
+/// it, so releasing by `close(2)` alone only takes effect once every such reference is gone.
+/// `inherited_descriptor` reproduces that sharing without a child process, so the interleaving is
+/// injected rather than waited for. Before sc-22738 a dropped reservation's artifact lock, and a
+/// released metadata lock, both kept reading as HELD for as long as an unrelated `Command` sat
+/// between `fork` and `exec` — costing every contending reservation, lease, recovery and retention
+/// pass a spurious "in active use" verdict or a block.
+#[test]
+fn released_cache_locks_are_free_even_while_an_inherited_descriptor_survives() {
+    let scratch = TempDir::new().unwrap();
+    let source = scratch.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    let candidate = source_candidate(&source, REVISION_A);
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let digest = cache_key_digest(&candidate.cache_key).unwrap();
+
+    let reservation = match store.reserve(&candidate, &source, "fixture:model").unwrap() {
+        ReservationOutcome::Acquired(reservation) => reservation,
+        _ => panic!("fixture reservation must acquire"),
+    };
+    let inherited = reservation
+        .artifact_lock
+        .as_ref()
+        .expect("an acquired reservation holds the artifact lock")
+        .inherited_descriptor()
+        .expect("descriptor duplicates");
+    drop(reservation);
+    let probe =
+        FileLock::try_exclusive(open_lock_file(&store.artifact_lock_path(&digest)).unwrap());
+    assert!(
+        probe.is_ok(),
+        "an artifact lock released with the reservation must not stay held by an inherited \
+         descriptor: {:?}",
+        probe.err()
+    );
+    drop(probe);
+    drop(inherited);
+
+    let metadata_lock = store.lock_metadata(&digest).unwrap();
+    let inherited = metadata_lock
+        .inherited_descriptor()
+        .expect("descriptor duplicates");
+    drop(metadata_lock);
+    let probe =
+        FileLock::try_exclusive(open_lock_file(&store.metadata_lock_path(&digest)).unwrap());
+    assert!(
+        probe.is_ok(),
+        "a released metadata lock must not stay held by an inherited descriptor: {:?}",
+        probe.err()
+    );
+    drop(inherited);
 }

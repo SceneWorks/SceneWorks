@@ -3534,9 +3534,8 @@ async fn minimax_h3_tier_download_fetches_one_partition_plus_the_whole_shared_fl
 async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() {
     // sc-19078: `SceneWorks/minimax-h3-mlx` ships no `model_index.json`, so the coarse
     // `q4/transformer/*` glob is satisfied by a SINGLE landed file out of fourteen shards. Without the
-    // family predicate a torn tier read `installed` and then died at load — the "complete but
-    // unloadable" class. The two entries own disjoint partitions of one repo, so each must be judged
-    // on its OWN partition: here `minimax_h3`'s q4 is complete while `minimax_h3_ref`'s q4 is torn.
+    // family predicate a torn tier read `installed` and then died at load. Both entries require
+    // both partitions, so a torn reference partition must make both entries repairable.
     let _env = isolate_hf_cache();
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -3583,8 +3582,9 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
 
     let base = entry("minimax_h3");
     assert_eq!(base["hasVariantMatrix"], true);
-    assert_eq!(base["installState"], "installed");
-    assert_eq!(tier_state(&base, "q4")["installState"], "installed");
+    assert_eq!(base["installState"], "missing");
+    assert_eq!(base["repairAvailable"], true);
+    assert_eq!(tier_state(&base, "q4")["cacheState"], "incomplete");
     for absent in ["q8", "bf16"] {
         assert_eq!(
             tier_state(&base, absent)["installState"],
@@ -3609,6 +3609,110 @@ async fn minimax_h3_tier_state_gates_on_every_shard_the_partition_index_names() 
             .any(|file| file.as_str() == Some("q4/ (incomplete: missing model components)")),
         "the torn tier must name itself: {torn:?}"
     );
+}
+
+#[tokio::test]
+async fn minimax_h3_missing_bf16_encoder_is_repairable_beside_complete_q4() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        minimax_h3_manifest(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config_dir);
+    let data_dir = temp_dir.path().join("data");
+    let snapshot = data_dir
+        .join("cache/huggingface/hub/models--SceneWorks--minimax-h3-mlx/snapshots/f22bc294");
+    for tier in ["q4", "bf16"] {
+        for partition in ["transformer", "transformer_ref"] {
+            seed_minimax_partition(&snapshot, tier, partition, &MINIMAX_SHARDS);
+        }
+    }
+    seed_minimax_shared_floor(&data_dir);
+    seed_minimax_packed_text_encoder(&data_dir, "q4");
+    let encoder = data_dir.join(
+        "cache/huggingface/hub/models--MiniMaxAI--MiniMax-H3/snapshots/939557dc/text_encoder",
+    );
+    std::fs::remove_dir_all(&encoder).unwrap();
+    for repaired in [false, true] {
+        if repaired {
+            seed_minimax_shared_floor(&data_dir);
+        }
+        // A fresh catalog scan after the filesystem changes, without reusing its short-lived cache.
+        let app = create_app(test_settings(&temp_dir)).unwrap();
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = models
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap();
+            assert_eq!(model["installState"], "installed", "q4 remains usable");
+            assert_eq!(model["repairAvailable"], !repaired, "{id}: {model}");
+            let tiers = model["variants"].as_array().unwrap();
+            let tier = |name: &str| tiers.iter().find(|t| t["variant"] == name).unwrap();
+            assert_eq!(tier("q4")["installed"], true);
+            assert_eq!(tier("q8")["cacheState"], "missing", "never downloaded");
+            assert_eq!(tier("bf16")["installed"], repaired);
+            assert_eq!(
+                tier("bf16")["cacheState"],
+                if repaired { "complete" } else { "incomplete" }
+            );
+            if !repaired {
+                for path in [
+                    "text_encoder/config.json",
+                    "text_encoder/model.safetensors.index.json",
+                ] {
+                    let missing = json!(format!("MiniMaxAI/MiniMax-H3/{path}"));
+                    assert!(tier("bf16")["missingRequiredFiles"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&missing));
+                    assert!(model["missingRequiredFiles"]
+                        .as_array()
+                        .unwrap()
+                        .contains(&missing));
+                }
+            }
+        }
+        if !repaired {
+            let (status, primary) = request(
+                app.clone(),
+                "POST",
+                "/api/v1/models/minimax_h3/download",
+                json!({"variant": "bf16"}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{primary}");
+            assert_eq!(primary["payload"]["files"], json!(["bf16/transformer/*"]));
+            let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+            let downloads = jobs.as_array().unwrap();
+            assert_eq!(
+                downloads.len(),
+                7,
+                "primary, sibling, encoder, and four shared components"
+            );
+            assert!(downloads
+                .iter()
+                .any(|job| job["payload"]["repo"] == "MiniMaxAI/MiniMax-H3"
+                    && job["payload"]["revision"] == "939557dc319dd91227e30195a763f272ba7f8765"
+                    && job["payload"]["files"]
+                        == json!([
+                            "text_encoder/config.json",
+                            "text_encoder/model.safetensors.index.json"
+                        ])));
+            assert!(downloads.iter().all(|job| {
+                let files = job["payload"]["files"].to_string();
+                !files.contains("q4/") && !files.contains("q8/")
+            }));
+        }
+    }
 }
 
 #[tokio::test]
@@ -3652,7 +3756,7 @@ async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
         .expect("minimax_h3 present")
         .clone();
 
-    // The q4 DiT tier itself is complete — this is specifically the co-requisite gate, not a torn tier.
+    // The q4 primary landed, but the tier needs its required companions before it can load.
     let q4 = base["variants"]
         .as_array()
         .expect("variants array")
@@ -3661,9 +3765,10 @@ async fn minimax_h3_is_not_installed_without_its_shared_component_floor() {
         .expect("q4 present")
         .clone();
     assert_eq!(
-        q4["installState"], "installed",
-        "the DiT tier itself landed"
+        q4["installState"], "missing",
+        "a primary alone does not make a usable tier"
     );
+    assert_eq!(q4["cacheState"], "incomplete");
     // …yet the entry is not installed, and names the component repo it is still waiting on.
     assert_eq!(base["installState"], "missing");
     assert_eq!(base["repairAvailable"], true);

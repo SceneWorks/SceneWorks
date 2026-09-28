@@ -1,0 +1,69 @@
+{
+  "purpose": "Focused regression renders using production-selected memory strategies; not a calibration matrix",
+  "sceneWorksBaseRevision": "5e5787d447efcc5a2e479f9df3c13c9c786b686e",
+  "inferenceRevision": "3cfdbec1d52230e75861d64fb759819bc7125a81",
+  "sourceState": "SceneWorks hotfix working tree; inference local path override of the listed revision",
+  "hardware": {
+    "model": "Mac17,6",
+    "chip": "Apple M5 Max",
+    "memoryBytes": 137438953472
+  },
+  "admissionBudget": {
+    "totalBytes": 8589934592,
+    "reservedHeadroomBytes": 2147483648
+  },
+  "request": {
+    "prompt": "A cinematic frame of a woman in a red raincoat holding a red umbrella standing in the middle of a neon street on a rainy night",
+    "negativePrompt": null,
+    "width": 1024,
+    "height": 1024,
+    "steps": 4,
+    "baseSeed": 1234,
+    "seedRule": "baseSeed + sequential item index"
+  },
+  "results": [
+    {
+      "model": "z_image_turbo",
+      "tier": "q4",
+      "count": 2,
+      "coldInclusiveActivePeakBytesByItem": [
+        4234046976,
+        4508876800
+      ]
+    },
+    {
+      "model": "sdxl",
+      "tier": "q4",
+      "count": 1,
+      "coldInclusiveActivePeakBytesByItem": [
+        4954293512
+      ]
+    },
+    {
+      "model": "sana_sprint_1600m",
+      "tier": "q4",
+      "count": 1,
+      "coldInclusiveActivePeakBytesByItem": [
+        3537595832
+      ]
+    }
+  ],
+  "assertions": [
+    "Shipped manifest and shared production load-policy preparation",
+    "Actual provider offload capability and resolved snapshot quality binding",
+    "8 GiB admission with 2 GiB reserve passes",
+    "4 GiB admission with 2 GiB reserve refuses",
+    "Selected strategy produces a nonuniform 1024x1024 image",
+    "MLX active peak including loading stays below 6 GiB"
+  ],
+  "limitations": [
+    "Physical host has 128 GiB; this is not physical 8 GiB runtime validation.",
+    "Four-step renders validate execution and working memory, not image-quality equivalence.",
+    "Peak counter is reset before each model, not between sequential items; second-item peak is cumulative."
+  ],
+  "finalPinnedAdmissionVerification": {
+    "inferenceRevision": "ebc97be15522ff263f76897f430053953e010e94",
+    "localOverrides": false,
+    "result": "all three production-prepared q4 requests admit; insufficient-budget refusals and tokenizer checks pass"
+  }
+}

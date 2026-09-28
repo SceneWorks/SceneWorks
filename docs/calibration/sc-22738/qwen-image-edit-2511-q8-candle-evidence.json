@@ -1,0 +1,186 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/qwen-image-edit-2511-mlx",
+        "resolvedRevision": "0dfbf3a018bcee42d77de14494c35f97a7531def",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-09-09T15:11:05Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:qwen-edit-anchor",
+        "blockers": [
+          "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 32988200960
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 32131514368
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 38976618496
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 38976618496
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "builtInAdapters",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "evidenceScope": "candidate",
+      "fixture": "qwen-edit-candle-q8-seed15817-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-578b46f031781c9df0d3",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/qwen-image-edit-2511-mlx@0dfbf3a018bcee42d77de14494c35f97a7531def:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-b976a9bc0fc01ab0bac9",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 32988200960,
+          "allocatorBytes": 32988200960,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 38976618496,
+          "allocatorBytes": 38976618496,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 32131514368,
+          "allocatorBytes": 32131514368,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 38976618496,
+          "allocatorBytes": 38976618496,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "dirty": false,
+          "revision": "e34d7b46a301376676bd8a60419190c7be9aa4f0"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:459cf073fa81f0fe8e4eb82bd9757c4aede4afa22edba882487a8ff84e004c68",
+          "revision": "8dc11e26009e32d805dcbf69650d9b4154f34963"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22728 anchor capture measures exact per-phase memory and strategy identity for the Candle Qwen-Image-Edit-2511 lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Qwen-Image-Edit-2511 reference-conditioned edit path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "edit_image",
+        "modelId": "qwen_image_edit_2511",
+        "overlay": "none",
+        "provider": "qwen_image_edit",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

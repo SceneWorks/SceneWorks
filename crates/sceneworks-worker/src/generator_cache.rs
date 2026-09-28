@@ -601,7 +601,7 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
 /// while the limit is still MLX's untouched default. `/ 3 * 2` (rather than `* 2 / 3`) makes any
 /// integer rounding go DOWNward, staying at or below the ceiling — which never throws.
 #[cfg(all(target_os = "macos", not(test)))]
-fn device_wired_ceiling_bytes() -> usize {
+pub(crate) fn device_wired_ceiling_bytes() -> usize {
     static CEILING: OnceLock<usize> = OnceLock::new();
     *CEILING.get_or_init(|| mlx_rs::memory::get_memory_limit() / 3 * 2)
 }
@@ -1479,6 +1479,30 @@ async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> Worke
     reply_rx.await.map_err(|_| {
         crate::WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
     })
+}
+
+/// Snapshot the host/allocator ceiling on the serialized MLX worker. Tier probes describe a cold
+/// complete pipeline; the real cache transaction credits retained weights and charges unrelated
+/// allocations again immediately before generation.
+#[cfg(target_os = "macos")]
+pub(crate) async fn mlx_tier_budget(
+    engine_id: &'static str,
+) -> WorkerResult<gen_core::MemoryBudget> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    let job: GeneratorJob = Box::new(move |_cache| {
+        let result = crate::mlx_fit_gate::live_request_budget(engine_id).map(|mut budget| {
+            budget.committed_bytes = 0;
+            budget.reclaimable_bytes = 0;
+            budget
+        });
+        let _ = reply_tx.send(result);
+    });
+    generator_worker()
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        crate::WorkerError::Engine("MLX generator cache worker dropped the tier budget".to_owned())
+    })?
 }
 
 #[cfg(test)]

@@ -871,8 +871,19 @@ button:focus-visible {
   background: var(--bg-2);
   border-right: 1px solid var(--border);
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
+
+.sidebar-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap-4);
+}
+
+.sidebar-scroll > * { flex-shrink: 0; }
 
 .brand {
   display: flex;
@@ -918,17 +929,53 @@ button:focus-visible {
 }
 
 /* Pinned to the bottom of the flex-column sidebar (margin-top: auto). Shows the
-   product version injected at build time (see App.jsx / vite.config.js). */
+   product version injected at build time (see AppVersion.jsx / vite.config.js). */
 .sidebar-footer {
+  flex-shrink: 0;
   margin-top: auto;
   padding: 6px 10px 2px;
   border-top: 1px solid var(--border);
 }
 
 .app-version {
-  font-size: 10.5px;
+  font-size: 12px;
   letter-spacing: 0.04em;
   color: var(--text-faint);
+}
+
+.app-version-section {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 8px;
+  margin-bottom: 8px;
+}
+
+.app-version-section .app-version,
+.app-update-link {
+  white-space: nowrap;
+}
+
+.app-update-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--accent-strong);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: left;
+}
+
+.app-update-link:hover { text-decoration: underline; }
+.app-update-link:disabled { opacity: 0.6; cursor: wait; }
+
+.app-update-error {
+  flex-basis: 100%;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 .sidebar-section-title {
@@ -2968,6 +3015,122 @@ label {
   gap: 8px;
 }
 
+/* Qwen-Image 2.1's official prompt rewriter (sc-24113).
+   The rewrite is EDITABLE, unlike the generic refiner's read-only paragraph, so the suggestion is a
+   real textarea. It inherits `.refine-review-text`'s type, then takes the affordances a text field
+   needs — a resizable box, the form background, and a visible border — so it never reads as a
+   paragraph the user is not allowed to touch. */
+.qwen-rewrite-draft {
+  width: 100%;
+  min-height: 140px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* The aspect-ratio suggestion, deliberately its own row beneath the prompt: the prose and the
+   geometry are two decisions, and a user who wants the rewrite at their own aspect ratio must not
+   have to take both. */
+.qwen-rewrite-aspect {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.qwen-rewrite-aspect-label {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.qwen-rewrite-aspect-size {
+  opacity: 0.75;
+}
+
+/* The ordered-reference rail (sc-24113), shared by Image Studio and the Simple shell. The order of
+   these references is part of the request for a model whose template numbers them, so the ordinal
+   is shown and the arrows edit it in place. */
+.ordered-references {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.ordered-reference {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 6px);
+  background: var(--surface-2, var(--surface));
+  font-size: 12.5px;
+}
+
+.ordered-reference-ordinal {
+  flex: none;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+
+.ordered-reference-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ordered-reference-actions {
+  flex: none;
+  display: flex;
+  gap: 4px;
+}
+
+.ordered-reference-actions button {
+  padding: 2px 8px;
+  line-height: 1.2;
+}
+
+.ordered-reference-actions button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* The transparency toggle's second half (sc-24113): this model has no transparency MODE, so the
+   toggle only keeps the alpha channel and the PROMPT decides whether it holds a cut-out. The
+   affordance is inline copy plus a button that edits the visible prompt — never a silent append. */
+.transparency-prompt-hint {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.transparency-prompt-hint .hero-link {
+  font-size: inherit;
+  text-align: left;
+}
+
+/* The idle-state explanation of what the rewriter will do, and — load-bearing copy — that it will
+   not change the prompt on its own. */
+.refine-hint {
+  margin: 6px 0 0;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
 .hero-link {
   display: inline-flex;
   align-items: center;
@@ -4202,6 +4365,54 @@ label {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--r-md);
+}
+
+/* YuE lyrics-to-song controls (sc-19385). The lyrics editor reuses the multi-speaker script rows;
+   the genre-tag chips reuse the saved-voice chip; the ICL band is a .studio-source-band <fieldset>
+   (so `disabled` greys every control for a CoT checkpoint). Tokens only — both themes inherit. */
+.yue-reference-band {
+  margin: 0;
+  min-width: 0;
+}
+
+.yue-reference-band:disabled {
+  opacity: 0.6;
+}
+
+.yue-genre-tags {
+  display: grid;
+  gap: 8px;
+}
+
+.yue-genre-tags .field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.yue-genre-tags__suggested {
+  display: grid;
+  gap: 8px;
+}
+
+.yue-genre-tags__suggested > summary {
+  cursor: pointer;
+  font-size: 12.5px;
+  color: var(--accent-strong);
+}
+
+.yue-genre-tags__suggestions {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.audio-icon-btn.audio-stem-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: auto;
+  padding: 0 6px;
+  font-size: 11.5px;
 }
 
 /* Voice Clone saved-voices registry + register affordance (sc-13517). Reuses the .preset-chip pill
@@ -7029,6 +7240,54 @@ details[open] > summary.lora-scope-group-heading::before,
   font-size: 12px;
   line-height: 1.5;
   color: var(--text-muted);
+}
+
+/* The persistent licence row (sc-24108) — the half of the licence surface that survives the
+   install, unlike `.model-gated-notice`, which is a pre-download gate and disappears with it.
+   Quiet by construction: no border, no warn tone, and the notice itself behind a collapsed
+   disclosure. It is a reference the user can come back to, not a thing to act on. Shared by the
+   Models card and the Simple model list (which passes `su-license-note`). */
+.model-license-summary,
+.su-license-note {
+  display: grid;
+  gap: 4px;
+}
+
+.model-license-summary-head,
+.su-license-note .model-license-summary-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.model-license-summary-name {
+  font-weight: 600;
+}
+
+/* Not the Simple Licenses screen's badge — that one is a two-state commercial-use verdict. This is
+   a single inline marker that only ever appears on a restricted model. */
+.model-license-summary-tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--danger-soft, rgba(220, 80, 80, 0.14));
+  color: var(--danger, #c2410c);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.model-license-summary-details > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.su-license-note {
+  padding: 0 12px 10px;
+  margin-top: -4px;
 }
 
 .mlx-status {
@@ -10268,6 +10527,24 @@ details[open] > summary.lora-scope-group-heading::before,
 .ie-ref img { width: 100%; height: 100%; object-fit: cover; }
 .ie-ref-remove { position: absolute; top: -8px; right: -8px; width: 20px; height: 20px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 50%; color: var(--ie-text); cursor: pointer; display: grid; place-items: center; font-size: 11px; z-index: 1; }
 .ie-ref-add { width: 52px; height: 52px; border-radius: 9px; border: 1px dashed var(--ie-border-strong); background: transparent; color: var(--ie-muted); cursor: pointer; display: grid; place-items: center; font-size: 20px; }
+/* Ordered references (sc-24113). The engine's template numbers the images (<image1> …) and its
+   block-causal attention makes each one visible only to what follows, so the ORDER is part of the
+   request. The ordinal is shown on the thumbnail — the prompt conventions for this family name
+   images directly ("use the second image as a mask"), and a user who cannot see which one is second
+   cannot write that prompt — and the arrows make the order editable in place, where before the only
+   way to reorder was to remove everything and re-add it. */
+.ie-ref-ordinal { position: absolute; left: 0; bottom: 0; right: 0; padding: 1px 3px; font-size: 9px; line-height: 1.3; font-weight: 600; text-align: center; color: var(--ie-text); background: color-mix(in srgb, var(--ie-surface) 82%, transparent); z-index: 1; pointer-events: none; }
+.ie-ref-move { position: absolute; bottom: -8px; width: 18px; height: 18px; background: var(--ie-surface); border: 1px solid var(--ie-border); border-radius: 50%; color: var(--ie-text); cursor: pointer; display: grid; place-items: center; font-size: 11px; line-height: 1; z-index: 2; }
+.ie-ref-move:first-of-type { left: -8px; }
+.ie-ref-move:nth-of-type(2) { right: -8px; }
+.ie-ref-move:disabled { opacity: 0.35; cursor: default; }
+.ie-ref-working { background: var(--ie-surface2); border-style: dashed; }
+.ie-ref-working-label { font-size: 9px; line-height: 1.1; text-align: center; padding: 0 3px 12px; color: var(--ie-muted); }
+/* The thumbnail is the positioning context for all four overlay controls, and it must not clip the
+   ones that sit outside its box. `.ie-ref` above sets `overflow: hidden` for the image's rounded
+   corners, which would also clip the move/remove buttons, so the image is clipped instead. */
+.ie-ref { overflow: visible; }
+.ie-ref img { border-radius: 9px; }
 .ie-histo { width: 100%; height: 58px; border: 1px solid var(--ie-border); border-radius: var(--r-sm); background: var(--ie-surface2); display: block; }
 
 /* Curve editor container tweak (reuse CurveEditor component) */
@@ -10776,9 +11053,505 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   flex-direction: column;
   min-height: 0;
+  overflow-y: auto;
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-ui);
+}
+/* Film mode owns the editor area: toolbar, step list, the active step (the only part that
+   scrolls), then the cut strip. Timeline mode is unmounted while it shows. */
+.ve-film {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
+  background: var(--bg);
+}
+.ve-film[hidden] { display: none; }
+.ve-film [role="tabpanel"][hidden] { display: none; }
+.ve-film-bar { gap: 12px; }
+.ve-film-bar .ve-toolbar-right { margin-left: auto; }
+.ve-film-draft-select { height: 32px; min-width: 140px; max-width: 220px; font-size: 12px; }
+.ve-film-bar .ve-brand { flex: 0 0 auto; }
+.ve-film-bar .ve-brand-sub,
+.ve-film-bar .ve-export { white-space: nowrap; }
+.ve-film-bar .ve-film-bar-text { position: relative; }
+/* The app resets <button> to bare text, so every film action gets the secondary-control
+   look here. Low specificity on purpose: the step, shot-list and regime buttons restyle it. */
+.ve-film :where(.ve-film-panels, .ve-film-lifecycle, .ve-film-footer, .ve-film-cut-head) button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.ve-film :where(.ve-film-panels, .ve-film-lifecycle, .ve-film-footer, .ve-film-cut-head) button:hover:not(:disabled) { background: var(--surface-hover); }
+.ve-film :where(.ve-film-panels, .ve-film-lifecycle, .ve-film-footer, .ve-film-cut-head) button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ve-film-eyebrow { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+.ve-mode-switch { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg); }
+.ve-mode-switch button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 30px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.ve-mode-switch button:hover { color: var(--text); }
+.ve-mode-switch button.selected { background: var(--accent-soft); color: var(--accent-strong); }
+[data-theme="dark"] .ve-mode-switch button.selected { color: var(--accent); }
+.ve-mode-switch button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ve-film-run-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: var(--ai-soft);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ve-film-run-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--ai); }
+.ve-film-body { display: flex; flex: 1 1 auto; min-height: 0; }
+.ve-film-steps {
+  display: flex;
+  flex: 0 0 216px;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 14px 10px;
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+}
+.ve-film-steps > .ve-film-eyebrow { padding: 0 8px; }
+.ve-film-view-tabs { display: flex; flex-direction: column; gap: 4px; counter-reset: film-step; }
+.ve-film-step {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  counter-increment: film-step;
+  cursor: pointer;
+  position: relative;
+}
+.ve-film-step::before {
+  content: counter(film-step);
+  grid-row: 1 / span 2;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+.ve-film-step.done::before { background: var(--accent-soft); color: var(--accent-strong); }
+[data-theme="dark"] .ve-film-step.done::before { color: var(--accent); }
+.ve-film-step.warn::before { background: var(--warn-soft); color: var(--warn); }
+.ve-film-step.busy::before { background: var(--ai-soft); color: var(--ai); }
+.ve-film-step.selected { border-color: var(--border-strong); background: var(--surface-2); }
+.ve-film-step:hover { background: var(--surface-hover); }
+.ve-film-step button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+}
+/* The whole row is the hit target, not just the label. */
+.ve-film-step button::after { content: ""; position: absolute; inset: 0; border-radius: 10px; }
+.ve-film-step button:focus-visible { outline: none; }
+.ve-film-step button:focus-visible::after { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ve-film-step-status { grid-column: 2; overflow: hidden; color: var(--text-faint); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ve-film-step.selected .ve-film-step-status { color: var(--text-muted); }
+.ve-film-steps .ve-film-lifecycle { margin-top: auto; background: var(--surface); font-size: 12px; }
+.ve-film-main { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0; }
+.ve-film-panels { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 16px 16px; }
+.ve-film-main > .ve-notice,
+.ve-film-main > .ve-film-export { flex: 0 0 auto; margin: 0; }
+.ve-film-footer { flex: 0 0 auto; justify-content: flex-end; align-items: center; margin: 0; padding: 10px 16px; border-top: 1px solid var(--border); }
+.ve-film-footer > span { margin-right: auto; color: var(--text-muted); font-size: 12px; }
+.ve-film-footer .ve-generate { width: auto; height: 38px; padding: 0 18px; }
+.ve-film-shot-state { align-self: center; padding: 2px 8px; border-radius: var(--r-pill); background: var(--surface-2); color: var(--text-muted); font-size: 10.5px; font-style: normal; font-weight: 600; white-space: nowrap; }
+.ve-film-shot-state.accepted { background: var(--accent-soft); color: var(--accent-strong); }
+[data-theme="dark"] .ve-film-shot-state.accepted { color: var(--accent); }
+.ve-film-shot-state.decide { background: var(--warn-soft); color: var(--warn); }
+.ve-film-shot-state.rendering,
+.ve-film-shot-state.queued { background: var(--ai-soft); color: var(--ai); }
+.ve-film-shot-state.rejected,
+.ve-film-shot-state.failed { background: var(--danger-soft); color: var(--danger); }
+.ve-film-cut { flex: 0 0 auto; display: grid; gap: 8px; padding: 10px 16px 12px; border-top: 1px solid var(--border); background: var(--bg-2); }
+.ve-film-cut-head { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 12px; white-space: nowrap; }
+.ve-film-cut-head strong { overflow: hidden; text-overflow: ellipsis; }
+.ve-film-cut-legend { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; }
+.ve-film-cut-count { margin-left: auto; color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+.ve-film-cut-head button { display: inline-flex; align-items: center; gap: 6px; height: 28px; padding: 0 10px; font-size: 11.5px; font-weight: 600; }
+.ve-film-cut i { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: transparent; }
+.ve-film-cut i.accepted { background: var(--accent); }
+.ve-film-cut i.decide { background: var(--warn); }
+.ve-film-cut i.rendering,
+.ve-film-cut i.queued { background: var(--ai); }
+.ve-film-cut i.rejected,
+.ve-film-cut i.failed { background: var(--danger); }
+.ve-film-cut-shots { display: flex; margin: 0; padding: 0; list-style: none; }
+.ve-film-cut-shots li { flex: 1 1 0; min-width: 0; }
+.ve-film-cut-shot {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  height: 64px;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 5px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+}
+.ve-film-cut-shot.accepted,
+.ve-film-cut-shot.decide,
+.ve-film-cut-shot.rejected { border-style: solid; background: var(--surface-2); color: var(--text); }
+.ve-film-cut-shot.rendering { border: 1px solid var(--ai); background: var(--surface-2); color: var(--text); }
+.ve-film-cut-thumb { flex: 1 1 auto; border-radius: 5px; }
+.ve-film-cut-shot.accepted .ve-film-cut-thumb,
+.ve-film-cut-shot.decide .ve-film-cut-thumb,
+.ve-film-cut-shot.rejected .ve-film-cut-thumb {
+  background: repeating-linear-gradient(45deg, color-mix(in oklch, var(--accent) 24%, transparent) 0 4px, transparent 4px 8px), color-mix(in oklch, var(--warm) 18%, var(--surface));
+}
+.ve-film-cut-shot.rendering .ve-film-cut-thumb { background: var(--ai-soft); }
+.ve-film-cut-label { display: flex; align-items: center; justify-content: space-between; gap: 4px; }
+.ve-film-cut-label b { overflow: hidden; font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.ve-film-start { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: grid; align-content: start; justify-content: center; gap: 22px; padding: 44px 24px; grid-template-columns: minmax(0, 860px); }
+.ve-film-start-head h2 { margin: 0 0 6px; font-size: 26px; font-weight: 700; letter-spacing: -0.01em; }
+.ve-film-start-head p { margin: 0; color: var(--text-muted); font-size: 13.5px; }
+.ve-film-start-cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.ve-film-start-card { position: relative; display: flex; flex-direction: column; gap: 12px; padding: 24px; border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); }
+.ve-film-start-card h3 { margin: 0; font-size: 19px; font-weight: 650; }
+.ve-film-start-card p { margin: 0; color: var(--text-muted); font-size: 13px; line-height: 1.55; }
+.ve-film-start-card ul { display: grid; gap: 6px; margin: 0 0 8px; padding-left: 18px; color: var(--text-muted); font-size: 12.5px; }
+.ve-film-start-card > button { margin-top: auto; justify-content: center; }
+.ve-film-start-icon { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 10px; background: var(--surface-2); color: var(--text-muted); }
+.ve-film-start-icon.primary { background: var(--accent-soft); color: var(--accent-strong); }
+[data-theme="dark"] .ve-film-start-icon.primary { color: var(--accent); }
+.ve-film-start-drafts { display: grid; gap: 8px; }
+.ve-film-start-drafts button { display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); text-align: left; }
+.ve-film-start-drafts button strong { flex: 1; font-size: 13px; }
+.ve-film-start-drafts button span { color: var(--text-muted); font-size: 11.5px; }
+.ve-clip-shot {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  margin-right: 5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--ai);
+  color: var(--ai-fg);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+.ve-clip-pending {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding: 4px 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 7px;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.ve-clip-pending.rendering { border-color: var(--ai); color: var(--ai); }
+.ve-film-bar .ve-toolbar-right { flex: 0 0 auto; }
+.ve-film-shot-list .ve-film-shot-state { grid-column: 1 / -1; justify-self: start; }
+/* Same pattern as the Timeline toolbar: a select, then icon buttons named by title. */
+.ve-film-bar .ve-film-bar-text span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.ve-toolbar .ve-brand { flex: 0 0 auto; max-width: 190px; }
+.ve-toolbar .ve-timeline-switch,
+.ve-toolbar .ve-btn-group,
+.ve-toolbar .ve-toolbar-right { flex: 0 0 auto; }
+.ve-toolbar .ve-timecode { flex: 0 0 auto; white-space: nowrap; }
+/* The Timeline toolbar's select already names the timeline; below a wide window the mode
+   switch takes the room the duplicate name used. */
+@media (max-width: 1500px) {
+  .ve-toolbar:not(.ve-film-bar) .ve-brand-text { display: none; }
+}
+.ve-film-run-chip { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+@media (max-width: 900px) {
+  .ve-film-body { flex-direction: column; }
+  .ve-film-steps { flex: 0 0 auto; border-right: 0; border-bottom: 1px solid var(--border); }
+  .ve-film-view-tabs { flex-direction: row; overflow-x: auto; }
+  .ve-film-step-status { display: none; }
+  .ve-film-start-cards { grid-template-columns: 1fr; }
+}
+.ve-film-toolbar,
+.ve-film-actions { display: flex; align-items: end; gap: 10px; margin-top: 10px; }
+.ve-film-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ve-film-form label,
+.ve-film-toolbar label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-prompt { grid-column: span 2; }
+.ve-film-form input,
+.ve-film-form textarea,
+.ve-film-form select,
+.ve-film-toolbar select,
+.ve-film-section input,
+.ve-film-section textarea,
+.ve-film-section select {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--text);
+  padding: 7px 9px;
+}
+.ve-film-references {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+.ve-film-reference-heading,
+.ve-film-reference-add,
+.ve-film-reference-row,
+.ve-film-bindings,
+.ve-film-bindings li {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ve-film-reference-heading span { color: var(--text-muted); margin-right: auto; }
+.ve-film-reference-add label,
+.ve-film-bindings label { display: grid; gap: 4px; }
+.ve-film-reference-row > input { min-width: 140px; flex: 1; }
+.ve-film-reference-check { display: flex !important; align-items: center; }
+.ve-film-reference-note { flex-basis: 100%; color: var(--text-muted); font-size: 11px; }
+.ve-film-reference-described {
+  min-width: 140px;
+  flex: 1;
+  align-self: center;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+.ve-film-file-button input { max-width: 220px; }
+.ve-film-bindings ol { width: 100%; margin: 0; padding-left: 24px; }
+.ve-film-bindings li span { min-width: 140px; }
+.ve-film-lifecycle { grid-column: 1 / -1; display: grid; gap: 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-lifecycle-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px; background: var(--surface-2); border-radius: 6px; font-size: 12px; }
+.ve-film-lifecycle-row > span:nth-child(2) { color: var(--text-muted); flex: 1; }
+.ve-film-operation-actions { display: flex; gap: 6px; }
+.ve-film-section {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.ve-film-section h3,
+.ve-film-section h4 { margin: 0 0 8px; }
+.ve-film-section label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+.ve-film-wide { display: grid; grid-column: 1 / -1; gap: 4px; }
+.ve-film-document-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.ve-film-document-columns > div { display: grid; align-content: start; gap: 8px; }
+.ve-film-dialogue { display: grid; grid-template-columns: minmax(90px, .35fr) 1fr; gap: 8px; }
+.ve-film-empty,
+.ve-film-provider-state { color: var(--muted); font-size: 12px; }
+.ve-film-operation { display: grid; box-sizing: border-box; min-width: 0; max-width: 100%; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-operation.is-failed,
+.ve-film-operation.is-canceled { border-left-color: var(--danger); }
+.ve-film-operation > span { min-width: 0; overflow-wrap: anywhere; }
+.ve-film-finding { margin: 2px 0; color: var(--danger); }
+.ve-film-planning-findings {
+  min-width: 0;
+  margin: 2px 0;
+  padding-left: 20px;
+  color: var(--danger);
+}
+.ve-film-planning-findings li {
+  min-width: 0;
+  margin: 3px 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.ve-film-candidate { display: grid; gap: 8px; margin-top: 12px; }
+.ve-film-candidate article { padding: 8px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-candidate article p { margin: 5px 0; }
+.ve-film-section-heading,
+.ve-film-shot-inspector > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ve-film-section-heading p { margin: 3px 0 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-advanced {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-advanced > summary { cursor: pointer; padding: 10px; font-weight: 650; }
+.ve-film-advanced > .ve-film-grid { margin: 0; padding: 0 10px 10px; }
+.ve-film-advanced > fieldset { margin: 0 10px 10px; }
+.ve-film-plan-controls,
+.ve-film-inspector-fields {
+  min-width: 0;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-plan-controls > .ve-film-form { margin-top: 0; }
+.ve-film-plan-controls { padding: 0; }
+.ve-film-plan-controls > fieldset { min-width: 0; padding: 10px; border: 0; }
+.ve-film-capability-summary { color: var(--text-muted); font-size: 12px; }
+.ve-film-render-regimes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+  padding: 0;
+  border: 0;
+}
+.ve-film-render-regimes > legend { margin-bottom: 5px; font-size: 12px; font-weight: 650; }
+.ve-film-render-regimes > label {
+  align-content: start;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--bg-2);
+}
+.ve-film-render-regimes > label.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, var(--bg-2)); }
+.ve-film-render-regimes > label > span { display: flex; align-items: center; gap: 6px; font-weight: 650; }
+.ve-film-render-regimes small { color: var(--text-muted); line-height: 1.35; }
+.ve-film-render-regimes .ve-film-render-recipe { color: var(--text); overflow-wrap: anywhere; }
+.ve-film-render-effective { margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+.ve-film-shot-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, .32fr) minmax(0, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+.ve-film-shot-list { display: grid; align-content: start; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ve-film-shot-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+}
+.ve-film-shot-list li.selected { border-color: var(--accent); background: color-mix(in oklch, var(--accent) 7%, transparent); }
+.ve-film-shot-list li > label { display: flex; align-items: center; gap: 4px; }
+.ve-film-shot-list li > button { display: grid; gap: 2px; min-width: 0; border: 0; background: transparent; color: var(--text); text-align: left; }
+.ve-film-shot-list li > button span { overflow: hidden; color: var(--text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.ve-film-shot-inspector { min-width: 0; }
+.ve-film-shot-inspector > header .ve-film-actions { margin-top: 0; }
+.ve-film-inspector-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 10px;
+}
+.ve-film-inspector-fields .ve-film-prompt,
+.ve-film-dependencies,
+.ve-film-findings { grid-column: 1 / -1; }
+.ve-film-dependencies { display: grid; gap: 7px; }
+.ve-film-dependency { display: grid; grid-template-columns: minmax(110px, .8fr) minmax(110px, .8fr) minmax(160px, 1.5fr) auto; gap: 7px; }
+.ve-film-findings { margin: 0; padding-left: 20px; color: var(--danger); font-size: 12px; }
+.ve-film-preflight { display: grid; gap: 8px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+.ve-film-preflight article { padding: 9px; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-preflight dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 10px; margin: 6px 0 0; font-size: 12px; }
+.ve-film-preflight dd { min-width: 0; }
+.ve-film-field-help { color: var(--text-muted); font-size: 11px; }
+.ve-film-field-help-more > summary { color: var(--text-muted); cursor: pointer; font-size: 11px; }
+.ve-film-inserted-text { display: grid; gap: 3px; margin: 0; padding-left: 18px; }
+.ve-film-inserted-text li { color: var(--text-muted); overflow-wrap: anywhere; }
+.ve-film-inserted-text em { margin-right: 6px; color: var(--text); font-style: normal; font-weight: 650; }
+.ve-film-review { display: grid; gap: 12px; }
+.ve-film-review > details { border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+.ve-film-review > details > summary { cursor: pointer; font-weight: 650; }
+.ve-film-review-plan { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; margin-top: 10px; }
+.ve-film-review-questions { display: grid; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--border); }
+.ve-film-review-questions > header, .ve-film-review-shot > header, .ve-film-take > header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.ve-film-review-questions fieldset { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.ve-film-review-runs, .ve-film-review-shot { display: grid; gap: 10px; }
+.ve-film-review-shot { padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
+.ve-film-review-shot.focused { border-color: var(--accent); }
+.ve-film-take-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }
+.ve-film-take { display: grid; gap: 8px; min-width: 0; padding: 10px; background: var(--bg-2); border-radius: 7px; }
+.ve-film-take video { width: 100%; max-height: 240px; background: #000; }
+.ve-film-take dl { display: grid; grid-template-columns: max-content 1fr; gap: 3px 8px; margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+.ve-film-take dl dt { color: var(--muted); }
+.ve-film-take-missing { display: grid; place-items: center; min-height: 120px; padding: 12px; background: var(--bg); color: var(--muted); text-align: center; }
+.ve-film-selection-state { padding: 3px 7px; border-radius: 999px; background: var(--bg-2); font-size: 12px; }
+.ve-film-selection-state.trim_conflict, .ve-film-selection-state.rejected_take_in_saved_cut, .ve-film-warning { color: var(--warning, #c56b00); }
+.ve-film-review-findings { padding: 9px; border-left: 3px solid var(--accent); background: var(--bg-2); }
+.ve-film-preflight dt { color: var(--text-muted); }
+.ve-film-preflight dd { margin: 0; overflow-wrap: anywhere; }
+.ve-film-help { margin: 6px 0; color: var(--text-muted); font-size: 12px; }
+.ve-film-sound-list,
+.ve-film-sound-beds { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin: 10px 0; }
+.ve-film-sound-list fieldset,
+.ve-film-sound-beds fieldset,
+.ve-film-section > fieldset { display: grid; gap: 8px; min-width: 0; border: 1px solid var(--border); border-radius: var(--r-sm); }
+.ve-film-audio-preview { width: 100%; height: 34px; }
+.ve-film-export { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border-left: 3px solid var(--accent); background: var(--surface); font-size: 12px; }
+.ve-audio-inspector { display: flex; align-items: end; gap: 8px; flex-wrap: wrap; }
+.ve-audio-inspector label { display: grid; gap: 4px; font-size: 12px; }
+@media (max-width: 760px) {
+  .ve-film-render-regimes { grid-template-columns: 1fr; }
+  .ve-film-shot-layout { grid-template-columns: 1fr; }
+  .ve-film-dependency { grid-template-columns: 1fr; }
 }
 .workspace > section.ve-editor {
   flex: 1 1 auto;
@@ -11025,8 +11798,8 @@ details[open] > summary.lora-scope-group-heading::before,
 .ve-upper {
   display: grid;
   grid-template-columns: 168px minmax(0, 1fr) 350px;
-  flex: 1 1 auto;
-  min-height: 0;
+  flex: 1 0 240px;
+  min-height: 240px;
 }
 
 /* Media bin */
@@ -11286,6 +12059,10 @@ details[open] > summary.lora-scope-group-heading::before,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.ve-rail-details { display: grid; gap: 3px; margin: 0 0 9px; font-size: 11px; }
+.ve-rail-details > div { display: flex; justify-content: space-between; gap: 8px; }
+.ve-rail-details dt { opacity: 0.7; }
+.ve-rail-details dd { margin: 0; text-align: right; overflow-wrap: anywhere; }
 .ve-ctx-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -18140,4 +18917,105 @@ button.audio-wave {
 .checkpoint-import.compact .checkpoint-linked-add,
 .checkpoint-import.compact .models-import-grid {
   grid-template-columns: 1fr;
+}
+
+/* Shared guide reader: navigation stays visible while the document scrolls. */
+.editor-guides-modal { grid-template-rows: auto auto minmax(0, 1fr); }
+.editor-guides-nav { display: flex; flex-wrap: wrap; gap: 8px; }
+.editor-guides-nav button { padding: 8px 12px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text); }
+.editor-guides-nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- Transparency backdrop (sc-24111) ----------
+   Every surface that can paint an RGBA asset, given one checkerboard instead of a
+   flat fill.
+
+   The problem this solves is not lost pixels — nothing on the web side drops the
+   alpha channel. It is that `.asset-tile img`, `.preview-button img`,
+   `.review-card img`, `.preview-modal img` and the queue thumbnails all declared
+   `background: var(--bg-2)`, which in the dark theme is very nearly black. A
+   natively transparent render (Qwen Image 2.1) therefore looked like a render on a
+   black background, and the user had no way to tell the two apart.
+
+   Why it is safe to apply unconditionally: every selector below except the modal is
+   `object-fit: cover` (the shared rule beside `.asset-tile img`), so the bitmap
+   covers its whole box and an opaque image hides the checkerboard completely.
+   Nothing changes for the images that are not transparent, which is why this needs
+   no per-asset alpha fact to key off. `.preview-modal img` is the one `contain`
+   surface and is handled just below by sizing the element to the bitmap instead, so
+   the checkerboard never shows up as letterbox bars.
+
+   `<video>` is deliberately NOT in the list: no video format this app plays carries
+   alpha, so a checkerboard behind one could only ever be decoration. The video rules
+   keep their flat `var(--bg-2)`.
+
+   The pattern is the app's existing convention, lifted from `.ie-canvas` (the Image
+   Editor stage, which has checkerboarded since epic 10243 and is what the sc-22461
+   color-key / SAM3 cutout previews already read against). Two 45-degree gradients
+   offset by half a tile. Kept as a variable-driven block so a 36x30 layer thumbnail
+   can use a smaller tile than a full-bleed grid tile without restating the
+   gradients. */
+.checker-backdrop,
+.asset-tile img,
+.preview-button img,
+.review-card img,
+.tray-item img,
+.reference-media img,
+.preview-modal img,
+.worker-progress-card__thumb-media,
+.ie-layer-thumb {
+  --checker-tile: 16px;
+  --checker-ink: color-mix(in srgb, var(--text) 11%, transparent);
+  background-color: var(--bg-2);
+  background-image:
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    ),
+    linear-gradient(
+      45deg,
+      var(--checker-ink) 25%,
+      transparent 25%,
+      transparent 75%,
+      var(--checker-ink) 75%
+    );
+  background-size: var(--checker-tile) var(--checker-tile);
+  background-position: 0 0, calc(var(--checker-tile) / 2) calc(var(--checker-tile) / 2);
+}
+
+/* A 36x30 layer chip and a 56px queue thumbnail get two or three tiles at 16px,
+   which reads as a diagonal stripe rather than a checker. Halve it. */
+.ie-layer-thumb,
+.worker-progress-card__thumb-cell.small .worker-progress-card__thumb-media {
+  --checker-tile: 8px;
+}
+
+/* The fullscreen preview is the only `object-fit: contain` surface in the list, and
+   contain is what would put the checkerboard in the letterbox bars of every opaque
+   image. Size the element to the bitmap instead, so the box IS the image and there
+   are no bars to fill. This also removes the flat `var(--bg-2)` bars that were there
+   before.
+
+   Without the height clamp there would be no bars at all: `width: 100%` alone gives
+   an `<img>` its intrinsic ratio. It is `max-height: 78vh` on `.preview-modal img`
+   that clamps a PORTRAIT image's height while the width stays at 100%, and that is
+   what letterboxes. `width: auto` lets the width follow the clamped height.
+
+   The declaration this has to beat is `.preview-modal-stage img, .preview-modal-stage
+   video { width: 100% }`. Review read that selector as (0,2,1) and this rule's earlier
+   `.preview-modal img` as (0,1,1), i.e. inert; both are in fact (0,1,1) — one class,
+   one type — so the earlier form already won on document order. The selector is
+   repeated verbatim here anyway, because "same selector, later in the file" stays true
+   if either block moves, where "different selector, tied specificity, happens to be
+   further down" is something a reader has to re-derive. It also covers both modal
+   layouts (the zoom viewport's `.preview-zoom-inner img` and the side-by-side
+   `.preview-compare-pane` images are both inside the stage), and it is `img`-only so a
+   <video> still fills the stage. `transparencyBackdrop.test.js` resolves the winner
+   rather than trusting either reading. */
+.preview-modal-stage img {
+  width: auto;
+  max-width: 100%;
+  height: auto;
 }

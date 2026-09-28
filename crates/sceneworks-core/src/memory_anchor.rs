@@ -1,12 +1,18 @@
 //! Measured memory anchors and the analytic peak derivation built on them (sc-22507, epic 22505).
 //!
 //! One anchor per `(model, quant tier, backend lane)` carries the measured per-phase peak
-//! decomposition of a single retained calibration render. Everything else is derived analytically:
-//! activation terms scale linearly in latent tokens (`area x latent frames`), decode scales in
-//! output voxels, attention transients are bounded by the declared rung parameters, and bounded
-//! regimes (tiled decode, windowed transformer residency, deferred materialization) substitute
-//! architecture-bounded terms for the anchored ones. This replaces grid measurement: a request at
-//! a `(geometry, frames)` cell that was never measured is admitted from the derived estimate.
+//! decomposition of a single retained calibration render. Everything else is derived analytically.
+//! For the VIDEO lane (LTX-2.5 on MLX): activation terms scale linearly in latent tokens
+//! (`area x latent frames`), decode scales in output voxels, attention transients are bounded by
+//! the declared rung parameters, and bounded regimes (tiled decode, windowed transformer
+//! residency, deferred materialization) substitute architecture-bounded terms for the anchored
+//! ones. For the IMAGE lanes (candle and MLX alike) there is exactly one law and no fitted
+//! coefficient (sc-22663, epic 22657 E3): per phase, the residue is the anchor's measured peak
+//! minus the component bytes resident in that phase under the anchor's regime; the request's
+//! regime re-adds its own resident components and scales the residues by architecture facts and
+//! geometry — see the *Image derivation law* section and [`MemoryAnchor::derive_phase_peaks`].
+//! This replaces grid measurement: a request at a `(geometry, frames)` cell that was never
+//! measured is admitted from the derived estimate.
 //!
 //! The store is checked in at `config/memory-anchors.json` and is validated against the immutable
 //! retained evidence it was extracted from (`PACKAGED_MEMORY_ANCHOR_SOURCES`): every anchor's
@@ -66,10 +72,1331 @@ pub const PACKAGED_MEMORY_ANCHORS: &str = include_str!("../../../config/memory-a
 /// Immutable retained evidence the anchors were extracted from. Every anchor's `source.path` must
 /// name one of these files, whose bytes are compiled in so the handshake cannot be bypassed by
 /// editing the file on disk.
+///
+/// EVERY retained corpus is packaged (sc-22666, epic 22657 E5). Packaging used to be a per-model
+/// opt-in because the candle image lane priced a cell with per-pixel slopes fitted on Krea Turbo,
+/// so anchoring another model from a freshly committed corpus would have repriced it with borrowed
+/// slopes. Since sc-22663 the image lanes fit nothing — the law decomposes each anchor's OWN
+/// measured peaks against the contract's component bytes — so there is no slope left to borrow and
+/// a retained corpus that is not compiled in is a defect rather than a deferral.
+/// `scripts/extract-memory-anchors.mjs` fails when it walks a corpus that could anchor a catalog
+/// cell but is absent from this list, so the packaging can never silently lapse again.
+///
+/// Keep sorted by path; `include_str!` paths are relative to this crate's `src/`.
 const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
+    (
+        "docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-bf16-candle-anchor.json"),
+    ),
+    (
+        "docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json"),
+    ),
+    (
+        "docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json",
+        include_str!("../../../docs/calibration/sc-15859/z-image-turbo-q8-candle-anchor.json"),
+    ),
     (
         "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json",
         include_str!("../../../docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/bernini-image-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/bernini-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-flash-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/chroma1-hd-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux-schnell-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/flux2-dev-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-dev-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-kv-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/flux2-klein-9b-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/ideogram-4-turbo-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ideogram-4-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v1-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v1-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v1-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v1-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v1-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v1-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v2-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v2-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v2-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v2-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/illustrious-xl-v2-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/illustrious-xl-v2-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/instantid-realvisxl-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/instantid-realvisxl-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/kolors-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/kolors-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-raw-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-raw-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-2-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/krea-2-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-q4-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-q4-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/krea-realtime-14b-q8-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/lens-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-3-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-3-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/ltx-2-5-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/ltx-2-5-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-base-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-base-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-edit-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-edit-turbo-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/mage-flow-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/minimax-h3-ref-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/pulid-flux-dev-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-lightning-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-lightning-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/qwen-image-edit-2511-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/qwen-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/realvisxl-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-lightning-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/realvisxl-lightning-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-lightning-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/realvisxl-lightning-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-lightning-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/realvisxl-lightning-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/realvisxl-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/realvisxl-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/realvisxl-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-1600m-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sana-sprint-1600m-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sana-sprint-1600m-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/scail2-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/scail2-14b-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/scail2-14b-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sd3-5-large-turbo-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sd3-5-large-turbo-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sd3-5-large-turbo-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-large-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sd3-5-medium-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sd3-5-medium-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sdxl-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sdxl-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sdxl-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sdxl-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sdxl-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sdxl-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v2-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-bf16-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-fast-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q4-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-candle-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-candle-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/sensenova-u1-8b-infographic-v3-q8-mlx-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/sensenova-u1-8b-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-bf16-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q4-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-i2v-14b-q8-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q4-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/wan-2-2-q8-mlx-exceeded-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json",
+        include_str!(
+            "../../../docs/calibration/sc-22738/wan-2-2-t2v-14b-bf16-mlx-exceeded-evidence.json"
+        ),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-edit-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-edit-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q4-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q4-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q8-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q8-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-turbo-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-turbo-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-22738/z-image-turbo-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-22738/z-image-turbo-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-24114/qwen-image-2-1-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-bf16-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-24114/qwen-image-2-1-q4-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-q4-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json"),
     ),
     (
         "docs/generated/krea-candle-five-rung-sc-11045.json",
@@ -80,8 +1407,16 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
         include_str!("../../../docs/generated/ltx-mlx-geometry-sweep-sc-18810.json"),
     ),
     (
+        "docs/generated/ltx-mlx-video-sc-18808.json",
+        include_str!("../../../docs/generated/ltx-mlx-video-sc-18808.json"),
+    ),
+    (
         "docs/generated/memory-calibration-evidence.json",
         include_str!("../../../docs/generated/memory-calibration-evidence.json"),
+    ),
+    (
+        "docs/generated/qwen-candle-five-rung-sc-15817.json",
+        include_str!("../../../docs/generated/qwen-candle-five-rung-sc-15817.json"),
     ),
 ];
 
@@ -186,6 +1521,11 @@ pub const fn decode_tiled_bound_bytes(voxels: i128) -> i128 {
 /// transitions), observed at up to 15.84% over the binding active phase across the retained corpus.
 /// Coefficient uncertainty is NOT covered here — it is priced inside the coefficients above, each
 /// of which is set at or above the highest measured within-cell slope.
+/// Retained MLX same-cell active-peak recapture spread. Estimated video peaks include this
+/// uncertainty once; reclaimable cache is excluded. The worker's policy audits the same value
+/// against the retained evidence corpus and asserts equality with this shared derivation input.
+pub const MLX_ACTIVE_RECAPTURE_SPREAD: f64 = 0.1260183508475594;
+
 pub const ANCHOR_ALLOCATOR_ENVELOPE_MARGIN: f64 = 0.17;
 
 /// Validation-only tightness budget: the corpus validation test refuses a derived bound more than
@@ -194,202 +1534,257 @@ pub const ANCHOR_ALLOCATOR_ENVELOPE_MARGIN: f64 = 0.17;
 pub const ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.25;
 
 // ---------------------------------------------------------------------------------------------
-// Candle (discrete-VRAM image lane) derivation coefficients — sc-22509, epic 22505.
+// Image derivation law — sc-22663, epic 22657 E3.
 //
-// The candle image lane is a DIFFERENT allocator and a different workload shape from the MLX video
-// lane above, so it gets its own per-term coefficients rather than borrowing the LTX video ones:
+// ONE law for both image lanes, and no fitted coefficient anywhere in it. The two per-lane image
+// laws this replaces (sc-22509's candle per-pixel slopes and the feature-end MLX allocator slopes)
+// each fitted three coefficients to ONE model's 768x768 -> 1024x1024 pair, then had to refuse every
+// other model ("underived"), clamp every request below 768x768 to that geometry, and refuse any
+// composition other than the one the anchor was measured in. Every one of those restrictions was a
+// consequence of fitting, and every one is gone here because nothing is fitted:
 //
-// * There is no temporal axis. A still image has one latent frame, so every activation term scales
-//   in OUTPUT PIXELS (`width x height`) rather than in latent tokens x latent frames. The law's
-//   domain is bounded BELOW at the smallest retained measured geometry
-//   ([`CANDLE_SMALLEST_RETAINED_PIXELS`]); a smaller request is priced at that geometry rather than
-//   extrapolated into a region the corpus never touched.
-// * There is no MLX-style reclaimable envelope. Every retained candle record measures
-//   `cudaCachingAllocatorPresent = 0` and `reclaimableBytes = 0`, with `observedMemory.overall`
-//   `allocatorBytes == activeBytes`: the CUDA lane hands pages back rather than retaining a cache
-//   across phase transitions. [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`] therefore covers a different
-//   single term — capture-to-capture spread — and is named for it.
+//   residue(phase) = measured phase peak − the component bytes RESIDENT in that phase under the
+//                    anchor's own regime
 //
-// PROVENANCE. The slopes below are the WITHIN-CELL measured deltas of the retained
-// `krea_2_turbo` / candle / q4 / `threeStage` (`resident` + `staged_residency`) evidence pair at
-// 768x768 and 1024x1024, published as `turboFit.evidenceRecords` in
-// `config/manifests/builtin.models.jsonc` and re-measured per rung in the compiled-in
-// `docs/generated/krea-candle-five-rung-sc-11045.json` capture the anchor itself is extracted from.
+// is what one retained render says about the phase's ACTIVATION working set, independent of which
+// weights happened to be loaded next to it. A request in any regime then re-adds the components
+// ITS regime keeps resident in that phase, and scales the residue by ratios that are architecture
+// facts and geometry, never fits:
 //
-// The anchor sits at the TOP of the measured geometry range (1024x1024 is the largest measured
-// still), so the corpus falsifies these coefficients by DOWNWARD extrapolation: a slope set too
-// steep walks the estimate below the measured 768x768 peak. Each slope is therefore pinned below
-// the ceiling that keeps the margin-widened 768x768 derivation at or above the measured 768x768
-// peak, and at or above the physical growth term the architecture requires. `candle_anchor_
-// derivation_brackets_every_retained_candle_measurement` is the falsifier for all of it.
+//   * decode under `bounded_decode`: the residue splits into a NON-TILING FLOOR carried unscaled
+//     and a per-tile part scaled by (decode chunk pixels / image pixels). The floor is what every
+//     bounded decode holds whole-image regardless of the tile: the full-image output accumulator
+//     and the full-image blend-weight accumulator of the engine's tile blender (`candle-gen/src/
+//     vae_tiling.rs::blend_plan` and the Qwen-Image VAE's `tile_blend_tail` at the pinned
+//     revision — one `[B, 3, H, W]` buffer in the activation dtype and one `[1, 1, H, W]` f32
+//     buffer), so it is `pixels x (3 x batch x activation width + 4)` and needs the activation
+//     width fact; without it the whole residue stays unscaled. The chunk is the LARGER of the two
+//     bounding models the pinned engines execute, because the law cannot know per provider which
+//     one a request runs: Krea 2 Turbo and Qwen-Image tile the VAE ON DEVICE through
+//     `gen_core::tiling::split_spatial` (tiles of `edge²` output pixels placed at stride
+//     `edge − overlap`, the halo INSIDE the extent), while Z-Image-Turbo and FLUX transfer
+//     `(edge − overlap)` output rows of latents to a whole-frame CPU decode
+//     (`bounded_host_latent_transfer`), a band of `(edge − overlap) x width` output pixels. The
+//     effective tile fraction is therefore never below `(edge − overlap) x width / pixels`;
+//   * denoise: the full score tensor — heads x tokens² x activation width, tokens from the request
+//     geometry through the VAE scale and patch size plus the conditioning tokens — is separated out
+//     of the residue and replaced by the chunk budget x width under `bounded_attention` (capped at
+//     the unchunked tensor: a chunk larger than the tensor cannot cost more than the tensor); the
+//     rest of the residue scales linearly in tokens;
+//   * transformer resident bytes x window / blocks under `bounded_transformer_residency`;
+//   * conditioning: the residue scales with the prompt's conditioning tokens over
+//     [`DEFAULT_CONDITIONING_TOKENS`], never below 1.0 (a shorter prompt than the records were
+//     measured with is not credited);
+//   * geometry through token and pixel counts; batch multiplies both.
+//
+// A missing fact leaves the residue it would have scaled UNSCALED, so the estimate only ever errs
+// large: [`ArchitectureFacts::default()`] prices every rung at the shallow composition. There is no
+// lower clamp — a 512x512 request prices below the 1024x1024 anchor, as it should — and no refusal
+// by composition: a resident request from a staged anchor re-adds the text encoder through denoise
+// and decode and prices ABOVE the staged estimate instead of returning `None`.
+//
+// DOMAIN. A phase whose measured peak is BELOW the component set it is decomposed against has
+// left the law's domain: the counters did not see the weights the anchor's regime says were
+// resident, so the subtraction says nothing about the activation working set (clamping it to zero
+// would read "the counters missed the weights" as "zero activation" and price a windowed denoise
+// at the window's weights alone). Such a request returns `None` and the caller keeps its floor.
+// Five of the six packaged MLX image anchors are outside the domain today — their
+// conditioning-phase active peak is a fraction of the eager resident set they claim, and so is
+// their conditioning-phase ALLOCATOR level (the quantity the MLX fit gate admits on), so
+// decomposing the allocator envelope instead would not bring one in (see
+// `the_packaged_mlx_anchors_are_outside_the_laws_domain` for both censuses). The cause was the
+// adapter's capture shape, not the counters (sc-22667, epic 22657 D3): MLX residency is
+// request-scoped even under eager materialization, so a window opened on a freshly loaded
+// generator measured a cold first request that was still materializing its weights. The
+// `z_image_turbo` q4 anchor was re-captured with the window opened above its materialized
+// resident set and is in domain (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`);
+// the others enter the domain the same way, one re-capture each.
+//
+// The measured phase level the law subtracts from is [`MemoryAnchor::phase_active_peak_bytes`],
+// the store's byte-bound decomposition. MLX allocator cache is reclaimable and is not added
+// to the active-memory prediction. The admission caller carries recapture uncertainty separately.
+//
+// The identity guards the earlier laws carried (backend lane, LTX pipeline axes, a single-frame
+// measured geometry) stay, and so does the anchor-vs-request regime guard: a phase the anchor
+// measured under a bounded rung carries that rung's bounded working set and cannot price the same
+// phase UNBOUNDED, so such a request is refused; the correspondingly-bounded request reuses the
+// bounded residue unscaled (the anchor row records no rung parameters, so the ratio is unknowable
+// and "unscaled" is the erring-large choice).
 // ---------------------------------------------------------------------------------------------
 
-/// Conditioning-phase bytes per output pixel on the candle image lane. Conditioning under staged
-/// residency holds the text encoder working set plus the initialized latent; only the latter sees
-/// the image geometry. The Qwen-Image VAE is x8 spatial with 16 latent channels, so one fp32 latent
-/// is `(w/8)(h/8) x 16 x 4 = 1` byte per output pixel; this is set at 4 B/px to cover up to four
-/// concurrently live copies of it. The retained within-cell measured slope is NEGATIVE (3.565 GiB
-/// at 768x768 against 3.44 GiB at 1024x1024 — the text working set is prompt-shaped, not
-/// image-shaped), so any non-negative coefficient sits above the measured trend.
-pub const CANDLE_COND_PER_PIXEL_BYTES: i128 = 4;
+/// Conditioning-token count assumed when a request states none. The Qwen3 / Qwen2.5-VL text
+/// encoders the image lanes condition on cap the prompt at 512 tokens (`max_sequence_length` of
+/// the reference pipelines), and the retained calibration records do not carry the prompt length
+/// they were measured with, so the cap is the documented stand-in on both sides of the ratio.
+pub const DEFAULT_CONDITIONING_TOKENS: u32 = 512;
 
-/// Denoise-phase bytes per output pixel on the candle image lane: the DiT forward's live activation
-/// set over the packed image latent. Retained within-cell measured slope is 9,212 B/px
-/// (10.597 -> 14.533 GiB across 589,824 -> 1,048,576 px on `q4` / `threeStage`). Set at 9 KiB/px,
-/// which is above the measured slope for upward extrapolation and still below the 9,217 B/px
-/// ceiling at which the margin-widened 768x768 derivation would fall under the measured peak. That
-/// ceiling is the tightest of the three and is what pins
-/// [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`]'s value; both are checked by
-/// `every_candle_coefficient_sits_inside_the_window_the_retained_pair_allows`.
-pub const CANDLE_DENOISE_PER_PIXEL_BYTES: i128 = 9_216;
+/// Architecture facts of the model an anchor measures, every one optional: a fact that is `None`
+/// leaves the residue it would have scaled unscaled (see the section comment). The worker fills
+/// these from the live provider contract; a fixture may fill them from the model's config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ArchitectureFacts {
+    /// Attention heads of the transformer (the score tensor is one `tokens x tokens` matrix per
+    /// head).
+    pub attention_heads: Option<u32>,
+    /// Per-head width. Carried as part of the architecture identity; the score-tensor term is
+    /// `heads x tokens²` and does not depend on it.
+    pub head_dim: Option<u32>,
+    /// Transformer block count — the denominator of the residency-window ratio.
+    pub transformer_blocks: Option<u32>,
+    /// Latent patch edge (latent pixels per token edge).
+    pub patch_size: Option<u32>,
+    /// Latent channels. Carried as part of the architecture identity.
+    pub latent_channels: Option<u32>,
+    /// Output pixels per latent pixel along one edge.
+    pub vae_spatial_scale: Option<u32>,
+    /// Output frames per latent frame. Still-image anchors measure one frame; carried so a video
+    /// anchor can state its temporal scale under the same struct.
+    pub vae_temporal_scale: Option<u32>,
+    /// Bytes per activation element (2 for bf16/f16, 4 for f32).
+    pub activation_dtype_width: Option<u32>,
+}
 
-/// Decode-phase bytes per output pixel on the candle image lane: the VAE decoder's concurrently
-/// live pixel-space working copies. Retained within-cell measured slope is 11,699 B/px
-/// (16.286 -> 21.285 GiB over the same geometry pair). Set at 12 KiB/px — above the measured slope,
-/// and below the 12,296 B/px ceiling that downward extrapolation to 768x768 imposes.
-pub const CANDLE_DECODE_PER_PIXEL_BYTES: i128 = 12_288;
+/// The resident byte size of each heavy component of the model an anchor measures, at the anchor's
+/// tier — what the law subtracts from a measured phase peak and re-adds per the request's regime.
+/// The worker supplies these from the live provider contract's asset facts; an anchor row MAY carry
+/// them ([`MemoryAnchor::component_bytes`]) once the extractor can read them off the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ComponentBytes {
+    /// The text/conditioning encoder(s).
+    pub conditioning: u64,
+    /// The denoising transformer.
+    pub transformer: u64,
+    /// The latent decoder.
+    pub decoder: u64,
+}
 
-/// Smallest output area the retained candle corpus measures (768x768). Below it the derivation is
-/// CLAMPED to this geometry rather than extrapolated further down: the corpus never touched that
-/// region, and the linear slopes above — fitted across 768x768 -> 1024x1024 — walk the estimate below
-/// the resident weight set the staged path still holds long before a 1x1 request, which errs toward
-/// OOM. See [`MemoryAnchor::derive_image_phase_peaks`].
-pub const CANDLE_SMALLEST_RETAINED_PIXELS: i128 = 768 * 768;
+impl ComponentBytes {
+    pub const fn total(self) -> u64 {
+        self.conditioning
+            .saturating_add(self.transformer)
+            .saturating_add(self.decoder)
+    }
+}
 
-/// Multiplicative margin applied to every derived candle phase peak, at the widest point of the
-/// derivation's domain. There is no MLX-style allocator-envelope term to cover here (the CUDA lane
-/// reports `reclaimableBytes = 0` and no caching allocator in every retained record), and no blanket
-/// safety factor: the value is the sum of two measured terms and nothing else.
-///
-/// TERM 1 — same-cell cross-capture spread, 3.3243%. The two retained candle captures of
-/// `q4` / `staged_residency` / 1024x1024 disagree: denoise 15.1026 GB in the five-rung capture (the
-/// anchor's own source record) against 15.6047 GB in the `turboFit` evidence record, i.e. +3.3243%;
-/// decode 22.3525 against 22.8546 GB, i.e. +2.2463%. The anchor sits on the LOWER capture, so the
-/// derivation must carry the wider of the two, 3.3243%.
-///
-/// TERM 2 — the downward-extrapolation lever, x1.3888. Term 1 is an ABSOLUTE discrepancy in the
-/// anchor's INTERCEPT, but the margin multiplies the DERIVED value, which shrinks as the request
-/// geometry falls below the anchor. At the clamp floor ([`CANDLE_SMALLEST_RETAINED_PIXELS`], the
-/// widest point of the domain) the derived denoise base is
-/// `15_102_640_128 - 9_216 x 458_752 = 10_874_781_696` bytes, or 0.72006 of the intercept, so the
-/// same absolute discrepancy is `3.3243% / 0.72006 = 4.6168%` there. Decode's lever is weaker
-/// (0.74781), so denoise sets the value.
-///
-/// TERM 3 — the deliberate slope surplus, +0.0169%. [`CANDLE_DENOISE_PER_PIXEL_BYTES`] is pinned
-/// slightly ABOVE the measured 9,212 B/px slope so upward extrapolation stays conservative; that
-/// same choice subtracts an extra `(9_216 - 9_212) x 458_752 = 1.835 MB` at the clamp floor, which
-/// is 0.0169% of the base above.
-///
-/// `4.6168% + 0.0169% = 4.6337%`, rounded UP at the fourth decimal.
-/// `candle_anchor_derivation_brackets_every_retained_candle_measurement` and
-/// `candle_derivation_agrees_with_the_retained_measured_manifest_rows` are the falsifiers: the
-/// binding requirement is the 768x768 denoise row, which needs 4.6315%.
-pub const CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN: f64 = 0.0464;
+/// The `bounded_decode` tile the request decodes with, in OUTPUT pixels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeTile {
+    pub edge: u32,
+    pub overlap: u32,
+}
 
-/// Validation-only tightness budget for the candle lane, the sibling of
-/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`]: the corpus validation test refuses a derived candle bound
-/// more than this fraction above the measured peak of the anchor's OWN composition, so the
-/// coefficients above cannot quietly widen into a vacuous always-passes bound. Deeper rung
-/// compositions are only required to be BRACKETED, never to be tight: the shallow-anchor argument
-/// (a deeper rung can only reduce a phase, never grow it) deliberately over-estimates them.
-pub const CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.15;
+impl DecodeTile {
+    /// The output area one ON-DEVICE decode tile materializes: `edge²`. The pinned engine
+    /// (`gen_core::tiling::split_spatial` at inference 670dc1f4) places tiles of exactly `edge`
+    /// output pixels at a stride of `edge − overlap`, with the overlap halo INSIDE the tile extent,
+    /// so the halo is not added on top.
+    pub const fn area(self) -> i128 {
+        let edge = self.edge as i128;
+        edge * edge
+    }
 
-// ---------------------------------------------------------------------------------------------
-// MLX (unified-memory) image lane derivation coefficients — epic 22505 feature-end fix round
-// (E2/E7): the sibling of the candle image law above, for the six image-MLX anchors
-// (flux2_dev q4/q8, qwen_image q4/q8/bf16, z_image_turbo q4).
-//
-// The MLX image lane differs from BOTH siblings in one measured way that shapes the whole law:
-// the MLX allocator RETAINS CACHE ACROSS PHASE TRANSITIONS, and on an eager resident image render
-// that retention is not a modest envelope above the binding phase — the retained flux2_dev
-// captures show an overall allocator envelope up to 2.06x the largest phase ACTIVE peak (88.80 GB
-// against a 43.18 GB decode active at q4/1024x1024). A per-phase law over ACTIVE peaks widened by
-// a multiplicative margin therefore cannot honestly price admission here: the margin would have to
-// be ~105% at one cell and ~43% at another, i.e. a number named after nothing. What IS linear in
-// output pixels, per the retained within-cell pairs, is each phase's ALLOCATOR level — the active
-// peak plus the cache retained from earlier phases, which is the quantity MLX admission must cover
-// (the unified-memory budget is consumed by the allocator, not by the active set). So this law
-// prices per-phase ALLOCATOR envelopes, read from the anchor's
-// [`MemoryAnchor::phase_allocator_envelope_bytes`] (bound byte-exactly to the source record's
-// `observedMemory.<phase>.allocatorBytes`), and its peak-over-phases IS the admission envelope —
-// the decode-phase allocator level equals `observedMemory.overall.allocatorBytes` in every
-// retained image-MLX record.
-//
-// PROVENANCE. The slopes are the within-cell measured allocator deltas of the retained
-// `flux2_dev` MLX pairs at 768x768 -> 1024x1024 (eager, resident, no bounded rungs) in
-// `docs/generated/memory-calibration-evidence.json`, at BOTH anchored tiers (q4 and q8) — the
-// only image-MLX cells whose retained records vary geometry at all. Both anchors sit at the TOP
-// of the measured range (1024x1024), so the corpus falsifies the coefficients by DOWNWARD
-// extrapolation exactly as it does the candle law's: a slope set too steep walks the margin-
-// widened 768x768 derivation below the measured 768x768 peak, and
-// `every_mlx_image_coefficient_sits_inside_the_window_the_retained_pairs_allow` pins each one
-// inside that window.
-//
-// PER-MODEL SCOPE. Coefficients fitted on flux2_dev's spread price flux2_dev's anchors and
-// nothing else. qwen_image (all three tiers) and z_image_turbo retain records at a SINGLE
-// geometry each (1024x1024 and 768x768 respectively), so no within-cell slope exists for them and
-// none is borrowed: their anchors carry [`MemoryAnchor::underived_reason`] and this law refuses
-// them — they validate their own measured point (the store handshake) and price nothing beyond
-// it. That scoping is per-model by construction (the extractor computes it from each model's own
-// retained geometry spread), never a blanket switch.
-// ---------------------------------------------------------------------------------------------
+    /// The output stride between tiles, `edge − overlap`; `None` when the overlap is not below the
+    /// edge (the engines refuse such a tuple, and so does the law).
+    pub const fn stride(self) -> Option<u32> {
+        if self.overlap < self.edge {
+            Some(self.edge - self.overlap)
+        } else {
+            None
+        }
+    }
 
-/// Conditioning-phase allocator bytes per output pixel on the MLX image lane, expressed as ONE
-/// BYTE PER THIS MANY PIXELS because the measured slope is far below a byte per pixel: the flux2
-/// conditioning peak is the text-embedding working set (~1.2 MB), and its measured within-cell
-/// allocator slope is 16,384 bytes over 458,752 px = 0.0357 B/px at both tiers. 1/16 B/px
-/// (0.0625) sits above that slope for upward extrapolation and below the 0.0638 B/px ceiling at
-/// which the margin-widened 768x768 derivation would fall under the measured 768x768 conditioning
-/// allocator level.
-pub const MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE: i128 = 16;
+    /// The output-pixel band one HOST-TRANSFER bounded decode holds on the device at a time:
+    /// `(edge − overlap)` output rows across the full request width. Z-Image-Turbo and FLUX bound
+    /// their decode this way (`bounded_host_latent_transfer` at the pinned revision: the tuple's
+    /// difference is the output stride, converted to latent rows and transferred to a whole-frame
+    /// CPU decode). `None` when the overlap is not below the edge.
+    pub const fn host_transfer_band(self, request_width: u32) -> Option<i128> {
+        match self.stride() {
+            Some(stride) => Some(stride as i128 * request_width as i128),
+            None => None,
+        }
+    }
 
-/// Denoise-phase allocator bytes per output pixel on the MLX image lane: the DiT forward's live
-/// activation growth (measured ACTIVE slope 2,259.9 B/px at both tiers) plus the allocator cache
-/// retained across the phase. Measured within-cell allocator slopes: 7,514.4 and 7,738.7 B/px
-/// (q8 pairs), 7,675.8 and 8,304.7 B/px (q4 pairs, the larger against the anchor's own capture).
-/// Set at 8.25 KiB/px — above the highest measured slope, and below the 9,136 B/px ceiling the
-/// q8 768x768 downward extrapolation imposes.
-pub const MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES: i128 = 8_448;
+    /// The decode chunk the law scales the per-tile decode residue by: the LARGER of the on-device
+    /// tile ([`Self::area`]) and the host-transfer band ([`Self::host_transfer_band`]), because the
+    /// law cannot know per provider which bounding model the request executes and the larger one
+    /// errs large. Callers cap it at the request's own pixel count.
+    pub const fn chunk_pixels(self, request_width: u32) -> Option<i128> {
+        match self.host_transfer_band(request_width) {
+            Some(band) => {
+                let area = self.area();
+                Some(if band > area { band } else { area })
+            }
+            None => None,
+        }
+    }
+}
 
-/// Decode-phase allocator bytes per output pixel on the MLX image lane. The decode-phase
-/// allocator level is the overall admission envelope (decode runs last and the pool still holds
-/// the denoise-phase cache), so this is also the envelope's growth rate. Measured within-cell
-/// slopes: 55,346.4 and 55,568.4 B/px (q8), 55,657.2 and 56,283.8 B/px (q4, the larger against
-/// the anchor's own capture). Set at 55 KiB/px (56,320) — above the highest measured slope, and
-/// below the 57,553 B/px ceiling the q8 768x768 downward extrapolation imposes.
-pub const MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES: i128 = 56_320;
+/// The regime the graded request executes in: the residency shape plus the parameters of each
+/// engaged bounded rung. `None` on a rung means the rung is not engaged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RequestRegime {
+    /// `staged_residency` engaged: the text encoder is dropped before denoise, the transformer
+    /// before decode. `false` runs whole-model resident through every phase.
+    pub staged: bool,
+    /// `bounded_decode` engaged with this tile.
+    pub decode_tile: Option<DecodeTile>,
+    /// `bounded_attention` engaged with this many concurrently materialized score elements.
+    pub attention_chunk_scores: Option<u64>,
+    /// `bounded_transformer_residency` engaged with this many resident blocks.
+    pub transformer_window: Option<u32>,
+}
 
-/// Smallest output area the retained image-MLX corpus measures for the derivable models
-/// (flux2_dev at 768x768). Below it the derivation CLAMPS to this geometry rather than
-/// extrapolating on, for exactly the candle law's reason ([`CANDLE_SMALLEST_RETAINED_PIXELS`]):
-/// the slopes are fitted across 768x768 -> 1024x1024 and walking further down leaves the corpus
-/// entirely, in the under-estimate (OOM) direction.
-pub const MLX_IMAGE_SMALLEST_RETAINED_PIXELS: i128 = 768 * 768;
+impl RequestRegime {
+    /// The shallow staged composition — `staged_residency` and nothing deeper.
+    pub const fn staged() -> Self {
+        Self {
+            staged: true,
+            decode_tile: None,
+            attention_chunk_scores: None,
+            transformer_window: None,
+        }
+    }
 
-/// Multiplicative margin applied to every derived MLX image phase allocator level. The allocator
-/// envelope itself is NOT covered here — it is the derived quantity (see the section comment) —
-/// so this margin covers exactly the RESIDUAL dispersion of that envelope that the upper-bounded
-/// slopes cannot, i.e. the two measured terms left after each coefficient is pinned at or above
-/// the highest within-cell slope:
-///
-/// * TERM 1 — cross-tier slope dispersion under downward extrapolation. The coefficients are
-///   pinned above the q4 slopes (the steeper pair); at q8/768x768 the measured slopes are
-///   shallower, so subtracting the pinned slope undershoots the measured level by 0.5301%
-///   (denoise) and 0.3949% (decode).
-/// * TERM 2 — the conditioning slope quantization. 1/16 B/px over the 458,752 px clamp span
-///   subtracts 28,672 bytes where the corpus measured 16,384, leaving the 768x768 conditioning
-///   derivation 1.0000% under its measured level — the binding requirement.
-///
-/// Set at 1.05%, above the 1.0000% binding term with rounding headroom.
-/// `mlx_image_derivation_brackets_every_retained_flux2_measurement` is the falsifier.
-pub const MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN: f64 = 0.0105;
+    /// The whole-model resident composition.
+    pub const fn resident() -> Self {
+        Self {
+            staged: false,
+            decode_tile: None,
+            attention_chunk_scores: None,
+            transformer_window: None,
+        }
+    }
+}
 
-/// Validation-only tightness budget for the MLX image lane, the sibling of
-/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`]: the corpus validation refuses a derived admission
-/// bound more than this fraction above the record's measured overall allocator envelope, so the
-/// coefficients and margin cannot quietly widen into a vacuous always-passes bound. 2% covers the
-/// margin (1.05%) plus the observed same-cell capture spread of the 1024x1024 envelopes (0.33%).
-pub const MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.02;
+/// One still-image workload for [`MemoryAnchor::derive_phase_peaks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImageDeriveRequest {
+    pub width: u32,
+    pub height: u32,
+    pub batch: u32,
+    /// Conditioning tokens the prompt encodes to; [`DEFAULT_CONDITIONING_TOKENS`] when unknown.
+    /// Enters the joint-attention sequence length (so the score tensor and the token-linear
+    /// denoise residue see it) and scales the conditioning residue by
+    /// `tokens / DEFAULT_CONDITIONING_TOKENS`, never below 1.0: the retained records do not carry
+    /// the prompt length they were measured with, so a shorter prompt is not credited.
+    pub conditioning_tokens: Option<u32>,
+    pub regime: RequestRegime,
+}
+
+impl ImageDeriveRequest {
+    pub const fn new(width: u32, height: u32, regime: RequestRegime) -> Self {
+        Self {
+            width,
+            height,
+            batch: 1,
+            conditioning_tokens: None,
+            regime,
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Variant/decoder component deltas — epic 22505 feature-end fix round (E2).
@@ -430,24 +1825,11 @@ pub const MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.02;
 // `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta`.
 // ---------------------------------------------------------------------------------------------
 
-/// Validation-only tightness budget for the sibling+delta fall-through, WIDER than
-/// [`ANCHOR_VALIDATION_TIGHTNESS_BUDGET`] by design: the delta rule adds the FULL shipped file
-/// size of every crossed component to every phase (the conservative direction — see the section
-/// comment), so a derived off-anchor bound legitimately over-estimates by up to the component's
-/// whole size where the true peak holds only part of it. The budget keeps the bound falsifiable
-/// (the leave-one-out validation refuses a runaway estimate) without demanding a tightness the
-/// conservative rule cannot deliver.
-///
-/// RE-DERIVED at the feature-end fix round, after the variant deltas were re-keyed onto what each
-/// variant actually materializes (the earlier 0.35 was sized by a binding case that inherited a
-/// misattributed 8.9 GB distillation-LoRA add on the distilled row — a component the distilled
-/// target never loads). With the corrected table the binding retained case is the bf16
-/// distilled/conv 1280x704 capture `imc-4e1b3a02a6ced3434824`, derived from its dev/diffvae
-/// sibling across a zero variant crossing plus the 0.81 GB conv-decoder crossing, landing 21.83%
-/// over its measured envelope. The budget is that figure rounded up to the next whole point.
-/// `the_delta_tightness_budget_is_the_binding_leave_one_out_overshoot_rounded_up` recomputes it
-/// and refuses more than a point of slack, so this cannot drift back into a number nothing binds.
-pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.22;
+/// Validation-only tightness of sibling+delta active estimates, including recapture uncertainty.
+/// The retained leave-one-out bound is 23.88% above its active peak (bf16 distilled/conv
+/// 1280x704, imc-4e1b3a02a6ced3434824). Round up to the next percentage point. This constrains
+/// the estimate in tests; it is never an additional admission allowance.
+pub const ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET: f64 = 0.24;
 
 /// Shipped weights file inventories the component deltas cite, compiled in for the same reason
 /// the retained corpora are: a delta's byte value must be recomputable from bytes this build
@@ -538,6 +1920,165 @@ pub struct MemoryAnchorStore {
     /// cell. `default` so a store written before the migration still parses.
     #[serde(default)]
     pub component_deltas: Vec<ComponentDelta>,
+    /// Measured LOWER BOUNDS from captures a physical-footprint hard stop ended (sc-22738, epic
+    /// 22723). This is the store's THIRD entry kind and the only one whose evidence is a render
+    /// that did NOT complete: see [`ExceededBound`]. `default` so a store written before the
+    /// migration still parses.
+    #[serde(default)]
+    pub exceeded_bounds: Vec<ExceededBound>,
+}
+
+/// A MEASURED LOWER BOUND on one cell's peak: the request reached `observed_footprint_bytes` of
+/// kernel physical footprint on a host of `host_memory_bytes` and was terminated by the capture
+/// guard before it finished (sc-22738, epic 22723 E4/E5).
+///
+/// WHY THIS IS EVIDENCE AND NOT A DROPPED CAPTURE. Before this row existed a footprint hard stop
+/// stamped nothing at all: `measure-memory-catalog.mjs` recorded `capture_failed`, the store kept
+/// no trace, and production kept admitting the very request that had just been killed — the
+/// `bernini:bf16:mlx` 848x480x49 render that ran 72 minutes and reached 97,147,294,328 bytes
+/// before the guard stopped it mid-decode. The run learned the single most decision-relevant fact
+/// about the cell (its peak is AT LEAST that), and the pipeline threw it away.
+///
+/// WHAT IT CLAIMS, AND WHAT IT DELIBERATELY DOES NOT. It claims one inequality — `peak >=
+/// observed_footprint_bytes` at this geometry — and nothing else. It is NOT a phase decomposition,
+/// NOT a point a law may fit, and NOT a substitute for a [`MemoryAnchor`]: it prices no estimate,
+/// widens no envelope and enters no derivation. Its ONLY consumer is the pre-load refusal
+/// ([`ExceededBound::required_bytes`]), which is why every field it carries is either identity or
+/// the inequality's own terms.
+///
+/// IT IS RETIRED ONLY BY RE-MEASUREMENT (sc-22738). A LATER completed capture of the same cell —
+/// same identity axes, geometry covering the bound's, on a host no larger than the one that was
+/// stopped — supersedes it: `scripts/extract-memory-anchors.mjs` (`retainExceededBounds`) drops
+/// the bound from the store and the anchor stands in its place. A later stop at the same geometry
+/// replaces the earlier bound rather than sitting beside it. Stops at other geometries all stay,
+/// each the strongest true inequality for its own point. Nothing else lifts a bound.
+///
+/// IT BINDS REGARDLESS OF CURRENCY (sc-22738). The bound carries the same
+/// [`AnchorSource::loader_closure_digest`] an anchor does, and for the same reason: so the probe
+/// tooling can tell when the loader that produced it has moved and the cell is worth stopping at
+/// again — the runner (`measure-memory-catalog.mjs`) then classifies the cell runnable and the
+/// MLX memory adapter's pre-load refusal lets it through to the guarded capture, whose outcome
+/// supersedes the bound as above. The runtime never reads that key. A bound whose closure has
+/// moved refuses exactly what it refused the day it was measured, because the alternative — a
+/// shared-engine fix silently re-admitting the very request a host was already unable to finish —
+/// is the failure the bound exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExceededBound {
+    pub id: String,
+    pub model_id: String,
+    pub model_family: String,
+    pub route: String,
+    pub provider: String,
+    pub backend: AnchorBackend,
+    pub tier: String,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: String,
+    pub overlay: Option<String>,
+    pub reference_count: u32,
+    pub load_shape: AnchorLoadShape,
+    pub geometry: AnchorGeometry,
+    /// The kernel `phys_footprint` of the guarded process group at the sample that tripped the
+    /// hard stop. The cell's true peak is at or above this: the render was still allocating.
+    pub observed_footprint_bytes: u64,
+    /// The guard's hard-stop ceiling for that run, carried so a reader can see how far past it the
+    /// group had already gone in one sampling interval.
+    pub ceiling_bytes: u64,
+    /// Whole-host memory of the capture host. Recorded because the inequality is only interesting
+    /// relative to a budget, and a bound measured on a smaller host must not read as a claim about
+    /// a larger one.
+    pub host_memory_bytes: u64,
+    /// The guard's own hard-stop reason, verbatim.
+    pub reason: String,
+    pub source: AnchorSource,
+}
+
+impl ExceededBound {
+    /// Whether a request at `(width, height, frames)` is at or above the geometry this bound was
+    /// measured at, on every axis. Monotonicity is the whole claim: a render that already needed
+    /// at least X bytes at this geometry cannot need less at a strictly larger one. A request
+    /// SMALLER on any axis is outside the bound and takes no refusal from it.
+    pub const fn covers_geometry(&self, width: u32, height: u32, frames: u32) -> bool {
+        width >= self.geometry.width
+            && height >= self.geometry.height
+            && frames >= self.geometry.frames
+    }
+
+    /// What a host must be able to give this request before it may be admitted: the measured lower
+    /// bound plus the lane's activation headroom.
+    ///
+    /// The headroom term is not padding. The footprint reading is a LOWER bound taken at the
+    /// instant the guard fired — for the Bernini capture, mid-VAE-decode on a curve that had just
+    /// climbed 18 GiB in under a second — so admitting at exactly the bound would admit a render
+    /// already known to want more. Charging the lane's ordinary activation allowance on top is the
+    /// same term every floor candidate already carries, applied to a peak the measurement proved
+    /// rather than to one an estimate guessed.
+    pub const fn required_bytes(&self, headroom_bytes: u64) -> u64 {
+        self.observed_footprint_bytes.saturating_add(headroom_bytes)
+    }
+
+    /// Whether this bound refuses a host — the whole decision, stated once so production and the
+    /// capture-side mirror cannot drift.
+    ///
+    /// TWO disjuncts, and the FIRST is the load-bearing one:
+    ///
+    /// * **A host no larger than the one that failed.** This is what the measurement literally
+    ///   says: a machine of `host_memory_bytes` ran this render and could not finish it. Nothing
+    ///   about a same-sized machine makes it likelier to succeed, so it is refused outright. This
+    ///   disjunct is the reason the fix bites at all — the Bernini stop was taken on the same
+    ///   128 GiB Mac that would otherwise queue the render again, and a footprint-versus-budget
+    ///   comparison alone would have re-admitted it: 90.5 GiB plus the lane's 16 GiB allowance is
+    ///   106.5 GiB, which an idle 128 GiB host appears to have.
+    /// * **A larger host that cannot currently carry the requirement.** A bigger machine MIGHT
+    ///   finish this render, so it is graded on what it can actually offer right now rather than
+    ///   refused on the strength of a smaller host's failure.
+    ///
+    /// `host_total_bytes` is the budget's own physical ceiling, which on the MLX lane can be the
+    /// allocator's limit rather than `hw.memsize` — i.e. at or below the figure a bound records.
+    /// The comparison is deliberately left inclusive-and-conservative there: erring towards
+    /// refusal on a host of ambiguous size is the direction that does not take the machine down.
+    pub const fn refuses_host(
+        &self,
+        host_total_bytes: u64,
+        effective_bytes: u64,
+        headroom_bytes: u64,
+    ) -> bool {
+        host_total_bytes <= self.host_memory_bytes
+            || effective_bytes < self.required_bytes(headroom_bytes)
+    }
+}
+
+/// The identity a request presents to [`MemoryAnchorStore::exceeded_bound_for`]. Every conjunct is
+/// an axis a [`MemoryAnchor`] lookup also keys on, for the same reason: a bound measured on one
+/// provider, mode or pipeline cell says nothing about another's.
+#[derive(Debug, Clone, Copy)]
+pub struct ExceededBoundQuery<'a> {
+    pub model_id: &'a str,
+    /// The two axes only a CATALOG resolution can state. Production always states both — the
+    /// worker has resolved the catalog family and the engine route before it asks — and the
+    /// capture-side mirror in the memory adapter states neither, because a capture plan names a
+    /// provider and a model id and there is no catalog inside the adapter binary to resolve them
+    /// from.
+    ///
+    /// `None` is therefore "this caller cannot state the axis", not a wildcard for anyone: both
+    /// are redundant with axes already graded — the catalog family is a function of `model_id`,
+    /// and the route of `provider` — so omitting them narrows nothing that `model_id`, `provider`,
+    /// `backend` and `tier` have not already pinned. A caller that CAN state them must, so a
+    /// mis-resolved route cannot borrow another cell's bound.
+    pub model_family: Option<&'a str>,
+    pub route: Option<&'a str>,
+    pub provider: &'a str,
+    pub backend: AnchorBackend,
+    pub tier: &'a str,
+    pub transformer_variant: Option<Ltx25TransformerVariant>,
+    pub decoder: Option<Ltx25Decoder>,
+    pub mode: &'a str,
+    pub overlay: Option<&'a str>,
+    pub reference_count: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frames: u32,
 }
 
 /// Why a cell is analytic-only, strongest evidence first. The variant names the BEST evidence that
@@ -549,6 +2090,11 @@ pub enum AnalyticOnlyBasis {
     MeasuredEnvelope,
     /// The pinned MLX provider publishes measured component/stage byte constants.
     ProviderMeasuredConstants,
+    /// The model's backend block publishes a `memoryStrategyContract` (sc-22666, epic 22657 E5):
+    /// no render is retained for the cell, but the contract's per-rung declaration plus the image
+    /// law's ratios price every rung of the ladder from the manifest row, so the cell's estimate
+    /// is a CONTRACT-ONLY per-rung ladder rather than one manifest scalar repeated.
+    ContractEstimate,
     /// The catalog manifest declares a `measured: true` per-tier envelope.
     ManifestTierDeclaration,
     /// Nothing measured covers the cell at all.
@@ -643,7 +2189,53 @@ pub struct AnchorSource {
     /// revision, no lock and no workspace input, a pin bump that leaves the loader's source
     /// untouched leaves this equal — which is exactly the claim E9 makes: an anchor predating an
     /// unrelated change stays authoritative.
+    ///
+    /// A RE-CAPTURE SIGNAL FOR THE PROBE TOOLING ONLY (sc-22738). `measure-memory-catalog.mjs`,
+    /// `generate-memory-matrix.mjs` (`current` per anchor, `summary.staleAnchors`) and
+    /// `stale-lane-report.mjs` compare this key to decide what to re-capture. Nothing in the
+    /// runtime does: an anchor binds, derives and a bound refuses exactly as if this key matched,
+    /// whether or not it does. There is no `is_current` on this type on purpose — a runtime
+    /// function that could express "stale" is how a shared-engine fix that touches nearly every
+    /// closure would silently move what a live request gets.
     pub loader_closure_digest: String,
+    /// HOW the key above was derived (sc-22667). `None`: at the record's own measurement revision,
+    /// the default. `Some`: at [`AnchorCurrencyAttestation::attested_revision`] instead, on the
+    /// strength of a reviewed attestation in `config/anchor-currency-attestations.json` that the
+    /// loader closure's diff from the measurement revision to that one is accounting-only or was
+    /// witnessed unchanged by a re-measure on the same hardware. Copied into the store by
+    /// `scripts/anchor-loader-closure.mjs --stamp-anchors`, never written here; carried so a
+    /// current anchor cannot hide whether it is current by measurement or by attestation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency_attestation: Option<AnchorCurrencyAttestation>,
+}
+
+/// A reviewed statement that an anchor's evidence still describes the loader at a revision later
+/// than its measurement (sc-22667, epic 22657). The repository's invalidation doctrine is
+/// two-gated: a differing loader-closure digest says the SOURCE moved, and only a
+/// load-or-device-path change with no behaviour witness says the MEMORY BEHAVIOUR did. This is the
+/// second gate written down — `why` classifies every changed closure file, `witness` names the
+/// re-measure (or states there is none and why the diff alone suffices). It is bounded: it names
+/// one `attested_revision`, and a pin bump that moves the loader closure past it stales the anchor
+/// again exactly as if the attestation were absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AnchorCurrencyAttestation {
+    /// The inference revision the cited record was measured at — must equal the record's own.
+    pub measured_revision: String,
+    /// The inference revision the currency key was derived at instead.
+    pub attested_revision: String,
+    /// When the diff was read (ISO date).
+    pub attested_at: String,
+    /// The story that reviewed it.
+    pub story: String,
+    /// `accounting-only` (every changed file prices, reports or tests; none loads or executes) or
+    /// `witnessed-unchanged` (load-path files changed, and a re-measure on the same hardware
+    /// reproduced the anchor).
+    pub class: String,
+    /// The file-by-file reading of the diff.
+    pub why: String,
+    /// The behaviour witness, or the stated reason none was needed.
+    pub witness: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -744,14 +2336,47 @@ pub struct MemoryAnchor {
     pub phase_allocator_envelope_bytes: Option<AnchorPhaseBytes>,
     /// The measured overall allocator envelope of the anchor render (active + reclaimable).
     pub overall_allocator_envelope_bytes: u64,
-    /// `Some` when this anchor VALIDATES its measured point but no lane law may derive from it,
-    /// with the stated reason (epic 22505 feature-end fix round, per-model scoping). Every
-    /// derivation law refuses an anchor carrying this field; the memory matrix publishes the cell
-    /// as `Anchored/underived`. Written by the extractor from the model's own retained evidence
-    /// (e.g. a single measured geometry supports no per-pixel coefficient), never a blanket
-    /// switch.
+    /// `Some` when this anchor VALIDATES its measured point but no FITTED lane law may derive from
+    /// it, with the stated reason (epic 22505 feature-end fix round, per-model scoping). The reason
+    /// is always a statement about fitting — a single measured geometry supports no per-pixel
+    /// coefficient, an axis-free row keys no video variant — so the video law and the lane shims
+    /// ([`MemoryAnchor::derive_image_phase_peaks`], [`MemoryAnchor::derive_mlx_image_phase_peaks`])
+    /// refuse an anchor carrying it, and the memory matrix publishes the cell as
+    /// `Anchored/underived`. The derivation law itself ([`MemoryAnchor::derive_phase_peaks`],
+    /// sc-22663) fits nothing and does not consult it. Written by the extractor from the model's
+    /// own retained evidence, never a blanket switch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub underived_reason: Option<String>,
+    /// The resident byte size of the measured model's components at the anchor's tier
+    /// (sc-22663), when the retained record states them. The derivation law takes components as
+    /// an explicit argument — the worker supplies the live contract's asset facts — so this field
+    /// is a carried fact for readers and for a future extractor that can read a record's contract
+    /// snapshot, not a prerequisite: today's retained records state no component bytes and every
+    /// packaged row is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_bytes: Option<ComponentBytes>,
+    /// The provider contract classifies `staged_residency` STRUCTURALLY NOT APPLICABLE on this
+    /// anchor's lane (sc-22734), so the cell has no staged composition to be measured in.
+    ///
+    /// This is an architecture fact about the engine, not a property of the render: SenseNova-U1 is
+    /// one fused dual-path checkpoint whose conditioning and denoise weights are interleaved in
+    /// every resident layer, so there is no separable conditioning component to release and no
+    /// phase boundary to stage at. The extractor writes it from the model's own manifest
+    /// (`<lane>.memoryStrategyStructuralExemptions.staged_residency`, whose `evidence[].source`
+    /// names the engine's `memory_strategy.rs`), never as a blanket switch.
+    ///
+    /// [`MemoryAnchor::derive_image_phase_peaks`] reads it to admit the ONE composition such a cell
+    /// can be captured in. Its ordinary refusal of a resident candle anchor rests on the staged
+    /// anchor being the SHALLOWER of two real compositions — a resident render additionally holds
+    /// the text encoder through denoise and decode, which the staged intercepts do not price. Where
+    /// staging is structurally impossible that asymmetry does not exist: resident IS the shallowest
+    /// composition, there is no co-resident encoder above it, and the law prices it exactly as the
+    /// MLX lane already prices its resident anchors.
+    ///
+    /// `#[serde(default)]` + `skip_serializing_if`: every packaged row predates this field, stays
+    /// byte-identical, and keeps the old behaviour (`false` → the staged-only guard, unchanged).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub staged_residency_structurally_not_applicable: bool,
 }
 
 /// Store-key spelling of the LTX-2.5 transformer variant, matching the retained evidence.
@@ -837,7 +2462,198 @@ pub fn load_memory_anchors(raw: &str) -> Result<MemoryAnchorStore, String> {
     }
     validate_analytic_only(&store)?;
     validate_component_deltas(&store)?;
+    validate_exceeded_bounds(&store)?;
     Ok(store)
+}
+
+/// An attestation is a justification or it is nothing (sc-22667): both revisions must be real
+/// and distinct, and the reading of the diff must be stated. What is NOT checked here is whether
+/// the attested revision equals the pin — that is the currency verdict, reported by the probe
+/// tooling and never a load failure, exactly as a mismatched digest is. One check for both row
+/// kinds that carry an [`AnchorSource`]: an anchor and a measured lower bound are stamped by the
+/// same walk (`anchor-loader-closure.mjs --stamp-anchors`) and attested from the same file.
+fn validate_currency_attestation(
+    kind: &str,
+    id: &str,
+    source: &AnchorSource,
+) -> Result<(), String> {
+    let Some(attestation) = &source.currency_attestation else {
+        return Ok(());
+    };
+    for (field, revision) in [
+        ("measuredRevision", &attestation.measured_revision),
+        ("attestedRevision", &attestation.attested_revision),
+    ] {
+        if !is_revision(revision) {
+            return Err(format!(
+                "{kind} {id} currency attestation {field} {revision:?} is not a 40-hex revision"
+            ));
+        }
+    }
+    if attestation.measured_revision == attestation.attested_revision {
+        return Err(format!(
+            "{kind} {id} currency attestation attests its own measurement revision {}",
+            attestation.measured_revision
+        ));
+    }
+    for (field, value) in [
+        ("attestedAt", &attestation.attested_at),
+        ("story", &attestation.story),
+        ("class", &attestation.class),
+        ("why", &attestation.why),
+        ("witness", &attestation.witness),
+    ] {
+        if value.trim().is_empty() {
+            return Err(format!(
+                "{kind} {id} currency attestation states no {field} — an attestation without its \
+                 justification is a re-stamp"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The exceeded-bound half of the store's invariants (sc-22738).
+///
+/// The handshake is the anchor's, narrowed to the fields the inequality is made of: the cited
+/// corpus must be compiled in, hash to what the row recorded, and carry an `exceededBounds` entry
+/// whose identity, geometry and byte figures are the row's. The store may not drift from the
+/// retained evidence it cites, and a bound is the one row kind where drift would turn a refusal on.
+fn validate_exceeded_bounds(store: &MemoryAnchorStore) -> Result<(), String> {
+    let mut seen = BTreeMap::new();
+    for bound in &store.exceeded_bounds {
+        if let Some(previous) = seen.insert(bound.id.clone(), &bound.id) {
+            return Err(format!("duplicate exceeded bound {previous}"));
+        }
+        validate_currency_attestation("exceeded bound", &bound.id, &bound.source)?;
+        if bound.geometry.width == 0 || bound.geometry.height == 0 || bound.geometry.frames == 0 {
+            return Err(format!(
+                "exceeded bound {} has a degenerate geometry",
+                bound.id
+            ));
+        }
+        if bound.reason.trim().is_empty() {
+            return Err(format!(
+                "exceeded bound {} states no hard-stop reason — an unexplained refusal is a gap \
+                 wearing a row's clothes",
+                bound.id
+            ));
+        }
+        // The guard samples and terminates at or above its ceiling, so a row claiming a footprint
+        // BELOW the ceiling it cites did not come from a hard stop at all.
+        if bound.ceiling_bytes == 0 || bound.observed_footprint_bytes < bound.ceiling_bytes {
+            return Err(format!(
+                "exceeded bound {} records footprint {} under its own hard-stop ceiling {} — that \
+                 is not a run the guard stopped",
+                bound.id, bound.observed_footprint_bytes, bound.ceiling_bytes
+            ));
+        }
+        if bound.host_memory_bytes < bound.observed_footprint_bytes {
+            return Err(format!(
+                "exceeded bound {} records a footprint larger than the whole capture host",
+                bound.id
+            ));
+        }
+        if !is_sha256(&bound.source.loader_closure_digest) {
+            return Err(format!(
+                "exceeded bound {} loader closure digest {} is not a sha256",
+                bound.id, bound.source.loader_closure_digest
+            ));
+        }
+        let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .find(|(path, _)| *path == bound.source.path)
+        else {
+            return Err(format!(
+                "exceeded bound {} cites source {} which is not a compiled retained-evidence file",
+                bound.id, bound.source.path
+            ));
+        };
+        let digest = format!("{:x}", Sha256::digest(source_raw.as_bytes()));
+        if digest != bound.source.sha256 {
+            return Err(format!(
+                "exceeded bound {} source digest mismatch for {}: recorded {} actual {digest}",
+                bound.id, bound.source.path, bound.source.sha256
+            ));
+        }
+        let source: serde_json::Value = serde_json::from_str(source_raw).map_err(|error| {
+            format!(
+                "retained evidence {} does not parse: {error}",
+                bound.source.path
+            )
+        })?;
+        let entry = source
+            .get("exceededBounds")
+            .and_then(|entries| entries.as_array())
+            .and_then(|entries| {
+                entries.iter().find(|entry| {
+                    entry.get("id").and_then(|id| id.as_str())
+                        == Some(bound.source.record_id.as_str())
+                })
+            })
+            .ok_or_else(|| {
+                format!(
+                    "exceeded bound {} cites entry {} absent from the exceededBounds of {}",
+                    bound.id, bound.source.record_id, bound.source.path
+                )
+            })?;
+        let target = entry.get("target").unwrap_or(&serde_json::Value::Null);
+        let str_at = |value: &serde_json::Value, key: &str| {
+            value
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        };
+        let u64_at = |value: &serde_json::Value, key: &str| value.get(key).and_then(|v| v.as_u64());
+        let entry_route = str_at(target, "route").or_else(|| str_at(target, "provider"));
+        let load_shape_key = match bound.load_shape {
+            AnchorLoadShape::EagerMaterialization => "eager_materialization",
+            AnchorLoadShape::DeferredMaterialization => "deferred_materialization",
+        };
+        let geometry = target.get("geometry").unwrap_or(&serde_json::Value::Null);
+        let entry_overlay = str_at(target, "overlay")
+            .filter(|overlay| overlay != "none")
+            .filter(|overlay| !overlay.is_empty());
+        if str_at(target, "modelId").as_deref() != Some(bound.model_id.as_str())
+            || str_at(target, "tier").as_deref() != Some(bound.tier.as_str())
+            || str_at(entry, "backend").as_deref() != Some(bound.backend.as_key())
+            || str_at(target, "mode").as_deref() != Some(bound.mode.as_str())
+            || str_at(target, "provider").as_deref() != Some(bound.provider.as_str())
+            || entry_route.as_deref() != Some(bound.route.as_str())
+            || optional_axis_key(str_at(target, "transformerVariant").as_deref())
+                != variant_key_opt(bound.transformer_variant)
+            || optional_axis_key(str_at(target, "decoder").as_deref())
+                != decoder_key_opt(bound.decoder)
+            || str_at(entry, "loadShape").as_deref() != Some(load_shape_key)
+            || str_at(entry, "calibrationFingerprint").as_deref()
+                != Some(bound.source.calibration_fingerprint.as_str())
+            || entry_overlay != bound.overlay
+            || u64_at(entry, "referenceCount") != Some(u64::from(bound.reference_count))
+        {
+            return Err(format!(
+                "exceeded bound {} identity disagrees with its source entry {}",
+                bound.id, bound.source.record_id
+            ));
+        }
+        if u64_at(geometry, "width") != Some(u64::from(bound.geometry.width))
+            || u64_at(geometry, "height") != Some(u64::from(bound.geometry.height))
+            || u64_at(geometry, "frames") != Some(u64::from(bound.geometry.frames))
+            || u64_at(entry, "observedFootprintBytes") != Some(bound.observed_footprint_bytes)
+            || u64_at(entry, "ceilingBytes") != Some(bound.ceiling_bytes)
+            || entry
+                .get("hardware")
+                .and_then(|hardware| u64_at(hardware, "memoryBytes"))
+                != Some(bound.host_memory_bytes)
+            || str_at(entry, "reason").as_deref() != Some(bound.reason.as_str())
+        {
+            return Err(format!(
+                "exceeded bound {} figures disagree with its source entry {} — the store may not \
+                 drift from the retained evidence it cites",
+                bound.id, bound.source.record_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The analytic-only half of the store's invariants (sc-22510).
@@ -961,6 +2777,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
             anchor.id, anchor.source.loader_closure_digest
         ));
     }
+    validate_currency_attestation("memory anchor", &anchor.id, &anchor.source)?;
     let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
         .iter()
         .find(|(path, _)| *path == anchor.source.path)
@@ -1074,7 +2891,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
     let record_overlay = str_at(target, "overlay")
         .filter(|overlay| overlay != "none")
         .filter(|overlay| !overlay.is_empty());
-    let record_reference_count = geometry
+    let record_reference_count = target
         .get("referenceCount")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
@@ -1182,6 +2999,18 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         return Err(format!(
             "memory anchor {} declares itself underived without a reason — an unexplained \
              refusal is a gap wearing a field's clothes",
+            anchor.id
+        ));
+    }
+    // Component bytes are optional, but a stated set must state something: all-zero components
+    // would make every phase's residue the whole measured peak and re-add nothing, i.e. a row that
+    // silently prices every regime as the anchor's own.
+    if anchor
+        .component_bytes
+        .is_some_and(|components| components.total() == 0)
+    {
+        return Err(format!(
+            "memory anchor {} states component bytes that sum to zero",
             anchor.id
         ));
     }
@@ -1293,18 +3122,29 @@ fn validate_component_deltas(store: &MemoryAnchorStore) -> Result<(), String> {
 
 /// The checked-in loader-closure declarations — the CURRENT value of every declared model's
 /// currency key. Derived at the pinned inference revision by `scripts/anchor-loader-closure.mjs`.
+///
+/// Parsed here so `cargo test` can hold the store to its declarations (every packaged anchor's
+/// `(model, lane)` must be declared; an attestation must name the pin the file was derived at).
+/// The runtime admission seam never reads it (sc-22738): there is no packaged accessor, and no
+/// anchor, bound or curve lookup takes an `AnchorLoaderClosures`.
 pub const PACKAGED_ANCHOR_LOADER_CLOSURES: &str =
     include_str!("../../../config/anchor-loader-closures.json");
 
 /// Must equal the `digestVersion` of the checked-in file. Two versions answer different questions,
-/// so a version bump reads as "no declaration" (fail closed to the floor) rather than silently
-/// comparing digests derived under different rules.
+/// so a version bump is refused at parse rather than silently comparing digests derived under
+/// different rules.
 pub const ANCHOR_LOADER_CLOSURE_VERSION: &str = "anchor-loader-closure v2";
 
 /// One `(model, backend lane)`'s declared loader closure.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AnchorLoaderClosure {
+    /// For a CATALOG ALIAS only (sc-22724): the engine provider id this model id resolves to
+    /// (`z_image_edit` → `z_image_turbo`). The inference tree never names the alias, so the
+    /// derivation asks its literal rule of the engine id and hashes it into the closure text.
+    /// Absent for every model that is its own engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_id: Option<String>,
     /// The loader entry points the closure is rooted at, repo-relative in the inference tree.
     pub entry_points: Vec<String>,
     /// The digest of the closure's source content. This is what an anchor is compared against.
@@ -1334,9 +3174,9 @@ pub fn anchor_loader_closure_key(model_id: &str, backend: AnchorBackend) -> Stri
 }
 
 impl AnchorLoaderClosures {
-    /// The current loader-closure digest for one `(model, backend lane)`, or `None` when the
-    /// coordinate is undeclared — which is fail-closed: an anchor whose loader nothing tracks
-    /// cannot be shown to be current, so it is not.
+    /// The declared loader-closure digest for one `(model, backend lane)`, or `None` when the
+    /// coordinate is undeclared. A tooling/test accessor: the runtime compares no anchor against
+    /// it (sc-22738).
     pub fn digest_for(&self, model_id: &str, backend: AnchorBackend) -> Option<&str> {
         self.models
             .get(&anchor_loader_closure_key(model_id, backend))
@@ -1387,29 +3227,13 @@ pub fn load_anchor_loader_closures(raw: &str) -> Result<AnchorLoaderClosures, St
     Ok(closures)
 }
 
+/// A full 40-hex git revision, as the attestation names them.
+fn is_revision(value: &str) -> bool {
+    value.len() == 40 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 fn is_sha256(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// The packaged declarations, parsed once. `None` demotes every anchor to the caller's floor.
-pub fn packaged_anchor_loader_closures() -> Option<&'static AnchorLoaderClosures> {
-    static PACKAGED: OnceLock<Option<AnchorLoaderClosures>> = OnceLock::new();
-    PACKAGED
-        .get_or_init(|| load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES).ok())
-        .as_ref()
-}
-
-impl MemoryAnchor {
-    /// Whether this anchor's evidence is CURRENT (sc-22511, E9).
-    ///
-    /// The one and only currency question: does the code that loads THIS model on THIS backend
-    /// still hash to what it hashed when the anchor was measured? Not the pin, not a sibling model,
-    /// not a shared crate the loader never reaches, not the calibration campaign that produced the
-    /// record — none of those can move this answer, by construction of the key.
-    pub fn is_current(&self, closures: &AnchorLoaderClosures) -> bool {
-        closures.digest_for(&self.model_id, self.backend)
-            == Some(self.source.loader_closure_digest.as_str())
-    }
 }
 
 /// The packaged store, parsed and validated once. `None` is fail-open: callers keep their
@@ -1422,6 +3246,38 @@ pub fn packaged_memory_anchors() -> Option<&'static MemoryAnchorStore> {
 }
 
 impl MemoryAnchorStore {
+    /// The BINDING measured lower bound for one request, or `None` (sc-22738).
+    ///
+    /// Binding means: same identity on every axis a measured point is keyed on, and request
+    /// geometry at or above the bound's on every axis. Among the survivors the LARGEST footprint
+    /// wins — several bounds may cover one request once a cell has been stopped at more than one
+    /// geometry, and the strongest true inequality is the useful one.
+    ///
+    /// Currency is NOT a conjunct, and the signature cannot express one: a bound whose loader
+    /// closure has since moved refuses exactly what it refused when measured. The moved closure is
+    /// the probe tooling's cue to stop at the cell again, never the runtime's cue to forget it.
+    pub fn binding_exceeded_bound(&self, query: ExceededBoundQuery<'_>) -> Option<&ExceededBound> {
+        self.exceeded_bounds
+            .iter()
+            .filter(|bound| {
+                bound.model_id == query.model_id
+                    && query
+                        .model_family
+                        .is_none_or(|family| bound.model_family == family)
+                    && query.route.is_none_or(|route| bound.route == route)
+                    && bound.provider == query.provider
+                    && bound.backend == query.backend
+                    && bound.tier == query.tier
+                    && bound.transformer_variant == query.transformer_variant
+                    && bound.decoder == query.decoder
+                    && bound.mode == query.mode
+                    && bound.overlay.as_deref() == query.overlay
+                    && bound.reference_count == query.reference_count
+                    && bound.covers_geometry(query.width, query.height, query.frames)
+            })
+            .max_by_key(|bound| bound.observed_footprint_bytes)
+    }
+
     /// The unique anchor for one `(model, backend lane, tier, transformer variant, decoder)`
     /// coordinate. The pipeline axes are part of the key, not a post-filter: the corpus measures no
     /// dev-vs-distilled pair at a common regime, so one variant's anchor may not price the other's
@@ -1442,6 +3298,33 @@ impl MemoryAnchorStore {
                 // lookup: it certifies neither variant, so it must not stand in for either.
                 && anchor.transformer_variant == Some(transformer_variant)
                 && anchor.decoder == Some(decoder)
+        })
+    }
+
+    /// The unique VIDEO anchor for one `(model, backend lane, tier, transformer variant, decoder)`
+    /// coordinate where the pipeline axes are OPTIONAL on both sides (sc-22736): an LTX-2.5
+    /// request carries both and resolves exactly as [`Self::anchor_for`] does; a request on a
+    /// video route that has no such axes at all (Wan 2.2, SCAIL-2, LTX-2.3) resolves the axis-free
+    /// multi-frame anchor of its cell. The match is on `Option` EQUALITY, never on a wildcard: an
+    /// axis-free anchor still answers no variant-keyed lookup, and an axis-keyed anchor answers no
+    /// axis-free one. A single-frame axis-free row is an IMAGE anchor and is not a video anchor
+    /// under any spelling — the mirror of [`Self::image_anchor_for`]'s refusal to hand a video
+    /// anchor to an image request.
+    pub fn video_anchor_for(
+        &self,
+        model_id: &str,
+        backend: AnchorBackend,
+        tier: &str,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
+    ) -> Option<&MemoryAnchor> {
+        self.anchors.iter().find(|anchor| {
+            anchor.model_id == model_id
+                && anchor.backend == backend
+                && anchor.tier == tier
+                && anchor.transformer_variant == transformer_variant
+                && anchor.decoder == decoder
+                && anchor.geometry.frames > 1
         })
     }
 
@@ -1489,8 +3372,9 @@ pub struct AnchorDeriveRequest {
     pub deferred_materialization: bool,
 }
 
-/// Margin-widened per-phase peak estimates. The admission peak is the max over phases; the shared
-/// selector's backend estimate margin still rides on top, exactly as it does for fitted curves.
+/// Per-phase working-set estimates; admission uses their maximum. MLX image estimates return
+/// active bytes and receive recapture uncertainty in the worker; MLX video estimates already
+/// include it here. Candle retains its existing lane accounting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorDerivedPhases {
     pub conditioning: u64,
@@ -1518,6 +3402,16 @@ impl AnchorDerivedPhases {
 struct RawPhaseEstimate {
     bytes: i128,
     anchored: bool,
+}
+
+/// The two halves of one IMAGE derivation, `[conditioning, denoise, decode]` each: the components
+/// the request's regime holds resident in each phase, and the activation residue the law scales
+/// onto them. Their per-phase sum is [`MemoryAnchor::derive_phase_peaks`]; the activation half
+/// alone is [`MemoryAnchor::derive_phase_activation_residues`].
+#[derive(Debug, Clone, Copy)]
+struct ImagePhaseSplit {
+    resident: [i128; 3],
+    activation: [i128; 3],
 }
 
 /// The three raw phase estimates of one video derivation.
@@ -1552,6 +3446,16 @@ fn widened(bytes: i128) -> Option<u64> {
     widened_by(bytes, ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)
 }
 
+/// MLX admission uses active allocations. Its cache is elastic, so a historical cache
+/// high-water is not mandatory RAM. Preserve the other backend's existing accounting.
+fn video_admission_bytes(bytes: i128, backend: AnchorBackend) -> Option<u64> {
+    if backend == AnchorBackend::Mlx {
+        widened_by(bytes, MLX_ACTIVE_RECAPTURE_SPREAD)
+    } else {
+        widened(bytes)
+    }
+}
+
 fn widened_by(bytes: i128, margin: f64) -> Option<u64> {
     if bytes <= 0 {
         return None;
@@ -1561,10 +3465,10 @@ fn widened_by(bytes: i128, margin: f64) -> Option<u64> {
     (widened.is_finite() && widened < u64::MAX as f64).then_some(widened as u64)
 }
 
-/// The workload axes the candle image derivation prices. There is no temporal axis and no
-/// per-phase rung flag: the anchor is the SHALLOWEST optimized composition the lane offers, and a
-/// deeper rung can only reduce a phase below it (that is what the rung is for), so one law prices
-/// every composition that contains the anchor's own.
+/// The workload axes of [`MemoryAnchor::derive_image_phase_peaks`], the candle lane's entry point
+/// onto the derivation law: geometry and the staging flag only. A composition deeper than staged
+/// is priced at the staged working set through this entry point (no rung parameters travel with
+/// it); [`ImageDeriveRequest`] carries the full regime for the law itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorImageDeriveRequest {
     pub width: u32,
@@ -1601,9 +3505,9 @@ impl MemoryAnchor {
     ) -> Option<AnchorDerivedPhases> {
         let raw = self.derive_video_phase_estimates_raw(request)?;
         Some(AnchorDerivedPhases {
-            conditioning: widened(raw.conditioning.bytes)?,
-            denoise: widened(raw.denoise.bytes)?,
-            decode: widened(raw.decode.bytes)?,
+            conditioning: video_admission_bytes(raw.conditioning.bytes, self.backend)?,
+            denoise: video_admission_bytes(raw.denoise.bytes, self.backend)?,
+            decode: video_admission_bytes(raw.decode.bytes, self.backend)?,
         })
     }
 
@@ -1623,23 +3527,24 @@ impl MemoryAnchor {
         if request.width == 0 || request.height == 0 || request.frames == 0 {
             return None;
         }
+        // Every per-token coefficient in this law is an LTX-2.5 pipeline fact keyed on the
+        // transformer variant and decoder. An anchor that states no such axes has no fitted law
+        // (sc-22736): a video route without those axes (Wan 2.2, SCAIL-2, LTX-2.3) is priced ONLY at
+        // and below its own measured point, and an image anchor (single frame, sc-22509) is not a
+        // video anchor at all. Consulted BEFORE the underived flag below, because the ONLY reason
+        // a video anchor is stamped underived is this very absence of axes — and the measured-point
+        // bound is exactly the "validates its measured point and prices nothing beyond it" the
+        // reason states. It fits nothing, so, like the image law, it does not consult the flag.
+        if self.transformer_variant.is_none() || self.decoder.is_none() {
+            return self.measured_point_bound_raw(request);
+        }
         // An anchor marked underived validates its measured point and prices nothing (epic 22505
         // feature-end fix round): every lane law carries this refusal so the store's statement and
         // the runtime behaviour cannot disagree.
         if self.underived_reason.is_some() {
             return None;
         }
-        // Every coefficient in this law is an LTX-2.5 pipeline fact keyed on the transformer
-        // variant and decoder. An anchor from a lane that has no such axes (the candle image
-        // anchors, sc-22509) is refused here rather than silently priced by video coefficients.
-        if self.transformer_variant.is_none() || self.decoder.is_none() {
-            return None;
-        }
-        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
-        if (!request.deferred_materialization && anchor_deferred)
-            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
-            || (!request.decode_tiled && self.measured_regime.decode_tiled)
-        {
+        if !self.measured_regime_prices(request) {
             return None;
         }
         let anchor_tokens = latent_tokens(
@@ -1693,116 +3598,471 @@ impl MemoryAnchor {
         })
     }
 
-    /// Derive the per-phase peak estimate for one requested still-image workload from this anchor
-    /// (sc-22509, epic 22505 — the candle image-lane sibling of
-    /// [`Self::derive_video_phase_peaks`]).
+    /// REGIME GUARD (anchor vs request), shared by the fitted video law and the measured-point
+    /// bound: a phase priced from the anchor's own measured intercept requires the anchor to have
+    /// run that phase UNBOUNDED. A deferred-materialization anchor carries no transformer
+    /// residency in its conditioning peak; a windowed anchor carries one block instead of the
+    /// whole transformer in its denoise peak; a tiled anchor carries a tile workspace instead of
+    /// the full decode working set. Reusing any of those for an unbounded request would
+    /// under-estimate by the whole omitted residency.
+    fn measured_regime_prices(&self, request: AnchorDeriveRequest) -> bool {
+        let anchor_deferred = self.load_shape == AnchorLoadShape::DeferredMaterialization;
+        !((!request.deferred_materialization && anchor_deferred)
+            || (!request.transformer_windowed && self.measured_regime.transformer_windowed)
+            || (!request.decode_tiled && self.measured_regime.decode_tiled))
+    }
+
+    /// The MEASURED-POINT BOUND for a video anchor that states no pipeline axes (sc-22736): Wan 2.2,
+    /// SCAIL-2 and LTX-2.3 anchors, whose routes have no `(transformer variant, decoder)` and for
+    /// which no per-token coefficient has been measured.
     ///
-    /// Each phase is the anchor's measured intercept plus its own per-output-pixel term
-    /// ([`CANDLE_COND_PER_PIXEL_BYTES`], [`CANDLE_DENOISE_PER_PIXEL_BYTES`],
-    /// [`CANDLE_DECODE_PER_PIXEL_BYTES`]) applied to the pixel delta from the anchor geometry, then
-    /// widened by [`CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN`].
+    /// Such an anchor prices nothing BEYOND its measured point — the law above has no slope for it
+    /// and none is invented here — but it does bound every request the measured render DOMINATES:
+    /// a request at no more output pixels and no more frames than the anchor, under a regime the
+    /// anchor's measured intercepts price ([`Self::measured_regime_prices`]), cannot exceed the
+    /// anchor's own per-phase peaks, so each phase is estimated AT the anchor's measured intercept
+    /// (widened by the shared allocator margin by the caller, like every anchored term). Pixels
+    /// rather than latent tokens because the token lattice is a per-model fact this law does not
+    /// know, and pixels are lattice-free and aspect-symmetric — a portrait bucket is bounded by
+    /// its landscape twin; frames per axis because the temporal lattice is likewise unknown.
     ///
-    /// IDENTITY GUARD: this law is the CUDA image lane's. A non-candle anchor, an anchor carrying
-    /// LTX pipeline axes, or an anchor whose measured geometry is not a still are all refused
-    /// rather than coerced.
+    /// A request bounding a phase the anchor measured unbounded (a tiled decode against an untiled
+    /// anchor, a deferred request against an eager one) is still priced at the unbounded measured
+    /// intercept: bounding only shrinks that phase's working set, so the measured peak remains an
+    /// upper bound — no architecture constant is substituted, because every such constant in this
+    /// module is an LTX-2.5 fact.
     ///
-    /// REGIME GUARD: the anchor must be the SHALLOW optimized composition — `staged_residency`
-    /// engaged and nothing deeper — and the graded candidate must also engage `staged_residency`.
-    /// That asymmetry is the whole argument for pricing four rungs from one anchor: every deeper
-    /// rung (`bounded_decode`, `bounded_attention`, `bounded_transformer_residency`) exists to make
-    /// a phase SMALLER, so the shallow anchor upper-bounds them, while a resident composition holds
-    /// the text encoder through denoise and decode and is strictly LARGER — the direction the
-    /// anchor cannot cover. A resident request therefore keeps its own resident estimate.
-    ///
-    /// Returns `None` on degenerate geometry, on a regime or identity the anchor cannot price, and
-    /// on any extrapolation that runs non-positive.
-    pub fn derive_image_phase_peaks(
+    /// `None` for a single-frame anchor (an image anchor is not a video anchor), a degenerate
+    /// geometry, a request the anchor does not dominate, or a regime it cannot price — each of
+    /// which leaves the caller on its analytic floor.
+    fn measured_point_bound_raw(
         &self,
-        request: AnchorImageDeriveRequest,
-    ) -> Option<AnchorDerivedPhases> {
-        if request.width == 0 || request.height == 0 {
-            return None;
-        }
-        // See `derive_video_phase_estimates_raw`: an underived anchor prices nothing on any lane.
-        if self.underived_reason.is_some() {
-            return None;
-        }
-        if self.backend != AnchorBackend::Candle
-            || self.transformer_variant.is_some()
-            || self.decoder.is_some()
-            || self.geometry.frames != 1
+        request: AnchorDeriveRequest,
+    ) -> Option<RawVideoPhaseEstimates> {
+        if self.geometry.frames <= 1
+            || request.width == 0
+            || request.height == 0
+            || request.frames == 0
         {
             return None;
         }
-        if !self.measured_regime.staged
-            || self.measured_regime.decode_tiled
-            || self.measured_regime.attention_chunked
-            || self.measured_regime.transformer_windowed
-            || !request.staged_residency
-        {
+        let request_pixels = u64::from(request.width) * u64::from(request.height);
+        let anchor_pixels = u64::from(self.geometry.width) * u64::from(self.geometry.height);
+        if request_pixels > anchor_pixels || request.frames > self.geometry.frames {
             return None;
         }
-        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
-        // LOWER CLAMP. The slopes are fitted across 768x768 -> 1024x1024 and the anchor sits at the
-        // top of that range, so every smaller request is a DOWNWARD extrapolation. Continued below
-        // the smallest retained geometry it leaves the corpus entirely and drops each phase far
-        // under the resident weight set the staged path still holds (at 1x1 the derived decode is
-        // ~5 GiB below the measured 768x768 decode) — an under-estimate, i.e. erring toward OOM. A
-        // sub-768x768 request is therefore priced AT 768x768, which is the smallest bound the
-        // evidence actually supports.
-        let pixels = (i128::from(request.width) * i128::from(request.height))
-            .max(CANDLE_SMALLEST_RETAINED_PIXELS);
-        let delta = pixels - anchor_pixels;
-        let conditioning = i128::from(self.phase_active_peak_bytes.conditioning)
-            + CANDLE_COND_PER_PIXEL_BYTES * delta;
-        let denoise = i128::from(self.phase_active_peak_bytes.denoise)
-            + CANDLE_DENOISE_PER_PIXEL_BYTES * delta;
-        let decode =
-            i128::from(self.phase_active_peak_bytes.decode) + CANDLE_DECODE_PER_PIXEL_BYTES * delta;
-        Some(AnchorDerivedPhases {
-            conditioning: widened_by(conditioning, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
-            denoise: widened_by(denoise, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
-            decode: widened_by(decode, CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN)?,
+        if !self.measured_regime_prices(request) {
+            return None;
+        }
+        let phase = |bytes: u64| RawPhaseEstimate {
+            bytes: i128::from(bytes),
+            anchored: true,
+        };
+        Some(RawVideoPhaseEstimates {
+            conditioning: phase(self.phase_active_peak_bytes.conditioning),
+            denoise: phase(self.phase_active_peak_bytes.denoise),
+            decode: phase(self.phase_active_peak_bytes.decode),
         })
     }
 
-    /// Derive the per-phase ALLOCATOR levels for one requested still-image workload on the MLX
-    /// unified-memory lane (epic 22505 feature-end fix round, E2/E7 — the MLX sibling of
-    /// [`Self::derive_image_phase_peaks`]). See the coefficient section's comment for why this
-    /// lane prices phase ALLOCATOR envelopes rather than actives; the returned
-    /// [`AnchorDerivedPhases::peak_bytes`] is therefore directly the admission envelope, and the
-    /// selector adds NOTHING on top (the worker's ladder margin policy treats
-    /// `EstimateAnchorDerived` as fully priced).
+    /// The derivation law (sc-22663, epic 22657 E3) — see the *Image derivation law* section
+    /// comment for the law itself. This is the ONE law both image lanes price from; the lane
+    /// entry points [`Self::derive_image_phase_peaks`] (candle) and
+    /// [`Self::derive_mlx_image_phase_peaks`] (MLX) are thin translations onto it.
     ///
-    /// IDENTITY GUARD: this law is the MLX image lane's. A non-MLX anchor, an anchor carrying LTX
-    /// pipeline axes, a multi-frame anchor, or an anchor whose record reports no per-phase
-    /// allocator decomposition are refused rather than coerced. An anchor carrying
-    /// [`MemoryAnchor::underived_reason`] is refused for the reason it states.
+    /// `components` are the resident byte sizes of the measured model's text encoder, transformer
+    /// and decoder at the anchor's tier (the worker reads them off the live provider contract);
+    /// `facts` are the architecture facts the rung ratios need, each optional and each leaving
+    /// its residue unscaled when absent.
     ///
-    /// REGIME GUARD: the anchor must be the fully UNBOUNDED eager resident composition — no rung
-    /// engaged, eager materialization. That is the WIDEST composition the lane executes, so it
-    /// upper-bounds every optimized composition of the same cell (each rung exists to make a
-    /// phase smaller) and one law prices the whole ladder. This is the mirror image of the candle
-    /// law's staged-anchor asymmetry: there the shallow OPTIMIZED anchor could not price the
-    /// larger resident composition; here the resident anchor prices everything because nothing is
-    /// larger than it.
+    /// IDENTITY GUARD: an anchor carrying LTX pipeline axes or a multi-frame measured geometry is
+    /// refused — those are the video law's. Both backend lanes are priced here; the lane shims
+    /// pin the lane.
     ///
-    /// Returns `None` on degenerate geometry and on any identity/regime the anchor cannot price.
-    pub fn derive_mlx_image_phase_peaks(
+    /// REGIME GUARD (anchor vs request): a phase the anchor measured under a bounded rung carries
+    /// that rung's bounded working set, so it cannot price the same phase UNBOUNDED and such a
+    /// request is refused; a request bounded in the same phase reuses the bounded residue
+    /// unscaled, the anchor row recording no rung parameters. The anchor's residency shape
+    /// (staged or resident) is NOT a guard: it only decides which components its measured peaks
+    /// contained, and the request's own shape decides which are re-added.
+    ///
+    /// DOMAIN GUARD: a phase whose measured peak is below the component set it is decomposed
+    /// against is refused (see the section comment) — the residue is never clamped to zero.
+    ///
+    /// Returns `None` on degenerate geometry, a zero rung parameter or a tile whose overlap is not
+    /// below its edge, a refused identity/regime, a phase outside the law's domain, or a phase
+    /// that prices to zero bytes (a zero peak would admit anything).
+    pub fn derive_phase_peaks(
+        &self,
+        request: &ImageDeriveRequest,
+        components: ComponentBytes,
+        facts: ArchitectureFacts,
+    ) -> Option<AnchorDerivedPhases> {
+        let split = self.derive_image_phase_split(request, components, facts)?;
+        Some(AnchorDerivedPhases {
+            conditioning: positive(split.resident[0] + split.activation[0])?,
+            denoise: positive(split.resident[1] + split.activation[1])?,
+            decode: positive(split.resident[2] + split.activation[2])?,
+        })
+    }
+
+    /// The ACTIVATION half of [`Self::derive_phase_peaks`], phase by phase: the anchor's measured
+    /// residue after the components are subtracted, re-scaled for the request's geometry, batch,
+    /// prompt length and engaged rungs — and NOT re-adding any component byte.
+    ///
+    /// This is what a caller that already prices the model's wired weights itself needs (sc-22665,
+    /// epic 22657 E4): the MLX worker's estimate floor composes its own contract-decomposed weights
+    /// term with this residue instead of the lane's geometry-blind generic headroom, so the
+    /// request's tile, attention chunk and transformer window reach the estimate. A caller that
+    /// wants the whole priced peak, components included, calls [`Self::derive_phase_peaks`].
+    ///
+    /// Refuses exactly what [`Self::derive_phase_peaks`] refuses, the per-phase positivity of the
+    /// FULL estimate included: a residue the law would not have stood behind as part of a whole
+    /// peak is not handed out on its own.
+    pub fn derive_phase_activation_residues(
+        &self,
+        request: &ImageDeriveRequest,
+        components: ComponentBytes,
+        facts: ArchitectureFacts,
+    ) -> Option<AnchorPhaseBytes> {
+        let split = self.derive_image_phase_split(request, components, facts)?;
+        for phase in 0..3 {
+            positive(split.resident[phase] + split.activation[phase])?;
+        }
+        Some(AnchorPhaseBytes {
+            conditioning: u64::try_from(split.activation[0]).ok()?,
+            denoise: u64::try_from(split.activation[1]).ok()?,
+            decode: u64::try_from(split.activation[2]).ok()?,
+        })
+    }
+
+    /// The law itself, kept as the two halves its consumers need separately: the components the
+    /// REQUEST's regime holds resident in each phase, and the activation residue the law scales
+    /// onto them. `[conditioning, denoise, decode]` in both, in `i128` because the sum is what the
+    /// positivity guard is defined on — an intermediate is never clamped.
+    fn derive_image_phase_split(
+        &self,
+        request: &ImageDeriveRequest,
+        components: ComponentBytes,
+        facts: ArchitectureFacts,
+    ) -> Option<ImagePhaseSplit> {
+        if request.width == 0 || request.height == 0 || request.batch == 0 {
+            return None;
+        }
+        if self.transformer_variant.is_some() || self.decoder.is_some() || self.geometry.frames != 1
+        {
+            return None;
+        }
+        let regime = request.regime;
+        let measured = self.measured_regime;
+        if (measured.decode_tiled && regime.decode_tile.is_none())
+            || (measured.attention_chunked && regime.attention_chunk_scores.is_none())
+            || (measured.transformer_windowed && regime.transformer_window.is_none())
+        {
+            return None;
+        }
+        if regime
+            .decode_tile
+            .is_some_and(|tile| tile.edge == 0 || tile.stride().is_none())
+            || regime.attention_chunk_scores == Some(0)
+            || regime.transformer_window == Some(0)
+        {
+            return None;
+        }
+
+        let conditioning = i128::from(components.conditioning);
+        let transformer = i128::from(components.transformer);
+        let decoder = i128::from(components.decoder);
+        let everything = conditioning + transformer + decoder;
+
+        // Residue per phase: the measured peak minus the components resident in that phase under
+        // the ANCHOR's regime. Staged drops the text encoder before denoise and the transformer
+        // before decode (the candle three-stage path); resident holds all three throughout. A
+        // measured peak BELOW its resident set is outside the law's domain (the counters did not
+        // see the weights the regime claims resident, so the subtraction says nothing about the
+        // activation working set) and refuses the request rather than clamping to zero.
+        let (anchor_cond, anchor_den, anchor_dec) = if measured.staged {
+            (conditioning, transformer, decoder)
+        } else {
+            (everything, everything, everything)
+        };
+        let residue = |peak: u64, resident: i128| {
+            let residue = i128::from(peak) - resident;
+            (residue >= 0).then_some(residue)
+        };
+        let peaks = self.phase_active_peak_bytes;
+        let cond_residue = residue(peaks.conditioning, anchor_cond)?;
+        let den_residue = residue(peaks.denoise, anchor_den)?;
+        let dec_residue = residue(peaks.decode, anchor_dec)?;
+
+        // Geometry. Pixel counts need no fact; token counts need the VAE scale and patch size.
+        let batch = i128::from(request.batch);
+        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
+        let request_pixels = i128::from(request.width) * i128::from(request.height);
+        // The anchor's records do not carry the prompt length they were measured with, so the
+        // anchor side of every token ratio is the documented default; the request side is its
+        // own count floored at that default (a shorter prompt is never credited — erring large).
+        let default_tokens = i128::from(DEFAULT_CONDITIONING_TOKENS);
+        let conditioning_tokens = i128::from(
+            request
+                .conditioning_tokens
+                .unwrap_or(DEFAULT_CONDITIONING_TOKENS),
+        )
+        .max(default_tokens);
+        let token_stride = match (facts.vae_spatial_scale, facts.patch_size) {
+            (Some(scale), Some(patch)) if scale > 0 && patch > 0 => {
+                Some(i128::from(scale) * i128::from(patch))
+            }
+            _ => None,
+        };
+        // Joint-attention sequence length of one sample: image tokens plus conditioning tokens.
+        let tokens = |width: u32, height: u32, conditioning_tokens: i128| {
+            token_stride.map(|stride| {
+                div_ceil_i128(i128::from(width), stride) * div_ceil_i128(i128::from(height), stride)
+                    + conditioning_tokens
+            })
+        };
+        let anchor_tokens = tokens(self.geometry.width, self.geometry.height, default_tokens);
+        let request_tokens = tokens(request.width, request.height, conditioning_tokens);
+        // Linear activation ratio: tokens when the facts allow, else pixels; batch multiplies.
+        let (linear_num, linear_den) = match (request_tokens, anchor_tokens) {
+            (Some(request_tokens), Some(anchor_tokens)) if anchor_tokens > 0 => {
+                (request_tokens * batch, anchor_tokens)
+            }
+            _ => (request_pixels * batch, anchor_pixels),
+        };
+
+        // Resident components under the REQUEST's regime. The window applies wherever the
+        // transformer is counted: windowed residency materializes one window at a time for the
+        // whole render, not just inside denoise.
+        let windowed_transformer = i128::from(windowed_transformer_bytes(
+            components.transformer,
+            regime.transformer_window,
+            facts.transformer_blocks,
+        ));
+        let (request_cond, request_den, request_dec) = if regime.staged {
+            (conditioning, windowed_transformer, decoder)
+        } else {
+            let all = conditioning + windowed_transformer + decoder;
+            (all, all, all)
+        };
+
+        // Conditioning: prompt-shaped, so the residue scales with batch and with the prompt's
+        // conditioning tokens over the default the records were measured against — never below
+        // 1.0, since the records do not state their prompt length. The retained resident/staged
+        // candle pairs measure it flat across 768x768 -> 1024x1024.
+        let cond_activation = scale_up(cond_residue * batch, conditioning_tokens, default_tokens);
+
+        // Denoise. With the score facts the residue splits into the full score tensor at the
+        // anchor geometry (capped at the residue — the anchor cannot have held more than it
+        // measured) and the rest; the rest scales linearly in tokens, the score tensor is
+        // re-priced at the request geometry, or replaced by the chunk budget when chunked.
+        // Without the facts the whole residue is treated as the worst-scaling term — quadratic
+        // in tokens for growth, linear for shrink — and a requested chunk leaves it unscaled.
+        let score_bytes = |width: u32, height: u32, conditioning: i128, batch: i128| {
+            let heads = i128::from(facts.attention_heads?);
+            let element = i128::from(facts.activation_dtype_width?);
+            let tokens = tokens(width, height, conditioning)?;
+            Some(heads * tokens * tokens * element * batch)
+        };
+        let den_activation =
+            match score_bytes(self.geometry.width, self.geometry.height, default_tokens, 1) {
+                Some(_) if measured.attention_chunked => {
+                    // The anchor's own denoise was chunked: its residue already holds a chunk
+                    // workspace instead of a score tensor, so there is nothing to separate out.
+                    scale_up(den_residue, linear_num, linear_den)
+                }
+                Some(anchor_scores) => {
+                    let non_score = den_residue - anchor_scores.min(den_residue);
+                    // The chunk budget is capped at the unchunked tensor at the request geometry: a
+                    // chunk larger than the whole tensor materializes the tensor, never more, so the
+                    // chunked rung can never price above the unchunked one.
+                    let unchunked_scores =
+                        score_bytes(request.width, request.height, conditioning_tokens, batch)?;
+                    let score_term = match regime.attention_chunk_scores {
+                        Some(chunk) => (i128::from(chunk)
+                            * i128::from(facts.activation_dtype_width.unwrap_or(1)))
+                        .min(unchunked_scores),
+                        None => unchunked_scores,
+                    };
+                    scale_up(non_score, linear_num, linear_den) + score_term
+                }
+                None => {
+                    let quadratic_num = request_pixels * request_pixels * batch;
+                    let quadratic_den = anchor_pixels * anchor_pixels;
+                    let linear = scale_up(den_residue, request_pixels * batch, anchor_pixels);
+                    let quadratic = scale_up(den_residue, quadratic_num, quadratic_den);
+                    linear.max(quadratic)
+                }
+            };
+
+        // Decode: pixel-shaped, so the residue scales in output pixels and batch. Under
+        // `bounded_decode` (from an anchor measured untiled — an anchor measured tiled already
+        // holds the tile working set and is not re-tiled) the scaled residue splits into the
+        // NON-TILING FLOOR, carried unscaled, and the per-tile remainder, scaled by the decode
+        // chunk's fraction of the image. The floor is the tile blender's two full-image
+        // accumulators — output `[B, 3, H, W]` in the activation dtype plus blend weights
+        // `[1, 1, H, W]` in f32 (`vae_tiling.rs::blend_plan` at the pin) — so it needs the
+        // activation width; without that fact the floor is unknowable and the whole residue stays
+        // unscaled. The chunk is the larger of the on-device tile and the host-transfer band
+        // (`DecodeTile::chunk_pixels`), capped at the whole image. See the section comment.
+        let mut dec_scaled = scale_up(dec_residue, request_pixels * batch, anchor_pixels);
+        if let (Some(tile), false) = (regime.decode_tile, measured.decode_tiled) {
+            if let Some(element) = facts.activation_dtype_width.filter(|width| *width > 0) {
+                let floor =
+                    (request_pixels * (3 * batch * i128::from(element) + 4)).min(dec_scaled);
+                let chunk = tile.chunk_pixels(request.width)?.min(request_pixels);
+                dec_scaled = floor + scale_up(dec_scaled - floor, chunk, request_pixels);
+            }
+        }
+        Some(ImagePhaseSplit {
+            resident: [request_cond, request_den, request_dec],
+            activation: [cond_activation, den_activation, dec_scaled],
+        })
+    }
+
+    /// The sc-22509 shallow entry point onto [`Self::derive_phase_peaks`], kept for the fixtures
+    /// written against it. Since sc-22667 NO worker lane prices through it: the shared candle
+    /// ladder (sc-22664) and the Krea 2 Turbo lane both call the law directly with the rung's own
+    /// regime (`RequestRegime` from the selected parameters) and the contract's architecture
+    /// facts, so a rung's tile, chunk and window reach the estimate.
+    ///
+    /// Pins the lane (a non-candle anchor is refused) and keeps the shallow-anchor asymmetry the
+    /// candle consumers were written against: the anchor must be the staged composition with no
+    /// deeper rung engaged, and the graded candidate must engage `staged_residency`. With no rung
+    /// parameters and no facts the law prices every composition containing the anchor's at the
+    /// shallow staged working set, which upper-bounds the deeper rungs. An anchor carrying
+    /// [`MemoryAnchor::underived_reason`] is refused, as before.
+    ///
+    /// sc-22734 adds the one cell shape that asymmetry does not describe: a provider whose contract
+    /// classifies `staged_residency` STRUCTURALLY NOT APPLICABLE has no staged composition at all,
+    /// so its anchor is resident and prices a resident candidate. See
+    /// [`MemoryAnchor::staged_residency_structurally_not_applicable`] for why that is sound rather
+    /// than the refused resident case. The two shapes are mutually exclusive and a row that mixes
+    /// them (staged anchor on an exempt cell, resident anchor on a non-exempt one) is still
+    /// refused, so no packaged row's disposition moves.
+    pub fn derive_image_phase_peaks(
+        &self,
+        request: AnchorImageDeriveRequest,
+        components: ComponentBytes,
+    ) -> Option<AnchorDerivedPhases> {
+        if self.underived_reason.is_some() || self.backend != AnchorBackend::Candle {
+            return None;
+        }
+        if self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
+        {
+            return None;
+        }
+        // Two admissible shapes, and a cell is only ever one of them
+        // ([`MemoryAnchor::staged_residency_structurally_not_applicable`]).
+        let regime = match (
+            self.measured_regime.staged,
+            self.staged_residency_structurally_not_applicable,
+        ) {
+            // The ordinary cell: a staged anchor prices a staged candidate.
+            (true, false) => {
+                if !request.staged_residency {
+                    return None;
+                }
+                RequestRegime::staged()
+            }
+            // sc-22734: a cell whose engine has NO staged composition. Its anchor is the resident
+            // render — the only one that exists — and it prices a resident candidate. There is no
+            // co-resident encoder above it to go unpriced, which is the whole reason the staged
+            // asymmetry exists, so the law prices it the way the MLX lane prices its residents.
+            (false, true) => {
+                if request.staged_residency {
+                    return None;
+                }
+                RequestRegime::resident()
+            }
+            // A staged anchor on a cell that declares staging impossible, or a resident anchor on a
+            // cell that has a staged composition it should have been captured in: both are records
+            // the law cannot honestly price, so both stay refused.
+            _ => return None,
+        };
+        self.derive_phase_peaks(
+            &ImageDeriveRequest::new(request.width, request.height, regime),
+            components,
+            ArchitectureFacts::default(),
+        )
+    }
+
+    /// Recover each usable resident MLX phase independently. A cached conditioning capture may
+    /// omit its encoder weights; that phase remains unknown without discarding a valid denoise
+    /// or decode observation. These are activation residues, not complete optimized measurements.
+    pub fn derive_mlx_image_activation_residues(
         &self,
         request: AnchorMlxImageDeriveRequest,
-    ) -> Option<AnchorDerivedPhases> {
-        if request.width == 0 || request.height == 0 {
-            return None;
-        }
-        if self.underived_reason.is_some() {
-            return None;
-        }
-        if self.backend != AnchorBackend::Mlx
+        components: ComponentBytes,
+    ) -> [Option<u64>; 3] {
+        if self.underived_reason.is_some()
+            || self.backend != AnchorBackend::Mlx
+            || self.load_shape != AnchorLoadShape::EagerMaterialization
+            || self.measured_regime.staged
+            || self.measured_regime.decode_tiled
+            || self.measured_regime.attention_chunked
+            || self.measured_regime.transformer_windowed
             || self.transformer_variant.is_some()
             || self.decoder.is_some()
             || self.geometry.frames != 1
+            || self.geometry.width == 0
+            || self.geometry.height == 0
+            || request.width == 0
+            || request.height == 0
         {
+            return [None; 3];
+        }
+        let resident = components
+            .conditioning
+            .saturating_add(components.transformer)
+            .saturating_add(components.decoder);
+        let pixels = u128::from(request.width) * u128::from(request.height);
+        let anchor_pixels = u128::from(self.geometry.width) * u128::from(self.geometry.height);
+        let scale = |residue: u64, quadratic: bool| {
+            let ratio = |numerator: u128, denominator: u128| {
+                u128::from(residue)
+                    .checked_mul(numerator)
+                    .map(|n| n.div_ceil(denominator))
+            };
+            let linear = ratio(pixels, anchor_pixels)?;
+            let scaled = if quadratic {
+                linear.max(ratio(pixels * pixels, anchor_pixels * anchor_pixels)?)
+            } else {
+                linear
+            };
+            // Retain observations below their capture geometry; the fixed/workspace split is unknown.
+            u64::try_from(scaled.max(u128::from(residue))).ok()
+        };
+        [
+            self.phase_active_peak_bytes
+                .conditioning
+                .checked_sub(resident),
+            self.phase_active_peak_bytes
+                .denoise
+                .checked_sub(resident)
+                .and_then(|r| scale(r, true)),
+            self.phase_active_peak_bytes
+                .decode
+                .checked_sub(resident)
+                .and_then(|r| scale(r, false)),
+        ]
+    }
+
+    /// Derive the MLX image lane's non-reclaimable active working set.
+    ///
+    /// Reclaimable cache is retained as capture provenance only. Adding it to a physical-memory
+    /// requirement contradicts `memory_calibration::Phase::non_reclaimable_bytes`: cache shrinks
+    /// under pressure and its boundary reading is not simultaneous with the active high-water mark.
+    /// This resident entry point preserves the source regime and materialization guards.
+    pub fn derive_mlx_image_phase_peaks(
+        &self,
+        request: AnchorMlxImageDeriveRequest,
+        components: ComponentBytes,
+    ) -> Option<AnchorDerivedPhases> {
+        if self.underived_reason.is_some() || self.backend != AnchorBackend::Mlx {
             return None;
         }
         if self.load_shape != AnchorLoadShape::EagerMaterialization
@@ -1813,43 +4073,181 @@ impl MemoryAnchor {
         {
             return None;
         }
-        let allocators = self.phase_allocator_envelope_bytes?;
-        let anchor_pixels = i128::from(self.geometry.width) * i128::from(self.geometry.height);
-        // LOWER CLAMP, exactly as the candle law's: the slopes are fitted across
-        // 768x768 -> 1024x1024 with the anchor at the top, so a sub-768x768 request is priced AT
-        // 768x768 rather than extrapolated below the corpus.
-        let pixels = (i128::from(request.width) * i128::from(request.height))
-            .max(MLX_IMAGE_SMALLEST_RETAINED_PIXELS);
-        let delta = pixels - anchor_pixels;
-        // The conditioning slope is sub-byte-per-pixel, so it is applied as `delta / 16` with the
-        // rounding chosen conservative in BOTH directions: an upward delta rounds UP (charge at
-        // least the slope), a downward delta rounds toward zero (subtract at most the slope).
-        let conditioning_growth = if delta >= 0 {
-            (delta + MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE - 1)
-                .div_euclid(MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE)
-        } else {
-            -((-delta) / MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE)
-        };
-        let conditioning = i128::from(allocators.conditioning) + conditioning_growth;
-        let denoise =
-            i128::from(allocators.denoise) + MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES * delta;
-        let decode = i128::from(allocators.decode) + MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES * delta;
-        Some(AnchorDerivedPhases {
-            conditioning: widened_by(conditioning, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
-            denoise: widened_by(denoise, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
-            decode: widened_by(decode, MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN)?,
-        })
+        self.derive_phase_peaks(
+            &ImageDeriveRequest::new(request.width, request.height, RequestRegime::resident()),
+            components,
+            ArchitectureFacts::default(),
+        )
     }
 }
 
-/// The workload axes the MLX image derivation prices. There is no temporal axis, and no regime
-/// flag at all: the anchor is the WIDEST (eager resident, unbounded) composition, so it
-/// upper-bounds every composition the lane can execute — see
-/// [`MemoryAnchor::derive_mlx_image_phase_peaks`].
+/// The transformer bytes a `bounded_transformer_residency` rung keeps RESIDENT: the law's window
+/// share `transformer x min(window, blocks) / blocks`, rounded up (sc-22663, epic 22657 E3; the
+/// worker's MLX estimate floor states the same share since sc-22667 whenever the facts carry a
+/// block count, so both image lanes price one windowed residency). With no window the whole
+/// transformer is resident; with a window but no block count — the default facts at this pin —
+/// the share is UNKNOWABLE and the LAW keeps the whole transformer, the erring-large reading,
+/// never zero. (The MLX floor's no-block-count arm is a separate, worker-side decision: it keeps
+/// its pre-epic accounting so shipped admissions do not move before the pin bump.)
+pub fn windowed_transformer_bytes(
+    transformer: u64,
+    window: Option<u32>,
+    blocks: Option<u32>,
+) -> u64 {
+    match (window, blocks) {
+        (Some(window), Some(blocks)) if blocks > 0 && window > 0 => u64::try_from(scale_up(
+            i128::from(transformer),
+            i128::from(window.min(blocks)),
+            i128::from(blocks),
+        ))
+        .unwrap_or(transformer),
+        _ => transformer,
+    }
+}
+
+/// `bytes x num / den`, rounded UP so a scaled residue never loses a byte to integer division.
+fn scale_up(bytes: i128, num: i128, den: i128) -> i128 {
+    if den <= 0 || bytes <= 0 || num <= 0 {
+        return 0;
+    }
+    div_ceil_i128(bytes * num, den)
+}
+
+/// A derived phase must be a positive byte count; zero or negative is refused, not clamped.
+fn positive(bytes: i128) -> Option<u64> {
+    (bytes > 0).then(|| u64::try_from(bytes).ok()).flatten()
+}
+
+// ---------------------------------------------------------------------------------------------
+// MLX admission policy shared by the worker's fit gate and the memory adapter (sc-22738)
+// ---------------------------------------------------------------------------------------------
+//
+// The memory adapter's ordinary LTX-2.3 capture admits through the SAME projection the worker's
+// gate would build for the cell (epic 22723 sc-22738, review round 2). The three inputs that
+// projection needs beyond the provider contract — the fixed unified-memory reserve, the generic
+// activation allowance and the floor's weights arithmetic — were private to
+// `crates/sceneworks-worker/src/{fit_gate,mlx_fit_gate}.rs`, and the adapter's first cut restated
+// two of them as fresh literals and the third as a hand transcription. They are declared ONCE here;
+// the worker reads its constants from these and both crates call [`floor_weights_bytes`]. A
+// change to any of them therefore moves the worker's admission and the adapter's projection
+// together, or not at all.
+
+/// Bytes per binary gigabyte (GiB) — `hw.memsize / 1024³`, the unit every MLX budget figure is
+/// stated in (`gpu::total_unified_memory_gb`, the epic's measured on-disk tables).
+pub const BYTES_PER_GIB: f64 = 1_073_741_824.0;
+
+/// The MLX lane's fixed unified-memory reserve: `mlx_fit_gate::live_request_budget` presents it as
+/// `MemoryBudget::reserved_headroom_bytes` for every non-Mage engine, and
+/// `MemoryBudget::effective_bytes` subtracts it before the shared predicate compares. Exact
+/// verified cells do not use this number for their foreign demand (that is derived from captured
+/// MLX/wired limits); it is Decision 2's promise that no-record/out-of-envelope/stale requests
+/// take the legacy reserve rather than silently adopting a new policy.
+pub const LEGACY_UNIFIED_FALLBACK_RESERVE_GB: f64 = 2.0;
+
+/// The MLX lane's generic flat activation allowance (`HEADROOM_GB`, sc-10863): the max
+/// common-case measured 1024² transient (14.04 GiB) plus a ~4 GiB OS/app reserve. The video
+/// lane's estimate floor is `floor weights + this` (`video_admission::floor_phase_peaks`), and a
+/// provider decode profile only ever RAISES that floor (`profiled_floor_phase_peaks`).
+pub const MLX_GENERIC_HEADROOM_GB: f64 = 18.0;
+
+/// GiB to bytes, rounded to the nearest byte and clamped into `u64` — the worker's own conversion
+/// (`mlx_fit_gate::gib_to_bytes`), so an allowance stated in GiB means the same byte count on both
+/// sides of the seam.
+pub fn gib_to_bytes(gib: f64) -> u64 {
+    (gib * BYTES_PER_GIB).round().clamp(0.0, u64::MAX as f64) as u64
+}
+
+/// The contract facts the floor's weights term reads, lifted off `gen_core::MemoryProviderContract`
+/// by each caller (this crate does not see gen-core's types). Every field is a declaration the
+/// provider makes about itself; nothing here is a tuned coefficient.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsFacts {
+    /// `asset_facts.conditioning_bytes` — the conditioning encoder stack.
+    pub conditioning_bytes: u64,
+    /// `asset_facts.base_bytes` — every resident weight of a plain render.
+    pub base_bytes: u64,
+    /// `asset_facts.transformer_bytes` — the load-exact transformer, evictable sub-stack included.
+    pub transformer_bytes: u64,
+    /// Bytes the provider declares it drops from INSIDE `transformer_bytes` before the declaring
+    /// phase reaches steady state: `transformer_bytes - steady_state_transformer_bytes()`. Zero for
+    /// every provider that has not adopted the sub-stack vocabulary.
+    pub intra_transformer_evicted_bytes: u64,
+    /// The sum of every auxiliary resident component (control branches, adapter stacks, …) the
+    /// composition does NOT bound: `resident_components()` filtered to `kind.is_auxiliary()` and
+    /// to `bounded_by` either absent or naming a rung the composition leaves disengaged.
+    pub auxiliary_resident_bytes: u64,
+}
+
+/// Which reductions the engaged composition applies to [`FloorWeightsFacts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct FloorWeightsComposition {
+    /// `StagedResidency` engaged.
+    pub staged: bool,
+    /// `BoundedTransformerResidency` engaged.
+    pub bounded_transformer: bool,
+    /// What rung 4 keeps resident of the transformer once it has removed it: 0 on the video lane,
+    /// the law's window share on the image lane. Ignored unless `bounded_transformer`.
+    pub resident_window_bytes: u64,
+}
+
+/// The floor's per-rung WEIGHTS term (sc-18096), derived only from the provider's own
+/// declarations:
+///
+/// * `staged` ⇒ the co-residency drop the rung exists for: the resident working set is the larger
+///   of the conditioning stack and everything else (the `staged_weights_gb` split the load-time
+///   gate has always used).
+/// * `bounded_transformer` ⇒ the transformer's declared bytes leave the resident floor and the
+///   rung's RESIDENT WINDOW comes back in, clamped at the load-exact transformer so no lane can
+///   state more than it loads.
+/// * The two reductions are EXCLUSIVE, not sequential. The staged reduction's clamp holds the lump
+///   at `transformer_bytes` precisely so the precompute instant stays covered — and rung 4 then
+///   removes that same `transformer_bytes`, sub-stack included. Applying both would leave
+///   `max(0, decoder − evicted)` where the answer is `decoder`.
+/// * A declared intra-transformer eviction leaves the floor only on the STAGED branch, and only
+///   down to the load-exact transformer (sc-19721): the drop lowers the steady state, not the
+///   peak, so it may only cancel against bytes provably NOT co-resident with the precompute instant.
+/// * Rungs 2 and 3 bound TRANSIENTS, not weights, and take no reduction here.
+/// * Unbounded auxiliary components stay resident.
+pub fn floor_weights_bytes(facts: FloorWeightsFacts, composition: FloorWeightsComposition) -> u64 {
+    let conditioning = facts.conditioning_bytes;
+    // The load-exact non-conditioning working set: what the transformer's own phase holds while the
+    // evictable sub-stack is still materialized.
+    let heavy_load_exact = facts.base_bytes.saturating_sub(conditioning);
+    let heavy = if composition.staged && !composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.intra_transformer_evicted_bytes)
+            .max(facts.transformer_bytes)
+    } else if composition.bounded_transformer {
+        heavy_load_exact
+            .saturating_sub(facts.transformer_bytes)
+            .saturating_add(
+                composition
+                    .resident_window_bytes
+                    .min(facts.transformer_bytes),
+            )
+    } else {
+        heavy_load_exact
+    };
+    let base = if composition.staged {
+        conditioning.max(heavy)
+    } else {
+        conditioning.saturating_add(heavy)
+    };
+    base.saturating_add(facts.auxiliary_resident_bytes)
+}
+
+/// The workload axes of [`MemoryAnchor::derive_mlx_image_phase_peaks`]: geometry only. The lane
+/// entry point prices the resident composition, which upper-bounds every composition the lane can
+/// execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AnchorMlxImageDeriveRequest {
     pub width: u32,
     pub height: u32,
+}
+
+/// Ceiling division on non-negative `i128` operands (`i128::div_ceil` is not stable).
+fn div_ceil_i128(numerator: i128, denominator: i128) -> i128 {
+    (numerator + denominator - 1) / denominator
 }
 
 /// One priced cell from [`MemoryAnchorStore::derive_video_phase_peaks_for_cell`]: the derived
@@ -1904,16 +4302,23 @@ impl MemoryAnchorStore {
     /// bytes, which is a priced crossing that happens to cost nothing and is taken normally: the
     /// distilled variant materializes no component its dev sibling lacks, and refusing that
     /// crossing would discard a derivation the evidence fully supports.
+    ///
+    /// The pipeline axes are OPTIONAL (sc-22736): a request on a route without them resolves its
+    /// axis-free anchor through [`Self::video_anchor_for`] and is priced by that anchor's
+    /// measured-point bound; the sibling+delta fall-through below is LTX-2.5's — it crosses
+    /// `(variant, decoder)` axes — so an axis-free request that has no exact anchor takes no
+    /// sibling and keeps its floor.
     pub fn derive_video_phase_peaks_for_cell(
         &self,
         model_id: &str,
         backend: AnchorBackend,
         tier: &str,
-        transformer_variant: Ltx25TransformerVariant,
-        decoder: Ltx25Decoder,
+        transformer_variant: Option<Ltx25TransformerVariant>,
+        decoder: Option<Ltx25Decoder>,
         request: AnchorDeriveRequest,
     ) -> Option<AnchorCellDerivation<'_>> {
-        if let Some(anchor) = self.anchor_for(model_id, backend, tier, transformer_variant, decoder)
+        if let Some(anchor) =
+            self.video_anchor_for(model_id, backend, tier, transformer_variant, decoder)
         {
             return Some(AnchorCellDerivation {
                 phases: anchor.derive_video_phase_peaks(request)?,
@@ -1921,6 +4326,9 @@ impl MemoryAnchorStore {
                 delta_bytes: 0,
             });
         }
+        let (Some(transformer_variant), Some(decoder)) = (transformer_variant, decoder) else {
+            return None;
+        };
         let mut candidates: Vec<(u32, &MemoryAnchor, u64)> = Vec::new();
         for anchor in self.anchors.iter().filter(|anchor| {
             anchor.model_id == model_id
@@ -1982,9 +4390,9 @@ impl MemoryAnchorStore {
             };
             let Some(phases) = (|| {
                 Some(AnchorDerivedPhases {
-                    conditioning: widened(priced(raw.conditioning))?,
-                    denoise: widened(priced(raw.denoise))?,
-                    decode: widened(priced(raw.decode))?,
+                    conditioning: video_admission_bytes(priced(raw.conditioning), backend)?,
+                    denoise: video_admission_bytes(priced(raw.denoise), backend)?,
+                    decode: video_admission_bytes(priced(raw.decode), backend)?,
                 })
             })() else {
                 continue;
@@ -2005,6 +4413,61 @@ mod tests {
     use std::collections::BTreeSet;
 
     const LTX25_CORPUS_PATH: &str = "docs/calibration/sc-18791/ltx25-mlx-evidence.seed.json";
+
+    /// EVERY retained corpus is compiled in (sc-22666, epic 22657 E5), and the packaged store
+    /// loads with the byte-exact handshake against all of them.
+    ///
+    /// SHAPE, not a census: the assertion is that every compiled-in entry parses as a corpus and
+    /// that every anchor's cited source resolves inside the list — never how many corpora exist or
+    /// which models they name, which would red on a retirement rather than on a defect. The
+    /// packaging-lapse guard that keeps a RETAINED corpus from being left out lives in
+    /// `scripts/extract-memory-anchors.mjs` (`assertEveryDerivableCorpusIsPackaged`), which can see
+    /// the walked tree this crate cannot.
+    #[test]
+    fn every_packaged_corpus_parses_and_backs_the_store_it_is_compiled_in_for() {
+        assert!(!PACKAGED_MEMORY_ANCHOR_SOURCES.is_empty());
+        let mut paths = BTreeSet::new();
+        for (path, raw) in PACKAGED_MEMORY_ANCHOR_SOURCES {
+            assert!(paths.insert(*path), "{path} is compiled in twice");
+            let parsed: serde_json::Value =
+                serde_json::from_str(raw).unwrap_or_else(|error| panic!("{path}: {error}"));
+            // sc-22738: a corpus carries retained RECORDS, measured lower BOUNDS, or both. A
+            // footprint hard stop produces a bundle with no record at all — the render never got
+            // far enough to decompose — and it is retained evidence all the same.
+            let records = parsed["records"].as_array().is_some_and(|r| !r.is_empty());
+            let bounds = parsed["exceededBounds"]
+                .as_array()
+                .is_some_and(|r| !r.is_empty());
+            assert!(
+                records || bounds,
+                "{path} carries neither retained records nor measured bounds, so it is not a corpus"
+            );
+        }
+        let sorted: Vec<&str> = paths.iter().copied().collect();
+        let declared: Vec<&str> = PACKAGED_MEMORY_ANCHOR_SOURCES
+            .iter()
+            .map(|(path, _)| *path)
+            .collect();
+        assert_eq!(sorted, declared, "the compiled-in list must stay sorted");
+
+        let store = packaged_memory_anchors().expect("the packaged anchor store must load");
+        for (id, cited) in store
+            .anchors
+            .iter()
+            .map(|anchor| (&anchor.id, &anchor.source.path))
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter()
+                    .map(|bound| (&bound.id, &bound.source.path)),
+            )
+        {
+            assert!(
+                paths.contains(cited.as_str()),
+                "{id} cites {cited}, which is not compiled in",
+            );
+        }
+    }
 
     fn corpus_raw() -> &'static str {
         PACKAGED_MEMORY_ANCHOR_SOURCES
@@ -2028,7 +4491,6 @@ mod tests {
         conditioning_active: u64,
         denoise_active: u64,
         decode_active: u64,
-        overall_envelope: u64,
     }
 
     /// Every retained, runtime-complete LTX-2.5 MLX measured record — the validation corpus.
@@ -2080,9 +4542,6 @@ mod tests {
                     conditioning_active: measured["conditioningActivePeak"],
                     denoise_active: measured["denoiseActivePeak"],
                     decode_active: measured["decodeActivePeak"],
-                    overall_envelope: record["observedMemory"]["overall"]["allocatorBytes"]
-                        .as_u64()
-                        .expect("overall envelope"),
                 }
             })
             .collect()
@@ -2105,81 +4564,168 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
-    // AC 1 (store half): every LTX-2.5 MLX (tier, transformer variant, decoder) cell the
-    // retained corpus measures carries exactly one anchor, and no cell it does not measure
-    // carries any.
+    // AC 1 (store half): every LTX-2.5 (tier, transformer variant, decoder) cell the retained
+    // corpus measures, ON EITHER LANE, carries exactly one anchor, and no cell it does not
+    // measure carries any.
     // -------------------------------------------------------------------------------------
 
-    #[test]
-    fn ltx25_mlx_carries_exactly_one_anchor_per_measured_pipeline_cell() {
-        let corpus = retained_corpus();
-        let measured: std::collections::BTreeSet<(String, &str, &str)> = corpus
+    /// Every `(tier, transformer variant, decoder)` cell that ANY packaged corpus measures for
+    /// LTX-2.5 on `lane` — the sc-18791 seed corpus and, since the sc-22738 campaign, the
+    /// per-cell corpora under `docs/calibration/sc-22738/`. Derived from the compiled-in list
+    /// rather than pinned, so a campaign that lands a new pipeline cell (the rerun's dev/conv
+    /// bf16 and q4) extends the expectation instead of reddening it.
+    ///
+    /// sc-22738: LANE-PARAMETERISED, and `status` is no longer read. Both changes are the same
+    /// correction. This used to hard-code `mlx` and `status == "runtime_complete"`, which held
+    /// only while MLX was the sole lane carrying LTX-2.5 anchors; the candle campaign landed
+    /// `ltx_2_5:candle` bf16/q4/q8, whose records are `status: "gated"`, so a candle lane bolted
+    /// onto the old predicate would have derived ZERO measured cells against three live anchors.
+    ///
+    /// `status` is not a candidacy rule anywhere in the anchor pass — `anchorCandidate` in
+    /// `scripts/extract-memory-anchors.mjs` never reads the field, and all three spellings the
+    /// packaged corpora use (`gated`, `runtime_complete`, `complete`) produce anchors today.
+    /// Filtering on it here was a SECOND, narrower opinion about what anchors, and this is the
+    /// bug that made the candle rows invisible to the guard below. What a record must have to
+    /// anchor is its lane's phase measurements, and re-deriving that rule in Rust would just be
+    /// a third opinion — so the cell set is the population, and the store is what is checked
+    /// against it.
+    fn measured_ltx25_cells(lane: &str) -> std::collections::BTreeSet<(String, String, String)> {
+        PACKAGED_MEMORY_ANCHOR_SOURCES
             .iter()
+            .flat_map(|(_, raw)| {
+                let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
+                source["records"]
+                    .as_array()
+                    .map(|records| records.to_vec())
+                    .unwrap_or_default()
+            })
+            .filter(|record| {
+                record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                    && record["backend"].as_str() == Some(lane)
+            })
             .map(|record| {
                 (
-                    record.tier.clone(),
-                    transformer_variant_key(record.transformer_variant),
-                    decoder_key(record.decoder),
+                    record["target"]["tier"].as_str().expect("tier").to_owned(),
+                    record["target"]["transformerVariant"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
+                    record["target"]["decoder"]
+                        .as_str()
+                        .unwrap_or("-")
+                        .to_owned(),
                 )
             })
-            .collect();
-        // Shape, not a frozen count: the corpus spans more than one variant and more than one
-        // decoder, so this test cannot silently degenerate into a single-cell assertion.
+            .collect()
+    }
+
+    #[test]
+    fn ltx25_carries_exactly_one_anchor_per_measured_pipeline_cell() {
+        // Shape, not a frozen count, and MLX-scoped on purpose: the MLX corpus spans more than
+        // one variant and more than one decoder, so the guard below cannot silently degenerate
+        // into a single-cell assertion on that lane. It is NOT asserted cross-lane — the candle
+        // campaign measured one variant (`distilled`) and one decoder (`conv`), so demanding a
+        // spread there would freeze a population rather than describe a shape.
+        let mlx_measured = measured_ltx25_cells(AnchorBackend::Mlx.as_key());
         assert!(
-            measured
+            mlx_measured
                 .iter()
-                .map(|(_, variant, _)| *variant)
+                .map(|(_, variant, _)| variant.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
-            "the retained corpus must span more than one transformer variant"
+            "the retained MLX corpus must span more than one transformer variant"
         );
         assert!(
-            measured
+            mlx_measured
                 .iter()
-                .map(|(_, _, decoder)| *decoder)
+                .map(|(_, _, decoder)| decoder.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
                 > 1,
-            "the retained corpus must span more than one decoder"
+            "the retained MLX corpus must span more than one decoder"
         );
 
-        for (tier, variant_key, decoder_key_str) in &measured {
-            let matching = store()
-                .anchors
-                .iter()
-                .filter(|anchor| {
-                    anchor.model_id == "ltx_2_5"
-                        && anchor.backend == AnchorBackend::Mlx
-                        && anchor.tier == *tier
-                        && variant_key_opt(anchor.transformer_variant) == *variant_key
-                        && decoder_key_opt(anchor.decoder) == *decoder_key_str
-                })
-                .count();
+        // sc-22738: BOTH lanes. The uniqueness half used to run on MLX alone while the citation
+        // loop below had already been widened, so the three `ltx_2_5:candle` anchors the candle
+        // campaign landed were checked for provenance but never for one-anchor-per-cell. A second
+        // candle anchor on a cell that already had one was admissible.
+        for lane in [AnchorBackend::Mlx, AnchorBackend::Candle] {
+            let measured = measured_ltx25_cells(lane.as_key());
+            assert!(
+                !measured.is_empty(),
+                "{}: the packaged corpora must measure at least one LTX-2.5 pipeline cell on \
+                 this lane — an empty population makes every assertion below vacuous",
+                lane.as_key()
+            );
+            for (tier, variant_key, decoder_key_str) in &measured {
+                let matching = store()
+                    .anchors
+                    .iter()
+                    .filter(|anchor| {
+                        anchor.model_id == "ltx_2_5"
+                            && anchor.backend == lane
+                            && anchor.tier == *tier
+                            && variant_key_opt(anchor.transformer_variant) == variant_key.as_str()
+                            && decoder_key_opt(anchor.decoder) == decoder_key_str.as_str()
+                    })
+                    .count();
+                assert_eq!(
+                    matching,
+                    1,
+                    "{}: cell ({tier}, {variant_key}, {decoder_key_str}) must carry exactly one \
+                     anchor",
+                    lane.as_key()
+                );
+            }
             assert_eq!(
-                matching, 1,
-                "cell ({tier}, {variant_key}, {decoder_key_str}) must carry exactly one anchor"
+                store()
+                    .anchors
+                    .iter()
+                    .filter(|anchor| anchor.model_id == "ltx_2_5" && anchor.backend == lane)
+                    .count(),
+                measured.len(),
+                "{}: the store must not carry an anchor for a pipeline cell the corpus never \
+                 measured",
+                lane.as_key()
             );
         }
-        assert_eq!(
-            store()
-                .anchors
-                .iter()
-                .filter(
-                    |anchor| anchor.model_id == "ltx_2_5" && anchor.backend == AnchorBackend::Mlx
-                )
-                .count(),
-            measured.len(),
-            "the store must not carry an anchor for a pipeline cell the corpus never measured"
-        );
         // Scoped to LTX-2.5: since sc-22510 the store spans the whole routing catalog, so this
-        // asks that the LTX-2.5 rows still come from the LTX-2.5 corpus and nothing more.
+        // asks that every LTX-2.5 row still comes from a packaged corpus that carries a completed
+        // LTX-2.5 record ON THAT ROW'S OWN LANE — the seed corpus or a sc-22738 campaign corpus —
+        // and nothing more.
+        //
+        // sc-22738: this loop used to demand an `mlx` record of EVERY LTX-2.5 anchor regardless of
+        // the anchor's backend, which held only while MLX was the sole lane carrying LTX-2.5
+        // anchors. The candle campaign landed ltx_2_5:candle bf16/q4/q8, each citing a candle
+        // corpus, and the MLX-keyed literal reddened on them. Keying the required record on
+        // `anchor.backend` keeps the guard on both lanes instead of exempting the new one: a
+        // candle anchor citing an MLX-only corpus (or the reverse) still fails.
         for anchor in store()
             .anchors
             .iter()
             .filter(|anchor| anchor.model_id == "ltx_2_5")
         {
-            assert_eq!(anchor.source.path, LTX25_CORPUS_PATH);
+            let lane = anchor.backend.as_key();
+            let cites_ltx25_corpus = PACKAGED_MEMORY_ANCHOR_SOURCES
+                .iter()
+                .find(|(path, _)| *path == anchor.source.path)
+                .map(|(_, raw)| {
+                    let source: serde_json::Value =
+                        serde_json::from_str(raw).expect("corpus parses");
+                    source["records"].as_array().is_some_and(|records| {
+                        records.iter().any(|record| {
+                            record["target"]["modelId"].as_str() == Some("ltx_2_5")
+                                && record["backend"].as_str() == Some(lane)
+                        })
+                    })
+                })
+                .unwrap_or(false);
+            assert!(
+                cites_ltx25_corpus,
+                "{}: an LTX-2.5 anchor must cite a packaged corpus carrying LTX-2.5 {lane} records",
+                anchor.id
+            );
         }
     }
 
@@ -2428,13 +4974,23 @@ mod tests {
                 Ltx25Decoder::Conv
             )
             .is_none());
-        // Measured at q4: dev/diffvae only.
+        // Measured at q4: dev/diffvae (seed corpus) and, since the sc-22738 rerun, dev/conv.
+        // Never measured at q4: either distilled combo.
         assert!(store()
             .anchor_for(
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q4",
                 Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::Conv
+            )
+            .is_some());
+        assert!(store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "q4",
+                Ltx25TransformerVariant::Distilled,
                 Ltx25Decoder::Conv
             )
             .is_none());
@@ -2579,7 +5135,10 @@ mod tests {
         // to the record too rather than being stored and trusted.
         for (field, value) in [
             ("overlay", serde_json::json!("identity")),
-            ("referenceCount", serde_json::json!(1)),
+            (
+                "referenceCount",
+                serde_json::json!(store().anchors[index].reference_count + 1),
+            ),
         ] {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
@@ -2607,6 +5166,33 @@ mod tests {
             let mut doctored: serde_json::Value =
                 serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
             doctored["anchors"][ltx][field] = value;
+            // The doctored identity may now name a cell another packaged anchor really occupies
+            // (the sc-22738 rerun anchored dev/conv at bf16, so relabelling the seed dev/diffvae
+            // row's decoder collides with it). Drop that other row so the ONLY defect the loader
+            // can see is the doctored row disagreeing with its own record — the duplicate-cell
+            // guard is a different invariant with its own test.
+            let identity = |anchor: &serde_json::Value| {
+                [
+                    "modelId",
+                    "backend",
+                    "tier",
+                    "transformerVariant",
+                    "decoder",
+                    "overlay",
+                    "referenceCount",
+                ]
+                .map(|key| anchor[key].clone())
+            };
+            let target = identity(&doctored["anchors"][ltx]);
+            let anchors = doctored["anchors"].as_array().expect("anchors").clone();
+            doctored["anchors"] = serde_json::Value::Array(
+                anchors
+                    .into_iter()
+                    .enumerate()
+                    .filter(|(index, anchor)| *index == ltx || identity(anchor) != target)
+                    .map(|(_, anchor)| anchor)
+                    .collect(),
+            );
             let error = load_memory_anchors(&doctored.to_string())
                 .err()
                 .unwrap_or_else(|| panic!("{field} must bind to the source record"));
@@ -2732,9 +5318,43 @@ mod tests {
     // is the COMPARISON: which anchors a rotated key stales, and which it leaves alone.
     // -------------------------------------------------------------------------------------
 
+    /// The tooling's currency question, restated locally for the two config-consistency tests
+    /// below. Deliberately NOT a method on `MemoryAnchor`: the runtime carries no such function
+    /// (sc-22738), and `scripts/anchor-loader-closure.mjs` owns the real one.
+    fn anchor_is_current(anchor: &MemoryAnchor, closures: &AnchorLoaderClosures) -> bool {
+        closures.digest_for(&anchor.model_id, anchor.backend)
+            == Some(anchor.source.loader_closure_digest.as_str())
+    }
+
     fn packaged_closures() -> AnchorLoaderClosures {
         load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
             .expect("the packaged loader closures parse")
+    }
+
+    /// sc-22724: a catalog alias declares the engine id it resolves to, and the strict parse
+    /// keeps the field (`deny_unknown_fields` would otherwise demote every anchor to the floor
+    /// the moment the derivation wrote it). A model that is its own engine carries none.
+    #[test]
+    fn a_catalog_alias_declaration_carries_its_engine_id() {
+        let closures = packaged_closures();
+        let alias = closures
+            .models
+            .get("z_image_edit:mlx")
+            .expect("z_image_edit:mlx is declared");
+        assert_eq!(alias.engine_id.as_deref(), Some("z_image_turbo"));
+        let own = closures
+            .models
+            .get("z_image_turbo:mlx")
+            .expect("z_image_turbo:mlx is declared");
+        assert_eq!(own.engine_id, None);
+        // The field round-trips through serde exactly as the derivation wrote it.
+        let raw: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).expect("closures parse");
+        assert_eq!(
+            raw["models"]["z_image_edit:mlx"]["engineId"],
+            "z_image_turbo"
+        );
+        assert!(raw["models"]["z_image_turbo:mlx"].get("engineId").is_none());
     }
 
     #[test]
@@ -2757,12 +5377,13 @@ mod tests {
     /// CURRENCY IS REPORTED, NEVER ASSERTED — and that distinction is the point of E8.
     ///
     /// A packaged anchor whose model's loader source has moved since the measurement is STALE BY
-    /// DESIGN: `is_current` returns false, admission demotes that cell to the conservative floor,
-    /// and the render still runs. Asserting currency here would turn the first pin bump that
-    /// genuinely touches a loader into a red `cargo test` on a change with nothing wrong in it —
-    /// which is the pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level
-    /// down. `bump-inference` regenerates the closures with `--write` automatically, so that red
-    /// would land on the bump itself.
+    /// DESIGN, and since sc-22738 that is a fact only the probe tooling acts on: the runtime binds
+    /// and derives from it exactly as from a current one, and the render still runs. Asserting
+    /// currency here would turn the first pin bump that genuinely touches a loader into a red
+    /// `cargo test` on a change with nothing wrong in it — which is the
+    /// pin-bump-forces-re-measurement gate this epic dismantled, rebuilt one level down.
+    /// `bump-inference` regenerates the closures with `--write` automatically, so that red would
+    /// land on the bump itself.
     ///
     /// What IS asserted is the loud half above: an anchor for a model nobody DECLARED is a
     /// mistake in the store, not a designed state, and it fails.
@@ -2773,13 +5394,14 @@ mod tests {
         let stale: Vec<&str> = store
             .anchors
             .iter()
-            .filter(|anchor| !anchor.is_current(&closures))
+            .filter(|anchor| !anchor_is_current(anchor, &closures))
             .map(|anchor| anchor.id.as_str())
             .collect();
         if !stale.is_empty() {
             eprintln!(
                 "note: {} of {} packaged anchors are not current against their model's declared \
-                 loader closure and will demote to the conservative floor: {}",
+                 loader closure (a re-capture signal for the tooling; the runtime binds them \
+                 regardless): {}",
                 stale.len(),
                 store.anchors.len(),
                 stale.join(", ")
@@ -2787,135 +5409,136 @@ mod tests {
         }
     }
 
-    /// THE HEADLINE, comparison half: rotating one model's loader digest stales exactly that
-    /// model's anchors — a sibling model declared beside it keeps its own.
-    ///
-    /// Both sides of this are REAL packaged anchors, not fabricated ones. `ltx_2_3` and `ltx_2_5`
-    /// share the crate `mlx-gen-ltx`, which is precisely the pair the crate-level provider digest
-    /// could not separate (E9's first named failure): under that unit a 2.3-only edit rotated 2.5.
+    /// sc-23692: historical attestations remain valid provenance after either a pin-only
+    /// bump or a shared-loader edit. Test both anchors and bounds without requiring the
+    /// packaged store to carry any particular current/historical attestation population.
     #[test]
-    fn a_rotated_loader_digest_stales_exactly_that_models_anchors() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        // A KNOWN-CURRENT BASELINE BY CONSTRUCTION: every declared digest is set to what that
-        // model's own anchors recorded. This is a comparison test, and it must not silently become
-        // a currency gate — whether the real pinned source still agrees is a separate question
-        // whose answer is allowed to be "no" (a stale anchor demotes to the floor, by design).
-        let mut closures = packaged_closures();
-        for anchor in &store.anchors {
-            let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-            let declared = closures
-                .models
-                .get_mut(&key)
-                .unwrap_or_else(|| panic!("{key} is declared"));
-            declared
-                .digest
-                .clone_from(&anchor.source.loader_closure_digest);
+    fn historical_attestations_load_regardless_of_live_pin_or_closure() {
+        let original = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("store loads");
+        let mut store = original.clone();
+        for source in store
+            .anchors
+            .iter_mut()
+            .map(|anchor| &mut anchor.source)
+            .chain(
+                store
+                    .exceeded_bounds
+                    .iter_mut()
+                    .map(|bound| &mut bound.source),
+            )
+        {
+            source.currency_attestation = Some(AnchorCurrencyAttestation {
+                measured_revision: "1".repeat(40),
+                attested_revision: "2".repeat(40),
+                attested_at: "2026-09-16".into(),
+                story: "sc-23692".into(),
+                class: "accounting-only".into(),
+                why: "fixture: no loading change".into(),
+                witness: "fixture: source review".into(),
+            });
         }
-        let closures = closures;
-        let subject = anchor_loader_closure_key("ltx_2_5", AnchorBackend::Mlx);
-        let sibling = anchor_loader_closure_key("ltx_2_3", AnchorBackend::Mlx);
-        assert_ne!(subject, sibling);
-
-        let anchors_for = |key: &str| -> Vec<&MemoryAnchor> {
-            store
-                .anchors
-                .iter()
-                .filter(|anchor| anchor_loader_closure_key(&anchor.model_id, anchor.backend) == key)
-                .collect()
-        };
-        let subject_anchors = anchors_for(&subject);
-        let sibling_anchors = anchors_for(&sibling);
-        assert!(
-            !subject_anchors.is_empty() && !sibling_anchors.is_empty(),
-            "both models must carry packaged anchors for this comparison to mean anything"
-        );
-
-        // Rotate ONE model's key at a time and read both populations back.
-        let rotated = |key: &str, to: &str| {
-            let mut moved = closures.clone();
-            moved
-                .models
-                .get_mut(key)
-                .unwrap_or_else(|| panic!("{key} is declared"))
-                .digest = to.repeat(64);
-            moved
-        };
-
-        // The sibling's loader moved: every ltx_2_5 anchor stays authoritative, every ltx_2_3
-        // anchor stales.
-        let moved_sibling = rotated(&sibling, "c");
-        for anchor in &subject_anchors {
-            assert!(
-                anchor.is_current(&moved_sibling),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                !anchor.is_current(&moved_sibling),
-                "anchor {} must stale when ITS OWN loader moves",
-                anchor.id
-            );
-        }
-
-        // And the mirror image.
-        let moved_subject = rotated(&subject, "d");
-        for anchor in &subject_anchors {
-            assert!(
-                !anchor.is_current(&moved_subject),
-                "anchor {} must stale when its OWN loader moves",
-                anchor.id
-            );
-        }
-        for anchor in &sibling_anchors {
-            assert!(
-                anchor.is_current(&moved_subject),
-                "anchor {} must survive a sibling model's loader edit",
-                anchor.id
-            );
+        let serialized = serde_json::to_string(&store).unwrap();
+        let mut live: serde_json::Value =
+            serde_json::from_str(PACKAGED_ANCHOR_LOADER_CLOSURES).unwrap();
+        live["inferenceRevision"] = serde_json::json!("3".repeat(40));
+        for change_closure in [false, true] {
+            if change_closure {
+                for entry in live["models"].as_object_mut().unwrap().values_mut() {
+                    entry["digest"] = serde_json::json!("0".repeat(64));
+                }
+            }
+            let closures = load_anchor_loader_closures(&live.to_string()).unwrap();
+            let loaded = load_memory_anchors(&serialized).expect("historical attestations load");
+            assert_eq!(loaded, store);
+            if change_closure {
+                assert!(loaded
+                    .anchors
+                    .iter()
+                    .all(|anchor| !anchor_is_current(anchor, &closures)));
+            }
         }
     }
 
-    /// The same anchor on the other backend lane is a different loader and a different key.
+    /// sc-22738: the attestation shape is validated on a BOUND exactly as on an anchor — a bound
+    /// is the row kind where a silently-accepted malformed justification would keep a refusal
+    /// current on nothing.
     #[test]
-    fn currency_is_keyed_per_backend_lane_and_fails_closed_when_undeclared() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let closures = packaged_closures();
-        let mut candle = store.anchors[0].clone();
-        candle.backend = AnchorBackend::Candle;
+    fn a_malformed_currency_attestation_on_a_bound_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let bounds = store["exceededBounds"]
+            .as_array()
+            .expect("the packaged store carries exceeded bounds");
+        assert!(!bounds.is_empty());
+        let attested = bounds
+            .iter()
+            .position(|bound| bound["source"]["currencyAttestation"].is_object());
+        let index = attested.unwrap_or(0);
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            let source = &mut doctored["exceededBounds"][index]["source"];
+            if attested.is_none() {
+                source["currencyAttestation"] = serde_json::json!({
+                    "measuredRevision": "1".repeat(40),
+                    "attestedRevision": "2".repeat(40),
+                    "attestedAt": "2026-09-07",
+                    "story": "sc-22738",
+                    "class": "accounting-only",
+                    "why": "test",
+                    "witness": "test",
+                });
+            }
+            patch(&mut source["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("exceeded bound"), "{error}");
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
         assert!(
-            !candle.is_current(&closures),
-            "an undeclared (model, lane) cannot be shown current, so it is not"
+            error.contains("attests its own measurement revision"),
+            "{error}"
         );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
     }
 
-    /// The campaign fingerprint is provenance, not currency: a re-fingerprinted campaign over the
-    /// same loader must not demote the anchor (E9).
+    /// The attestation's shape is validated at load like the digest's: a revision that is not a
+    /// revision, an attestation of its own measurement, or a missing justification is a load
+    /// failure, never a silently-current anchor.
     #[test]
-    fn the_calibration_fingerprint_is_not_a_currency_term() {
-        let store = load_memory_anchors(PACKAGED_MEMORY_ANCHORS).expect("packaged store loads");
-        let anchor = &store.anchors[0];
-        // Current BY CONSTRUCTION, for the reason spelled out in
-        // `a_rotated_loader_digest_stales_exactly_that_models_anchors`: the claim here is about the
-        // FINGERPRINT, and reading it off the live pinned source would quietly make it a currency
-        // gate that reds on any pin bump the loader source actually moved through.
-        let mut closures = packaged_closures();
-        let key = anchor_loader_closure_key(&anchor.model_id, anchor.backend);
-        closures
-            .models
-            .get_mut(&key)
-            .unwrap_or_else(|| panic!("{key} is declared"))
-            .digest
-            .clone_from(&anchor.source.loader_closure_digest);
-
-        let mut refingerprinted = anchor.clone();
-        assert!(refingerprinted.is_current(&closures));
-        refingerprinted.source.calibration_fingerprint = "sc-99999-some-later-campaign".to_owned();
+    fn a_malformed_currency_attestation_is_rejected_at_load() {
+        let store: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let index = store["anchors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .position(|anchor| anchor["source"]["currencyAttestation"].is_object())
+            .expect("the packaged store carries an attested anchor");
+        let doctor = |patch: &dyn Fn(&mut serde_json::Value)| {
+            let mut doctored = store.clone();
+            patch(&mut doctored["anchors"][index]["source"]["currencyAttestation"]);
+            load_memory_anchors(&doctored.to_string()).expect_err("must reject")
+        };
+        let error = doctor(&|a| a["attestedRevision"] = serde_json::json!("abc"));
+        assert!(error.contains("not a 40-hex revision"), "{error}");
+        let error = doctor(&|a| a["attestedRevision"] = a["measuredRevision"].clone());
         assert!(
-            refingerprinted.is_current(&closures),
-            "a later campaign fingerprint must not move currency"
+            error.contains("attests its own measurement revision"),
+            "{error}"
         );
+        for field in ["why", "witness", "class", "story", "attestedAt"] {
+            let error = doctor(&|a| a[field] = serde_json::json!("   "));
+            assert!(error.contains(&format!("states no {field}")), "{error}");
+        }
+        let error = doctor(&|a| a["extra"] = serde_json::json!(1));
+        assert!(error.contains("unknown field"), "{error}");
+        // Well-formed as shipped.
+        assert!(load_memory_anchors(&store.to_string()).is_ok());
     }
 
     #[test]
@@ -2976,7 +5599,7 @@ mod tests {
     }
 
     #[test]
-    fn derivation_at_the_anchor_geometry_reproduces_the_anchor_peaks_plus_margin() {
+    fn derivation_at_the_anchor_geometry_reproduces_active_peaks() {
         let anchor = store()
             .anchor_for(
                 "ltx_2_5",
@@ -2993,9 +5616,8 @@ mod tests {
                 anchor.geometry.frames,
             ))
             .expect("derivable at the anchor's own geometry");
-        let expect = |measured: u64| {
-            ((measured as f64) * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil() as u64
-        };
+        let expect =
+            |measured: u64| widened_by(i128::from(measured), MLX_ACTIVE_RECAPTURE_SPREAD).unwrap();
         assert_eq!(
             derived.conditioning,
             expect(anchor.phase_active_peak_bytes.conditioning)
@@ -3197,7 +5819,7 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("record {} is derivable", record.id));
 
-            // Per-phase safety: the margin-widened derived phase covers the measured active peak.
+            // Per-phase safety: the derived active phase covers the measured active peak.
             for (phase, derived_bytes, measured_bytes) in [
                 (
                     "conditioning",
@@ -3215,17 +5837,27 @@ mod tests {
                 );
             }
 
-            // Overall bracket: at or above the measured allocator envelope, and within the
+            // Overall bracket: at or above the measured active peak, and within the
             // validation tightness budget so the margins stay falsifiable.
             let upper = derived.peak_bytes();
             assert!(
-                upper >= record.overall_envelope,
-                "record {}: derived admission bound {upper} under the measured allocator \
-                 envelope {}",
+                upper
+                    >= record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active),
+                "record {}: derived admission bound {upper} under the measured active \
+                 peak {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
-            let tight_cap = ((record.overall_envelope as f64)
+            let tight_cap = ((record
+                .conditioning_active
+                .max(record.denoise_active)
+                .max(record.decode_active) as f64)
                 * (1.0 + ANCHOR_VALIDATION_TIGHTNESS_BUDGET))
                 .ceil() as u64;
             assert!(
@@ -3233,7 +5865,10 @@ mod tests {
                 "record {}: derived admission bound {upper} exceeds the tightness cap \
                  {tight_cap} over envelope {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
         }
 
@@ -3288,21 +5923,223 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------------------
-    // Candle image lane (sc-22509).
+    // Image derivation law (sc-22663, epic 22657 E3) — fixtures.
     // -------------------------------------------------------------------------------------
 
     const KREA_CANDLE_CORPUS_PATH: &str = "docs/generated/krea-candle-five-rung-sc-11045.json";
 
-    /// One retained candle capture: the rung composition it executed and its three measured phase
-    /// peaks.
+    /// The sc-15859 Z-Image-Turbo q4 candle anchor capture: `staged_residency` at 1024x1024,
+    /// conditioning 3.10 GB / denoise 8.05 GB / decode 11.74 GB device peak deltas. Not a
+    /// compiled-in store source (the store is regenerated at epic end), so the test reads the
+    /// retained file at run time — deliberately not `include_str!`, which would make a test-only
+    /// fixture a production embed every Docker builder context must copy — and builds the anchor
+    /// row from the record.
+    const Z_IMAGE_Q4_CANDLE_ANCHOR_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/calibration/sc-15859/z-image-turbo-q4-candle-anchor.json"
+    );
+
+    fn z_image_q4_candle_anchor_raw() -> String {
+        std::fs::read_to_string(Z_IMAGE_Q4_CANDLE_ANCHOR_PATH)
+            .unwrap_or_else(|error| panic!("{Z_IMAGE_Q4_CANDLE_ANCHOR_PATH}: {error}"))
+    }
+
+    /// Z-Image-Turbo q4 component bytes on the candle lane: the `SceneWorks/z-image-turbo-mlx`
+    /// q4 tier the retained record's `artifact` names (revision bb2bc989), whose subdirectories
+    /// measure text_encoder (Qwen3) 2.26 GB, transformer 3.47 GB, vae 0.16 GB on disk. The
+    /// record carries no per-component inventory, so the figures are bound to the tier's
+    /// packaged `estimatedSizeBytes` instead:
+    /// `the_fixture_component_bytes_sum_to_their_packaged_tier_sizes` recomputes the sum against
+    /// the manifest within 2%.
+    const Z_IMAGE_Q4_COMPONENTS: ComponentBytes = ComponentBytes {
+        conditioning: 2_260_000_000,
+        transformer: 3_470_000_000,
+        decoder: 160_000_000,
+    };
+
+    /// Z-Image architecture facts (`candle_transformers::models::z_image::transformer::Config::
+    /// z_image_turbo`): 30 heads of 128, 30 blocks, patch 2, 16 latent channels, x8 VAE, bf16
+    /// activations.
+    const Z_IMAGE_FACTS: ArchitectureFacts = ArchitectureFacts {
+        attention_heads: Some(30),
+        head_dim: Some(128),
+        transformer_blocks: Some(30),
+        patch_size: Some(2),
+        latent_channels: Some(16),
+        vae_spatial_scale: Some(8),
+        vae_temporal_scale: Some(1),
+        activation_dtype_width: Some(2),
+    };
+
+    /// Krea 2 Turbo architecture facts (`candle-gen-krea/src/config.rs` at the pinned inference
+    /// revision): 48 heads of 128, 28 single-stream blocks, patch 2 over the 16-channel x8
+    /// Qwen-Image VAE, bf16 activations.
+    const KREA_FACTS: ArchitectureFacts = ArchitectureFacts {
+        attention_heads: Some(48),
+        head_dim: Some(128),
+        transformer_blocks: Some(28),
+        patch_size: Some(2),
+        latent_channels: Some(16),
+        vae_spatial_scale: Some(8),
+        vae_temporal_scale: Some(1),
+        activation_dtype_width: Some(2),
+    };
+
+    /// Krea 2 Turbo q4 component bytes on the candle lane, read off the retained five-rung
+    /// corpus itself: the resident-minus-staged DENOISE delta is the text encoder that staging
+    /// drops (2,818,572,288 bytes; the decode delta agrees byte for byte), the resident-minus-
+    /// staged CONDITIONING delta is the DiT plus VAE that staging has not yet loaded
+    /// (8,891,924,480), split at the Qwen-Image VAE's bf16 safetensors size (~254 MB).
+    const KREA_Q4_COMPONENTS: ComponentBytes = ComponentBytes {
+        conditioning: 2_818_572_288,
+        transformer: 8_638_117_888,
+        decoder: 253_806_592,
+    };
+
+    /// The Z-Image / Krea candle fully-engaged rung parameters the providers publish
+    /// (`bounded_decode` 512/128, `bounded_attention` 64 Mi scores for Z-Image, one-block
+    /// transformer window).
+    const FULLY_ENGAGED: RequestRegime = RequestRegime {
+        staged: true,
+        decode_tile: Some(DecodeTile {
+            edge: 512,
+            overlap: 128,
+        }),
+        attention_chunk_scores: Some(64 * 1024 * 1024),
+        transformer_window: Some(1),
+    };
+
+    fn at(width: u32, height: u32, regime: RequestRegime) -> ImageDeriveRequest {
+        ImageDeriveRequest::new(width, height, regime)
+    }
+
+    /// Build the anchor row for the single record of a memory-v5 candle capture file, exactly as
+    /// the extractor would (identity, geometry, regime, the three device peak deltas).
+    fn candle_record_anchor(raw: &str) -> MemoryAnchor {
+        let source: serde_json::Value = serde_json::from_str(raw).expect("capture parses");
+        let record = &source["records"][0];
+        let target = &record["target"];
+        let measured: BTreeMap<&str, u64> = record["diagnostics"]["measurements"]
+            .as_array()
+            .expect("measurements")
+            .iter()
+            .filter_map(|entry| Some((entry["name"].as_str()?, entry["value"].as_u64()?)))
+            .collect();
+        let engaged: Vec<&str> = record["strategy"]["engagedRungs"]
+            .as_array()
+            .expect("engaged rungs")
+            .iter()
+            .filter_map(|rung| rung.as_str())
+            .collect();
+        let str_at = |value: &serde_json::Value, key: &str| {
+            value[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key}"))
+                .to_owned()
+        };
+        MemoryAnchor {
+            id: format!("{}:{}", str_at(target, "modelId"), str_at(record, "id")),
+            model_id: str_at(target, "modelId"),
+            model_family: String::new(),
+            route: str_at(target, "provider"),
+            provider: str_at(target, "provider"),
+            backend: match record["backend"].as_str() {
+                Some("candle") => AnchorBackend::Candle,
+                _ => AnchorBackend::Mlx,
+            },
+            tier: str_at(target, "tier"),
+            transformer_variant: None,
+            decoder: None,
+            mode: str_at(target, "mode"),
+            overlay: None,
+            reference_count: 0,
+            load_shape: match record["loadShape"].as_str() {
+                Some("eager_materialization") => AnchorLoadShape::EagerMaterialization,
+                _ => AnchorLoadShape::DeferredMaterialization,
+            },
+            measured_regime: AnchorMeasuredRegime {
+                decode_tiled: engaged.contains(&"bounded_decode"),
+                transformer_windowed: engaged.contains(&"bounded_transformer_residency"),
+                staged: engaged.contains(&"staged_residency"),
+                attention_chunked: engaged.contains(&"bounded_attention"),
+            },
+            source: AnchorSource {
+                path: String::new(),
+                sha256: String::new(),
+                record_id: str_at(record, "id"),
+                calibration_fingerprint: str_at(record, "calibrationFingerprint"),
+                loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
+            },
+            geometry: AnchorGeometry {
+                width: target["geometry"]["width"].as_u64().expect("width") as u32,
+                height: target["geometry"]["height"].as_u64().expect("height") as u32,
+                frames: target["geometry"]["frames"].as_u64().expect("frames") as u32,
+                fps: None,
+            },
+            phase_active_peak_bytes: AnchorPhaseBytes {
+                conditioning: measured["conditioningDevicePeakDelta"],
+                denoise: measured["denoiseDevicePeakDelta"],
+                decode: measured["decodeDevicePeakDelta"],
+            },
+            phase_allocator_envelope_bytes: None,
+            overall_allocator_envelope_bytes: measured["overallDevicePeakDelta"],
+            underived_reason: None,
+            component_bytes: None,
+            // The retained corpus this fixture replays predates the structural-exemption fact and
+            // carries no structurally-exempt cell, so every replayed row keeps the staged-only law.
+            staged_residency_structurally_not_applicable: false,
+        }
+    }
+
+    fn z_image_q4_anchor() -> MemoryAnchor {
+        let anchor = candle_record_anchor(&z_image_q4_candle_anchor_raw());
+        // Shape of the fixture the story cites: the shallow staged composition at 1024x1024.
+        assert_eq!(anchor.model_id, "z_image_turbo");
+        assert_eq!(anchor.tier, "q4");
+        assert_eq!(anchor.backend, AnchorBackend::Candle);
+        assert_eq!(
+            (anchor.geometry.width, anchor.geometry.height),
+            (1024, 1024)
+        );
+        assert_eq!(
+            anchor.measured_regime,
+            AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            }
+        );
+        assert_eq!(anchor.phase_active_peak_bytes.conditioning, 3_097_493_504);
+        assert_eq!(anchor.phase_active_peak_bytes.denoise, 8_050_966_528);
+        assert_eq!(anchor.phase_active_peak_bytes.decode, 11_741_954_048);
+        anchor
+    }
+
+    fn z_image_at(request: &ImageDeriveRequest) -> AnchorDerivedPhases {
+        z_image_q4_anchor()
+            .derive_phase_peaks(request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+            .unwrap_or_else(|| panic!("{request:?} must be derivable"))
+    }
+
+    /// One retained candle capture: the rung composition it executed, its parameters, and its
+    /// three measured phase peaks.
     struct CandleCorpusRecord {
         id: String,
         engaged: Vec<String>,
+        regime: RequestRegime,
         width: u32,
         height: u32,
         conditioning: u64,
         denoise: u64,
         decode: u64,
+    }
+
+    impl CandleCorpusRecord {
+        fn peak(&self) -> u64 {
+            self.conditioning.max(self.denoise).max(self.decode)
+        }
     }
 
     fn krea_candle_corpus() -> Vec<CandleCorpusRecord> {
@@ -3329,14 +6166,32 @@ mod tests {
                     .iter()
                     .filter_map(|entry| Some((entry["name"].as_str()?, entry["value"].as_u64()?)))
                     .collect();
+                let engaged: Vec<String> = record["strategy"]["engagedRungs"]
+                    .as_array()
+                    .expect("engaged rungs")
+                    .iter()
+                    .filter_map(|rung| rung.as_str().map(str::to_owned))
+                    .collect();
+                let parameters = &record["strategy"]["parameters"];
+                let has = |rung: &str| engaged.iter().any(|engaged| engaged == rung);
+                let regime = RequestRegime {
+                    staged: has("staged_residency"),
+                    decode_tile: has("bounded_decode").then(|| DecodeTile {
+                        edge: parameters["decodeTileEdge"].as_u64().expect("tile edge") as u32,
+                        overlap: parameters["decodeOverlap"].as_u64().expect("overlap") as u32,
+                    }),
+                    attention_chunk_scores: has("bounded_attention")
+                        .then(|| parameters["attentionChunkSize"].as_u64().expect("chunk")),
+                    transformer_window: has("bounded_transformer_residency").then(|| {
+                        parameters["transformerWindowSize"]
+                            .as_u64()
+                            .expect("window") as u32
+                    }),
+                };
                 CandleCorpusRecord {
                     id: record["id"].as_str().expect("record id").to_owned(),
-                    engaged: record["strategy"]["engagedRungs"]
-                        .as_array()
-                        .expect("engaged rungs")
-                        .iter()
-                        .filter_map(|rung| rung.as_str().map(str::to_owned))
-                        .collect(),
+                    engaged,
+                    regime,
                     width: geometry["width"].as_u64().expect("width") as u32,
                     height: geometry["height"].as_u64().expect("height") as u32,
                     conditioning: measured["conditioningDevicePeakDelta"],
@@ -3353,299 +6208,1574 @@ mod tests {
             .expect("the Krea candle q4 anchor is packaged")
     }
 
+    // -------------------------------------------------------------------------------------
+    // Image derivation law — the story's acceptance criteria.
+    // -------------------------------------------------------------------------------------
+
+    /// AC 1: from the sc-15859 q4 staged anchor and the Z-Image facts, the fully engaged
+    /// composition (staged + bounded_decode 512/128 + bounded_attention 64 Mi + window 1) at
+    /// 1024x1024 prices in [4, 6] GB overall; each deeper rung's per-phase peaks are at or below
+    /// the shallower rung's; and the resident composition prices ABOVE staged instead of `None`.
     #[test]
-    fn krea_candle_q4_carries_exactly_one_shallow_staged_anchor() {
-        let anchor = krea_candle_anchor();
-        // The candle image lane has no LTX pipeline axes, and its records carry no output rate.
-        // Both are `None` as a positive statement about the cell, not an omission.
-        assert_eq!(anchor.transformer_variant, None);
-        assert_eq!(anchor.decoder, None);
-        assert_eq!(anchor.geometry.fps, None);
-        assert_eq!(anchor.geometry.frames, 1);
-        assert_eq!(anchor.source.path, KREA_CANDLE_CORPUS_PATH);
-        // The shallow staged composition is what makes one anchor price four rungs.
+    fn z_image_q4_rungs_price_from_the_staged_anchor_in_the_restated_window_and_in_order() {
+        const GB: u64 = 1_000_000_000;
+        let staged = RequestRegime::staged();
+        let tiled = RequestRegime {
+            decode_tile: FULLY_ENGAGED.decode_tile,
+            ..staged
+        };
+        let chunked = RequestRegime {
+            attention_chunk_scores: FULLY_ENGAGED.attention_chunk_scores,
+            ..tiled
+        };
+        let windowed = RequestRegime {
+            transformer_window: FULLY_ENGAGED.transformer_window,
+            ..chunked
+        };
+        assert_eq!(windowed, FULLY_ENGAGED);
+        let ladder =
+            [staged, tiled, chunked, windowed].map(|regime| z_image_at(&at(1024, 1024, regime)));
+
+        // The staged derivation at the anchor's own geometry and composition IS the anchor.
+        let anchor = z_image_q4_anchor();
         assert_eq!(
-            anchor.measured_regime,
-            AnchorMeasuredRegime {
-                decode_tiled: false,
-                transformer_windowed: false,
-                staged: true,
-                attention_chunked: false,
-            }
+            ladder[0].conditioning,
+            anchor.phase_active_peak_bytes.conditioning
+        );
+        assert_eq!(ladder[0].denoise, anchor.phase_active_peak_bytes.denoise);
+        assert_eq!(ladder[0].decode, anchor.phase_active_peak_bytes.decode);
+
+        // Each deeper rung is at or below the shallower one, phase for phase — and the rung that
+        // engages a phase's bound moves that phase strictly, so the ratios are known to bite.
+        for pair in ladder.windows(2) {
+            let (shallow, deep) = (pair[0], pair[1]);
+            assert!(deep.conditioning <= shallow.conditioning);
+            assert!(deep.denoise <= shallow.denoise);
+            assert!(deep.decode <= shallow.decode);
+        }
+        assert!(
+            ladder[1].decode < ladder[0].decode,
+            "the tile ratio must bite"
+        );
+        assert!(ladder[2].denoise < ladder[1].denoise, "the chunk must bite");
+        assert!(
+            ladder[3].denoise < ladder[2].denoise,
+            "the window must bite"
+        );
+
+        let fully_engaged = ladder[3];
+        let overall = fully_engaged.peak_bytes();
+        // The restated AC-1 window (review of sc-22663): [3, 6] GB overall, strictly below the
+        // staged anchor's overall, and never below the components the engaged composition keeps
+        // resident in any phase — the text encoder plus its conditioning residue, the windowed
+        // DiT share, the VAE. No pad sits anywhere in this arithmetic.
+        assert!(
+            (3 * GB..=6 * GB).contains(&overall),
+            "the fully engaged 1024x1024 composition must price in [3, 6] GB overall, got \
+             {overall} ({fully_engaged:?})"
+        );
+        assert!(overall < ladder[0].peak_bytes());
+        let components = Z_IMAGE_Q4_COMPONENTS;
+        let cond_residue = anchor.phase_active_peak_bytes.conditioning - components.conditioning;
+        assert!(overall >= components.conditioning + cond_residue);
+        assert!(overall >= components.transformer.div_ceil(30) + components.decoder);
+        assert!(fully_engaged.denoise >= components.transformer.div_ceil(30));
+        assert!(fully_engaged.decode >= components.decoder);
+        // The arithmetic behind that window, stated so a drift is legible: one resident block
+        // (3.47 GB / 30), the non-score denoise residue (8.05 - 3.47 GB minus the 30 x 4608² x
+        // 2 B score tensor) plus the 64 Mi x 2 B chunk; and, over the VAE, the decode residue
+        // (11.74 - 0.16 GB) split into the unscaled blender floor (1024² x (3 x 2 B + 4 B)) and
+        // the remainder scaled by the decode chunk — the larger of the 512² on-device tile and
+        // the (512 - 128) x 1024 host-transfer band, i.e. 384 x 1024 = 3/8 of the image.
+        assert_eq!(fully_engaged.conditioning, 3_097_493_504);
+        assert_eq!(
+            fully_engaged.denoise,
+            115_666_667 + 3_306_946_688 + 134_217_728
+        );
+        let blender_floor = 1_048_576 * (3 * 2 + 4);
+        assert_eq!(
+            fully_engaged.decode,
+            160_000_000
+                + blender_floor
+                + div_ceil_i128(
+                    (11_581_954_048 - blender_floor as i128) * 393_216,
+                    1_048_576
+                ) as u64
+        );
+        assert_eq!(fully_engaged.decode, 4_509_786_368);
+        assert_eq!(overall, fully_engaged.decode);
+
+        // Resident from the staged anchor: priced, and strictly above staged in every phase.
+        let resident = z_image_at(&at(1024, 1024, RequestRegime::resident()));
+        assert!(resident.conditioning > ladder[0].conditioning);
+        assert!(resident.denoise > ladder[0].denoise);
+        assert!(resident.decode > ladder[0].decode);
+        // …by exactly the components staging keeps out of each phase.
+        let components = Z_IMAGE_Q4_COMPONENTS;
+        assert_eq!(
+            resident.conditioning - ladder[0].conditioning,
+            components.transformer + components.decoder
         );
         assert_eq!(
-            store()
-                .anchors
-                .iter()
-                .filter(|candidate| candidate.model_id == "krea_2_turbo"
-                    && candidate.backend == AnchorBackend::Candle)
-                .count(),
-            1,
-            "the retained candle corpus measures exactly one (model, tier, lane) cell"
+            resident.denoise - ladder[0].denoise,
+            components.conditioning + components.decoder
         );
-        // A video lookup must not reach an image anchor and vice versa.
-        assert!(store()
-            .anchor_for(
-                "krea_2_turbo",
-                AnchorBackend::Candle,
-                "q4",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+        assert_eq!(
+            resident.decode - ladder[0].decode,
+            components.conditioning + components.transformer
+        );
+    }
+
+    /// AC 2, candle bullet: a 512x512 request prices below the 1024x1024 anchor — there is no
+    /// lower clamp. (The MLX bullet is `the_packaged_mlx_anchors_are_outside_the_laws_domain`
+    /// and `a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order`.)
+    #[test]
+    fn a_smaller_request_prices_below_the_anchor_with_no_lower_clamp() {
+        let staged = RequestRegime::staged();
+        let small = z_image_at(&at(512, 512, staged));
+        let mid = z_image_at(&at(768, 768, staged));
+        let anchored = z_image_at(&at(1024, 1024, staged));
+        let large = z_image_at(&at(1536, 1536, staged));
+        assert!(small.peak_bytes() < anchored.peak_bytes());
+        assert!(small.denoise < anchored.denoise && small.decode < anchored.decode);
+        // No clamp: 512x512 sits strictly below 768x768, which sits strictly below the anchor.
+        assert!(small.denoise < mid.denoise && small.decode < mid.decode);
+        assert!(mid.denoise < anchored.denoise && mid.decode < anchored.decode);
+        assert!(anchored.peak_bytes() < large.peak_bytes());
+        // …and never below the components the composition holds resident.
+        assert!(small.conditioning >= Z_IMAGE_Q4_COMPONENTS.conditioning);
+        assert!(small.denoise >= Z_IMAGE_Q4_COMPONENTS.transformer);
+        assert!(small.decode >= Z_IMAGE_Q4_COMPONENTS.decoder);
+        // Area, not aspect.
+        assert_eq!(
+            z_image_at(&at(1344, 768, staged)),
+            z_image_at(&at(768, 1344, staged))
+        );
+    }
+
+    /// The packaged tier size (`estimatedSizeBytes` of the `variant == tier` download row) of one
+    /// builtin model — the resident set an eager, whole-model anchor of that tier claims.
+    fn packaged_tier_bytes(model_id: &str, tier: &str) -> u64 {
+        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| crate::jsonc::strip_jsonc_comments(contents))
+            .expect("the builtin models manifest is compiled in");
+        let manifest: serde_json::Value = serde_json::from_str(&raw).expect("manifest parses");
+        manifest["models"]
+            .as_array()
+            .expect("models")
+            .iter()
+            .find(|model| model["id"].as_str() == Some(model_id))
+            .unwrap_or_else(|| panic!("{model_id} is a builtin model"))["downloads"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{model_id} declares downloads"))
+            .iter()
+            .find(|download| download["variant"].as_str() == Some(tier))
+            .and_then(|download| download["estimatedSizeBytes"].as_u64())
+            .unwrap_or_else(|| panic!("{model_id} {tier} declares estimatedSizeBytes"))
+    }
+
+    /// AC 2, MLX bullet — what the packaged store can and cannot support. The story asked for
+    /// the packaged `qwen_image` MLX resident anchor to price rung 4 below rung 2; under the
+    /// domain guard (review of sc-22663: a residue is never clamped to zero) NO packaged MLX
+    /// image anchor is derivable with its tier's real component bytes, because every one of them
+    /// reports a conditioning-phase active peak that is a fraction of the eager resident set it
+    /// claims — the MLX active counters did not see the weights. The numbers, so the refusal is
+    /// legible: conditioning active peaks of 1.26 MB (flux2_dev q4 and q8), 43.9 KB (qwen_image
+    /// bf16/q4/q8) and 2.27 GB (z_image_turbo q4) against packaged resident sets of 33.6 GB,
+    /// 55.0 GB, 57.7 / 28.4 / 38.6 GB and 5.9 GB. The lane entry point therefore prices nothing
+    /// from the packaged store; the rung ordering itself is asserted on an in-domain anchor in
+    /// `a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order`.
+    ///
+    /// ALLOCATOR BASIS (second review pass, D5): the MLX fit gate admits on the per-phase
+    /// ALLOCATOR envelope, and one might expect that level — unlike the active counter — to
+    /// carry the wired weight set. It does not, in the conditioning phase: the allocator
+    /// conditioning levels are 1.26 MB (flux2_dev q4/q8), 44.1 KB (qwen_image bf16/q4/q8) and
+    /// 2.27 GB (z_image_turbo q4), so the allocator-basis residues are, in GB
+    /// (cond / denoise / decode): flux2_dev q4 −33.60 / +7.31 / +55.20; flux2_dev q8 −55.00 /
+    /// +10.26 / +58.15; qwen_image bf16 −57.73 / +5.83 / +5.47; qwen_image q4 −28.39 / +2.92 /
+    /// +1.65; qwen_image q8 −38.58 / +2.84 / +1.62; z_image_turbo q4 −3.64 / +6.27 / +8.40.
+    /// Denoise and decode come back positive on the allocator basis, conditioning never does, so
+    /// no packaged MLX anchor is in the law's domain on either basis and the law keeps
+    /// decomposing the active peak — a switch to the allocator basis would move nothing. Both
+    /// bases are asserted below so a re-captured anchor that reports its weights lands here.
+    ///
+    /// RE-CAPTURE (sc-22667, epic 22657 D3): the cause was the ADAPTER, not the counters — MLX
+    /// residency is request-scoped even under eager materialization, and the window opened on a
+    /// cold first request. `z_image_turbo` q4 was re-captured with the window opened above its
+    /// materialized resident set and is now IN domain
+    /// (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`); the other MLX image
+    /// anchors of that pre-campaign bundle keep the cold-request shape until their own re-capture
+    /// and stay in this census.
+    ///
+    /// CENSUS SCOPE (sc-22738): the cold-request rows are exactly the MLX image anchors still
+    /// cited from the pre-campaign bundle `docs/generated/memory-calibration-evidence.json`. The
+    /// sc-22738 campaign re-captured the MLX image catalog under the fixed adapter into
+    /// `docs/calibration/sc-22738/`, and those rows are NOT this census: some report the resident
+    /// set in their conditioning level (klein q4: 15.1 GB against a 21.7 GB set) and are in the
+    /// law's domain, others (sd3_5, mage_flow, chroma) legitimately hold their text encoder
+    /// staged below it. Selecting "every MLX image anchor but z_image_turbo" was a frozen census
+    /// of the five bundle rows and red the moment a re-captured anchor landed. The bundle rows
+    /// that a later campaign re-captures leave this census with their file, and an empty census
+    /// is the test retired, not a failure.
+    #[test]
+    fn the_packaged_mlx_anchors_are_outside_the_laws_domain() {
+        const PRE_CAMPAIGN_BUNDLE: &str = "docs/generated/memory-calibration-evidence.json";
+        let packaged: Vec<&MemoryAnchor> = store()
+            .anchors
+            .iter()
+            .filter(|anchor| {
+                anchor.backend == AnchorBackend::Mlx
+                    && anchor.geometry.frames == 1
+                    && anchor.model_id != "z_image_turbo"
+                    && anchor.source.path == PRE_CAMPAIGN_BUNDLE
+            })
+            .collect();
+        if packaged.is_empty() {
+            return;
+        }
+        for anchor in packaged {
+            assert!(
+                !anchor.measured_regime.staged,
+                "{}: eager resident",
+                anchor.id
+            );
+            let resident_set = packaged_tier_bytes(&anchor.model_id, &anchor.tier);
+            // The split does not matter to a resident-regime decomposition (every phase is
+            // decomposed against the sum); the sum is the manifest's.
+            let components = ComponentBytes {
+                conditioning: resident_set,
+                transformer: 0,
+                decoder: 0,
+            };
+            assert!(
+                anchor.phase_active_peak_bytes.conditioning < resident_set / 2,
+                "{}: conditioning active {} is not below the {resident_set} resident set it claims",
+                anchor.id,
+                anchor.phase_active_peak_bytes.conditioning
+            );
+            // …and so is the ALLOCATOR level of the same phase (D5): every packaged row carries
+            // a per-phase allocator decomposition, and its conditioning level is a fraction of
+            // the resident set too, while its denoise and decode levels sit above it.
+            let allocators = anchor
+                .phase_allocator_envelope_bytes
+                .unwrap_or_else(|| panic!("{}: carries a per-phase allocator envelope", anchor.id));
+            assert!(
+                allocators.conditioning < resident_set / 2,
+                "{}: conditioning allocator {} is not below the {resident_set} resident set",
+                anchor.id,
+                allocators.conditioning
+            );
+            assert!(
+                allocators.denoise > resident_set && allocators.decode > resident_set,
+                "{}: the denoise/decode allocator levels {}/{} must exceed the resident set — if \
+                 this fails the census in the doc comment above has moved",
+                anchor.id,
+                allocators.denoise,
+                allocators.decode
+            );
+            // A resident request with every bounded rung engaged (so neither the regime guard
+            // nor a staged phase priced at a zero component refuses) is refused by the domain
+            // guard alone…
+            let request = at(
+                anchor.geometry.width,
+                anchor.geometry.height,
+                RequestRegime {
+                    staged: false,
+                    ..FULLY_ENGAGED
+                },
+            );
+            assert!(
+                anchor
+                    .derive_phase_peaks(&request, components, ArchitectureFacts::default())
+                    .is_none(),
+                "{}: an out-of-domain anchor must refuse, not clamp",
+                anchor.id
+            );
+            // …and lifting every phase peak to at least the resident set is exactly what makes
+            // it derivable again, so the refusal is the domain guard and nothing else. (The
+            // conditioning phase is below on every packaged row; flux2_dev q4 and qwen_image
+            // bf16 report a denoise active peak below their resident set as well.)
+            let mut lifted = anchor.clone();
+            let peaks = &mut lifted.phase_active_peak_bytes;
+            peaks.conditioning = peaks.conditioning.max(resident_set);
+            peaks.denoise = peaks.denoise.max(resident_set);
+            peaks.decode = peaks.decode.max(resident_set);
+            assert!(
+                lifted
+                    .derive_phase_peaks(&request, components, ArchitectureFacts::default())
+                    .is_some(),
+                "{}: with every phase peak at or above the resident set the anchor derives",
+                anchor.id
+            );
+        }
+    }
+
+    #[test]
+    fn cached_conditioning_preserves_other_resident_mlx_phase_residues() {
+        let mut anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .unwrap()
+            .clone();
+        let components = ComponentBytes {
+            conditioning: 1,
+            transformer: 1,
+            decoder: 1,
+        };
+        let request = AnchorMlxImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+        };
+        let complete = anchor.derive_mlx_image_activation_residues(request, components);
+        assert!(complete.iter().all(Option::is_some));
+        anchor.phase_active_peak_bytes.conditioning = 0;
+        let partial = anchor.derive_mlx_image_activation_residues(request, components);
+        assert_eq!(partial, [None, complete[1], complete[2]]);
+        assert!(
+            anchor
+                .derive_mlx_image_phase_peaks(request, components)
+                .is_none(),
+            "whole-pipeline authority remains strict"
+        );
+        anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+        anchor.measured_regime.decode_tiled = false;
+        anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            anchor.derive_mlx_image_activation_residues(request, components),
+            [None; 3]
+        );
+    }
+
+    /// sc-22667 (epic 22657 D3, E6 "one MLX tier"): the packaged `z_image_turbo` q4 MLX anchor was
+    /// re-captured on the nax runner with the adapter's phase window opened ABOVE its
+    /// materialized resident set (`memory-mlx-adapter`, `open_resident_phase_window`), so every
+    /// phase level now includes the 5.9 GB the tier holds resident and the law decomposes it with
+    /// the tier's real component split: the resident derivation reproduces the anchor, the staged
+    /// rung prices below it, and the fully engaged rung 4 prices below the staged rung 2.
+    ///
+    /// The components are the T2I RESIDENT set read off the q4 snapshot's safetensors headers
+    /// (`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`): text encoder, transformer, and the VAE DECODER —
+    /// a text-to-image render never materializes the 67,041,088-byte VAE encoder, and the
+    /// record's post-request live set (5,833,334,792 bytes, `preRungActiveAfterClear`) sits
+    /// 7.1 MB above that sum and 60 MB below the whole-VAE sum.
+    ///
+    /// MUTATION: point the store at the cold-request record this replaced (conditioning active
+    /// peak 2,266,383,344 against the 5.83 GB resident set — the figures the census above still
+    /// asserts for the other five MLX anchors) and every `expect` here fails: the domain guard
+    /// refuses a conditioning residue below zero.
+    #[test]
+    fn the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        assert!(!anchor.measured_regime.staged);
+        assert_eq!(anchor.load_shape, AnchorLoadShape::EagerMaterialization);
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident_set = components.total();
+        let peaks = anchor.phase_active_peak_bytes;
+        // The window opened above the resident set: every phase level carries the weights.
+        for (phase, peak) in [
+            ("conditioning", peaks.conditioning),
+            ("denoise", peaks.denoise),
+            ("decode", peaks.decode),
+        ] {
+            assert!(
+                peak >= resident_set,
+                "{phase}: the re-captured level {peak} must include the {resident_set} resident set"
+            );
+        }
+        let facts = Z_IMAGE_FACTS;
+        let derive = |regime| anchor.derive_phase_peaks(&at(768, 768, regime), components, facts);
+        let resident = derive(RequestRegime::resident())
+            .expect("the re-captured MLX anchor is inside the law's domain");
+        assert_eq!(resident.conditioning, peaks.conditioning);
+        assert_eq!(resident.denoise, peaks.denoise);
+        assert_eq!(resident.decode, peaks.decode);
+        let rung_2 = derive(RequestRegime::staged()).expect("the staged rung prices");
+        let rung_4 = derive(FULLY_ENGAGED).expect("the fully engaged rung prices");
+        assert!(rung_2.peak_bytes() <= resident.peak_bytes());
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "rung 4 {rung_4:?} must price below rung 2 {rung_2:?}"
+        );
+        assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
+        // The physical-memory gate must use active bytes, not add reclaimable cache.
+        let lane = anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                components,
+            )
+            .expect("the MLX lane entry point prices the re-captured anchor");
+        assert_eq!(lane.conditioning, resident.conditioning);
+        assert_eq!(lane.denoise, resident.denoise);
+        assert_eq!(lane.decode, resident.decode);
+        let mut inflated_cache = anchor.clone();
+        inflated_cache.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+            conditioning: u64::MAX,
+            denoise: u64::MAX,
+            decode: u64::MAX,
+        });
+        assert_eq!(
+            inflated_cache.derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768
+                },
+                components,
+            ),
+            Some(lane),
+            "elastic cache is not mandatory residency"
+        );
+    }
+
+    /// The Z-Image-Turbo q4 MLX resident set a text-to-image render holds, as tensor bytes summed
+    /// off the packaged snapshot's safetensors headers (`SceneWorks/z-image-turbo-mlx@bb2bc989`,
+    /// `q4/`): every `text_encoder` tensor, every `transformer` tensor, and the `decoder.*`
+    /// tensors of `vae/model.safetensors` (97,583,622 of its 164,624,710 bytes; the other
+    /// 67,041,088 are the encoder, which a T2I render never materializes).
+    const Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS: ComponentBytes = ComponentBytes {
+        conditioning: 2_262_920_192,
+        transformer: 3_465_730_304,
+        decoder: 97_583_622,
+    };
+
+    /// THE GAP IS CLOSED (sc-22667, inference c6d6a4db) — what remains here is a DOMAIN GUARD,
+    /// not a production residue.
+    ///
+    /// It used to read: the worker prices the anchor with the provider's asset facts
+    /// (`video_admission::anchor_component_bytes`), whose `decoder_bytes` was the WHOLE `vae/`
+    /// directory — encoder included — so the resident set it subtracted (5,893,275,206) exceeded
+    /// the re-captured conditioning level (5,834,701,816) by 58.6 MB, the law refused, and the
+    /// production MLX cell stayed on its estimate floor. The pinned provider now splits that
+    /// directory by key prefix: `decoder_bytes` is the render-resident `decoder.*` half
+    /// (97,583,622 B, exactly [`Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS`]) and the `encoder.*` half a
+    /// `Reference` request opts into is a typed `MemoryComponentKind::ReferenceEncoder` auxiliary
+    /// carried in `overlay_bytes`. `anchor_component_bytes` hands the law the three BASE legs, and
+    /// `base_bytes` is exactly `text_encoder + dit + vae` with the auxiliary charged on top by the
+    /// contract's own `predicted_peak_from_base` — so production now hands this anchor the
+    /// decoder-only split and it is IN DOMAIN. `the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`
+    /// above walks that path; the worker's
+    /// `the_packaged_z_image_mlx_cell_prices_rung_four_below_rung_two_from_the_contracts_base_legs`
+    /// grades the same cell through the production seam.
+    ///
+    /// What survives is the guard: an OVERSTATED component — the whole directory, which is what a
+    /// provider that folded the encoder back into `decoder_bytes` would state — must still be
+    /// REFUSED rather than clamped to zero, because the law will not subtract a resident set the
+    /// measurement contradicts. If this test starts deriving, the domain guard has been weakened;
+    /// if the decoder-only split stops deriving, the pin regressed.
+    #[test]
+    fn an_overstated_whole_vae_component_is_still_refused_by_the_anchor_domain_guard() {
+        let anchor = store()
+            .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+            .expect("the z_image_turbo q4 MLX anchor is packaged");
+        let whole_vae = ComponentBytes {
+            decoder: 164_624_710,
+            ..Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS
+        };
+        assert!(anchor.phase_active_peak_bytes.conditioning < whole_vae.total());
+        assert!(anchor
+            .derive_phase_peaks(
+                &at(768, 768, RequestRegime::resident()),
+                whole_vae,
+                Z_IMAGE_FACTS
             )
             .is_none());
-        assert!(store()
-            .image_anchor_for("ltx_2_5", AnchorBackend::Mlx, "bf16")
+        assert!(anchor
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 768,
+                    height: 768,
+                },
+                whole_vae,
+            )
             .is_none());
     }
 
-    /// AC 1 (corpus half): the candle derivation brackets every retained candle measurement whose
-    /// composition contains the anchor's, and stays TIGHT on the anchor's own composition.
+    /// A synthetic eager, resident, unbounded MLX anchor at 1024x1024 whose counters saw its
+    /// weights: every phase peak is the whole component set plus a stated activation residue,
+    /// and the allocator level sits a stated envelope above each. Identity fields are borrowed
+    /// from the packaged flux2_dev q8 row (the lane entry point checks lane, load shape and
+    /// regime, not the id); the peaks are NOT the record's.
+    fn in_domain_resident_mlx_anchor(components: ComponentBytes) -> MemoryAnchor {
+        let residues = AnchorPhaseBytes {
+            conditioning: 500_000_000,
+            denoise: 6_000_000_000,
+            decode: 12_000_000_000,
+        };
+        let total = components.total();
+        let mut anchor = flux2_mlx_anchor("q8").clone();
+        anchor.id = "synthetic:mlx:resident:in-domain".to_owned();
+        anchor.underived_reason = None;
+        anchor.geometry = AnchorGeometry {
+            width: 1024,
+            height: 1024,
+            frames: 1,
+            fps: None,
+        };
+        anchor.phase_active_peak_bytes = AnchorPhaseBytes {
+            conditioning: total + residues.conditioning,
+            denoise: total + residues.denoise,
+            decode: total + residues.decode,
+        };
+        anchor.phase_allocator_envelope_bytes = Some(AnchorPhaseBytes {
+            conditioning: total + residues.conditioning + 100_000_000,
+            denoise: total + residues.denoise + 1_000_000_000,
+            decode: total + residues.decode + 2_000_000_000,
+        });
+        anchor.overall_allocator_envelope_bytes = total + residues.decode + 2_000_000_000;
+        anchor
+    }
+
+    /// The rung ordering AC 2 asked of an MLX resident anchor, on an anchor inside the law's
+    /// domain (the packaged ones are not — see the test above): the windowed rung prices below
+    /// the staged rung, with every residue it scales asserted positive so the ordering is not
+    /// vacuous, and the resident derivation at the anchor geometry reproduces the anchor.
+    #[test]
+    fn a_resident_mlx_anchor_whose_counters_saw_its_weights_prices_the_ladder_in_order() {
+        // Qwen-Image bf16 component bytes: the tier's packaged download split at the
+        // Qwen2.5-VL-7B text encoder's bf16 size (16.6 GB) and the VAE's (~254 MB).
+        let total = packaged_tier_bytes("qwen_image", "bf16");
+        let components = ComponentBytes {
+            conditioning: 16_600_000_000,
+            transformer: total - 16_600_000_000 - 253_806_592,
+            decoder: 253_806_592,
+        };
+        // Qwen-Image: 24 heads of 128, 60 blocks, patch 2 over the 16-channel x8 VAE, bf16.
+        let facts = ArchitectureFacts {
+            attention_heads: Some(24),
+            transformer_blocks: Some(60),
+            ..Z_IMAGE_FACTS
+        };
+        let anchor = in_domain_resident_mlx_anchor(components);
+        assert!(!anchor.measured_regime.staged);
+        assert_eq!(anchor.load_shape, AnchorLoadShape::EagerMaterialization);
+        for (phase, peak) in [
+            ("conditioning", anchor.phase_active_peak_bytes.conditioning),
+            ("denoise", anchor.phase_active_peak_bytes.denoise),
+            ("decode", anchor.phase_active_peak_bytes.decode),
+        ] {
+            assert!(
+                peak > components.total(),
+                "{phase}: the residue the law scales must be positive, peak {peak} against {}",
+                components.total()
+            );
+        }
+        let rung_2 = anchor
+            .derive_phase_peaks(&at(1024, 1024, RequestRegime::staged()), components, facts)
+            .expect("the resident MLX anchor prices the staged rung");
+        let rung_4 = anchor
+            .derive_phase_peaks(&at(1024, 1024, FULLY_ENGAGED), components, facts)
+            .expect("the resident MLX anchor prices the windowed rung");
+        assert!(
+            rung_4.peak_bytes() < rung_2.peak_bytes(),
+            "windowed {rung_4:?} must price below staged {rung_2:?}"
+        );
+        assert!(rung_4.denoise < rung_2.denoise && rung_4.decode < rung_2.decode);
+        // The resident derivation at the anchor geometry IS the anchor: every component re-added
+        // into every phase plus the positive residue, byte for byte.
+        let resident = anchor
+            .derive_phase_peaks(
+                &at(1024, 1024, RequestRegime::resident()),
+                components,
+                facts,
+            )
+            .expect("resident");
+        assert_eq!(
+            resident.conditioning,
+            anchor.phase_active_peak_bytes.conditioning
+        );
+        assert_eq!(resident.denoise, anchor.phase_active_peak_bytes.denoise);
+        assert_eq!(resident.decode, anchor.phase_active_peak_bytes.decode);
+        assert!(rung_2.peak_bytes() <= resident.peak_bytes());
+        // And the same anchor with one phase pushed below its resident set is refused whole.
+        let mut below = anchor.clone();
+        below.phase_active_peak_bytes.denoise = components.total() - 1;
+        assert!(below
+            .derive_phase_peaks(&at(1024, 1024, FULLY_ENGAGED), components, facts)
+            .is_none());
+    }
+
+    /// sc-22665 (E4): the activation half of the law is exactly the whole estimate minus the
+    /// components the request's regime holds resident in that phase — nothing is re-added, and a
+    /// request the law refuses hands out no residue either. Asserted on the same in-domain
+    /// resident MLX anchor the rung-ordering test uses, at three regimes, so the residue's own
+    /// rung ordering (chunk shrinks denoise, tile shrinks decode) is visible without the
+    /// components' rung ordering masking it.
+    #[test]
+    fn the_activation_residues_are_the_derived_peaks_minus_the_regimes_resident_components() {
+        let total = packaged_tier_bytes("qwen_image", "bf16");
+        let components = ComponentBytes {
+            conditioning: 16_600_000_000,
+            transformer: total - 16_600_000_000 - 253_806_592,
+            decoder: 253_806_592,
+        };
+        let facts = ArchitectureFacts {
+            attention_heads: Some(24),
+            transformer_blocks: Some(60),
+            ..Z_IMAGE_FACTS
+        };
+        let anchor = in_domain_resident_mlx_anchor(components);
+        let chunked = RequestRegime {
+            staged: true,
+            attention_chunk_scores: Some(64 * 1024 * 1024),
+            ..RequestRegime::staged()
+        };
+        let residues = |regime| {
+            let request = at(1024, 1024, regime);
+            let peaks = anchor
+                .derive_phase_peaks(&request, components, facts)
+                .expect("the in-domain anchor prices this regime");
+            let residues = anchor
+                .derive_phase_activation_residues(&request, components, facts)
+                .expect("…and hands out the activation half of the same estimate");
+            // The difference is a COMPONENT set, never an activation byte: every phase's
+            // peak-minus-residue is a sum of the three component figures.
+            for (phase, peak, residue) in [
+                ("conditioning", peaks.conditioning, residues.conditioning),
+                ("denoise", peaks.denoise, residues.denoise),
+                ("decode", peaks.decode, residues.decode),
+            ] {
+                let resident = peak
+                    .checked_sub(residue)
+                    .unwrap_or_else(|| panic!("{phase}: the residue cannot exceed the peak"));
+                assert!(
+                    resident <= components.total(),
+                    "{phase}: {resident} resident bytes exceed the whole component set"
+                );
+            }
+            residues
+        };
+        let rung_2 = residues(RequestRegime::staged());
+        let rung_3 = residues(chunked);
+        let rung_4 = residues(FULLY_ENGAGED);
+        assert_eq!(
+            rung_2.conditioning, rung_4.conditioning,
+            "no rung below bounds the conditioning phase"
+        );
+        assert!(
+            rung_3.denoise < rung_2.denoise,
+            "the attention chunk must shrink the denoise residue: {rung_3:?} vs {rung_2:?}"
+        );
+        assert_eq!(rung_3.decode, rung_2.decode, "rung 3 does not tile decode");
+        assert!(
+            rung_4.decode < rung_3.decode,
+            "the decode tile must shrink the decode residue: {rung_4:?} vs {rung_3:?}"
+        );
+        assert_eq!(rung_4.denoise, rung_3.denoise);
+        // A refused request hands out no residue either.
+        let mut below = anchor.clone();
+        below.phase_active_peak_bytes.denoise = components.total() - 1;
+        assert!(below
+            .derive_phase_activation_residues(&at(1024, 1024, FULLY_ENGAGED), components, facts)
+            .is_none());
+    }
+
+    /// sc-22667 (epic 22657 feature-end round): the window share both image lanes state is ONE
+    /// function. `transformer x min(window, blocks) / blocks` rounded up when both are known; the
+    /// WHOLE transformer when the block count is unknown (the default facts at this pin) or no
+    /// window is engaged — never zero.
+    ///
+    /// MUTATION: returning `0` (or `transformer.saturating_sub(..)`) for the unknown-blocks arm
+    /// reds the second assertion; dropping the `.min(blocks)` clamp reds the fourth; and the law
+    /// itself is graded through this helper by `z_image_q4_rungs_price_from_the_staged_anchor_*`,
+    /// so a divergence between the two reds there.
+    #[test]
+    fn the_windowed_transformer_share_is_the_laws_and_errs_large_without_a_block_count() {
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(1), Some(30)),
+            115_666_667,
+            "one of thirty blocks, rounded up"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(1), None),
+            3_470_000_000,
+            "a window with no block count keeps the whole transformer resident"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, None, Some(30)),
+            3_470_000_000,
+            "no window engaged: whole transformer"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(64), Some(30)),
+            3_470_000_000,
+            "a window wider than the model is the whole model, never more"
+        );
+        assert_eq!(
+            windowed_transformer_bytes(3_470_000_000, Some(0), Some(30)),
+            3_470_000_000
+        );
+    }
+
+    /// sc-22738: the shared floor weights arithmetic, one assertion per branch the worker's
+    /// `mlx_fit_gate::floor_weights_bytes` used to carry privately. Facts: conditioning 26,
+    /// transformer 20 (of which 6 evictable), decoder 4, base 50, one unbounded auxiliary of 3.
+    #[test]
+    fn the_shared_floor_weights_term_prices_every_composition_the_worker_prices() {
+        let facts = FloorWeightsFacts {
+            conditioning_bytes: 26,
+            base_bytes: 50,
+            transformer_bytes: 20,
+            intra_transformer_evicted_bytes: 6,
+            auxiliary_resident_bytes: 3,
+        };
+        let composition = |staged: bool, bounded_transformer: bool, resident_window_bytes: u64| {
+            FloorWeightsComposition {
+                staged,
+                bounded_transformer,
+                resident_window_bytes,
+            }
+        };
+        // Resident: conditioning + heavy (24) + auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(false, false, 0)), 53);
+        // Staged: max(conditioning 26, heavy 24 − 6 evicted clamped at the transformer 20 = 20)
+        // = 26, plus the auxiliary.
+        assert_eq!(floor_weights_bytes(facts, composition(true, false, 0)), 29);
+        // Staged with a drop smaller than the clamp room: heavy 24 − 2 = 22 ≥ 20.
+        let small_drop = FloorWeightsFacts {
+            intra_transformer_evicted_bytes: 2,
+            ..facts
+        };
+        assert_eq!(
+            floor_weights_bytes(small_drop, composition(true, false, 0)),
+            29
+        );
+        let tall_heavy = FloorWeightsFacts {
+            base_bytes: 60,
+            ..facts
+        };
+        // heavy 34 − 6 = 28 > conditioning 26.
+        assert_eq!(
+            floor_weights_bytes(tall_heavy, composition(true, false, 0)),
+            31
+        );
+        // Rung 4 alone: the transformer leaves (24 − 20 = 4), the window comes back clamped at the
+        // load-exact transformer; the eviction is NOT applied on top.
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 0)), 33);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 5)), 38);
+        assert_eq!(floor_weights_bytes(facts, composition(false, true, 99)), 53);
+        // Staged + rung 4: exclusive — the rung-4 branch, then the staged max. heavy = 4 + 5 = 9;
+        // max(26, 9) = 26; + 3.
+        assert_eq!(floor_weights_bytes(facts, composition(true, true, 5)), 29);
+        // The weights-free contract prices zero everywhere.
+        assert_eq!(
+            floor_weights_bytes(FloorWeightsFacts::default(), composition(true, true, 7)),
+            0
+        );
+    }
+
+    /// sc-22738: the byte forms of the two shared allowances are the worker's own conversion of
+    /// the GiB declarations, and nothing else — the adapter's admission budget and floor read
+    /// these, so a drift here is a drift in what ships.
+    #[test]
+    fn the_shared_allowances_convert_to_the_bytes_the_worker_presents() {
+        assert_eq!(
+            gib_to_bytes(LEGACY_UNIFIED_FALLBACK_RESERVE_GB),
+            2_147_483_648
+        );
+        assert_eq!(gib_to_bytes(MLX_GENERIC_HEADROOM_GB), 19_327_352_832);
+        assert_eq!(gib_to_bytes(0.0), 0);
+        assert_eq!(gib_to_bytes(-1.0), 0);
+        assert_eq!(gib_to_bytes(1.5), 1_610_612_736);
+    }
+
+    /// The Bernini stop, as a fixture: `bernini:bf16:mlx` text_to_video at 848x480x49, stopped at
+    /// 97,147,294,328 bytes of physical footprint on a 128 GiB host (sc-22738, measured 2026-09-06).
+    fn bernini_bound() -> ExceededBound {
+        ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
+            model_id: "bernini".to_owned(),
+            model_family: "bernini".to_owned(),
+            route: "bernini".to_owned(),
+            provider: "bernini".to_owned(),
+            backend: AnchorBackend::Mlx,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video".to_owned(),
+            overlay: None,
+            reference_count: 0,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 49,
+                fps: None,
+            },
+            observed_footprint_bytes: 97_147_294_328,
+            ceiling_bytes: 94_822_600_832,
+            host_memory_bytes: 137_438_953_472,
+            reason: "physical_footprint_at_or_above_94822600832:observed_97147294328".to_owned(),
+            source: AnchorSource {
+                path: "docs/calibration/sc-22738/bernini-bf16-mlx-exceeded-evidence.json"
+                    .to_owned(),
+                sha256: "0".repeat(64),
+                record_id: "exc-0".to_owned(),
+                calibration_fingerprint: "fp".to_owned(),
+                loader_closure_digest: "b".repeat(64),
+                currency_attestation: None,
+            },
+        }
+    }
+
+    fn bound_store(bounds: Vec<ExceededBound>) -> MemoryAnchorStore {
+        MemoryAnchorStore {
+            schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: Vec::new(),
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: bounds,
+        }
+    }
+
+    fn bernini_query(width: u32, height: u32, frames: u32) -> ExceededBoundQuery<'static> {
+        ExceededBoundQuery {
+            model_id: "bernini",
+            model_family: Some("bernini"),
+            route: Some("bernini"),
+            provider: "bernini",
+            backend: AnchorBackend::Mlx,
+            tier: "bf16",
+            transformer_variant: None,
+            decoder: None,
+            mode: "text_to_video",
+            overlay: None,
+            reference_count: 0,
+            width,
+            height,
+            frames,
+        }
+    }
+
+    /// sc-22738: a measured lower bound binds at and above its own geometry, on the identity it was
+    /// measured on — and regardless of whether its currency key still matches the packaged loader
+    /// closures (see `a_bound_whose_loader_closure_moved_still_binds`).
+    #[test]
+    fn a_measured_lower_bound_binds_at_and_above_its_geometry_on_its_own_identity() {
+        let store = bound_store(vec![bernini_bound()]);
+        let bind = |query| {
+            store
+                .binding_exceeded_bound(query)
+                .map(|bound| bound.observed_footprint_bytes)
+        };
+        // The measured point itself, and every request at or above it on all three axes.
+        assert_eq!(bind(bernini_query(848, 480, 49)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(848, 480, 97)), Some(97_147_294_328));
+        assert_eq!(bind(bernini_query(1280, 720, 49)), Some(97_147_294_328));
+        // SMALLER on any single axis is outside the claim: the inequality was measured at one
+        // geometry and monotonicity only runs upwards.
+        assert_eq!(bind(bernini_query(848, 480, 25)), None);
+        assert_eq!(bind(bernini_query(640, 480, 49)), None);
+        assert_eq!(bind(bernini_query(848, 256, 49)), None);
+        // Every identity axis is a conjunct — a foreign tier, mode, provider, lane, overlay or
+        // reference surface must not borrow this cell's measurement.
+        for foreign in [
+            ExceededBoundQuery {
+                tier: "q4",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                mode: "image_to_video",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                provider: "bernini_image",
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                backend: AnchorBackend::Candle,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                overlay: Some("control"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                reference_count: 1,
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                model_family: Some("wan"),
+                ..bernini_query(848, 480, 49)
+            },
+            ExceededBoundQuery {
+                route: Some("wan_2_2_t2v_a14b"),
+                ..bernini_query(848, 480, 49)
+            },
+        ] {
+            assert_eq!(bind(foreign), None, "a foreign identity borrowed the bound");
+        }
+        // A caller that cannot state the catalog axes still binds: both are functions of axes
+        // already graded, and the capture-side mirror has no catalog to resolve them from.
+        assert_eq!(
+            bind(ExceededBoundQuery {
+                model_family: None,
+                route: None,
+                ..bernini_query(848, 480, 49)
+            }),
+            Some(97_147_294_328),
+        );
+    }
+
+    /// sc-22738 (Michael's standing rule): the runtime ALWAYS behaves as if the measurement were
+    /// valid. A bound whose `loaderClosureDigest` matches nothing the packaged closures declare —
+    /// or that is stamped at a digest the ledger has since moved past — binds exactly as a current
+    /// one. The lookup signature cannot even take the closures, so the only way to demote here is to
+    /// re-add the parameter. MUTATION: restoring `bound.is_current(closures)` as a conjunct (or
+    /// `let closures = closures?;`) turns every assertion below red.
+    #[test]
+    fn a_bound_whose_loader_closure_moved_still_binds() {
+        let store = bound_store(vec![bernini_bound()]);
+        // The store's bound is stamped at "b"*64; the packaged ledger declares something else for
+        // bernini:mlx (or nothing at all — the lookup does not care which).
+        let declared = load_anchor_loader_closures(PACKAGED_ANCHOR_LOADER_CLOSURES)
+            .expect("packaged closures parse")
+            .digest_for("bernini", AnchorBackend::Mlx)
+            .map(str::to_owned);
+        assert_ne!(
+            declared.as_deref(),
+            Some(
+                store.exceeded_bounds[0]
+                    .source
+                    .loader_closure_digest
+                    .as_str()
+            ),
+            "the fixture must be stale against the ledger for this test to prove anything"
+        );
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // And a bound at a digest no ledger has ever declared binds too: currency is not a term.
+        let mut undeclared = bernini_bound();
+        undeclared.source.loader_closure_digest = "f".repeat(64);
+        let store = bound_store(vec![undeclared]);
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(1280, 720, 97))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+    }
+
+    /// sc-22738: several bounds can cover one request once a cell has been stopped more than once.
+    /// The STRONGEST true inequality is the useful one.
+    #[test]
+    fn the_largest_covering_bound_wins() {
+        let smaller = ExceededBound {
+            id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-small".to_owned(),
+            observed_footprint_bytes: 80_000_000_000,
+            geometry: AnchorGeometry {
+                width: 848,
+                height: 480,
+                frames: 25,
+                fps: None,
+            },
+            ..bernini_bound()
+        };
+        let store = bound_store(vec![smaller, bernini_bound()]);
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 49))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(97_147_294_328),
+        );
+        // At a geometry only the smaller bound covers, the smaller one is the whole claim.
+        assert_eq!(
+            store
+                .binding_exceeded_bound(bernini_query(848, 480, 25))
+                .map(|bound| bound.observed_footprint_bytes),
+            Some(80_000_000_000),
+        );
+    }
+
+    /// sc-22738: the requirement a host is graded against is the measured footprint PLUS the lane's
+    /// activation allowance — never the bare reading, which was taken mid-climb.
+    #[test]
+    fn the_requirement_is_the_measured_footprint_plus_the_lanes_headroom() {
+        let bound = bernini_bound();
+        assert_eq!(bound.required_bytes(0), 97_147_294_328);
+        assert_eq!(
+            bound.required_bytes(gib_to_bytes(16.0)),
+            97_147_294_328 + 17_179_869_184
+        );
+        assert_eq!(
+            bound.required_bytes(u64::MAX),
+            u64::MAX,
+            "the sum saturates rather than wrapping into a requirement of nearly zero",
+        );
+    }
+
+    /// sc-22738: THE predicate, and the disjunct that makes the Bernini fix bite.
+    ///
+    /// A host no larger than the one the render failed on is refused outright. Grading such a host
+    /// on footprint-versus-budget alone would re-admit it — 90.5 GiB plus the lane's 16 GiB
+    /// allowance is 106.5 GiB, and an idle 128 GiB Mac appears to have that — which is exactly the
+    /// re-admission this story exists to stop.
+    #[test]
+    fn a_host_no_larger_than_the_one_that_failed_is_refused_outright() {
+        let bound = bernini_bound();
+        let headroom = gib_to_bytes(16.0);
+        let host = 137_438_953_472_u64;
+        assert!(
+            bound.required_bytes(headroom) < host,
+            "the requirement alone does NOT exceed an idle 128 GiB host; the host-size disjunct \
+             is what refuses it",
+        );
+        assert!(
+            bound.refuses_host(host, host, headroom),
+            "the same 128 GiB machine that could not finish this render must not be given it again",
+        );
+        assert!(
+            bound.refuses_host(host - 1, u64::MAX, headroom),
+            "a SMALLER host is refused even with an impossible budget",
+        );
+        // A larger host is graded on what it can actually offer.
+        let bigger = host * 4;
+        assert!(
+            !bound.refuses_host(bigger, bigger, headroom),
+            "a machine four times the size may still run it",
+        );
+        assert!(
+            bound.refuses_host(bigger, bound.required_bytes(headroom) - 1, headroom),
+            "a larger but busy host that cannot offer the requirement is refused",
+        );
+        assert!(
+            !bound.refuses_host(bigger, bound.required_bytes(headroom), headroom),
+            "exact equality fits",
+        );
+    }
+
+    /// sc-22738: the store refuses a bound that is not a hard stop's reading — one under its own
+    /// ceiling, one above the whole capture host, or one that states no reason.
+    #[test]
+    fn a_bound_that_is_not_a_hard_stops_reading_fails_the_load() {
+        let refuse = |bound: ExceededBound, fragment: &str| {
+            let error = validate_exceeded_bounds(&bound_store(vec![bound]))
+                .expect_err("the store accepted a bound that is not a hard stop's reading");
+            assert!(error.contains(fragment), "unexpected error: {error}");
+        };
+        refuse(
+            ExceededBound {
+                observed_footprint_bytes: 94_822_600_831,
+                ..bernini_bound()
+            },
+            "under its own hard-stop ceiling",
+        );
+        refuse(
+            ExceededBound {
+                host_memory_bytes: 97_147_294_327,
+                ..bernini_bound()
+            },
+            "larger than the whole capture host",
+        );
+        refuse(
+            ExceededBound {
+                reason: "  ".to_owned(),
+                ..bernini_bound()
+            },
+            "states no hard-stop reason",
+        );
+        refuse(
+            ExceededBound {
+                geometry: AnchorGeometry {
+                    frames: 0,
+                    ..bernini_bound().geometry
+                },
+                ..bernini_bound()
+            },
+            "degenerate geometry",
+        );
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    loader_closure_digest: "not-a-digest".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "is not a sha256",
+        );
+        // The corpus handshake, both halves: a bound may only cite a compiled-in retained-evidence
+        // file, and it must hash to what the row recorded — the store may not drift from the
+        // evidence a refusal is drawn from.
+        refuse(
+            ExceededBound {
+                source: AnchorSource {
+                    path: "docs/calibration/sc-22738/not-compiled-in.json".to_owned(),
+                    ..bernini_bound().source
+                },
+                ..bernini_bound()
+            },
+            "not a compiled retained-evidence file",
+        );
+        refuse(bernini_bound(), "source digest mismatch");
+    }
+
+    /// sc-22738: the packaged Bernini bound is bound BYTE-EXACTLY to the corpus it cites — this is
+    /// the row a production refusal is drawn from, so a store that drifted from its evidence would
+    /// refuse renders on a number nothing measured.
+    #[test]
+    fn the_packaged_bernini_bound_agrees_with_its_retained_evidence() {
+        let store = packaged_memory_anchors().expect("the packaged anchor store must load");
+        let bound = store
+            .exceeded_bounds
+            .iter()
+            .find(|bound| bound.model_id == "bernini" && bound.tier == "bf16")
+            .expect("the bernini:bf16:mlx footprint hard stop is retained");
+        assert_eq!(bound.backend, AnchorBackend::Mlx);
+        assert_eq!(bound.mode, "text_to_video");
+        assert_eq!(bound.geometry.frames, 49);
+        assert_eq!(bound.observed_footprint_bytes, 97_147_294_328);
+        assert_eq!(bound.host_memory_bytes, 137_438_953_472);
+        // `validate_exceeded_bounds` re-derived every one of those figures from the compiled-in
+        // bundle at load; asserting the load succeeded plus the row's own content is the whole of
+        // the handshake, stated without a second copy of the comparison.
+        assert!(validate_exceeded_bounds(store).is_ok());
+    }
+
+    /// AC 3: `ArchitectureFacts::default()` leaves every residue unscaled, so the estimate is
+    /// never smaller than with full facts — for the whole set and for each fact dropped alone.
+    #[test]
+    fn missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate() {
+        let request = at(1024, 1024, FULLY_ENGAGED);
+        let anchor = z_image_q4_anchor();
+        let full = z_image_at(&request);
+        let none = anchor
+            .derive_phase_peaks(
+                &request,
+                Z_IMAGE_Q4_COMPONENTS,
+                ArchitectureFacts::default(),
+            )
+            .expect("no facts still derives");
+        assert!(none.conditioning >= full.conditioning);
+        assert!(none.denoise >= full.denoise);
+        assert!(none.decode >= full.decode);
+        // With no facts the window and the chunk cannot scale anything: denoise is the anchor's
+        // own measured denoise (whole transformer + whole residue), i.e. the staged rung's.
+        assert_eq!(none.denoise, anchor.phase_active_peak_bytes.denoise);
+        assert!(none.denoise > full.denoise);
+        // The decode floor needs the activation width (the blender's output accumulator is in
+        // that dtype), so without facts the whole decode residue stays unscaled: decode is the
+        // anchor's own measured decode, i.e. the staged rung's.
+        assert_eq!(none.decode, anchor.phase_active_peak_bytes.decode);
+        assert!(none.decode > full.decode);
+
+        // Dropping any ONE fact never shrinks the estimate below the full-facts one.
+        type FactDrop = fn(&mut ArchitectureFacts);
+        let drops: [(&str, FactDrop); 8] = [
+            ("attention_heads", |facts| facts.attention_heads = None),
+            ("head_dim", |facts| facts.head_dim = None),
+            ("transformer_blocks", |facts| {
+                facts.transformer_blocks = None
+            }),
+            ("patch_size", |facts| facts.patch_size = None),
+            ("latent_channels", |facts| facts.latent_channels = None),
+            ("vae_spatial_scale", |facts| facts.vae_spatial_scale = None),
+            ("vae_temporal_scale", |facts| {
+                facts.vae_temporal_scale = None
+            }),
+            ("activation_dtype_width", |facts| {
+                facts.activation_dtype_width = None
+            }),
+        ];
+        for (label, drop) in drops {
+            let mut facts = Z_IMAGE_FACTS;
+            drop(&mut facts);
+            let partial = anchor
+                .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, facts)
+                .unwrap_or_else(|| panic!("without {label} the law must still derive"));
+            for (phase, partial_bytes, full_bytes) in [
+                ("conditioning", partial.conditioning, full.conditioning),
+                ("denoise", partial.denoise, full.denoise),
+                ("decode", partial.decode, full.decode),
+            ] {
+                assert!(
+                    partial_bytes >= full_bytes,
+                    "without {label}, {phase} {partial_bytes} fell below the full-facts \
+                     {full_bytes}"
+                );
+            }
+        }
+        // …and the facts that carry a ratio actually move it (so the assertions above are not
+        // vacuous): blocks drive the window, heads/width/patch/scale drive the score split, and
+        // the activation width alone drives the decode floor.
+        for (label, drop) in drops {
+            let mut facts = Z_IMAGE_FACTS;
+            drop(&mut facts);
+            let partial = anchor
+                .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, facts)
+                .expect("derives");
+            let moves_denoise = matches!(
+                label,
+                "attention_heads"
+                    | "transformer_blocks"
+                    | "patch_size"
+                    | "vae_spatial_scale"
+                    | "activation_dtype_width"
+            );
+            assert_eq!(
+                partial.denoise > full.denoise,
+                moves_denoise,
+                "{label}: dropping it {} change the denoise estimate",
+                if moves_denoise { "must" } else { "must not" }
+            );
+            let moves_decode = label == "activation_dtype_width";
+            assert_eq!(
+                partial.decode > full.decode,
+                moves_decode,
+                "{label}: dropping it {} change the decode estimate",
+                if moves_decode { "must" } else { "must not" }
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Image derivation law — the retained corpora as falsifiers.
+    // -------------------------------------------------------------------------------------
+
+    /// The Krea candle five-rung corpus derived from its own staged record: every rung's derived
+    /// admission peak brackets the measured one, per phase where the composition matches the
+    /// law's, inside a documented tightness budget — and the deeper rungs are priced strictly
+    /// below the staged rung, so the ratios are known to have bitten.
     #[test]
     fn candle_anchor_derivation_brackets_every_retained_candle_measurement() {
+        /// Deeper-rung tightness. The binding case is the retained window-1 rung at 2.14x its
+        /// measured 3.996 GB peak, and the phase that binds is DECODE: the law scales Krea's
+        /// decode residue by the larger of the two decode chunk models — the (512 − 128) x 1024
+        /// host-transfer band, 3/8 of the image — because it cannot know that Krea tiles its VAE
+        /// on device at 512² (1/4 of the image; see `DecodeTile::chunk_pixels`), and prices that
+        /// rung's decode at 8.55 GB against a measured 3.83 GB. The next rungs sit at 1.18x and
+        /// 1.02x. Forgetting to subtract the components would put the window-1 rung above 5x.
+        const DEEPER_RUNG_TIGHTNESS: f64 = 2.5;
         let anchor = krea_candle_anchor();
         let corpus = krea_candle_corpus();
         assert!(
-            corpus.len() >= 4,
-            "the retained candle corpus must span several rung compositions, found {}",
+            corpus.len() >= 5,
+            "the retained candle corpus must span the five rungs, found {}",
             corpus.len()
         );
+        let staged = anchor
+            .derive_phase_peaks(
+                &at(
+                    anchor.geometry.width,
+                    anchor.geometry.height,
+                    RequestRegime::staged(),
+                ),
+                KREA_Q4_COMPONENTS,
+                KREA_FACTS,
+            )
+            .expect("the staged rung derives");
         let mut bracketed = 0usize;
         for record in &corpus {
-            if !record.engaged.iter().any(|rung| rung == "staged_residency") {
-                continue;
-            }
             let derived = anchor
-                .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                    width: record.width,
-                    height: record.height,
-                    staged_residency: true,
-                })
+                .derive_phase_peaks(
+                    &at(record.width, record.height, record.regime),
+                    KREA_Q4_COMPONENTS,
+                    KREA_FACTS,
+                )
                 .unwrap_or_else(|| panic!("{} must be derivable", record.id));
-            for (phase, derived_bytes, measured_bytes) in [
-                ("conditioning", derived.conditioning, record.conditioning),
-                ("denoise", derived.denoise, record.denoise),
-                ("decode", derived.decode, record.decode),
-            ] {
+            let peak = derived.peak_bytes();
+            assert!(
+                peak >= record.peak(),
+                "{} ({:?}): derived peak {peak} under-predicts the measured {}",
+                record.id,
+                record.engaged,
+                record.peak()
+            );
+            assert!(
+                derived.conditioning >= record.conditioning,
+                "{} conditioning: derived {} under the measured {}",
+                record.id,
+                derived.conditioning,
+                record.conditioning
+            );
+            assert!(
+                derived.denoise >= record.denoise,
+                "{} denoise: derived {} under the measured {}",
+                record.id,
+                derived.denoise,
+                record.denoise
+            );
+            // Decode per phase only where the composition is the law's: Krea's staged path keeps
+            // the DiT resident through decode (the retained resident-minus-staged decode delta is
+            // the text encoder alone), so its tiled decode phases carry ~8.6 GB of transformer
+            // the VAE-only decode composition does not price. The admission PEAK still brackets
+            // them above; the decode phase itself is asserted where the anchor's composition
+            // holds.
+            if record.regime.decode_tile.is_none() {
                 assert!(
-                    derived_bytes >= measured_bytes,
-                    "{} {phase}: derived {derived_bytes} under-predicts the measured \
-                     {measured_bytes}",
-                    record.id
+                    derived.decode >= record.decode,
+                    "{} decode: derived {} under the measured {}",
+                    record.id,
+                    derived.decode,
+                    record.decode
                 );
-                // NO tightness assert here. Every record in this corpus was captured at the
-                // anchor's OWN geometry, so on the anchor's own composition the ratio is the
-                // margin by construction (1.0 + CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN) and on a
-                // deeper rung it is deliberately loose. Tightness is asserted where it can
-                // actually bite — across BOTH measured geometries — by
-                // `candle_derivation_agrees_with_the_retained_measured_manifest_rows`.
+            }
+            let ratio = peak as f64 / record.peak() as f64;
+            let budget = if record.regime == RequestRegime::staged() {
+                1.0
+            } else {
+                DEEPER_RUNG_TIGHTNESS
+            };
+            assert!(
+                ratio <= budget,
+                "{} ({:?}): derived peak {peak} is {ratio:.3}x the measured {}, over the {budget}x \
+                 budget",
+                record.id,
+                record.engaged,
+                record.peak()
+            );
+            if record.regime != RequestRegime::staged() && record.regime.staged {
+                assert!(
+                    peak < staged.peak_bytes(),
+                    "{} ({:?}): a deeper rung must price below the staged rung {}",
+                    record.id,
+                    record.engaged,
+                    staged.peak_bytes()
+                );
             }
             bracketed += 1;
         }
         assert!(
-            bracketed >= 4,
-            "at least four retained candle compositions must be bracketed, got {bracketed}"
+            bracketed >= 5,
+            "all five retained candle compositions must be bracketed, got {bracketed}"
         );
     }
 
-    /// The regime guard is load-bearing, not decorative: the retained RESIDENT capture is the
-    /// counterexample that proves reusing a staged anchor for a resident request would
-    /// under-predict — and by how much.
+    /// sc-22734. A candle cell whose provider contract classifies `staged_residency`
+    /// STRUCTURALLY NOT APPLICABLE has no staged composition to have been captured in, so its
+    /// anchor is the RESIDENT render and the entry point prices it. The two shapes are mutually
+    /// exclusive, so no packaged row's disposition moves: the flag defaults to `false` and every
+    /// existing anchor keeps the staged-only guard exactly.
     #[test]
-    fn a_resident_candle_composition_is_refused_because_the_staged_anchor_underpredicts_it() {
-        let anchor = krea_candle_anchor();
-        assert!(
+    fn a_structurally_staging_free_candle_cell_is_priced_from_its_resident_anchor() {
+        let staged_anchor = krea_candle_anchor();
+        // The exempt cell's anchor is a RESIDENT render, so the fixture must be one: the
+        // re-captured z_image_turbo q4 row is the packaged anchor whose every phase level carries
+        // the whole resident set (`the_recaptured_z_image_mlx_anchor_is_inside_the_laws_domain`),
+        // which is exactly the domain a resident derivation needs. Re-labelled onto the candle
+        // lane, because no candle capture of a structurally staging-free family exists yet — the
+        // sc-22734 arms are what will produce the first one.
+        let resident_capture = |exempt: bool| {
+            let mut anchor = store()
+                .image_anchor_for("z_image_turbo", AnchorBackend::Mlx, "q4")
+                .expect("the z_image_turbo q4 MLX anchor is packaged")
+                .clone();
+            anchor.backend = AnchorBackend::Candle;
+            anchor.staged_residency_structurally_not_applicable = exempt;
             anchor
-                .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                    width: 1024,
-                    height: 1024,
+        };
+        let components = Z_IMAGE_Q4_MLX_RESIDENT_COMPONENTS;
+        let resident = AnchorImageDeriveRequest {
+            width: 768,
+            height: 768,
+            staged_residency: false,
+        };
+        let staged = AnchorImageDeriveRequest {
+            staged_residency: true,
+            ..resident
+        };
+
+        // The flag defaults off, so the packaged shape is untouched: staged anchor + staged
+        // request prices, resident request does not.
+        assert!(!staged_anchor.staged_residency_structurally_not_applicable);
+        let krea = AnchorImageDeriveRequest {
+            width: 1024,
+            height: 1024,
+            staged_residency: true,
+        };
+        assert!(staged_anchor
+            .derive_image_phase_peaks(krea, KREA_Q4_COMPONENTS)
+            .is_some());
+        assert!(staged_anchor
+            .derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
                     staged_residency: false,
-                })
-                .is_none(),
-            "a resident composition must not be priced from the staged anchor"
+                    ..krea
+                },
+                KREA_Q4_COMPONENTS,
+            )
+            .is_none());
+
+        // The exempt cell: a resident anchor, which the law otherwise refuses outright.
+        let exempt = resident_capture(true);
+        assert!(!exempt.measured_regime.staged);
+        let derived = exempt
+            .derive_image_phase_peaks(resident, components)
+            .expect("a staging-free cell prices from its resident anchor");
+        assert_eq!(
+            derived,
+            AnchorDerivedPhases {
+                conditioning: exempt.phase_active_peak_bytes.conditioning,
+                denoise: exempt.phase_active_peak_bytes.denoise,
+                decode: exempt.phase_active_peak_bytes.decode,
+            },
+            "at the anchor's own geometry the resident derivation is the anchor"
         );
-        let resident = krea_candle_corpus()
-            .into_iter()
-            .find(|record| record.engaged == ["resident"])
-            .expect("the retained candle corpus carries a resident capture");
-        let staged = anchor
-            .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: resident.width,
-                height: resident.height,
-                staged_residency: true,
-            })
-            .expect("the staged derivation at the anchor geometry");
-        assert!(
-            staged.conditioning < resident.conditioning,
-            "the resident conditioning peak {} must exceed the staged derivation {} — otherwise \
-             the guard guards nothing",
-            resident.conditioning,
-            staged.conditioning
+        // ...and it answers ONLY the resident candidate. A staged candidate on a cell with no
+        // staged composition is not a request this engine can be asked to honour.
+        assert!(exempt
+            .derive_image_phase_peaks(staged, components)
+            .is_none());
+
+        // The two mixed shapes stay refused, so the flag can never launder a record the law
+        // cannot honestly price: a STAGED anchor on an exempt cell, and a RESIDENT anchor on a
+        // cell that has a staged composition it should have been captured in.
+        let mut staged_on_exempt = resident_capture(true);
+        staged_on_exempt.measured_regime.staged = true;
+        for request in [staged, resident] {
+            assert!(staged_on_exempt
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+        let resident_on_ordinary = resident_capture(false);
+        assert!(!resident_on_ordinary.measured_regime.staged);
+        for request in [staged, resident] {
+            assert!(resident_on_ordinary
+                .derive_image_phase_peaks(request, components)
+                .is_none());
+        }
+
+        // Every deeper rung is still refused on the exempt lane, and so is an underived row.
+        for deeper in ["decode_tiled", "attention_chunked", "transformer_windowed"] {
+            let mut anchor = exempt.clone();
+            match deeper {
+                "decode_tiled" => anchor.measured_regime.decode_tiled = true,
+                "attention_chunked" => anchor.measured_regime.attention_chunked = true,
+                _ => anchor.measured_regime.transformer_windowed = true,
+            }
+            assert!(
+                anchor
+                    .derive_image_phase_peaks(resident, components)
+                    .is_none(),
+                "{deeper} is deeper than the law prices, exemption or not"
+            );
+        }
+        let mut underived = exempt.clone();
+        underived.underived_reason = Some("measured_envelope".to_owned());
+        assert!(underived
+            .derive_image_phase_peaks(resident, components)
+            .is_none());
+
+        // The flag rides the store round trip, and is absent from a row that does not set it.
+        let json = serde_json::to_string(&exempt).expect("serialize");
+        assert!(json.contains("\"stagedResidencyStructurallyNotApplicable\":true"));
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&json).expect("round trip"),
+            exempt.clone()
         );
+        let packaged = serde_json::to_string(&staged_anchor).expect("serialize");
         assert!(
-            staged.decode < resident.decode,
-            "the resident decode peak {} must exceed the staged derivation {}",
-            resident.decode,
-            staged.decode
+            !packaged.contains("stagedResidencyStructurallyNotApplicable"),
+            "a row that does not set it stays byte-identical to the packaged shape"
+        );
+        assert_eq!(
+            serde_json::from_str::<MemoryAnchor>(&packaged).expect("round trip"),
+            staged_anchor.clone()
         );
     }
 
-    /// The other half of the regime guard: the ANCHOR must itself be the shallow staged capture.
-    /// A capture measured in a deeper bounded regime carries a smaller working set than the rungs
-    /// it would be asked to price, so it is refused rather than promoted into a law. The retained
-    /// deeper captures are the counterexamples that make the refusal necessary.
+    /// The candle lane's entry point is the same law: at the anchor's geometry the staged
+    /// derivation equals the anchor, and it keeps the shallow-anchor guards its consumers were
+    /// written against — a resident request, a deeper-measured anchor, another lane, an
+    /// underived row are refused there, not by the law.
     #[test]
-    fn a_deeper_measured_candle_regime_cannot_be_promoted_into_the_shallow_law() {
+    fn the_candle_entry_point_keeps_its_guards_while_the_law_prices_what_it_refuses() {
+        let anchor = krea_candle_anchor();
         let request = AnchorImageDeriveRequest {
             width: 1024,
             height: 1024,
             staged_residency: true,
         };
-        let shallow = krea_candle_anchor()
-            .derive_image_phase_peaks(request)
+        let derived = anchor
+            .derive_image_phase_peaks(request, KREA_Q4_COMPONENTS)
             .expect("the shallow staged anchor prices its own geometry");
-        for (label, regime, deeper_id) in [
-            (
-                "bounded_decode",
-                AnchorMeasuredRegime {
-                    decode_tiled: true,
-                    transformer_windowed: false,
-                    staged: true,
-                    attention_chunked: false,
+        assert_eq!(
+            derived,
+            AnchorDerivedPhases {
+                conditioning: anchor.phase_active_peak_bytes.conditioning,
+                denoise: anchor.phase_active_peak_bytes.denoise,
+                decode: anchor.phase_active_peak_bytes.decode,
+            }
+        );
+        // The entry point refuses the resident composition; the law prices it, above staged.
+        assert!(anchor
+            .derive_image_phase_peaks(
+                AnchorImageDeriveRequest {
+                    staged_residency: false,
+                    ..request
                 },
-                "imc-25e4d186c7016141e988",
+                KREA_Q4_COMPONENTS,
+            )
+            .is_none());
+        let resident = anchor
+            .derive_phase_peaks(
+                &at(1024, 1024, RequestRegime::resident()),
+                KREA_Q4_COMPONENTS,
+                KREA_FACTS,
+            )
+            .expect("the law prices the resident composition");
+        assert!(resident.peak_bytes() > derived.peak_bytes());
+        let measured_resident = krea_candle_corpus()
+            .into_iter()
+            .find(|record| record.engaged == ["resident"])
+            .expect("the retained resident capture");
+        assert!(resident.conditioning >= measured_resident.conditioning);
+        assert!(resident.denoise >= measured_resident.denoise);
+        assert!(resident.decode >= measured_resident.decode);
+
+        for (label, mutate) in [
+            (
+                "a deeper measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.decode_tiled = true)
+                    as Box<dyn Fn(&mut MemoryAnchor)>,
             ),
             (
-                "bounded_attention",
-                AnchorMeasuredRegime {
-                    decode_tiled: true,
-                    transformer_windowed: false,
-                    staged: true,
-                    attention_chunked: true,
-                },
-                "imc-3fc9bf23d8b351edaa57",
+                "a resident measured regime",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.staged = false),
             ),
             (
-                "bounded_transformer_residency",
-                AnchorMeasuredRegime {
-                    decode_tiled: true,
-                    transformer_windowed: true,
-                    staged: true,
-                    attention_chunked: true,
-                },
-                "imc-89d319fe2aed72ae01bb",
+                "the other backend lane",
+                Box::new(|anchor: &mut MemoryAnchor| anchor.backend = AnchorBackend::Mlx),
+            ),
+            (
+                "a stated underived reason",
+                Box::new(|anchor: &mut MemoryAnchor| {
+                    anchor.underived_reason = Some("validation-only".to_owned());
+                }),
             ),
         ] {
-            let mut mutated = krea_candle_anchor().clone();
-            mutated.measured_regime = regime;
+            let mut mutated = anchor.clone();
+            mutate(&mut mutated);
             assert!(
-                mutated.derive_image_phase_peaks(request).is_none(),
-                "an anchor measured under {label} must not price the shallow staged rung"
-            );
-            // …and the retained capture of that regime shows why: its denoise peak is genuinely
-            // smaller than the shallow law's, so reusing it as an intercept would under-predict.
-            let deeper = krea_candle_corpus()
-                .into_iter()
-                .find(|record| record.id == deeper_id)
-                .unwrap_or_else(|| panic!("the retained {label} capture"));
-            assert!(
-                deeper.denoise < shallow.denoise,
-                "{label}: the deeper capture's denoise {} must sit below the shallow derivation \
-                 {} for the guard to be load-bearing",
-                deeper.denoise,
-                shallow.denoise
+                mutated
+                    .derive_image_phase_peaks(request, KREA_Q4_COMPONENTS)
+                    .is_none(),
+                "the candle entry point must refuse an anchor carrying {label}"
             );
         }
     }
 
+    /// The identity and regime guards of the law itself, each mutated individually onto an
+    /// otherwise-derivable anchor.
     #[test]
-    fn candle_derived_peaks_track_output_area_in_both_directions() {
-        let anchor = krea_candle_anchor();
-        let at = |width: u32, height: u32| {
-            anchor
-                .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                    width,
-                    height,
-                    staged_residency: true,
-                })
-                .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
-        };
-        let small = at(896, 896);
-        let anchored = at(1024, 1024);
-        let large = at(1536, 1536);
-        assert!(small.peak_bytes() < anchored.peak_bytes());
-        assert!(anchored.peak_bytes() < large.peak_bytes());
-        // A never-measured non-square geometry is priced by area, not by aspect.
-        assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
-        // Below the smallest retained measured geometry the derivation CLAMPS instead of
-        // extrapolating on: every request under 768x768 is priced at exactly 768x768, phase for
-        // phase. Without the clamp the linear slopes walk the estimate below the working set the
-        // staged path still holds, in a region the corpus never touched.
-        let floor = at(768, 768);
-        assert_eq!(
-            CANDLE_SMALLEST_RETAINED_PIXELS,
-            768 * 768,
-            "the clamp floor is the smallest retained measured geometry"
-        );
-        for (label, clamped) in [("1x1", at(1, 1)), ("512x512", at(512, 512))] {
-            assert_eq!(
-                clamped, floor,
-                "{label} must be priced at the 768x768 clamp floor, not extrapolated below it"
-            );
-        }
-        // …and the floor is a real bound, not a degenerate one: it still exceeds the 768x768
-        // measured decode peak of the retained manifest rows.
-        let measured_768 = krea_retained_768_three_stage();
-        assert!(floor.decode > measured_768.decode);
-        assert!(floor.denoise > measured_768.denoise);
+    fn the_law_refuses_video_identities_and_unbounded_requests_of_bounded_anchors() {
+        let anchor = z_image_q4_anchor();
+        let request = at(1024, 1024, FULLY_ENGAGED);
         assert!(anchor
-            .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: 0,
-                height: 512,
-                staged_residency: true,
-            })
-            .is_none());
-    }
-
-    #[test]
-    fn the_two_lane_laws_refuse_each_others_anchors() {
-        assert!(
-            krea_candle_anchor()
-                .derive_video_phase_peaks(plain_request(1024, 1024, 1))
-                .is_none(),
-            "the LTX video law must refuse an anchor with no pipeline axes"
-        );
-        let ltx = store()
-            .anchor_for(
-                "ltx_2_5",
-                AnchorBackend::Mlx,
-                "bf16",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
-            )
-            .expect("the LTX bf16 dev/diffvae anchor");
-        assert!(
-            ltx.derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: 1024,
-                height: 1024,
-                staged_residency: true,
-            })
-            .is_none(),
-            "the candle image law must refuse an MLX video anchor"
-        );
-        // The packaged LTX anchors are all attention-chunked, so the regime guard alone would
-        // refuse them and the IDENTITY half of the guard would go unexercised. Each identity
-        // condition is therefore mutated onto an otherwise-derivable candle anchor.
-        let image_request = AnchorImageDeriveRequest {
-            width: 1024,
-            height: 1024,
-            staged_residency: true,
-        };
-        assert!(
-            krea_candle_anchor()
-                .derive_image_phase_peaks(image_request)
-                .is_some(),
-            "the unmutated candle anchor must be derivable, or the mutations below prove nothing"
-        );
+            .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+            .is_some());
         for (label, mutate) in [
             (
                 "a video pipeline variant",
@@ -3655,233 +7785,354 @@ mod tests {
             ),
             (
                 "a video decoder",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.decoder = Some(Ltx25Decoder::DiffVae);
-                }),
+                Box::new(|anchor: &mut MemoryAnchor| anchor.decoder = Some(Ltx25Decoder::Conv)),
             ),
             (
                 "a multi-frame measured geometry",
                 Box::new(|anchor: &mut MemoryAnchor| anchor.geometry.frames = 145),
             ),
-            (
-                "the other backend lane",
-                Box::new(|anchor: &mut MemoryAnchor| anchor.backend = AnchorBackend::Mlx),
-            ),
         ] {
-            let mut mutated = krea_candle_anchor().clone();
+            let mut mutated = anchor.clone();
             mutate(&mut mutated);
             assert!(
-                mutated.derive_image_phase_peaks(image_request).is_none(),
-                "the candle image law must refuse an anchor carrying {label}"
+                mutated
+                    .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+                    .is_none(),
+                "the law must refuse an anchor carrying {label}"
+            );
+        }
+        // The packaged LTX video anchors are refused for their axes, and the video law refuses
+        // the image anchors in turn.
+        let ltx = store()
+            .anchor_for(
+                "ltx_2_5",
+                AnchorBackend::Mlx,
+                "bf16",
+                Ltx25TransformerVariant::Dev,
+                Ltx25Decoder::DiffVae,
+            )
+            .expect("the LTX bf16 dev/diffvae anchor");
+        assert!(ltx
+            .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+            .is_none());
+        assert!(krea_candle_anchor()
+            .derive_video_phase_peaks(plain_request(1024, 1024, 1))
+            .is_none());
+
+        // A phase the anchor measured BOUNDED cannot price the same phase unbounded…
+        for (label, measured, unbounded) in [
+            (
+                "tiled",
+                AnchorMeasuredRegime {
+                    decode_tiled: true,
+                    ..anchor.measured_regime
+                },
+                RequestRegime {
+                    decode_tile: None,
+                    ..FULLY_ENGAGED
+                },
+            ),
+            (
+                "chunked",
+                AnchorMeasuredRegime {
+                    attention_chunked: true,
+                    ..anchor.measured_regime
+                },
+                RequestRegime {
+                    attention_chunk_scores: None,
+                    ..FULLY_ENGAGED
+                },
+            ),
+            (
+                "windowed",
+                AnchorMeasuredRegime {
+                    transformer_windowed: true,
+                    ..anchor.measured_regime
+                },
+                RequestRegime {
+                    transformer_window: None,
+                    ..FULLY_ENGAGED
+                },
+            ),
+        ] {
+            let mut bounded = anchor.clone();
+            bounded.measured_regime = measured;
+            assert!(
+                bounded
+                    .derive_phase_peaks(
+                        &at(1024, 1024, unbounded),
+                        Z_IMAGE_Q4_COMPONENTS,
+                        Z_IMAGE_FACTS
+                    )
+                    .is_none(),
+                "a {label}-measured anchor must refuse the unbounded request"
+            );
+            // …while the correspondingly bounded request reuses the bounded residue UNSCALED:
+            // it prices at or above what the unbounded anchor's scaled ratio would give.
+            let reused = bounded
+                .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+                .unwrap_or_else(|| panic!("a {label}-measured anchor prices the bounded request"));
+            let scaled = anchor
+                .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+                .expect("the unbounded anchor prices the bounded request");
+            assert!(reused.peak_bytes() >= scaled.peak_bytes());
+        }
+
+        // Degenerate inputs are refused, not clamped.
+        for (label, request) in [
+            ("a zero width", at(0, 1024, FULLY_ENGAGED)),
+            (
+                "a zero batch",
+                ImageDeriveRequest {
+                    batch: 0,
+                    ..request
+                },
+            ),
+            (
+                "a zero tile edge",
+                at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        decode_tile: Some(DecodeTile {
+                            edge: 0,
+                            overlap: 0,
+                        }),
+                        ..FULLY_ENGAGED
+                    },
+                ),
+            ),
+            (
+                "a tile overlap not below its edge (the engines refuse the tuple too)",
+                at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        decode_tile: Some(DecodeTile {
+                            edge: 512,
+                            overlap: 512,
+                        }),
+                        ..FULLY_ENGAGED
+                    },
+                ),
+            ),
+            (
+                "a zero chunk",
+                at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        attention_chunk_scores: Some(0),
+                        ..FULLY_ENGAGED
+                    },
+                ),
+            ),
+            (
+                "a zero window",
+                at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        transformer_window: Some(0),
+                        ..FULLY_ENGAGED
+                    },
+                ),
+            ),
+        ] {
+            assert!(
+                anchor
+                    .derive_phase_peaks(&request, Z_IMAGE_Q4_COMPONENTS, Z_IMAGE_FACTS)
+                    .is_none(),
+                "{label} must be refused"
             );
         }
     }
 
-    /// The `krea_2_turbo` catalog entry's `candle` block, from the embedded builtin manifest.
-    fn krea_candle_manifest_block() -> serde_json::Value {
-        let raw = crate::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("the builtin model manifest is embedded");
-        let manifest: serde_json::Value =
-            serde_json::from_str(&crate::jsonc::strip_jsonc_comments(raw))
-                .expect("the builtin model manifest parses");
-        manifest["models"]
-            .as_array()
-            .expect("models")
-            .iter()
-            .find(|model| model["id"].as_str() == Some("krea_2_turbo"))
-            .expect("the krea_2_turbo catalog entry")["candle"]
-            .clone()
-    }
-
-    /// The retained `krea_2_turbo` / candle / q4 / `threeStage` measured row at 768x768 — the
-    /// SMALLEST retained geometry, and the one every downward-extrapolation bound is pinned
-    /// against. Read from the manifest rather than transcribed, so a manifest edit cannot leave a
-    /// stale literal validating a number the evidence no longer carries.
-    fn krea_retained_768_three_stage() -> AnchorDerivedPhases {
-        const GIB: f64 = 1_073_741_824.0;
-        let candle = krea_candle_manifest_block();
-        let row = candle["turboFit"]["evidenceRecords"]
-            .as_array()
-            .expect("turboFit evidence records")
-            .iter()
-            .find(|record| {
-                record["tier"].as_str() == Some("q4")
-                    && record["width"].as_u64() == Some(768)
-                    && record["height"].as_u64() == Some(768)
-            })
-            .expect("the retained 768x768 q4 evidence record")["observedPhasesGb"]["threeStage"]
-            .clone();
-        let gib = |key: &str| (row[key].as_f64().unwrap_or_else(|| panic!("{key}")) * GIB) as u64;
-        AnchorDerivedPhases {
-            conditioning: gib("text"),
-            denoise: gib("denoise"),
-            decode: gib("decode"),
-        }
-    }
-
-    /// AC 1 (manifest half): the derived-from-anchor estimates agree with the retained measured
-    /// candle rows this story displaces as the selector's source — the `turboFit.evidenceRecords`
-    /// per-phase captures at both measured geometries, and the `sequentialPeakGb` scalar the
-    /// estimate floor used to read.
+    /// The residue split never goes negative: an anchor whose denoise residue is smaller than
+    /// the full score tensor its facts imply caps the subtraction at the residue, so the chunked
+    /// estimate is the resident set plus the chunk and nothing less, and the unchunked estimate
+    /// at the anchor geometry re-prices the full tensor above the measured peak rather than below.
     #[test]
-    fn candle_derivation_agrees_with_the_retained_measured_manifest_rows() {
-        const GIB: f64 = 1_073_741_824.0;
-        let anchor = krea_candle_anchor();
-        let candle = krea_candle_manifest_block();
-        let derive = |width: u32, height: u32| {
-            anchor
-                .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                    width,
-                    height,
-                    staged_residency: true,
-                })
-                .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
+    fn the_score_subtraction_is_capped_at_the_residue() {
+        let anchor = z_image_q4_anchor();
+        // 300 heads make the 1024x1024 score tensor ~12.7 GB, far above the 4.58 GB residue.
+        let facts = ArchitectureFacts {
+            attention_heads: Some(300),
+            ..Z_IMAGE_FACTS
         };
+        let chunked = anchor
+            .derive_phase_peaks(
+                &at(
+                    1024,
+                    1024,
+                    RequestRegime {
+                        attention_chunk_scores: Some(64 * 1024 * 1024),
+                        ..RequestRegime::staged()
+                    },
+                ),
+                Z_IMAGE_Q4_COMPONENTS,
+                facts,
+            )
+            .expect("derives");
+        assert_eq!(
+            chunked.denoise,
+            Z_IMAGE_Q4_COMPONENTS.transformer + 64 * 1024 * 1024 * 2
+        );
+        let unchunked = anchor
+            .derive_phase_peaks(
+                &at(1024, 1024, RequestRegime::staged()),
+                Z_IMAGE_Q4_COMPONENTS,
+                facts,
+            )
+            .expect("derives");
+        assert!(unchunked.denoise > anchor.phase_active_peak_bytes.denoise);
+    }
 
-        // Every retained q4 evidence record, at both measured geometries and all four measured
-        // compositions.
-        let records = candle["turboFit"]["evidenceRecords"]
-            .as_array()
-            .expect("turboFit evidence records");
-        let mut checked = 0usize;
-        for record in records {
-            if record["tier"].as_str() != Some("q4") {
-                continue;
-            }
-            let width = record["width"].as_u64().expect("width") as u32;
-            let height = record["height"].as_u64().expect("height") as u32;
-            let derived = derive(width, height);
-            for (composition, phases) in record["observedPhasesGb"]
-                .as_object()
-                .expect("observed phases")
-            {
-                for (phase, derived_bytes) in [
-                    ("text", derived.conditioning),
-                    ("denoise", derived.denoise),
-                    ("decode", derived.decode),
-                ] {
-                    let observed =
-                        (phases[phase].as_f64().expect("observed phase") * GIB).ceil() as u64;
-                    assert!(
-                        derived_bytes >= observed,
-                        "{width}x{height} {composition} {phase}: derived {derived_bytes} \
-                         under-predicts the retained manifest row {observed}"
-                    );
-                    // Tight only against the anchor's own composition; deeper rungs are
-                    // deliberately over-estimated.
-                    if composition == "threeStage" {
-                        let ratio = derived_bytes as f64 / observed as f64;
-                        assert!(
-                            ratio <= 1.0 + CANDLE_ANCHOR_VALIDATION_TIGHTNESS_BUDGET,
-                            "{width}x{height} threeStage {phase}: derived {derived_bytes} is \
-                             {ratio:.4}x the retained manifest row {observed}"
-                        );
-                    }
-                }
-                checked += 1;
-            }
+    /// A chunk budget larger than the whole score tensor is capped at the tensor: the chunked
+    /// rung can never price above the unchunked one. At 256x256 the Z-Image tensor is
+    /// 30 x 1536² x 2 B = 141.6 MB, so a 1 Gi-score chunk (2 GiB) is capped to it; at 1024x1024
+    /// the 64 Mi chunk sits below the 1.27 GB tensor and must bite by exactly the difference.
+    #[test]
+    fn the_chunk_term_is_capped_at_the_unchunked_score_tensor() {
+        let anchor = z_image_q4_anchor();
+        let chunked = |width: u32, chunk: u64| {
+            anchor
+                .derive_phase_peaks(
+                    &at(
+                        width,
+                        width,
+                        RequestRegime {
+                            attention_chunk_scores: Some(chunk),
+                            ..RequestRegime::staged()
+                        },
+                    ),
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        let unchunked = |width: u32| {
+            anchor
+                .derive_phase_peaks(
+                    &at(width, width, RequestRegime::staged()),
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        // 256x256: 32² + 512 = 1536 tokens, tensor 30 x 1536² x 2 B = 141,557,760 B; a 1 Gi
+        // chunk (2 GiB of scores) is far above it and is capped, so chunked == unchunked.
+        let oversized = 1024 * 1024 * 1024;
+        assert!(oversized * 2 > 141_557_760);
+        assert_eq!(chunked(256, oversized).denoise, unchunked(256).denoise);
+        // 1024x1024: the 64 Mi chunk is below the 1,274,019,840 B tensor and bites by exactly
+        // the difference.
+        let chunk_bytes = 64 * 1024 * 1024 * 2;
+        assert!(chunk_bytes < 1_274_019_840);
+        assert_eq!(
+            unchunked(1024).denoise - chunked(1024, 64 * 1024 * 1024).denoise,
+            1_274_019_840 - chunk_bytes
+        );
+    }
+
+    /// The conditioning residue scales with the prompt's conditioning tokens over the default
+    /// — and never below 1.0, since the records do not state the prompt length they were
+    /// measured with. The joint sequence length moves the denoise estimate with it.
+    #[test]
+    fn conditioning_tokens_scale_the_conditioning_residue_and_never_credit_a_short_prompt() {
+        let anchor = z_image_q4_anchor();
+        let with_tokens = |tokens: Option<u32>| {
+            anchor
+                .derive_phase_peaks(
+                    &ImageDeriveRequest {
+                        conditioning_tokens: tokens,
+                        ..at(1024, 1024, RequestRegime::staged())
+                    },
+                    Z_IMAGE_Q4_COMPONENTS,
+                    Z_IMAGE_FACTS,
+                )
+                .expect("derives")
+        };
+        let default = with_tokens(None);
+        assert_eq!(default, with_tokens(Some(DEFAULT_CONDITIONING_TOKENS)));
+        let residue =
+            anchor.phase_active_peak_bytes.conditioning - Z_IMAGE_Q4_COMPONENTS.conditioning;
+        assert!(residue > 0);
+        // Twice the tokens: twice the residue on top of the text encoder, and a longer joint
+        // sequence for denoise.
+        let doubled = with_tokens(Some(2 * DEFAULT_CONDITIONING_TOKENS));
+        assert_eq!(
+            doubled.conditioning,
+            Z_IMAGE_Q4_COMPONENTS.conditioning + 2 * residue
+        );
+        assert!(doubled.denoise > default.denoise);
+        // Half the tokens: no credit anywhere — the request's count is floored at the default
+        // on every side it enters, so the estimate is the default's in every phase.
+        let halved = with_tokens(Some(DEFAULT_CONDITIONING_TOKENS / 2));
+        assert_eq!(halved, default);
+    }
+
+    /// The fixture component bytes are not free literals: each set sums to its tier's packaged
+    /// download (`estimatedSizeBytes` in the builtin manifest) within 2%, so a retyped figure
+    /// or a re-cut tier lands here.
+    #[test]
+    fn the_fixture_component_bytes_sum_to_their_packaged_tier_sizes() {
+        for (label, components, model, tier) in [
+            (
+                "Z-Image-Turbo q4",
+                Z_IMAGE_Q4_COMPONENTS,
+                "z_image_turbo",
+                "q4",
+            ),
+            ("FLUX.2 [dev] q4", flux2_components("q4"), "flux2_dev", "q4"),
+            ("FLUX.2 [dev] q8", flux2_components("q8"), "flux2_dev", "q8"),
+        ] {
+            let packaged = packaged_tier_bytes(model, tier);
+            let sum = components.total();
+            let drift = (sum as f64 - packaged as f64).abs() / packaged as f64;
+            assert!(
+                drift <= 0.02,
+                "{label}: components sum to {sum} against the packaged {packaged} ({drift:.4})"
+            );
+            assert!(components.conditioning > 0 && components.transformer > 0);
+            assert!(components.decoder > 0);
         }
-        assert!(
-            checked >= 8,
-            "both retained q4 geometries and all four compositions must be checked, got {checked}"
-        );
+        assert_eq!(packaged_tier_bytes("z_image_turbo", "q4"), 5_909_406_487);
+    }
 
-        // The scalar row the estimate floor used to read, at the geometry it was measured at.
-        let measured_pixels = candle["vramMeasuredPixels"]
-            .as_u64()
-            .expect("vramMeasuredPixels");
-        let edge = (measured_pixels as f64).sqrt() as u32;
-        assert_eq!(u64::from(edge) * u64::from(edge), measured_pixels);
-        assert_eq!(anchor.geometry.width, edge);
-        let derived_peak = derive(edge, edge).peak_bytes();
-        let sequential_row =
-            (candle["sequentialPeakGb"]["q4"].as_f64().expect("row") * GIB).ceil() as u64;
-        assert!(
-            derived_peak >= sequential_row * 9 / 10 && derived_peak <= sequential_row * 11 / 10,
-            "at the measured geometry the derived staged peak {derived_peak} must agree with the \
-             retained sequentialPeakGb row {sequential_row} within 10%"
+    /// Batch multiplies the activation residues (and the score tensor), never the weights.
+    #[test]
+    fn batch_scales_the_residues_and_not_the_components() {
+        let anchor = z_image_q4_anchor();
+        let request = at(1024, 1024, RequestRegime::staged());
+        let one = z_image_at(&request);
+        let two = z_image_at(&ImageDeriveRequest {
+            batch: 2,
+            ..request
+        });
+        assert!(two.conditioning > one.conditioning);
+        assert!(two.denoise > one.denoise);
+        assert!(two.decode > one.decode);
+        let components = Z_IMAGE_Q4_COMPONENTS;
+        let residue = |peak: u64, resident: u64| peak - resident;
+        let peaks = anchor.phase_active_peak_bytes;
+        assert_eq!(
+            two.conditioning,
+            components.conditioning + 2 * residue(peaks.conditioning, components.conditioning)
         );
-
-        // Directional: the derivation prices the STAGED working set, so it must sit below the
-        // resident row. If it ever crossed, the anchor would be pricing the wrong lane.
-        let resident_row =
-            (candle["vramGbByTier"]["q4"].as_f64().expect("row") * GIB).ceil() as u64;
-        assert!(
-            derived_peak < resident_row,
-            "the derived staged peak {derived_peak} must stay below the retained resident row \
-             {resident_row}"
+        assert_eq!(
+            two.decode,
+            components.decoder + 2 * residue(peaks.decode, components.decoder)
+        );
+        assert_eq!(
+            two.denoise,
+            components.transformer + 2 * residue(peaks.denoise, components.transformer)
         );
     }
 
     // -------------------------------------------------------------------------------------
-    // MLX image lane (epic 22505 feature-end fix round, E2/E7).
+    // MLX image lane entry point.
     // -------------------------------------------------------------------------------------
-
-    const IMAGE_MLX_CORPUS_PATH: &str = "docs/generated/memory-calibration-evidence.json";
-
-    /// One retained MLX image record: geometry, composition, and its measured per-phase
-    /// ALLOCATOR levels plus the overall envelope.
-    struct MlxImageCorpusRecord {
-        id: String,
-        tier: String,
-        width: u32,
-        height: u32,
-        load_shape: String,
-        engaged: Vec<String>,
-        conditioning_alloc: u64,
-        denoise_alloc: u64,
-        decode_alloc: u64,
-        overall_envelope: u64,
-    }
-
-    fn mlx_image_corpus(model_id: &str) -> Vec<MlxImageCorpusRecord> {
-        let raw = PACKAGED_MEMORY_ANCHOR_SOURCES
-            .iter()
-            .find(|(path, _)| *path == IMAGE_MLX_CORPUS_PATH)
-            .map(|(_, raw)| *raw)
-            .expect("the image-MLX retained corpus is compiled in");
-        let source: serde_json::Value = serde_json::from_str(raw).expect("corpus parses");
-        source["records"]
-            .as_array()
-            .expect("records")
-            .iter()
-            .filter(|record| {
-                record["target"]["modelId"].as_str() == Some(model_id)
-                    && record["backend"].as_str() == Some("mlx")
-                    && record["target"]["geometry"]["frames"].as_u64() == Some(1)
-            })
-            .map(|record| {
-                let geometry = &record["target"]["geometry"];
-                let alloc = |phase: &str| {
-                    record["observedMemory"][phase]["allocatorBytes"]
-                        .as_u64()
-                        .unwrap_or_else(|| panic!("{phase} allocatorBytes"))
-                };
-                MlxImageCorpusRecord {
-                    id: record["id"].as_str().expect("id").to_owned(),
-                    tier: record["target"]["tier"].as_str().expect("tier").to_owned(),
-                    width: geometry["width"].as_u64().expect("width") as u32,
-                    height: geometry["height"].as_u64().expect("height") as u32,
-                    load_shape: record["loadShape"].as_str().expect("loadShape").to_owned(),
-                    engaged: record["strategy"]["engagedRungs"]
-                        .as_array()
-                        .expect("engaged rungs")
-                        .iter()
-                        .filter_map(|rung| rung.as_str().map(str::to_owned))
-                        .collect(),
-                    conditioning_alloc: alloc("conditioning"),
-                    denoise_alloc: alloc("denoise"),
-                    decode_alloc: alloc("decode"),
-                    overall_envelope: record["observedMemory"]["overall"]["allocatorBytes"]
-                        .as_u64()
-                        .expect("overall envelope"),
-                }
-            })
-            .collect()
-    }
 
     fn flux2_mlx_anchor(tier: &str) -> &'static MemoryAnchor {
         store()
@@ -3889,253 +8140,45 @@ mod tests {
             .unwrap_or_else(|| panic!("the flux2_dev {tier} MLX anchor is packaged"))
     }
 
-    /// The per-model scope of the image-MLX law, read off the packaged store: the models whose own
-    /// retained records vary geometry (flux2_dev, both tiers) derive; the single-geometry models
-    /// (qwen_image, z_image_turbo) and the axis-free video anchor (ltx_2_3) are validation-only
-    /// with their reason stated, and the law honors the statement.
-    #[test]
-    fn image_mlx_derivability_is_scoped_per_model_with_stated_reasons() {
-        for tier in ["q4", "q8"] {
-            let anchor = flux2_mlx_anchor(tier);
-            assert_eq!(anchor.underived_reason, None, "flux2 {tier} must derive");
-            assert!(anchor
-                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-                    width: 1024,
-                    height: 1024,
-                })
-                .is_some());
-        }
-        for (model, tiers) in [
-            ("qwen_image", &["q4", "q8", "bf16"][..]),
-            ("z_image_turbo", &["q4"][..]),
-        ] {
-            for tier in tiers {
-                let anchor = store()
-                    .image_anchor_for(model, AnchorBackend::Mlx, tier)
-                    .unwrap_or_else(|| panic!("{model} {tier} anchor"));
-                let reason = anchor
-                    .underived_reason
-                    .as_deref()
-                    .unwrap_or_else(|| panic!("{model} {tier} must state why it is underived"));
-                assert!(
-                    reason.contains("single geometry"),
-                    "{model} {tier}: the reason must name the missing spread, got {reason}"
-                );
-                assert!(
-                    anchor
-                        .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-                            width: anchor.geometry.width,
-                            height: anchor.geometry.height,
-                        })
-                        .is_none(),
-                    "{model} {tier}: an underived anchor must price nothing"
-                );
-            }
-        }
-        let ltx23 = store()
-            .anchors
-            .iter()
-            .find(|anchor| anchor.model_id == "ltx_2_3")
-            .expect("the ltx_2_3 anchor is packaged");
-        assert!(
-            ltx23
-                .underived_reason
-                .as_deref()
-                .is_some_and(|reason| reason.contains("pipeline axes")),
-            "ltx_2_3's axis-free anchor must state its refusal"
-        );
-    }
-
-    /// AC (E2/E7): the image-MLX derivation brackets every retained record of the derivable
-    /// models — per-phase against the measured ALLOCATOR levels, and overall against the measured
-    /// admission envelope, inside the named tightness budget.
-    #[test]
-    fn mlx_image_derivation_brackets_every_retained_flux2_measurement() {
-        let corpus = mlx_image_corpus("flux2_dev");
-        // Shape: both anchored tiers and both measured geometries must appear, or the test stops
-        // asking its question.
-        for tier in ["q4", "q8"] {
-            for edge in [768_u32, 1024] {
-                assert!(
-                    corpus
-                        .iter()
-                        .any(|record| record.tier == tier && record.width == edge),
-                    "the retained corpus must cover {tier} at {edge}x{edge}"
-                );
-            }
-        }
-        let mut bracketed = 0_usize;
-        for record in &corpus {
-            let anchor = flux2_mlx_anchor(&record.tier);
-            let derived = anchor
-                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-                    width: record.width,
-                    height: record.height,
-                })
-                .unwrap_or_else(|| panic!("{} must be derivable", record.id));
-            for (phase, derived_bytes, measured_bytes) in [
-                (
-                    "conditioning",
-                    derived.conditioning,
-                    record.conditioning_alloc,
-                ),
-                ("denoise", derived.denoise, record.denoise_alloc),
-                ("decode", derived.decode, record.decode_alloc),
-            ] {
-                assert!(
-                    derived_bytes >= measured_bytes,
-                    "{} {phase}: derived allocator level {derived_bytes} under the measured \
-                     {measured_bytes}",
-                    record.id
-                );
-            }
-            let upper = derived.peak_bytes();
-            assert!(
-                upper >= record.overall_envelope,
-                "{}: derived admission bound {upper} under the measured envelope {}",
-                record.id,
-                record.overall_envelope
-            );
-            let tight_cap = ((record.overall_envelope as f64)
-                * (1.0 + MLX_IMAGE_VALIDATION_TIGHTNESS_BUDGET))
-                .ceil() as u64;
-            assert!(
-                upper <= tight_cap,
-                "{}: derived admission bound {upper} exceeds the tightness cap {tight_cap}",
-                record.id
-            );
-            bracketed += 1;
-        }
-        assert!(
-            bracketed >= 8,
-            "both tiers at both geometries with their repeat captures must be bracketed, got \
-             {bracketed}"
-        );
-    }
-
-    /// The image-MLX slopes are pinned from both sides: at or ABOVE the highest within-cell
-    /// measured allocator slope (upward extrapolation must not cross below the trend), and BELOW
-    /// the ceiling at which the margin-widened 768x768 downward derivation falls under the
-    /// measured 768x768 allocator level.
-    #[test]
-    fn every_mlx_image_coefficient_sits_inside_the_window_the_retained_pairs_allow() {
-        let corpus = mlx_image_corpus("flux2_dev");
-        let span = 1024_i128 * 1024 - MLX_IMAGE_SMALLEST_RETAINED_PIXELS;
-        let mut cond_slopes: Vec<f64> = Vec::new();
-        let mut denoise_slopes: Vec<f64> = Vec::new();
-        let mut decode_slopes: Vec<f64> = Vec::new();
-        for (index, left) in corpus.iter().enumerate() {
-            for right in &corpus[index + 1..] {
-                if left.tier != right.tier
-                    || left.load_shape != right.load_shape
-                    || left.engaged != right.engaged
-                {
-                    continue;
-                }
-                let left_px = i128::from(left.width) * i128::from(left.height);
-                let right_px = i128::from(right.width) * i128::from(right.height);
-                if left_px == right_px {
-                    continue;
-                }
-                let delta = (right_px - left_px) as f64;
-                cond_slopes.push(
-                    (right.conditioning_alloc as f64 - left.conditioning_alloc as f64) / delta,
-                );
-                denoise_slopes
-                    .push((right.denoise_alloc as f64 - left.denoise_alloc as f64) / delta);
-                decode_slopes.push((right.decode_alloc as f64 - left.decode_alloc as f64) / delta);
-            }
-        }
-        assert!(
-            !denoise_slopes.is_empty(),
-            "the corpus must measure within-cell slopes"
-        );
-        let highest = |slopes: &[f64]| slopes.iter().fold(f64::MIN, |a, &b| a.max(b.abs()));
-        for tier in ["q4", "q8"] {
-            let anchor = flux2_mlx_anchor(tier);
-            let allocators = anchor
-                .phase_allocator_envelope_bytes
-                .expect("flux2 anchors carry phase allocator levels");
-            let measured_768 = corpus
-                .iter()
-                .find(|record| record.tier == tier && record.width == 768)
-                .expect("the 768x768 retained row");
-            for (phase, coefficient, intercept, small_measured, slopes) in [
-                (
-                    "conditioning",
-                    1.0 / MLX_IMAGE_COND_ALLOC_PIXELS_PER_BYTE as f64,
-                    allocators.conditioning,
-                    measured_768.conditioning_alloc,
-                    &cond_slopes,
-                ),
-                (
-                    "denoise",
-                    MLX_IMAGE_DENOISE_ALLOC_PER_PIXEL_BYTES as f64,
-                    allocators.denoise,
-                    measured_768.denoise_alloc,
-                    &denoise_slopes,
-                ),
-                (
-                    "decode",
-                    MLX_IMAGE_DECODE_ALLOC_PER_PIXEL_BYTES as f64,
-                    allocators.decode,
-                    measured_768.decode_alloc,
-                    &decode_slopes,
-                ),
-            ] {
-                let observed = highest(slopes);
-                assert!(
-                    coefficient >= observed,
-                    "{phase}: coefficient {coefficient} sits below the highest measured \
-                     within-cell allocator slope {observed}"
-                );
-                let ceiling = (intercept as f64
-                    - small_measured as f64 / (1.0 + MLX_IMAGE_ALLOCATOR_RESIDUAL_MARGIN))
-                    / span as f64;
-                assert!(
-                    coefficient <= ceiling,
-                    "{tier} {phase}: coefficient {coefficient} exceeds the {ceiling} ceiling at \
-                     which the margin-widened 768x768 derivation falls under the measured level"
-                );
-            }
+    /// FLUX.2 [dev] MLX component bytes per tier: the tier's packaged download
+    /// (`estimatedSizeBytes` in the builtin manifest — 33.6 GB q4, 55.0 GB q8) split at the
+    /// 24B Mistral text encoder's 4-/8-bit size and the VAE. Bound to the manifest by
+    /// `the_fixture_component_bytes_sum_to_their_packaged_tier_sizes` (within 2%).
+    fn flux2_components(tier: &str) -> ComponentBytes {
+        match tier {
+            "q4" => ComponentBytes {
+                conditioning: 13_400_000_000,
+                transformer: 19_850_000_000,
+                decoder: 350_000_000,
+            },
+            "q8" => ComponentBytes {
+                conditioning: 25_400_000_000,
+                transformer: 29_250_000_000,
+                decoder: 350_000_000,
+            },
+            other => panic!("no flux2 components for {other}"),
         }
     }
 
-    /// The identity and regime guards of the image-MLX law, each mutated individually on an
-    /// otherwise-derivable anchor.
+    /// The MLX entry point's guards, each mutated individually on an otherwise-derivable anchor
+    /// (an in-domain synthetic one — the packaged rows are refused by the law's domain guard,
+    /// asserted here too), and its area scaling in both directions.
     #[test]
-    fn the_mlx_image_law_refuses_foreign_identities_and_regimes() {
+    fn the_mlx_entry_point_keeps_its_guards_and_tracks_output_area() {
         let request = AnchorMlxImageDeriveRequest {
             width: 1024,
             height: 1024,
         };
-        assert!(
-            flux2_mlx_anchor("q4")
-                .derive_mlx_image_phase_peaks(request)
-                .is_some(),
-            "the unmutated anchor must derive, or the mutations below prove nothing"
-        );
+        let components = flux2_components("q4");
+        let in_domain = in_domain_resident_mlx_anchor(components);
+        assert!(in_domain
+            .derive_mlx_image_phase_peaks(request, components)
+            .is_some());
         for (label, mutate) in [
             (
                 "the candle lane",
                 Box::new(|anchor: &mut MemoryAnchor| anchor.backend = AnchorBackend::Candle)
                     as Box<dyn Fn(&mut MemoryAnchor)>,
-            ),
-            (
-                "a video pipeline variant",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.transformer_variant = Some(Ltx25TransformerVariant::Dev);
-                }),
-            ),
-            (
-                "a video decoder",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.decoder = Some(Ltx25Decoder::Conv);
-                }),
-            ),
-            (
-                "a multi-frame measured geometry",
-                Box::new(|anchor: &mut MemoryAnchor| anchor.geometry.frames = 145),
             ),
             (
                 "deferred materialization",
@@ -4152,91 +8195,135 @@ mod tests {
                 Box::new(|anchor: &mut MemoryAnchor| anchor.measured_regime.decode_tiled = true),
             ),
             (
-                "a chunked-attention measured regime",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.measured_regime.attention_chunked = true;
-                }),
-            ),
-            (
-                "a windowed measured regime",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.measured_regime.transformer_windowed = true;
-                }),
-            ),
-            (
-                "no phase allocator decomposition",
-                Box::new(|anchor: &mut MemoryAnchor| {
-                    anchor.phase_allocator_envelope_bytes = None;
-                }),
-            ),
-            (
                 "a stated underived reason",
                 Box::new(|anchor: &mut MemoryAnchor| {
                     anchor.underived_reason = Some("validation-only".to_owned());
                 }),
             ),
         ] {
-            let mut mutated = flux2_mlx_anchor("q4").clone();
+            let mut mutated = in_domain.clone();
             mutate(&mut mutated);
             assert!(
-                mutated.derive_mlx_image_phase_peaks(request).is_none(),
-                "the MLX image law must refuse an anchor carrying {label}"
+                mutated
+                    .derive_mlx_image_phase_peaks(request, components)
+                    .is_none(),
+                "the MLX entry point must refuse an anchor carrying {label}"
             );
         }
-        // And the video/candle laws refuse the MLX image anchor in turn.
-        assert!(flux2_mlx_anchor("q4")
-            .derive_video_phase_peaks(plain_request(1024, 1024, 1))
-            .is_none());
-        assert!(flux2_mlx_anchor("q4")
-            .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: 1024,
-                height: 1024,
-                staged_residency: true,
-            })
-            .is_none());
-    }
-
-    #[test]
-    fn mlx_image_derived_peaks_track_output_area_and_clamp_below_the_corpus() {
-        let anchor = flux2_mlx_anchor("q8");
+        // Every packaged MLX image anchor is refused at the entry point: the flux2 rows by the
+        // law's domain guard (their conditioning counters saw no weights), the single-geometry
+        // rows by their stated underived reason AND the domain guard.
+        for (model, tier) in [
+            ("flux2_dev", "q4"),
+            ("flux2_dev", "q8"),
+            ("qwen_image", "bf16"),
+            ("z_image_turbo", "q4"),
+        ] {
+            let anchor = store()
+                .image_anchor_for(model, AnchorBackend::Mlx, tier)
+                .unwrap_or_else(|| panic!("{model} {tier} anchor"));
+            let components = ComponentBytes {
+                conditioning: packaged_tier_bytes(model, tier),
+                transformer: 0,
+                decoder: 0,
+            };
+            assert!(anchor
+                .derive_mlx_image_phase_peaks(request, components)
+                .is_none());
+            assert!(anchor
+                .derive_phase_peaks(
+                    &at(1024, 1024, RequestRegime::resident()),
+                    components,
+                    ArchitectureFacts::default()
+                )
+                .is_none());
+        }
+        // Output-area tracking through the entry point, on the in-domain anchor: the allocator
+        // envelope is carried unscaled below the anchor geometry and pixel-scaled above it.
+        let anchor = in_domain_resident_mlx_anchor(flux2_components("q8"));
         let at = |width: u32, height: u32| {
             anchor
-                .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest { width, height })
+                .derive_mlx_image_phase_peaks(
+                    AnchorMlxImageDeriveRequest { width, height },
+                    flux2_components("q8"),
+                )
                 .unwrap_or_else(|| panic!("{width}x{height} must be derivable"))
         };
-        assert!(at(896, 896).peak_bytes() < at(1024, 1024).peak_bytes());
+        assert!(at(512, 512).peak_bytes() < at(768, 768).peak_bytes());
+        assert!(at(768, 768).peak_bytes() < at(1024, 1024).peak_bytes());
         assert!(at(1024, 1024).peak_bytes() < at(1536, 1536).peak_bytes());
-        // Area, not aspect.
+        assert_eq!(
+            at(1024, 1024).peak_bytes(),
+            anchor
+                .phase_active_peak_bytes
+                .conditioning
+                .max(anchor.phase_active_peak_bytes.denoise)
+                .max(anchor.phase_active_peak_bytes.decode),
+            "at the anchor geometry the entry point reproduces the active working set"
+        );
         assert_eq!(at(1344, 768).peak_bytes(), at(768, 1344).peak_bytes());
-        // Sub-corpus requests clamp to the smallest retained geometry.
-        let floor = at(768, 768);
-        for (label, clamped) in [("1x1", at(1, 1)), ("512x512", at(512, 512))] {
-            assert_eq!(
-                clamped, floor,
-                "{label} must be priced at the 768x768 clamp floor"
-            );
-        }
         assert!(anchor
-            .derive_mlx_image_phase_peaks(AnchorMlxImageDeriveRequest {
-                width: 0,
-                height: 512,
-            })
+            .derive_mlx_image_phase_peaks(
+                AnchorMlxImageDeriveRequest {
+                    width: 0,
+                    height: 512,
+                },
+                flux2_components("q8"),
+            )
             .is_none());
     }
 
-    /// An underived anchor prices nothing on ANY lane — the store's statement and the runtime
-    /// behaviour cannot disagree.
+    /// An anchor row may carry component bytes; a stated set that sums to zero is refused at
+    /// load, and the field round-trips through the store.
     #[test]
-    fn an_underived_anchor_prices_nothing_on_any_lane() {
-        let mut candle = krea_candle_anchor().clone();
-        candle.underived_reason = Some("validation-only".to_owned());
-        assert!(candle
-            .derive_image_phase_peaks(AnchorImageDeriveRequest {
-                width: 1024,
-                height: 1024,
-                staged_residency: true,
-            })
-            .is_none());
+    fn component_bytes_round_trip_through_the_store_and_a_zero_set_is_refused() {
+        let mut doctored: serde_json::Value =
+            serde_json::from_str(PACKAGED_MEMORY_ANCHORS).expect("packaged store parses");
+        let index = store()
+            .anchors
+            .iter()
+            .position(|anchor| anchor.model_id == "krea_2_turbo")
+            .expect("the krea anchor");
+        doctored["anchors"][index]["componentBytes"] = serde_json::json!({
+            "conditioning": KREA_Q4_COMPONENTS.conditioning,
+            "transformer": KREA_Q4_COMPONENTS.transformer,
+            "decoder": KREA_Q4_COMPONENTS.decoder,
+        });
+        let loaded = load_memory_anchors(&doctored.to_string())
+            .expect("a store carrying component bytes loads");
+        assert_eq!(
+            loaded.anchors[index].component_bytes,
+            Some(KREA_Q4_COMPONENTS)
+        );
+        let serialized = serde_json::to_string(&loaded).expect("serializes");
+        assert!(serialized.contains("\"componentBytes\""));
+        assert_eq!(
+            load_memory_anchors(&serialized)
+                .expect("round-trips")
+                .anchors[index]
+                .component_bytes,
+            Some(KREA_Q4_COMPONENTS)
+        );
+        // Every packaged row states none today; `None` never serializes.
+        assert!(store()
+            .anchors
+            .iter()
+            .all(|anchor| anchor.component_bytes.is_none()));
+        assert!(!PACKAGED_MEMORY_ANCHORS.contains("componentBytes"));
+
+        doctored["anchors"][index]["componentBytes"] = serde_json::json!({
+            "conditioning": 0,
+            "transformer": 0,
+            "decoder": 0,
+        });
+        let error = load_memory_anchors(&doctored.to_string())
+            .expect_err("all-zero component bytes must be rejected");
+        assert!(error.contains("sum to zero"), "{error}");
+    }
+
+    /// An underived VIDEO anchor prices nothing: the video law fits, so it honours the field.
+    #[test]
+    fn an_underived_video_anchor_prices_nothing() {
         let mut video = store()
             .anchor_for(
                 "ltx_2_5",
@@ -4247,9 +8334,253 @@ mod tests {
             )
             .expect("q8 dev/diffvae anchor")
             .clone();
+        assert!(video
+            .derive_video_phase_peaks(plain_request(768, 512, 121))
+            .is_some());
         video.underived_reason = Some("validation-only".to_owned());
         assert!(video
             .derive_video_phase_peaks(plain_request(768, 512, 121))
+            .is_none());
+    }
+
+    // -------------------------------------------------------------------------------------
+    // sc-22736: axis-free VIDEO anchors (Wan 2.2, SCAIL-2, LTX-2.3) — the measured-point bound.
+    // -------------------------------------------------------------------------------------
+
+    /// A synthetic Wan 2.2 I2V candle anchor: multi-frame, no pipeline axes, one reference, and
+    /// stamped with the axis-free underived reason exactly as the extractor writes it.
+    fn axis_free_video_anchor() -> MemoryAnchor {
+        MemoryAnchor {
+            id: "wan_2_2_i2v_14b:candle:bf16:-:-:sc-22736-wan2-2-i2v-a14b-candle-dense-v1:imc-test"
+                .to_owned(),
+            model_id: "wan_2_2_i2v_14b".to_owned(),
+            model_family: "wan-video".to_owned(),
+            route: "wan2_2_i2v_14b".to_owned(),
+            provider: "wan2_2_i2v_14b".to_owned(),
+            backend: AnchorBackend::Candle,
+            tier: "bf16".to_owned(),
+            transformer_variant: None,
+            decoder: None,
+            mode: "image_to_video".to_owned(),
+            overlay: None,
+            reference_count: 1,
+            load_shape: AnchorLoadShape::EagerMaterialization,
+            measured_regime: AnchorMeasuredRegime {
+                decode_tiled: false,
+                transformer_windowed: false,
+                staged: true,
+                attention_chunked: false,
+            },
+            source: AnchorSource {
+                path: String::new(),
+                sha256: String::new(),
+                record_id: "imc-test".to_owned(),
+                calibration_fingerprint: "sc-22736-wan2-2-i2v-a14b-candle-dense-v1".to_owned(),
+                loader_closure_digest: "0".repeat(64),
+                currency_attestation: None,
+            },
+            geometry: AnchorGeometry {
+                width: 1280,
+                height: 720,
+                frames: 77,
+                fps: Some(16),
+            },
+            phase_active_peak_bytes: AnchorPhaseBytes {
+                conditioning: 30_000_000_000,
+                denoise: 62_000_000_000,
+                decode: 48_000_000_000,
+            },
+            phase_allocator_envelope_bytes: None,
+            overall_allocator_envelope_bytes: 62_000_000_000,
+            underived_reason: Some(
+                "the source record states no (transformer variant, decoder) pipeline axes and the \
+                 video law's per-token coefficients are keyed on them; this anchor validates its \
+                 measured point and prices nothing beyond it"
+                    .to_owned(),
+            ),
+            component_bytes: None,
+            staged_residency_structurally_not_applicable: false,
+        }
+    }
+
+    fn widened_measured(anchor: &MemoryAnchor) -> AnchorDerivedPhases {
+        let expect = |measured: u64| {
+            ((measured as f64) * (1.0 + ANCHOR_ALLOCATOR_ENVELOPE_MARGIN)).ceil() as u64
+        };
+        AnchorDerivedPhases {
+            conditioning: expect(anchor.phase_active_peak_bytes.conditioning),
+            denoise: expect(anchor.phase_active_peak_bytes.denoise),
+            decode: expect(anchor.phase_active_peak_bytes.decode),
+        }
+    }
+
+    /// An axis-free video anchor prices every request it dominates AT its measured point — no
+    /// per-token slope, none invented — and refuses everything beyond it. Mutations this kills:
+    /// dropping the pixel or the frame dominance check (the beyond-anchor rows derive); restoring
+    /// the axis-free `return None` (nothing derives); scaling the intercepts by any coefficient
+    /// (the equality against the widened measured peaks fails).
+    #[test]
+    fn an_axis_free_video_anchor_bounds_every_request_it_dominates_at_its_measured_point() {
+        let anchor = axis_free_video_anchor();
+        let expected = widened_measured(&anchor);
+        // At the measured point itself.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 77)),
+            Some(expected)
+        );
+        // Dominated: fewer frames, fewer pixels, the portrait twin — each bounded by the same
+        // measured peaks, never scaled down (no lower clamp is a per-token law's property; this
+        // one has no slope).
+        for (width, height, frames) in [
+            (1280, 720, 45),
+            (832, 480, 77),
+            (720, 1280, 77),
+            (16, 16, 1),
+        ] {
+            assert_eq!(
+                anchor.derive_video_phase_peaks(plain_request(width, height, frames)),
+                Some(expected),
+                "{width}x{height} f{frames}"
+            );
+        }
+        // Beyond the measured point in either axis: refused, the caller keeps its floor.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 720, 81)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1280, 736, 77)),
+            None
+        );
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(1920, 1080, 45)),
+            None
+        );
+        // Degenerate geometry is refused, as everywhere.
+        assert_eq!(
+            anchor.derive_video_phase_peaks(plain_request(0, 720, 77)),
+            None
+        );
+        // A request bounding a phase the anchor measured UNBOUNDED is still priced at the
+        // unbounded intercept: no LTX architecture constant is substituted for a Wan phase.
+        let mut tiled = plain_request(832, 480, 45);
+        tiled.decode_tiled = true;
+        assert_eq!(anchor.derive_video_phase_peaks(tiled), Some(expected));
+        // ...and the mirror is refused: a tiled anchor cannot price an untiled request.
+        let mut tiled_anchor = anchor.clone();
+        tiled_anchor.measured_regime.decode_tiled = true;
+        assert_eq!(
+            tiled_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        let mut deferred_anchor = anchor.clone();
+        deferred_anchor.load_shape = AnchorLoadShape::DeferredMaterialization;
+        assert_eq!(
+            deferred_anchor.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            None
+        );
+        // The axis-free underived reason is the STATEMENT of this bound, not a refusal of it:
+        // without the reason the answer is identical.
+        let mut unstated = anchor.clone();
+        unstated.underived_reason = None;
+        assert_eq!(
+            unstated.derive_video_phase_peaks(plain_request(832, 480, 45)),
+            Some(expected)
+        );
+        // An axis-free SINGLE-FRAME row is an image anchor and is not a video anchor under any
+        // spelling.
+        let mut still = anchor.clone();
+        still.geometry.frames = 1;
+        assert_eq!(
+            still.derive_video_phase_peaks(plain_request(832, 480, 1)),
+            None
+        );
+    }
+
+    /// The store resolves an axis-free video anchor for an axis-free request and for nothing
+    /// else, and the cell derivation goes through it with no sibling crossing. Mutation this kills:
+    /// dropping the `frames > 1` guard in `video_anchor_for` (the image row resolves as video), or
+    /// matching the axes as wildcards (the variant-keyed lookups resolve).
+    #[test]
+    fn the_store_resolves_an_axis_free_video_anchor_only_for_an_axis_free_request() {
+        let anchor = axis_free_video_anchor();
+        let mut image = anchor.clone();
+        image.id = "z_image_turbo:candle:q4:-:-:x:imc-image".to_owned();
+        image.model_id = "z_image_turbo".to_owned();
+        image.geometry.frames = 1;
+        let store = MemoryAnchorStore {
+            schema_version: 1,
+            anchors: vec![anchor.clone(), image],
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
+        };
+        assert_eq!(
+            store
+                .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "bf16", None, None)
+                .map(|found| found.id.as_str()),
+            Some(anchor.id.as_str())
+        );
+        // Wrong lane, wrong tier, a variant-keyed request: nothing.
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Mlx, "bf16", None, None)
+            .is_none());
+        assert!(store
+            .video_anchor_for("wan_2_2_i2v_14b", AnchorBackend::Candle, "q4", None, None)
+            .is_none());
+        for variant in [
+            Ltx25TransformerVariant::Dev,
+            Ltx25TransformerVariant::Distilled,
+        ] {
+            for decoder in [Ltx25Decoder::Conv, Ltx25Decoder::DiffVae] {
+                assert!(store
+                    .video_anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        Some(variant),
+                        Some(decoder)
+                    )
+                    .is_none());
+                assert!(store
+                    .anchor_for(
+                        "wan_2_2_i2v_14b",
+                        AnchorBackend::Candle,
+                        "bf16",
+                        variant,
+                        decoder
+                    )
+                    .is_none());
+            }
+        }
+        // The image row answers no video lookup even though it is axis-free.
+        assert!(store
+            .video_anchor_for("z_image_turbo", AnchorBackend::Candle, "bf16", None, None)
+            .is_none());
+        // Cell derivation: the exact anchor, delta 0, the measured-point bound.
+        let derived = store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "bf16",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
+            .expect("the dominated request derives");
+        assert_eq!(derived.anchor.id, anchor.id);
+        assert_eq!(derived.delta_bytes, 0);
+        assert_eq!(derived.phases, widened_measured(&anchor));
+        // No sibling crossing exists for an axis-free cell: an unanchored tier keeps its floor.
+        assert!(store
+            .derive_video_phase_peaks_for_cell(
+                "wan_2_2_i2v_14b",
+                AnchorBackend::Candle,
+                "q4",
+                None,
+                None,
+                plain_request(832, 480, 45),
+            )
             .is_none());
     }
 
@@ -4299,8 +8630,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the unmeasured variant cell derives from its sibling");
@@ -4336,9 +8667,10 @@ mod tests {
             .expect("the sibling prices the request");
         let expect = |estimate: RawPhaseEstimate| {
             if estimate.anchored {
-                widened(estimate.bytes + i128::from(delta.bytes)).expect("widens")
+                video_admission_bytes(estimate.bytes + i128::from(delta.bytes), AnchorBackend::Mlx)
+                    .expect("active estimate")
             } else {
-                widened(estimate.bytes).expect("widens")
+                video_admission_bytes(estimate.bytes, AnchorBackend::Mlx).expect("active estimate")
             }
         };
         assert_eq!(derived.phases.conditioning, expect(raw.conditioning));
@@ -4394,8 +8726,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("a zero crossing still derives — a zero delta is priced, not missing");
@@ -4439,8 +8771,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "q8",
-                Ltx25TransformerVariant::Dev,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Dev),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the exact cell derives");
@@ -4464,8 +8796,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 "bf16",
-                Ltx25TransformerVariant::Distilled,
-                Ltx25Decoder::DiffVae,
+                Some(Ltx25TransformerVariant::Distilled),
+                Some(Ltx25Decoder::DiffVae),
                 request,
             )
             .expect("the doctored store still derives the cell via a sibling");
@@ -4484,8 +8816,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     "bf16",
-                    Ltx25TransformerVariant::Distilled,
-                    Ltx25Decoder::DiffVae,
+                    Some(Ltx25TransformerVariant::Distilled),
+                    Some(Ltx25Decoder::DiffVae),
                     request,
                 )
                 .is_none(),
@@ -4507,12 +8839,19 @@ mod tests {
     /// non-windowed request from a windowed anchor. The direction is covered instead by
     /// `an_unmeasured_variant_cell_derives_from_the_sibling_anchor_plus_the_bound_delta` (byte-for
     /// -byte application) and by the engine-agreement tests (which key the table itself).
+    ///
+    /// SCOPE (sc-22738): the validation is over the seed corpus's OWN topology, so the doctored
+    /// store keeps only the LTX-2.5 anchors that corpus produced. The sc-22738 rerun anchored
+    /// dev/conv at bf16 and q4 from its own corpora; left in, distilled/conv would derive from
+    /// dev/conv (a variant crossing priced zero) instead of dev/diffvae plus the decoder crossing,
+    /// and the nonzero-delta interrogation below would have nothing to interrogate.
     #[test]
     fn leave_one_out_sibling_delta_derivations_bracket_the_retained_distilled_records() {
         let mut doctored = store().clone();
         doctored.anchors.retain(|anchor| {
-            !(anchor.model_id == "ltx_2_5"
-                && anchor.transformer_variant == Some(Ltx25TransformerVariant::Distilled))
+            anchor.model_id != "ltx_2_5"
+                || (anchor.source.path == LTX25_CORPUS_PATH
+                    && anchor.transformer_variant != Some(Ltx25TransformerVariant::Distilled))
         });
         let corpus = retained_corpus();
         let distilled: Vec<_> = corpus
@@ -4537,8 +8876,8 @@ mod tests {
                     "ltx_2_5",
                     AnchorBackend::Mlx,
                     &record.tier,
-                    record.transformer_variant,
-                    record.decoder,
+                    Some(record.transformer_variant),
+                    Some(record.decoder),
                     AnchorDeriveRequest {
                         width: record.width,
                         height: record.height,
@@ -4627,7 +8966,8 @@ mod tests {
                 ),
             ] {
                 if anchored {
-                    let undelta = widened(sibling_raw).expect("widens");
+                    let undelta = video_admission_bytes(sibling_raw, AnchorBackend::Mlx)
+                        .expect("active estimate");
                     if derived.delta_bytes > 0 {
                         assert!(
                             derived_bytes > undelta,
@@ -4663,12 +9003,22 @@ mod tests {
             }
             let upper = derived.phases.peak_bytes();
             assert!(
-                upper >= record.overall_envelope,
+                upper
+                    >= record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active),
                 "{}: derived bound {upper} under the measured envelope {}",
                 record.id,
-                record.overall_envelope
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active)
             );
-            let cap = ((record.overall_envelope as f64)
+            let cap = ((record
+                .conditioning_active
+                .max(record.denoise_active)
+                .max(record.decode_active) as f64)
                 * (1.0 + ANCHOR_DELTA_VALIDATION_TIGHTNESS_BUDGET))
                 .ceil() as u64;
             assert!(
@@ -4676,8 +9026,16 @@ mod tests {
                 "{}: derived bound {upper} exceeds the delta tightness cap {cap} over envelope {} \
                  (overshoot {:.4})",
                 record.id,
-                record.overall_envelope,
-                (upper as f64) / (record.overall_envelope as f64) - 1.0
+                record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active),
+                (upper as f64)
+                    / (record
+                        .conditioning_active
+                        .max(record.denoise_active)
+                        .max(record.decode_active) as f64)
+                    - 1.0
             );
         }
         // The budget is a claim about DELTA-priced bounds, so the leave-one-out set has to carry
@@ -4711,8 +9069,8 @@ mod tests {
                 "ltx_2_5",
                 AnchorBackend::Mlx,
                 &record.tier,
-                record.transformer_variant,
-                record.decoder,
+                Some(record.transformer_variant),
+                Some(record.decoder),
                 AnchorDeriveRequest {
                     width: record.width,
                     height: record.height,
@@ -4724,8 +9082,12 @@ mod tests {
             ) else {
                 continue;
             };
-            let overshoot =
-                (derived.phases.peak_bytes() as f64) / (record.overall_envelope as f64) - 1.0;
+            let overshoot = (derived.phases.peak_bytes() as f64)
+                / (record
+                    .conditioning_active
+                    .max(record.denoise_active)
+                    .max(record.decode_active) as f64)
+                - 1.0;
             if overshoot > worst {
                 worst = overshoot;
                 worst_id = record.id.clone();
@@ -5041,52 +9403,5 @@ mod tests {
         let error = load_memory_anchors(&unexplained.to_string())
             .expect_err("an empty underived reason must be rejected");
         assert!(error.contains("without a reason"), "{error}");
-    }
-
-    /// The candle slopes are pinned by DOWNWARD extrapolation: the anchor is the largest measured
-    /// geometry, so a slope set too steep walks the estimate below the smaller measured peak. This
-    /// pins each one against the ceiling that fact imposes, and against the physical growth term.
-    #[test]
-    fn every_candle_coefficient_sits_inside_the_window_the_retained_pair_allows() {
-        // Retained `krea_2_turbo` / candle / q4 / `threeStage` pair, read from
-        // `turboFit.evidenceRecords` — never transcribed as literals.
-        let anchor = krea_candle_anchor();
-        let measured_768 = krea_retained_768_three_stage();
-        let anchor_pixels = i128::from(anchor.geometry.width) * i128::from(anchor.geometry.height);
-        let span = anchor_pixels - CANDLE_SMALLEST_RETAINED_PIXELS;
-        for (phase, intercept, small_measured, coefficient) in [
-            (
-                "conditioning",
-                anchor.phase_active_peak_bytes.conditioning,
-                measured_768.conditioning,
-                CANDLE_COND_PER_PIXEL_BYTES,
-            ),
-            (
-                "denoise",
-                anchor.phase_active_peak_bytes.denoise,
-                measured_768.denoise,
-                CANDLE_DENOISE_PER_PIXEL_BYTES,
-            ),
-            (
-                "decode",
-                anchor.phase_active_peak_bytes.decode,
-                measured_768.decode,
-                CANDLE_DECODE_PER_PIXEL_BYTES,
-            ),
-        ] {
-            assert!(
-                coefficient >= 0,
-                "{phase}: a negative per-pixel term would shrink the estimate as the image grows"
-            );
-            let small_measured = i128::from(small_measured);
-            let ceiling = ((i128::from(intercept) as f64
-                - small_measured as f64 / (1.0 + CANDLE_ANCHOR_CAPTURE_SPREAD_MARGIN))
-                / span as f64) as i128;
-            assert!(
-                coefficient <= ceiling,
-                "{phase}: coefficient {coefficient} B/px exceeds the {ceiling} B/px ceiling at \
-                 which the margin-widened 768x768 derivation falls under the measured peak"
-            );
-        }
     }
 }

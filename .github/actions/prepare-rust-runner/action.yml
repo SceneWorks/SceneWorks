@@ -56,7 +56,8 @@ description: >
 # rustup.exe itself, and the .cargo\bin an interactive shell resolves — hangs off the
 # profile that installed rustup, NOT off $env:CARGO_HOME. The runner services pin
 # CARGO_HOME to a per-runner dependency cache (D:\cargo-home-N) and windows-candle.yml
-# repoints it again at $RUNNER_TEMP\cargo-home; neither has a bin\. Deriving rustup
+# preserves a verified listener cache or selects its isolated persistent fallback;
+# neither has a bin\. Deriving rustup
 # from CARGO_HOME silently skipped the authoritative resolution and emitted a
 # permanent bogus "rustup was deleted" warning. Keep the two notions separate.
 runs:
@@ -77,8 +78,8 @@ runs:
         # different thing on these runners: each runner service pins it to a per-runner
         # dependency cache (D:\cargo-home-N — registry\, git\, config.toml, and no bin\
         # at all) so four concurrent jobs stop racing one shared checkout (os error 267),
-        # and windows-candle.yml repoints it again at $RUNNER_TEMP\cargo-home a few steps
-        # later. Resolving rustup under CARGO_HOME therefore probed a directory that has
+        # and windows-candle.yml verifies listener isolation a few steps later.
+        # Resolving rustup under CARGO_HOME therefore probed a directory that has
         # never existed on this box: it silently disabled the authoritative resolution in
         # (1) below — every job has been falling through to the directory scan in (2) —
         # and made the closing .cargo\bin check report "rustup was deleted" on every

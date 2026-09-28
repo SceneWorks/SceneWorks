@@ -71,6 +71,8 @@ on:
       - "package.json"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/select-starvector-windows-python.ps1"
+      - "scripts/select-starvector-windows-python.test.ps1"
   workflow_dispatch:
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
@@ -132,6 +134,9 @@ jobs:
         run: npm ci --prefix apps/desktop
       - name: Validate desktop bundle configuration
         run: npm --prefix apps/desktop test
+      - name: Run StarVector Windows Python selection regression
+        shell: powershell
+        run: .\scripts\select-starvector-windows-python.test.ps1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"

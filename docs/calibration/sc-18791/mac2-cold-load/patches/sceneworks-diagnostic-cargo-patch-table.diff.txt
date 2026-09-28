@@ -1,0 +1,109 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 24c5bd78d..9aad57364 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -146,3 +146,104 @@ all = "warn"
+ # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
+ [patch."https://github.com/huggingface/candle"]
+ candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "21d17666f691a59358f2147517ac11cb34aa6f0b" }
++
++[patch."https://github.com/SceneWorks/inference"]
++candle-audio = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio" }
++candle-audio-acestep = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-acestep" }
++candle-audio-catalog = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-catalog" }
++candle-audio-chatterbox = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-chatterbox" }
++candle-audio-chatterbox-ve = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-chatterbox-ve" }
++candle-audio-clap = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-clap" }
++candle-audio-kokoro = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-kokoro" }
++candle-audio-mmaudio = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-mmaudio" }
++candle-audio-moss-sfx = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-moss-sfx" }
++candle-audio-moss-tts = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-moss-tts" }
++candle-audio-moss-tts-realtime = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-moss-tts-realtime" }
++candle-audio-openvoice = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-openvoice" }
++candle-audio-stable-audio-3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-stable-audio-3" }
++candle-audio-whisper = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/audio/candle-audio-whisper" }
++candle-gen = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen" }
++candle-gen-anima = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-anima" }
++candle-gen-bernini = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-bernini" }
++candle-gen-boogu = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-boogu" }
++candle-gen-catalog = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-catalog" }
++candle-gen-chroma = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-chroma" }
++candle-gen-clip = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-clip" }
++candle-gen-depth = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-depth" }
++candle-gen-face = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-face" }
++candle-gen-flux = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-flux" }
++candle-gen-flux2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-flux2" }
++candle-gen-ideogram = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-ideogram" }
++candle-gen-instantid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-instantid" }
++candle-gen-joycaption = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-joycaption" }
++candle-gen-kolors = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-kolors" }
++candle-gen-krea = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-krea" }
++candle-gen-lens = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-lens" }
++candle-gen-ltx = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-ltx" }
++candle-gen-mage = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-mage" }
++candle-gen-minimax-h3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-minimax-h3" }
++candle-gen-mochi = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-mochi" }
++candle-gen-pid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-pid" }
++candle-gen-pulid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-pulid" }
++candle-gen-qwen-image = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-qwen-image" }
++candle-gen-sam3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-sam3" }
++candle-gen-sana = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-sana" }
++candle-gen-scail2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-scail2" }
++candle-gen-sd3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-sd3" }
++candle-gen-sdxl = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-sdxl" }
++candle-gen-seedvr2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-seedvr2" }
++candle-gen-sensenova = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-sensenova" }
++candle-gen-svd = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-svd" }
++candle-gen-wan = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-wan" }
++candle-gen-z-image = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/candle-gen-z-image" }
++candle-kernels = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/candle-gen/vendor/candle-kernels" }
++candle-llm = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/llm/candle-llm" }
++core-llm = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/contracts/core-llm" }
++mlx-gen = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen" }
++mlx-gen-anima = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-anima" }
++mlx-gen-bernini = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-bernini" }
++mlx-gen-boogu = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-boogu" }
++mlx-gen-catalog = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-catalog" }
++mlx-gen-chroma = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-chroma" }
++mlx-gen-clip = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-clip" }
++mlx-gen-depth = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-depth" }
++mlx-gen-face = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-face" }
++mlx-gen-flux = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-flux" }
++mlx-gen-flux2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-flux2" }
++mlx-gen-ideogram = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-ideogram" }
++mlx-gen-instantid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-instantid" }
++mlx-gen-joycaption = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-joycaption" }
++mlx-gen-kolors = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-kolors" }
++mlx-gen-krea = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-krea" }
++mlx-gen-krea-realtime = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-krea-realtime" }
++mlx-gen-lens = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-lens" }
++mlx-gen-ltx = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-ltx" }
++mlx-gen-mage = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-mage" }
++mlx-gen-minimax-h3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-minimax-h3" }
++mlx-gen-mochi = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-mochi" }
++mlx-gen-pid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-pid" }
++mlx-gen-pulid = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-pulid" }
++mlx-gen-qwen-image = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-qwen-image" }
++mlx-gen-sam2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sam2" }
++mlx-gen-sam3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sam3" }
++mlx-gen-sana = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sana" }
++mlx-gen-scail2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-scail2" }
++mlx-gen-sd3 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sd3" }
++mlx-gen-sdxl = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sdxl" }
++mlx-gen-seedvr2 = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-seedvr2" }
++mlx-gen-sensenova = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-sensenova" }
++mlx-gen-svd = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-svd" }
++mlx-gen-wan = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-wan" }
++mlx-gen-z-image = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/media/mlx-gen/mlx-gen-z-image" }
++mlx-llm = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/llm/mlx-llm" }
++runtime-catalog = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/bundles/runtime-catalog" }
++runtime-cuda = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/bundles/runtime-cuda" }
++runtime-macos = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/bundles/runtime-macos" }
++sceneworks-gen-core = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/contracts/gen-core" }
++sceneworks-gen-core-testkit = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/inference-patched/crates/contracts/gen-core-testkit" }
++
++[patch."https://github.com/michaeltrefry/mlx-rs"]
++pmetal-mlx-rs = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/mlx-rs-fork/mlx-rs" }
++pmetal-mlx-sys = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/mlx-rs-fork/mlx-sys" }
++mlx-macros = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/mlx-rs-fork/mlx-macros" }
++mlx-internal-macros = { path = "/Volumes/Data/calibration/sc-18791/diagnostic/mlx-rs-fork/mlx-internal-macros" }

@@ -1,0 +1,62 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "fe771743fa263f1a23bc0be8297cfa29eb532ed7ac0370223e6223b14b4feb1a",
+        "repository": "SceneWorks/krea-realtime-14b-mlx",
+        "resolvedRevision": "e68e9a3d98187fdf6936838ffcf6df5aa48d6626",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "krea-realtime-14b-bf16-mlx-resident-ladder-v1",
+      "capturedAt": "2026-09-07T07:17:44.486Z",
+      "ceilingBytes": 94822600832,
+      "eventFileSha256": "47e4b0467f091f9ab1cfdd2dcf89a7123f422c9e1e71ccf655594bb5ecef79a4",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-596a1ae39ba4e61551cd",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-c31c4b1c8874c0a10da3",
+      "observedFootprintBytes": 109921567216,
+      "reason": "physical_footprint_at_or_above_94822600832:observed_109921567216",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "7c00cf73346a4f6777075421ba1ca58abdc123673c819c1bb302426f7d5f3608",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:78f45eccb173aac34425e3b4a7564fbb7489c7f4dbe87553f5b59862c22aca2c",
+          "revision": "8ae700bcf62a620bd2860a655a015c51ed47b70e"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 45,
+          "height": 480,
+          "width": 832
+        },
+        "mode": "text_to_video",
+        "modelId": "krea_realtime_14b",
+        "overlay": "none",
+        "provider": "krea_realtime_14b",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}

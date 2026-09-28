@@ -506,6 +506,7 @@ pub(super) async fn generate_candle_flux1_control_stream(
         false,
         false,
         raw_budget,
+        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
         predicted_peak,
         runtime_overlay_bytes,
         gen_core::MemoryCacheState::Cold,

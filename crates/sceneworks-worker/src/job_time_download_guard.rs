@@ -665,6 +665,9 @@ const NON_WEIGHT_FETCHERS: &[&str] = &[
     "build_source_url_client",
     // A `HEAD`/range probe for the size of a `sourceUrl`. Returns a `u64`; writes nothing.
     "lora_source_content_length",
+    // Verifies an installed receipt against pinned upstream content. Returns only SHA-256 text;
+    // no remote bytes or caller-chosen filesystem destination can reach a generation lane.
+    "huggingface_file_content_sha256",
     // `HfSnapshot::resolve` — an `impl` method that pages the HF *file listing* API for a repo. It
     // returns metadata (names, sizes, SHAs) and writes nothing; a caller still needs a real primitive
     // to turn that listing into bytes on disk. It also needs a `reqwest::Client` handed to it, which

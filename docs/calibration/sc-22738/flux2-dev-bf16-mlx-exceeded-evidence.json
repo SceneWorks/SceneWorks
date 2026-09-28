@@ -1,0 +1,63 @@
+{
+  "exceededBounds": [
+    {
+      "artifact": {
+        "inventorySha256": "64323e949de0ea900ed357fdcbe98e3a9cee69b0a8dfaec03599acd22bbd4e94",
+        "repository": "SceneWorks/flux2-dev-mlx",
+        "resolvedRevision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18218-flux2-dev-t2i-resident-evidence-v1",
+      "capturedAt": "2026-09-07T03:26:01.329Z",
+      "ceilingBytes": 86988010336,
+      "eventFileSha256": "a2827bf4b080baca78a0d88b65998318a7468d85ab69f89a71f6ad86f15a876c",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "exc-2c3953f5b6d3a4680b35",
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-b030398ebde9a6e24dd2",
+      "observedFootprintBytes": 86988010336,
+      "providerStderrSha256": "de64f4215a8ed0c3b07e21400743c2195e9c6ae2913f375627380ef1e9a690e7",
+      "reason": "metal_submissions_ignored:observed_86988010336:wired_limit_87044670532",
+      "referenceCount": 0,
+      "repositories": {
+        "inference": {
+          "closureDigest": "93be3c1b52fcd9266fa594241698f1366ce0e192fc493656f77baf2ad85147ac",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:f526e9dff72cf4aae53506650a670173a53ededa716e8ec9b87834a5437b5248",
+          "revision": "b1337a54dc60c0725b771263545cd8094fef0824"
+        }
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 512,
+          "width": 512
+        },
+        "mode": "text_to_image",
+        "modelId": "flux2_dev",
+        "overlay": "none",
+        "provider": "flux2_dev",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [],
+  "schemaVersion": 6
+}

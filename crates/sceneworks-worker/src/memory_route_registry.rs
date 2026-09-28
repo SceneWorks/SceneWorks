@@ -475,6 +475,18 @@ const IDEOGRAM_MODES: &[MemoryRouteMode] = &[
 ];
 const QWEN_EDIT_MODES: &[MemoryRouteMode] =
     &[MemoryRouteMode::EditImage, MemoryRouteMode::CharacterImage];
+/// SC-24114: Qwen-Image 2.1 serves ONE upstream call — an empty ordered reference list is
+/// text-to-image, a non-empty one is the edit — under four public modes.
+/// The provider's `MAX_REFERENCE_IMAGES` — this module compiles on every target, so it is restated
+/// here and pinned against the linked provider by
+/// `qwen_image_2_1_reference_bound_matches_the_linked_provider`.
+pub(crate) const QWEN_IMAGE_2_1_MAX_REFERENCES: u32 = 10;
+const QWEN_IMAGE_2_1_MODES: &[MemoryRouteMode] = &[
+    MemoryRouteMode::TextToImage,
+    MemoryRouteMode::EditImage,
+    MemoryRouteMode::ImageToImage,
+    MemoryRouteMode::CharacterImage,
+];
 const FLUX2_KLEIN_EDIT_MODES: &[MemoryRouteMode] = &[
     MemoryRouteMode::EditImage,
     MemoryRouteMode::CharacterImage,
@@ -566,6 +578,55 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
         legacy_shaping: true,
+    },
+    // sc-24112 — Qwen-Image 2.1, registered on BOTH lanes with the SAME coordinates. That symmetry
+    // is the declaration, not a shortcut: after inference #1007 both providers load the same packed
+    // artefacts, declare the same `supported_quants: [Q4, Q8]` (plus the dense bf16 snapshot), and
+    // publish the same `Resident` / `StagedResidency` / `BoundedDecode` ladder off one derived
+    // memory model. A per-lane divergence here would be a claim neither engine makes.
+    //
+    // `BF16_Q4_Q8` and not `ALL_TIERS`: the catalog ships exactly these three, and NVFP4 is not a
+    // tier either provider can serve.
+    //
+    // `QWEN_IMAGE_2_1_MODES` — every PUBLIC mode the request route serves (sc-24114): text-to-image
+    // and the three conditioned faces of the SAME upstream call (`edit_image`, `image_to_image`,
+    // `character_image`). Before sc-24114 this was `TEXT_ONLY`, which left every reference request
+    // with no declaration at all (candle: `NoRelevantDeclaration`), so the terminal campaign and
+    // the admission path could only ever see text-to-image.
+    //
+    // The provider's `memory_strategy::safety_check` admits `MemoryMode::TextToImage` and PRICES
+    // references there (each one an extra `REFERENCE_FIT_TOKENS` joint-sequence block, bounded by
+    // `MAX_REFERENCE_IMAGES`) — there is no separate provider edit mode. So the manifest's
+    // `requestContexts` map every public mode onto `providerMode: "text_to_image"`, and
+    // [`expected_provider_mode`] states that mapping for this provider: the public coordinate
+    // (what the matrix and the campaign key on) stays the request's own mode, while the provider
+    // receives the one mode it implements.
+    //
+    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
+    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
+    // reachable at all — it is absent rather than exempted.
+    //
+    // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
+    // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
+    // declaration-owned and was never in the pre-declaration shaper, so removing the declaration
+    // must make it unreachable rather than fall back to legacy shaping.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: QWEN_IMAGE_2_1_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "qwen_image_2_1",
+        tiers: BF16_Q4_Q8,
+        modes: QWEN_IMAGE_2_1_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
@@ -921,6 +982,45 @@ const RULES: &[MemoryRouteRule] = &[
         load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: true,
+    },
+    // sc-22731: the MLX twins of the two Candle SANA rows above. Until these existed the registry
+    // named 37 MLX providers and NEITHER SANA route, so `mlx-gen-sana`'s windowed rung 4
+    // (`bounded_transformer_residency` over `TRANSFORMER_WINDOW_COMPONENT::Dit`, inference PR 951)
+    // was unroutable by construction: `evaluate_declared_mlx_load_shape_for_request_with_strategy`
+    // refuses any provider with no `Mlx` rule, so no MLX SANA declaration could ever be consulted.
+    //
+    // `ALL_TIERS` like the three MLX Chroma1 rows above — the packed macOS turnkeys ship q4, q8 and
+    // bf16 and `mlx-gen-sana` opens each. `SANA_MODES` and `PLAIN`, exactly as the Candle rows: the
+    // engine's route gate admits text_to_image and image_to_image, and the MLX still lane builds its
+    // spec with no adapters. `requires_sequential_selection: true` because PR 951's
+    // `contract_with_asset_facts` declares the windowed rung ONLY under `OffloadPolicy::Sequential`
+    // — a Resident load must therefore keep the shape it came in with, which is what the
+    // `matching.all(|rule| rule.requires_sequential_selection)` short-circuit below guarantees, and
+    // why the six `sana_*:*:mlx` RESIDENT anchors keep `eager_materialization`.
+    //
+    // `legacy_shaping: false` and NOT the `true` the MLX Chroma1 rows carry: these coordinates did
+    // not exist in the pre-declaration shaper, so they must not become reachable through
+    // `apply_registered_load_shape` merely because a manifest declaration is absent. The cost is
+    // that the lane is request-context-owned (`requires_request_context` below), so it stays
+    // refused-and-eager — exactly what it is today with no rule at all — until the
+    // `sana_*.mlx` `memoryStrategyContract` blocks carry `requestContexts`.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sana_1600m",
+        tiers: ALL_TIERS,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "sana_sprint_1600m",
+        tiers: ALL_TIERS,
+        modes: SANA_MODES,
+        load_profiles: PLAIN,
+        requires_sequential_selection: true,
+        legacy_shaping: false,
     },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
@@ -1519,6 +1619,11 @@ fn mlx_request_implementation_matches(
     requires_request_context: bool,
 ) -> Result<bool, ()> {
     let implementation_object = implementation.as_object().ok_or(())?;
+    // This pass evaluates BTR declarations. Legacy Resident inventory rows need no request
+    // contexts, and staged declarations are validated separately if no BTR row applies.
+    if implementation_rung(implementation_object)? != "bounded_transformer_residency" {
+        return Ok(false);
+    }
     if implementation_object.get("requestContexts").is_none() {
         if requires_request_context {
             return Err(());
@@ -1671,6 +1776,15 @@ fn expected_provider_mode(
     context: MemoryRouteRequestContext,
 ) -> &'static str {
     match (runtime_provider, context.mode) {
+        // SC-24114: Qwen-Image 2.1's provider implements ONE memory mode and prices the ordered
+        // reference list inside it (0..=MAX_REFERENCE_IMAGES extra joint-sequence blocks).
+        (
+            "qwen_image_2_1",
+            MemoryRouteMode::TextToImage
+            | MemoryRouteMode::EditImage
+            | MemoryRouteMode::ImageToImage
+            | MemoryRouteMode::CharacterImage,
+        ) if context.reference_count <= QWEN_IMAGE_2_1_MAX_REFERENCES => "text_to_image",
         ("qwen_image_edit", MemoryRouteMode::EditImage)
             if (1..=5).contains(&context.reference_count) =>
         {
@@ -2289,6 +2403,40 @@ pub fn evaluate_declared_mlx_load_shape(
     )
 }
 
+/// Does the pinned provider implement `strategy` for the candidate whose contract this is?
+///
+/// A contract-read ERROR is not the same fact as "the provider does not implement it", and the
+/// declaration evaluator can only act on the latter. sc-22727 measured the cost of conflating them:
+/// the shipped FLUX.2 Klein rehosts failed `KleinArtifactInventory::verify_for_provider` while the
+/// contract was being read, the `Err` collapsed to `false` here, the BTR declaration was refused,
+/// and the route silently downgraded to an eager resident load carrying NO calibration identity —
+/// with nothing in the log to say an artifact had been rejected. The downgrade is still the right
+/// fallback (a load that cannot prove its rung must not claim it), so this keeps returning `false`;
+/// it just stops doing it silently.
+fn provider_implements_declared_strategy(
+    contract: gen_core::Result<Option<gen_core::MemoryProviderContract>>,
+    provider: &str,
+    strategy: MemoryStrategy,
+) -> bool {
+    match contract {
+        Ok(contract) => contract.is_some_and(|contract| {
+            contract
+                .capability(strategy)
+                .is_some_and(|capability| capability.support == MemoryStrategySupport::Implemented)
+        }),
+        Err(error) => {
+            tracing::warn!(
+                provider,
+                strategy = ?strategy,
+                %error,
+                "memory-strategy contract read failed; treating the declared strategy as \
+                 unimplemented and falling back to the eager resident load shape"
+            );
+            false
+        }
+    }
+}
+
 /// Request-exact MLX declaration intersection. Full BTR rows authorize `Applied + Deferred`;
 /// exact lower-only staged rows authorize only `Eligible + Eager` under their declared load policy.
 /// `Eligible` remains non-authorizing for BTR and is ignored by every legacy shaper. Krea and FLUX
@@ -2311,15 +2459,11 @@ pub fn evaluate_declared_mlx_load_shape_for_request(
         spec,
         context,
         |candidate, strategy| {
-            crate::inference_runtime::media()
-                .memory_strategy_contract(provider, candidate)
-                .ok()
-                .flatten()
-                .is_some_and(|contract| {
-                    contract.capability(strategy).is_some_and(|capability| {
-                        capability.support == MemoryStrategySupport::Implemented
-                    })
-                })
+            provider_implements_declared_strategy(
+                crate::inference_runtime::media().memory_strategy_contract(provider, candidate),
+                provider,
+                strategy,
+            )
         },
     )
 }
@@ -3245,6 +3389,95 @@ mod tests {
         contract
     }
 
+    /// sc-22727: a contract-read ERROR downgrades the declaration (it is not proof of the rung),
+    /// but it must not do so silently — it is how the shipped FLUX.2 Klein rehosts came to run
+    /// uncalibrated with nothing in the log. Weights-free: the seam is a pure function of the
+    /// `Result` the registry hands back.
+    #[test]
+    fn a_failed_contract_read_downgrades_the_declared_strategy_and_is_not_silent() {
+        let implemented = provider_implements_declared_strategy(
+            Ok(Some(staged_contract("flux2_klein_9b"))),
+            "flux2_klein_9b",
+            MemoryStrategy::StagedResidency,
+        );
+        assert!(
+            implemented,
+            "an implemented rung must still read as implemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(Some(staged_contract("flux2_klein_9b"))),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "a Missing rung must read as unimplemented"
+        );
+        assert!(
+            !provider_implements_declared_strategy(
+                Ok(None),
+                "flux2_klein_9b",
+                MemoryStrategy::BoundedTransformerResidency,
+            ),
+            "no contract is not an implemented rung"
+        );
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let captured = std::sync::Arc::clone(&logs);
+        let refused =
+            tracing::subscriber::with_default(CapturingSubscriber { messages: captured }, || {
+                provider_implements_declared_strategy(
+                    Err(gen_core::Error::Unsupported(
+                        "flux2 Klein turnkey text encoder is not dense".to_owned(),
+                    )),
+                    "flux2_klein_9b",
+                    MemoryStrategy::BoundedTransformerResidency,
+                )
+            });
+        assert!(!refused, "an unreadable contract cannot authorize the rung");
+        let logs = logs.lock().expect("log buffer");
+        assert_eq!(logs.len(), 1, "exactly one warning: {logs:?}");
+        assert!(
+            logs[0].contains("flux2_klein_9b")
+                && logs[0].contains("flux2 Klein turnkey text encoder is not dense"),
+            "the warning must name the provider AND the error: {}",
+            logs[0]
+        );
+    }
+
+    /// A minimal `tracing` subscriber that records every event's rendered fields, so the seam's
+    /// warning can be asserted without a global subscriber or a log-capture dependency.
+    struct CapturingSubscriber {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Render<'a>(&'a mut String);
+            impl tracing::field::Visit for Render<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{}={value:?} ", field.name());
+                }
+            }
+            let mut rendered = String::new();
+            event.record(&mut Render(&mut rendered));
+            self.messages.lock().expect("log buffer").push(rendered);
+        }
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+
     fn sana_contract(provider: &str) -> gen_core::MemoryProviderContract {
         let mut contract = staged_contract(provider);
         contract.load_shape = LoadShape::DeferredMaterialization;
@@ -3307,15 +3540,16 @@ mod tests {
     }
 
     fn request_strategy_declaration() -> JsonObject<String, Value> {
-        serde_json::json!({
-            "id": "krea_2_raw",
-            "candle": { "memoryStrategyContract": {
-                "abi": 1,
-                "provider": "krea_2_raw",
-                "implementations": [{
+        // sc-22735: the shipped rows are per-(route, tier), so the fixture is too — a fixture that
+        // still spanned three tiers under one shared key would exercise a shape the manifest no
+        // longer has, and the row-selection path under test is the one that must pick per tier.
+        let implementations = ["bf16", "q4", "q8"]
+            .into_iter()
+            .map(|tier| {
+                serde_json::json!({
                     "rung": "staged_residency",
-                    "fingerprint": "krea-candle-request-scoped-staged-residency-v1",
-                    "tiers": ["bf16", "q4", "q8"],
+                    "fingerprint": format!("krea-2-raw-{tier}-cuda-staged-residency-v1"),
+                    "tiers": [tier],
                     "modes": ["text_to_image"],
                     "overlays": ["none", "lora"],
                     "loadProfiles": ["plain", "lora", "lora_pid", "pid"],
@@ -3328,7 +3562,15 @@ mod tests {
                     ],
                     "engagedRungs": ["resident", "staged_residency"],
                     "parameters": {}, "parameterRanges": {}, "source": "fixture"
-                }]
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::json!({
+            "id": "krea_2_raw",
+            "candle": { "memoryStrategyContract": {
+                "abi": 1,
+                "provider": "krea_2_raw",
+                "implementations": implementations
             }}
         })
         .as_object()
@@ -3391,6 +3633,252 @@ mod tests {
         .clone()
     }
 
+    /// The six shipped Mage-Flow catalog ids. Catalog id and engine provider id are equal on every
+    /// row (`engines.rs` `MODEL_TABLE`), which the anchor arms assert rather than assume.
+    const MAGE_MODELS: [&str; 6] = [
+        "mage_flow",
+        "mage_flow_base",
+        "mage_flow_turbo",
+        "mage_flow_edit",
+        "mage_flow_edit_base",
+        "mage_flow_edit_turbo",
+    ];
+
+    /// The mode a Mage member is admitted under: the three instruction editors render
+    /// `edit_image` on one reference, the rest plain `text_to_image`.
+    fn mage_mode(model_id: &str) -> (MemoryRouteMode, &'static str, u32) {
+        if model_id.contains("edit") {
+            (MemoryRouteMode::EditImage, "edit_image", 1)
+        } else {
+            (MemoryRouteMode::TextToImage, "text_to_image", 0)
+        }
+    }
+
+    /// The worker's Mage load spec at the anchor coordinate: a snapshot directory, the resolved
+    /// tier's quant on the spec, no overlay (`MemoryRouteLoadProfile::Plain`), bound to its own
+    /// catalog route, with the shared text-encoder/VAE components staged the way
+    /// `image_jobs/base.rs` `attach_required_components` stages them (named components are not a
+    /// load-profile axis, so the profile stays `Plain`).
+    fn mage_spec(model_id: &str, tier: MemoryRouteTier) -> LoadSpec {
+        spec(tier, MemoryRouteLoadProfile::Plain)
+            .with_resolved_route(model_id)
+            .with_component(
+                "text_encoder",
+                WeightsSource::Dir("components/text_encoder".into()),
+            )
+            .with_component("vae", WeightsSource::Dir("components/vae".into()))
+    }
+
+    /// sc-22733 review (blocker, E4): the shape the worker's Candle image stream LOADS Mage under —
+    /// driven through the same declaration evaluator production runs
+    /// (`image_jobs/base.rs` `apply_declared_candle_image_load_shape` →
+    /// `evaluate_declared_candle_load_shape`) over the REAL shipped manifest entries.
+    ///
+    /// Every Mage entry's `candle.memoryStrategyContract` declares `bounded_transformer_residency`,
+    /// so `has_relevant_btr_declaration` is true and the six Candle `RULES` rows (`ALL_TIERS` ×
+    /// `ALL_MODES`, `PLAIN`, `requires_sequential_selection: false`) exist for every cell — but
+    /// the declaration is matched on the BTR row's OWN `tiers` (`implementation_declares_selector`
+    /// looks at no other rung), and the generated candle BTR row of every Mage entry lists
+    /// `["bf16"]` only: `candle-gen-mage` publishes BTR `Implemented` only where `streamable` AND
+    /// `transformer_has_device_format` hold, and the stage-1 dump
+    /// (`capabilities.candle.json` `memoryContracts/mage_flow*`) found device-format blocks on the
+    /// bf16 snapshot alone. So the shape the worker LOADS is per tier: `Applied +
+    /// DeferredMaterialization` at bf16 (the provider predicate is asked about a Deferred
+    /// candidate, for which `streamable` holds — the predicate below mirrors that gate), and
+    /// `Refused + EagerMaterialization` at q4 and q8, where the generic shaper that follows must
+    /// not re-admit the route. Both results hold in BOTH modes and REGARDLESS of whether the staged
+    /// rung was selected. The anchor arm and the 18 `mage_flow*:*:candle` plan rows bind exactly
+    /// that: `deferred_materialization` on bf16, `eager_materialization` on q4/q8.
+    ///
+    /// *Mutations this kills:* a bf16 plan row moved to `eager_materialization` or a q4/q8 row to
+    /// `deferred_materialization`; a Mage Candle rule flipped to `requires_sequential_selection:
+    /// true` (the resident selection would fall to `Eligible + Eager` at bf16); the manifest's
+    /// bf16 BTR row deleted (bf16 would refuse) or widened to q4 (q4 would apply).
+    #[test]
+    fn mage_candle_production_load_shape_is_deferred_on_bf16_and_eager_on_the_packed_tiers() {
+        let plan: Value =
+            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+                .expect("memory calibration plan parses");
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
+        let mut checked = 0;
+        for model_id in MAGE_MODELS {
+            let manifest = shipped_model(model_id);
+            let (mode, mode_key, _) = mage_mode(model_id);
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                for sequential_selected in [false, true] {
+                    let shaped = evaluate_declared_candle_load_shape_with(
+                        model_id,
+                        Some(tier.as_str()),
+                        Some(mode),
+                        &manifest,
+                        mage_spec(model_id, tier),
+                        sequential_selected,
+                        // `candle-gen-mage` `memory_strategy::streamable`: Deferred, a directory
+                        // source, and none of the overlay slots.
+                        |candidate| {
+                            candidate.load_shape == LoadShape::DeferredMaterialization
+                                && matches!(candidate.weights, WeightsSource::Dir(_))
+                                && candidate.adapters.is_empty()
+                                && candidate.control.is_none()
+                                && candidate.extra_controls.is_empty()
+                                && candidate.ip_adapter.is_none()
+                                && candidate.pid.is_none()
+                                && candidate.identity.is_none()
+                        },
+                    );
+                    let (expected_result, expected_shape, expected_key) =
+                        if tier == MemoryRouteTier::Bf16 {
+                            (
+                                LoadShapeDeclarationResult::Applied,
+                                LoadShape::DeferredMaterialization,
+                                "deferred_materialization",
+                            )
+                        } else {
+                            (
+                                LoadShapeDeclarationResult::Refused,
+                                LoadShape::EagerMaterialization,
+                                "eager_materialization",
+                            )
+                        };
+                    assert_eq!(
+                        shaped.load_shape_declaration_result,
+                        expected_result,
+                        "{model_id} {} sequential_selected={sequential_selected}",
+                        tier.as_str()
+                    );
+                    assert_eq!(shaped.load_shape, expected_shape);
+                    // The generic shaper that follows in production must move neither an Applied
+                    // nor a Refused declaration.
+                    let generic = apply_registered_load_shape(
+                        MemoryRouteBackend::Candle,
+                        model_id,
+                        mode,
+                        shaped,
+                        sequential_selected,
+                    );
+                    assert_eq!(generic.load_shape, expected_shape);
+                    let key = format!("{model_id}:{}:candle", tier.as_str());
+                    let row = anchors
+                        .get(&key)
+                        .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                    assert_eq!(
+                        row["loadShape"].as_str(),
+                        Some(expected_key),
+                        "{key} must plan the shape the worker loads"
+                    );
+                }
+                let key = format!("{model_id}:{}:candle", tier.as_str());
+                let row = anchors
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                assert_eq!(row["mode"].as_str(), Some(mode_key), "{key}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, MAGE_MODELS.len() * 3);
+    }
+
+    /// sc-22733 review (scope gap 1): the shape the worker's MLX image stream LOADS Mage under for
+    /// the RESIDENT anchor selection, driven through the production evaluator pair
+    /// (`image_jobs/base.rs` → `evaluate_declared_mlx_load_shape_for_request` then
+    /// `apply_declared_mlx_load_policy_for_request`) over the real shipped manifest entries with
+    /// the request context the anchor renders (plain text-to-image with no reference, or
+    /// `edit_image` with exactly one).
+    ///
+    /// The resident rows do NOT stay eager. The six MLX Mage `RULES` are typed
+    /// (`legacy_shaping: false`, `requires_sequential_selection: false`), the manifest's BTR row
+    /// matches the anchor's exact request context, and `mlx-gen-mage` publishes BTR `Implemented`
+    /// for any streamable Deferred candidate (`model.rs` `streamable_spec`: Deferred, a directory,
+    /// no diff-patch adapters — the predicate below mirrors exactly that), so the worker evaluates
+    /// `Applied + DeferredMaterialization` BEFORE any rung is selected and then binds the BTR row's
+    /// `requiredOffloadPolicy: "sequential"`. The 18 `mage_flow*:*:mlx` plan rows therefore bind
+    /// `deferred_materialization`, exactly like the FLUX.1 MLX rows (sc-22726) and unlike Z-Image,
+    /// whose MLX rule couples the deferred shape to the Sequential decision.
+    ///
+    /// *Mutations this kills:* an MLX plan row moved back to `eager_materialization`; an MLX Mage
+    /// rule flipped to `requires_sequential_selection: true` (the resident selection would fall to
+    /// `Eligible + Eager`); the manifest BTR row's `requiredOffloadPolicy` removed (the bound policy
+    /// would stay `Resident`).
+    #[test]
+    fn mage_mlx_production_load_shape_is_deferred_and_sequential_for_the_resident_selection() {
+        let plan: Value =
+            serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+                .expect("memory calibration plan parses");
+        let anchors = plan["anchors"].as_object().expect("plan anchors object");
+        let mut checked = 0;
+        for model_id in MAGE_MODELS {
+            let manifest = shipped_model(model_id);
+            let (mode, _, reference_count) = mage_mode(model_id);
+            let context = MemoryRouteRequestContext {
+                mode,
+                reference_count,
+                use_pid: false,
+                has_phases: false,
+            };
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    model_id,
+                    Some(tier.as_str()),
+                    Some(mode),
+                    &manifest,
+                    mage_spec(model_id, tier),
+                    context,
+                    // `mlx-gen-mage` publishes rung 4 Implemented for a deferred candidate on
+                    // every shipped tier under both offload policies (`mlx-gen-catalog`
+                    // `mage_routes_publish_the_full_rung_four_ladder_on_every_shipped_tier`).
+                    |candidate| candidate.load_shape == LoadShape::DeferredMaterialization,
+                );
+                let bound = apply_declared_mlx_load_policy_for_request(
+                    model_id,
+                    Some(tier.as_str()),
+                    Some(mode),
+                    &manifest,
+                    evaluated.clone(),
+                    context,
+                );
+                let key = format!("{model_id}:{}:mlx", tier.as_str());
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Applied,
+                    "{key}"
+                );
+                assert_eq!(
+                    evaluated.load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{key}"
+                );
+                assert_eq!(
+                    bound.load_shape,
+                    LoadShape::DeferredMaterialization,
+                    "{key}"
+                );
+                assert_eq!(
+                    bound.offload_policy,
+                    OffloadPolicy::Sequential,
+                    "{key}: the BTR row's requiredOffloadPolicy is bound"
+                );
+                let row = anchors
+                    .get(&key)
+                    .unwrap_or_else(|| panic!("the plan has no {key} anchor"));
+                assert_eq!(
+                    row["loadShape"].as_str(),
+                    Some("deferred_materialization"),
+                    "{key} must plan the shape the worker loads"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, MAGE_MODELS.len() * 3);
+    }
+
     fn shipped_model(id: &str) -> JsonObject<String, Value> {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value =
@@ -3404,6 +3892,56 @@ mod tests {
             .and_then(Value::as_object)
             .unwrap_or_else(|| panic!("missing shipped model {id}"))
             .clone()
+    }
+
+    #[test]
+    fn shipped_sdxl_packed_tiers_reach_declared_streaming() {
+        for id in ["sdxl", "realvisxl", "realvisxl_lightning"] {
+            let manifest = shipped_model(id);
+            for tier in [MemoryRouteTier::Q4, MemoryRouteTier::Q8] {
+                for profile in [MemoryRouteLoadProfile::Plain, MemoryRouteLoadProfile::Lora] {
+                    let input = spec(tier, profile).with_resolved_route(id);
+                    let shaped = evaluate_declared_mlx_load_shape_with(
+                        "sdxl",
+                        Some(tier.as_str()),
+                        Some(MemoryRouteMode::TextToImage),
+                        &manifest,
+                        input.clone(),
+                        |_| true,
+                    );
+                    assert_eq!(
+                        shaped.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Applied,
+                        "{id} {tier:?} {profile:?}"
+                    );
+                    let refused = evaluate_declared_mlx_load_shape_with(
+                        "sdxl",
+                        Some(tier.as_str()),
+                        Some(MemoryRouteMode::TextToImage),
+                        &manifest,
+                        input,
+                        |_| false,
+                    );
+                    assert_eq!(
+                        refused.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Refused,
+                        "provider cannot be bypassed"
+                    );
+                }
+            }
+            let unsupported = evaluate_declared_mlx_load_shape_with(
+                "sdxl",
+                Some("nvfp4"),
+                Some(MemoryRouteMode::TextToImage),
+                &manifest,
+                spec(MemoryRouteTier::Nvfp4, MemoryRouteLoadProfile::Plain).with_resolved_route(id),
+                |_| true,
+            );
+            assert_eq!(
+                unsupported.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
     }
 
     fn spec(tier: MemoryRouteTier, profile: MemoryRouteLoadProfile) -> LoadSpec {
@@ -3545,6 +4083,70 @@ mod tests {
     }
 
     #[test]
+    fn krea_raw_candle_declaration_publishes_per_route_tier_calibration_identity() {
+        // sc-22735: the candle block used to publish one fingerprint across both Raw routes and all
+        // three tiers, so a measured anchor could not be attributed to the cell it came from. Derive
+        // the {route} x {tier} product here rather than counting rows.
+        let manifest = shipped_model("krea_2_raw");
+        let contract = &manifest["candle"]["memoryStrategyContract"];
+        assert_eq!(contract["provider"], "krea_2_raw");
+        assert_eq!(
+            contract["exhaustive"], true,
+            "the candle declaration stays exhaustive: an undeclared cell must fail closed"
+        );
+        let implementations = contract["implementations"]
+            .as_array()
+            .expect("Raw candle implementation rows");
+        let expected = [("krea_2_raw", "krea-2-raw"), ("krea_2_edit", "krea-2-edit")]
+            .into_iter()
+            .flat_map(|(route, prefix)| {
+                ["bf16", "q4", "q8"].into_iter().map(move |tier| {
+                    (
+                        route.to_owned(),
+                        tier.to_owned(),
+                        format!("{prefix}-{tier}-cuda-staged-residency-v1"),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared = implementations
+            .iter()
+            .map(|implementation| {
+                assert_eq!(
+                    implementation["rung"], "staged_residency",
+                    "request-scoped staging is the only candle rung Raw declares"
+                );
+                let tiers = implementation["tiers"]
+                    .as_array()
+                    .expect("Raw candle tiers");
+                assert_eq!(
+                    tiers.len(),
+                    1,
+                    "each row must own exactly one tier so its calibration identity is unambiguous"
+                );
+                (
+                    implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("krea_2_raw")
+                        .to_owned(),
+                    tiers[0].as_str().expect("Raw candle tier").to_owned(),
+                    implementation["fingerprint"]
+                        .as_str()
+                        .expect("Raw candle fingerprint")
+                        .to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(declared, expected);
+        assert_eq!(
+            implementations.len(),
+            declared.len(),
+            "no duplicate (route, tier) rows"
+        );
+    }
+
+    #[test]
     fn krea_raw_declaration_is_exact_true_cfg_generation_authority() {
         let manifest = shipped_model("krea_2_raw");
         let contract = manifest["mlx"]["memoryStrategyContract"]
@@ -3560,49 +4162,105 @@ mod tests {
         let implementations = contract["implementations"]
             .as_array()
             .expect("Raw implementation rows");
-        assert_eq!(implementations.len(), 6);
-        let (native, edit) = implementations.split_at(3);
-        for implementation in native {
-            assert_eq!(
-                implementation["fingerprint"],
-                "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
-            );
-            assert_eq!(
-                implementation["tiers"],
-                serde_json::json!(["bf16", "q4", "q8"])
-            );
+        // sc-22735: the row set is the {route} x {rung} x {tier} product, and each cell publishes its
+        // own calibration identity. Derive the expectation from that product rather than freezing a
+        // count — a frozen `len()` accepts any 18 rows, including eighteen copies of one cell, and
+        // silently re-passes if a tier or a rung is dropped and another duplicated.
+        let expected_mlx_rows = ["krea_2_raw", "krea_2_edit"]
+            .into_iter()
+            .flat_map(|route| {
+                [
+                    "bounded_decode",
+                    "bounded_attention",
+                    "bounded_transformer_residency",
+                ]
+                .into_iter()
+                .flat_map(move |rung| {
+                    ["bf16", "q4", "q8"].into_iter().map(move |tier| {
+                        let prefix = if route == "krea_2_raw" {
+                            "krea-2-raw"
+                        } else {
+                            "krea-2-edit"
+                        };
+                        (
+                            route.to_owned(),
+                            rung.to_owned(),
+                            tier.to_owned(),
+                            format!("{prefix}-{tier}-mlx-shared-ladder-v1"),
+                        )
+                    })
+                })
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        let declared_mlx_rows = implementations
+            .iter()
+            .map(|implementation| {
+                let tiers = implementation["tiers"]
+                    .as_array()
+                    .expect("Raw declares tiers");
+                assert_eq!(
+                    tiers.len(),
+                    1,
+                    "each Raw row must own exactly one tier so its calibration identity is unambiguous"
+                );
+                (
+                    implementation
+                        .get("runtimeProvider")
+                        .and_then(Value::as_str)
+                        .unwrap_or("krea_2_raw")
+                        .to_owned(),
+                    implementation["rung"]
+                        .as_str()
+                        .expect("Raw rung")
+                        .to_owned(),
+                    tiers[0].as_str().expect("Raw tier").to_owned(),
+                    implementation["fingerprint"]
+                        .as_str()
+                        .expect("Raw fingerprint")
+                        .to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            declared_mlx_rows, expected_mlx_rows,
+            "Raw must publish one per-(route, tier) production identity per rung, never Turbo's shared key"
+        );
+        assert_eq!(
+            implementations.len(),
+            declared_mlx_rows.len(),
+            "no duplicate (route, rung, tier) rows"
+        );
+        for implementation in implementations {
+            let native = implementation.get("runtimeProvider").is_none();
             assert_eq!(
                 implementation["modes"],
-                serde_json::json!(["text_to_image"])
+                if native {
+                    serde_json::json!(["text_to_image"])
+                } else {
+                    serde_json::json!(["edit_image"])
+                }
             );
             assert_eq!(
                 implementation["overlays"],
-                serde_json::json!(["none", "lora"])
+                if native {
+                    serde_json::json!(["none", "lora"])
+                } else {
+                    serde_json::json!(["lora"])
+                }
             );
+            if implementation["rung"] == "bounded_transformer_residency" {
+                assert_eq!(
+                    implementation["engagedRungs"],
+                    serde_json::json!([
+                        "resident",
+                        "staged_residency",
+                        "bounded_decode",
+                        "bounded_attention",
+                        "bounded_transformer_residency"
+                    ])
+                );
+            }
         }
-        for implementation in edit {
-            assert_eq!(implementation["runtimeProvider"], "krea_2_edit");
-            assert_eq!(
-                implementation["fingerprint"],
-                "krea-2-mlx-full-ladder-native-pid-attn64m-window1-2026-08-03-v3"
-            );
-            assert_eq!(
-                implementation["tiers"],
-                serde_json::json!(["bf16", "q4", "q8"])
-            );
-            assert_eq!(implementation["modes"], serde_json::json!(["edit_image"]));
-            assert_eq!(implementation["overlays"], serde_json::json!(["lora"]));
-        }
-        assert_eq!(
-            implementations[2]["engagedRungs"],
-            serde_json::json!([
-                "resident",
-                "staged_residency",
-                "bounded_decode",
-                "bounded_attention",
-                "bounded_transformer_residency"
-            ])
-        );
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let shipped: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
@@ -3941,8 +4599,23 @@ mod tests {
             LoadShapeDeclarationResult::Refused
         );
 
+        // sc-22735: the rows are per-(route, tier), so index 2 no longer names the native BTR row a
+        // q4 request resolves through — a mutation planted there would sit on a tier this request
+        // never reads and the refusal would pass without the guard ever running. Locate the row.
         let mut malformed = manifest.clone();
-        malformed["mlx"]["memoryStrategyContract"]["implementations"][2]["engagedRungs"] =
+        let btr_q4 = malformed["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("implementation rows")
+            .iter()
+            .position(|row| {
+                row["rung"] == "bounded_transformer_residency"
+                    && row.get("runtimeProvider").is_none()
+                    && row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+            })
+            .expect("the native q4 BTR row");
+        malformed["mlx"]["memoryStrategyContract"]["implementations"][btr_q4]["engagedRungs"] =
             Value::String("staged_residency".to_owned());
         assert_eq!(
             apply(
@@ -4155,8 +4828,27 @@ mod tests {
                 |_| true,
             )
         };
+        // sc-22735: Turbo's rows are per-(route, tier) now, so index 2 no longer names the BTR row
+        // this q4 text-to-image request resolves through — a mutation planted there would sit on a
+        // row the request never reads and every refusal below would pass without its guard ever
+        // running. Locate the row by what identifies it: the native (no `runtimeProvider`, which is
+        // what separates Turbo from the `krea_2_turbo_edit` rows in the same array) BTR row that
+        // declares q4.
+        let turbo_btr_q4 = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("implementation rows")
+            .iter()
+            .position(|row| {
+                row["rung"] == "bounded_transformer_residency"
+                    && row.get("runtimeProvider").is_none()
+                    && row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+            })
+            .expect("the native Turbo q4 BTR row");
+
         let mut crossed_provider_mode = manifest.clone();
-        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][2]
+        crossed_provider_mode["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             ["requestContexts"][0]["providerMode"] = Value::String("image_to_image".to_owned());
         assert_eq!(
             evaluate_mutated(&crossed_provider_mode).load_shape_declaration_result,
@@ -4165,7 +4857,7 @@ mod tests {
         );
 
         let mut ambiguous = manifest.clone();
-        let contexts = ambiguous["mlx"]["memoryStrategyContract"]["implementations"][2]
+        let contexts = ambiguous["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             ["requestContexts"]
             .as_array_mut()
             .expect("Turbo BTR request contexts");
@@ -4178,7 +4870,7 @@ mod tests {
         );
 
         let mut missing_matching_contexts = manifest.clone();
-        missing_matching_contexts["mlx"]["memoryStrategyContract"]["implementations"][2]
+        missing_matching_contexts["mlx"]["memoryStrategyContract"]["implementations"][turbo_btr_q4]
             .as_object_mut()
             .expect("Turbo BTR implementation")
             .remove("requestContexts");
@@ -5733,6 +6425,91 @@ mod tests {
     }
 
     #[test]
+    fn shipped_flux2_dev_staging_survives_legacy_resident_inventory_rows() {
+        let manifest = shipped_model("flux2_dev");
+        let evaluate =
+            |manifest: &JsonObject<String, Value>, tier: MemoryRouteTier, accept: bool| {
+                evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                    "flux2_dev",
+                    Some(tier.as_str()),
+                    Some(MemoryRouteMode::TextToImage),
+                    manifest,
+                    spec(tier, MemoryRouteLoadProfile::Plain).with_resolved_route("flux2_dev"),
+                    MemoryRouteRequestContext {
+                        mode: MemoryRouteMode::TextToImage,
+                        reference_count: 0,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |candidate, strategy| {
+                        assert_eq!(strategy, MemoryStrategy::StagedResidency);
+                        assert_eq!(candidate.offload_policy, OffloadPolicy::Sequential);
+                        assert_eq!(candidate.load_shape, LoadShape::EagerMaterialization);
+                        accept
+                    },
+                )
+            };
+        for tier in [
+            MemoryRouteTier::Bf16,
+            MemoryRouteTier::Q4,
+            MemoryRouteTier::Q8,
+        ] {
+            let selected = evaluate(&manifest, tier, true);
+            assert_eq!(
+                selected.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Eligible
+            );
+            assert_eq!(selected.load_shape, LoadShape::EagerMaterialization);
+            assert_eq!(selected.offload_policy, OffloadPolicy::Sequential);
+            assert_eq!(
+                evaluate(&manifest, tier, false).load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+        for mutation in ["missing", "malformed", "duplicate"] {
+            let mut invalid = manifest.clone();
+            let rows = invalid["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array_mut()
+                .unwrap();
+            let index = rows
+                .iter()
+                .position(|row| {
+                    row["rung"] == "staged_residency" && row.get("runtimeProvider").is_none()
+                })
+                .unwrap();
+            match mutation {
+                "missing" => {
+                    rows[index]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("requestContexts");
+                }
+                "malformed" => rows[index]["requestContexts"] = serde_json::json!({}),
+                _ => rows.push(rows[index].clone()),
+            }
+            let refused = evaluate_declared_mlx_load_shape_for_request_with_strategy(
+                "flux2_dev",
+                Some("bf16"),
+                Some(MemoryRouteMode::TextToImage),
+                &invalid,
+                spec(MemoryRouteTier::Bf16, MemoryRouteLoadProfile::Plain)
+                    .with_resolved_route("flux2_dev"),
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::TextToImage,
+                    reference_count: 0,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_, _| panic!("{mutation}: invalid declarations must not reach the provider"),
+            );
+            assert_eq!(
+                refused.load_shape_declaration_result,
+                LoadShapeDeclarationResult::Refused
+            );
+        }
+    }
+
+    #[test]
     fn flux2_dev_mlx_rules_cover_only_exact_base_edit_and_control_coordinates() {
         let witnesses = deferred_route_witnesses();
         let dev = witnesses
@@ -6198,6 +6975,123 @@ mod tests {
             );
             assert_eq!(shaped.load_shape, LoadShape::EagerMaterialization);
         }
+    }
+
+    /// **The eighteen shipped Candle SenseNova cells load Resident + Eager, read off the REAL
+    /// manifest** (sc-22734 review).
+    ///
+    /// `memory-candle-adapter`'s `sensenova_candle_spec_at` hard-codes `OffloadPolicy::Resident` +
+    /// `LoadShape::EagerMaterialization`, and its own test asserts those constants straight back —
+    /// so the claim that this is the WORKER's shape rested on a doc comment. This case asks the
+    /// production function instead: `evaluate_declared_candle_load_shape_with` over each of the six
+    /// catalog models' shipped manifest blocks. None declares a `memoryStrategyContract`, so the
+    /// declaration is `NotEvaluated`, the provider predicate is never consulted, and the spec comes
+    /// back with the shape it went in with. The moment a SenseNova block gains a BTR route entry,
+    /// the adapter's captured shape stops being the worker's and this reds.
+    ///
+    /// The second half is the positive control: a FIXTURE COPY of one shipped block with a
+    /// declaration spliced in DOES reach the predicate and DOES leave `NotEvaluated` behind, so the
+    /// first half is reading the manifest rather than restating a constant.
+    #[test]
+    fn shipped_sensenova_candle_routes_load_resident_and_eager() {
+        const SENSENOVA_CATALOG: [(&str, &str); 6] = [
+            ("sensenova_u1_8b", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_infographic_v2", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_infographic_v3", "sensenova_u1_8b"),
+            ("sensenova_u1_8b_fast", "sensenova_u1_8b_fast"),
+            (
+                "sensenova_u1_8b_infographic_v2_fast",
+                "sensenova_u1_8b_fast",
+            ),
+            (
+                "sensenova_u1_8b_infographic_v3_fast",
+                "sensenova_u1_8b_fast",
+            ),
+        ];
+        for (model_id, runtime_provider) in SENSENOVA_CATALOG {
+            let manifest = shipped_model(model_id);
+            for tier in ["q4", "q8", "bf16"] {
+                let input = LoadSpec::new(WeightsSource::Dir("sensenova-fixture".into()))
+                    .with_resolved_route(model_id)
+                    .with_offload_policy(OffloadPolicy::Resident)
+                    .with_load_shape(LoadShape::EagerMaterialization);
+                let evaluated = evaluate_declared_candle_load_shape_with(
+                    runtime_provider,
+                    Some(tier),
+                    Some(MemoryRouteMode::TextToImage),
+                    &manifest,
+                    input,
+                    false,
+                    |_| {
+                        panic!(
+                            "{model_id}:{tier}: no shipped SenseNova block declares a BTR route \
+                             entry, so the provider predicate must never be consulted"
+                        )
+                    },
+                );
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::NotEvaluated,
+                    "{model_id}:{tier}"
+                );
+                assert_eq!(
+                    evaluated.load_shape,
+                    LoadShape::EagerMaterialization,
+                    "{model_id}:{tier}"
+                );
+                assert_eq!(
+                    evaluated.offload_policy,
+                    OffloadPolicy::Resident,
+                    "{model_id}:{tier}"
+                );
+            }
+        }
+
+        // Positive control: a FIXTURE COPY of one shipped block with a BTR route entry spliced in
+        // stops being `NotEvaluated`. Without this, the case above could not tell "no declaration"
+        // apart from "this function ignores the manifest".
+        //
+        // It lands on `Refused` rather than `Applied` because SenseNova also has no Candle entry in
+        // `RULES` — a manifest declaration alone never shapes a route the registry does not route,
+        // which is the second, independent reason the adapter's Resident + Eager spec is the
+        // worker's. Both would have to change for a SenseNova Candle load to defer.
+        let mut declared = shipped_model("sensenova_u1_8b");
+        declared.insert(
+            "candle".to_owned(),
+            candle_declaration(
+                "sensenova_u1_8b",
+                "sensenova_u1_8b",
+                "sensenova_u1_8b",
+                &["q4"],
+                &["text_to_image"],
+                &["none"],
+            )["candle"]
+                .clone(),
+        );
+        let shaped = evaluate_declared_candle_load_shape_with(
+            "sensenova_u1_8b",
+            Some("q4"),
+            Some(MemoryRouteMode::TextToImage),
+            &declared,
+            LoadSpec::new(WeightsSource::Dir("sensenova-fixture".into()))
+                .with_resolved_route("sensenova_u1_8b")
+                .with_offload_policy(OffloadPolicy::Resident)
+                .with_load_shape(LoadShape::EagerMaterialization),
+            false,
+            |_| panic!("SenseNova has no Candle RULES entry, so no candidate can reach a provider"),
+        );
+        assert_eq!(
+            shaped.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Refused,
+            "a spliced declaration is SEEN — the shipped blocks' NotEvaluated is a real absence",
+        );
+        assert!(
+            !RULES
+                .iter()
+                .any(|rule| rule.backend == MemoryRouteBackend::Candle
+                    && rule.provider.starts_with("sensenova_u1_8b")),
+            "no SenseNova Candle route rule: the second reason the adapter's shape is the worker's",
+        );
     }
 
     #[test]
@@ -6970,6 +7864,100 @@ mod tests {
         );
     }
 
+    /// sc-22731. The two MLX SANA rows exist at exactly the coordinates `mlx-gen-sana` serves, and
+    /// at no others. Deleting either row turns this red on its first `rule_coordinates_match`.
+    #[test]
+    fn mlx_sana_rules_cover_exact_tiers_modes_and_load_profiles() {
+        for provider in ["sana_1600m", "sana_sprint_1600m"] {
+            for tier in MemoryRouteTier::ALL {
+                for mode in [MemoryRouteMode::TextToImage, MemoryRouteMode::ImageToImage] {
+                    let selector = MemoryRouteSelector {
+                        backend: MemoryRouteBackend::Mlx,
+                        provider,
+                        tier,
+                        mode,
+                        overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                        load_profile: MemoryRouteLoadProfile::Plain,
+                    };
+                    assert!(rule_coordinates_match(selector), "missing {selector:?}");
+                }
+            }
+            // The MLX still lane builds its spec with no adapters at all, and the engine's route
+            // gate admits neither of these modes: an overlaid or edit coordinate here would be
+            // fiction.
+            for crossed in [
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::TextToImage,
+                    overlay: MemoryRouteLoadProfile::Lora.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Lora,
+                },
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::EditImage,
+                    overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Plain,
+                },
+                MemoryRouteSelector {
+                    backend: MemoryRouteBackend::Mlx,
+                    provider,
+                    tier: MemoryRouteTier::Q4,
+                    mode: MemoryRouteMode::StyleVariations,
+                    overlay: MemoryRouteLoadProfile::Plain.overlay(),
+                    load_profile: MemoryRouteLoadProfile::Plain,
+                },
+            ] {
+                assert!(!rule_coordinates_match(crossed), "accepted {crossed:?}");
+            }
+        }
+    }
+
+    /// sc-22731 ripple. The MLX SANA rows are Sequential-only and declaration-owned, so they must
+    /// NOT hand a Resident load a deferred shape: `apply_registered_load_shape` only consults
+    /// `legacy_shaping: true` rows, and the request-scoped evaluator short-circuits on
+    /// `requires_sequential_selection`. This is what keeps the six `sana_*:*:mlx` RESIDENT anchors
+    /// at `eager_materialization` — flipping either new row's `legacy_shaping` to `true` or its
+    /// `requires_sequential_selection` to `false` reds this.
+    #[test]
+    fn the_new_mlx_sana_rows_never_shape_a_resident_load_deferred() {
+        for provider in ["sana_1600m", "sana_sprint_1600m"] {
+            for tier in [
+                MemoryRouteTier::Bf16,
+                MemoryRouteTier::Q4,
+                MemoryRouteTier::Q8,
+            ] {
+                for sequential_selected in [false, true] {
+                    assert_eq!(
+                        apply_registered_load_shape(
+                            MemoryRouteBackend::Mlx,
+                            provider,
+                            MemoryRouteMode::TextToImage,
+                            spec(tier, MemoryRouteLoadProfile::Plain),
+                            sequential_selected,
+                        )
+                        .load_shape,
+                        LoadShape::EagerMaterialization,
+                        "{provider}:{tier:?}:{sequential_selected}"
+                    );
+                }
+            }
+            // ...and the rows are declaration-owned, so nothing else can claim they are legacy.
+            assert!(
+                RULES
+                    .iter()
+                    .any(|rule| rule.backend == MemoryRouteBackend::Mlx
+                        && rule.provider == provider
+                        && !rule.legacy_shaping
+                        && rule.requires_sequential_selection),
+                "{provider} must have a declaration-owned, sequential-only MLX row"
+            );
+        }
+    }
+
     #[test]
     fn candle_sdxl_rule_covers_exact_tiers_modes_and_load_profiles() {
         for tier in [
@@ -7378,8 +8366,16 @@ mod tests {
                         "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "identity"],
                     }),
+                    // sc-22732: q4 and q8 are separate rows because `mlx-gen-kolors` publishes a
+                    // distinct production identity per artifact tier and a row carries one
+                    // `fingerprint`; the packed-tier axes are otherwise identical.
                     serde_json::json!({
-                        "tiers": ["q4", "q8"],
+                        "tiers": ["q4"],
+                        "modes": ["text_to_image", "edit_image", "character_image"],
+                        "overlays": ["none", "lora", "identity"],
+                    }),
+                    serde_json::json!({
+                        "tiers": ["q8"],
                         "modes": ["text_to_image", "edit_image", "character_image"],
                         "overlays": ["none", "lora", "identity"],
                     }),
@@ -7718,8 +8714,25 @@ mod tests {
             assert!(matches!(refused, DeclaredCandleStrategyContract::Refused));
         }
 
+        // sc-22735: rows are per-tier now, so a mutation planted at a fixed index can land on a tier
+        // the request never selects and pass without ever being read. Locate the row the q4 requests
+        // below actually resolve through.
+        let q4_row = |declaration: &JsonObject<String, Value>| {
+            declaration["candle"]["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("implementation rows")
+                .iter()
+                .position(|row| {
+                    row["tiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "q4"))
+                })
+                .expect("a q4 row")
+        };
+
         let mut missing_provider_mode = manifest.clone();
-        missing_provider_mode["candle"]["memoryStrategyContract"]["implementations"][0]
+        let index = q4_row(&missing_provider_mode);
+        missing_provider_mode["candle"]["memoryStrategyContract"]["implementations"][index]
             ["requestContexts"][1]
             .as_object_mut()
             .expect("reference context")
@@ -7737,10 +8750,11 @@ mod tests {
         ));
 
         let mut duplicate_context = manifest.clone();
-        let repeated = duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
-            ["requestContexts"][1]
+        let index = q4_row(&duplicate_context);
+        let repeated = duplicate_context["candle"]["memoryStrategyContract"]["implementations"]
+            [index]["requestContexts"][1]
             .clone();
-        duplicate_context["candle"]["memoryStrategyContract"]["implementations"][0]
+        duplicate_context["candle"]["memoryStrategyContract"]["implementations"][index]
             ["requestContexts"]
             .as_array_mut()
             .expect("request contexts")
@@ -8517,7 +9531,18 @@ mod tests {
             let implementations = manifest["candle"]["memoryStrategyContract"]["implementations"]
                 .as_array()
                 .expect("Ideogram implementations");
-            for (profile, overlay) in [("plain", "none"), ("lora", "lora")] {
+            // sc-22732: the rows are per TIER — `candle-gen-ideogram` publishes a distinct
+            // production identity per (route, artifact-proven tier), and a row carries one
+            // `fingerprint` — so exactness is claimed per (profile, rung, tier) and the three tier
+            // rows of one (profile, rung) must be disjoint, which the walk below proves.
+            for (profile, overlay, tier) in [
+                ("plain", "none", "bf16"),
+                ("plain", "none", "q4"),
+                ("plain", "none", "q8"),
+                ("lora", "lora", "bf16"),
+                ("lora", "lora", "q4"),
+                ("lora", "lora", "q8"),
+            ] {
                 for (rung, engaged) in [
                     (
                         "bounded_decode",
@@ -8554,11 +9579,28 @@ mod tests {
                                     && implementation["overlays"].as_array().is_some_and(|values| {
                                         values.iter().any(|value| value == overlay)
                                     })
+                                    && implementation["tiers"].as_array().is_some_and(|values| {
+                                        values.iter().any(|value| value == tier)
+                                    })
                             })
                             .collect::<Vec<_>>();
                     let [implementation] = matching.as_slice() else {
-                        panic!("{provider}:{profile}:{rung} must have exactly one declaration");
+                        panic!(
+                            "{provider}:{profile}:{rung}:{tier} must have exactly one declaration"
+                        );
                     };
+                    assert_eq!(implementation["tiers"], serde_json::json!([tier]));
+                    assert_eq!(
+                        implementation["fingerprint"],
+                        serde_json::json!(format!(
+                            "ideogram4-candle-request-scoped-staged-residency-v1-{}-{tier}",
+                            if provider == "ideogram_4" {
+                                "base"
+                            } else {
+                                "turbo"
+                            }
+                        ))
+                    );
                     assert_eq!(implementation["engagedRungs"], serde_json::json!(engaged));
                 }
             }
@@ -9158,5 +10200,226 @@ mod tests {
                 has_phases: false,
             },
         ));
+    }
+
+    /// SC-24114: every public mode Qwen-Image 2.1 serves reaches the provider's ONE memory mode,
+    /// across the whole 0..=MAX_REFERENCE_IMAGES range, and nothing past it does.
+    #[test]
+    fn qwen_image_2_1_public_modes_map_onto_the_providers_one_memory_mode() {
+        for mode in QWEN_IMAGE_2_1_MODES {
+            for reference_count in 0..=QWEN_IMAGE_2_1_MAX_REFERENCES {
+                let context = MemoryRouteRequestContext {
+                    mode: *mode,
+                    reference_count,
+                    use_pid: false,
+                    has_phases: false,
+                };
+                assert_eq!(
+                    expected_provider_mode("qwen_image_2_1", context),
+                    "text_to_image",
+                    "{mode:?} with {reference_count} references"
+                );
+            }
+        }
+        // Both lanes witness every public mode (the terminal campaign and the matrix key on them).
+        // Spelled out rather than read from `QWEN_IMAGE_2_1_MODES`, so narrowing that constant
+        // back to text-to-image reds here.
+        let witnesses = deferred_route_witnesses();
+        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+            for mode in &[
+                MemoryRouteMode::TextToImage,
+                MemoryRouteMode::EditImage,
+                MemoryRouteMode::ImageToImage,
+                MemoryRouteMode::CharacterImage,
+            ] {
+                assert!(
+                    witnesses.iter().any(|row| row.backend == backend
+                        && row.provider == "qwen_image_2_1"
+                        && row.mode == *mode),
+                    "{backend:?} must witness qwen_image_2_1 {mode:?}"
+                );
+            }
+        }
+    }
+
+    /// SC-24114: a Candle Qwen-Image 2.1 REFERENCE request has a declaration. Before the
+    /// request-owned rows it was `NoRelevantDeclaration` for every edit / image-to-image /
+    /// character request; now the shipped manifest applies one exact row and hands the provider
+    /// `text_to_image`.
+    ///
+    /// *Mutation that reds this:* removing `requestContexts` from the shipped Candle rows (→
+    /// `NoRelevantDeclaration`), or dropping `edit_image` from their `modes` (→ `Refused`).
+    #[test]
+    fn shipped_qwen_image_2_1_candle_reference_requests_are_declared() {
+        let manifest = shipped_model("qwen_image_2_1");
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::TextToImage, 1),
+            (MemoryRouteMode::EditImage, 1),
+            (MemoryRouteMode::EditImage, 10),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 3),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1");
+                let declared = declared_candle_request_strategy_contract_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    &manifest,
+                    &spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| Some(staged_contract("qwen_image_2_1")),
+                );
+                let provider_mode = match declared {
+                    DeclaredCandleStrategyContract::Applied { provider_mode, .. } => provider_mode,
+                    DeclaredCandleStrategyContract::NoRelevantDeclaration => {
+                        panic!("{tier} {mode:?} x{reference_count}: NoRelevantDeclaration")
+                    }
+                    DeclaredCandleStrategyContract::Refused => {
+                        panic!("{tier} {mode:?} x{reference_count}: Refused")
+                    }
+                };
+                assert_eq!(provider_mode, "text_to_image");
+            }
+        }
+        // Past the provider's bound there is no declaration to apply.
+        let spec =
+            LoadSpec::new(WeightsSource::Dir("q8".into())).with_resolved_route("qwen_image_2_1");
+        assert!(!matches!(
+            declared_candle_request_strategy_contract_with(
+                "qwen_image_2_1",
+                Some("q8"),
+                &manifest,
+                &spec,
+                MemoryRouteRequestContext {
+                    mode: MemoryRouteMode::EditImage,
+                    reference_count: QWEN_IMAGE_2_1_MAX_REFERENCES + 1,
+                    use_pid: false,
+                    has_phases: false,
+                },
+                |_| Some(staged_contract("qwen_image_2_1")),
+            ),
+            DeclaredCandleStrategyContract::Applied { .. }
+        ));
+    }
+
+    /// SC-24114: the restated reference bound is the linked provider's own.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_reference_bound_matches_the_linked_provider() {
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        use runtime_cuda::providers::qwen_image_2_1 as provider;
+        #[cfg(target_os = "macos")]
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        assert_eq!(
+            QWEN_IMAGE_2_1_MAX_REFERENCES as usize,
+            provider::config::MAX_REFERENCE_IMAGES
+        );
+    }
+
+    /// SC-24114: the shipped MLX Qwen-Image 2.1 declaration is request-owned (every row carries
+    /// `requestContexts`, as a non-legacy MLX lane requires) and does NOT force every load onto the
+    /// provider's `Sequential` policy — which drops and reloads the language tower per request.
+    /// A reference request stays on the caller's own load policy and is never refused.
+    ///
+    /// *Mutation that reds this:* adding an MLX `staged_residency` row (→ `Eligible + Sequential`
+    /// for every load), or removing `requestContexts` from an MLX row (→ `Refused`).
+    #[test]
+    fn shipped_qwen_image_2_1_mlx_declaration_is_request_owned_and_never_forces_staging() {
+        let manifest = shipped_model("qwen_image_2_1");
+        let rows = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+            .as_array()
+            .expect("the MLX lane declares its contract");
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter().all(|row| row.get("requestContexts").is_some()),
+            "a non-legacy MLX lane reads a row without requestContexts as malformed"
+        );
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::EditImage, 4),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 10),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1");
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    Some(mode),
+                    &manifest,
+                    spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| true,
+                );
+                assert_eq!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::NotEvaluated,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+                assert_eq!(evaluated.offload_policy, OffloadPolicy::Resident);
+            }
+        }
+    }
+
+    /// SC-24114: when resident does NOT fit, the fit gate (`decide_residency_for_spec`) hands the
+    /// declaration a `Sequential` spec. With no MLX `staged_residency` row that decision must pass
+    /// through un-refused and still `Sequential` — the declaration neither blocks the staged load
+    /// nor quietly flips it back to resident — even when the provider-implements predicate answers
+    /// false for every candidate.
+    ///
+    /// *Mutation that reds this:* the declaration refusing (or re-residenting) a spec it has no
+    /// staged row for.
+    #[test]
+    fn shipped_qwen_image_2_1_mlx_declaration_passes_the_fit_gates_sequential_decision() {
+        let manifest = shipped_model("qwen_image_2_1");
+        for (mode, reference_count) in [
+            (MemoryRouteMode::TextToImage, 0),
+            (MemoryRouteMode::EditImage, 4),
+            (MemoryRouteMode::ImageToImage, 1),
+            (MemoryRouteMode::CharacterImage, 10),
+        ] {
+            for tier in ["bf16", "q8", "q4"] {
+                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                    .with_resolved_route("qwen_image_2_1")
+                    .with_offload_policy(OffloadPolicy::Sequential);
+                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                    "qwen_image_2_1",
+                    Some(tier),
+                    Some(mode),
+                    &manifest,
+                    spec,
+                    MemoryRouteRequestContext {
+                        mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    },
+                    |_| false,
+                );
+                assert_ne!(
+                    evaluated.load_shape_declaration_result,
+                    LoadShapeDeclarationResult::Refused,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+                assert_eq!(
+                    evaluated.offload_policy,
+                    OffloadPolicy::Sequential,
+                    "{tier} {mode:?} x{reference_count}"
+                );
+            }
+        }
     }
 }

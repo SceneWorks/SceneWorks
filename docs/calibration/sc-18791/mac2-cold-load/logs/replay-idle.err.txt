@@ -1,0 +1,1 @@
+memory-strategy provider adapter: required environment variable SCENEWORKS_MEMORY_MODEL_BYTES is not set

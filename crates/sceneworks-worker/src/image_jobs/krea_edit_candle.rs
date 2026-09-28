@@ -444,6 +444,7 @@ pub(super) async fn generate_candle_krea_edit_stream(
         false,
         false,
         budget,
+        raw_budget.map_or(0.0, crate::vram_gate::ladder_reserve_gb),
         predicted_peak_gb,
         adapter_resident_bytes,
         if reclaimable_gb > 0.0 {

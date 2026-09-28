@@ -1,0 +1,248 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/chroma1-flash-mlx",
+        "resolvedRevision": "6a9cb6178709559461506bf247f708d0d1008d00",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "chroma1-flash-bf16-mlx-shared-ladder-v1",
+      "capturedAt": "2026-09-06T11:26:51Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:chroma1-flash-shared-ladder",
+        "blockers": [
+          "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 1448
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1112376
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 30033766724
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 42779880756
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 88265514292
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 42781437756
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 27424774380
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 855628755
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 42781437756
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 27424774380
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 64
+          },
+          {
+            "name": "loadShapeDeferred",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "chroma1-flash-mlx-bf16-1024-seed22731-step2",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-bf8c2372019a3a78c9bd",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/chroma1-flash-mlx@6a9cb6178709559461506bf247f708d0d1008d00:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-3377bf5333a4ddc7077e",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1112376,
+          "allocatorBytes": 1112392,
+          "reclaimableBytes": 16
+        },
+        "decode": {
+          "activeBytes": 42779880756,
+          "allocatorBytes": 88265514292,
+          "reclaimableBytes": 45485633536
+        },
+        "denoise": {
+          "activeBytes": 30033766724,
+          "allocatorBytes": 38458645136,
+          "reclaimableBytes": 8424878412
+        },
+        "overall": {
+          "activeBytes": 42779880756,
+          "allocatorBytes": 88265514292,
+          "reclaimableBytes": 45485633536
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 67108864,
+        "decode": 92744450048,
+        "denoise": 40399536128,
+        "overall": 92744450048
+      },
+      "quality": {
+        "contract": "identical artifact, prompt, seed, geometry, steps, tier, and loaded provider; cold measured render versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "903a72d4e51eb94ba0c430e35e9a339147ffff4ad48fe9572327d163b0612101",
+          "dirty": false,
+          "revision": "563c44e1652043bf8bd018de79cadadc393f91f2"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:ee35851de3ec034fbe50790131ed5afa92f002dedda573542017a2feec5f3591",
+          "revision": "c26b9efcc92f656127444abc935a4bfab3df7c78"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 92744450048,
+          "name": "exact_fit",
+          "predictedBytes": 92744450048,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned SANA/Chroma1 crates open no memory-strategy request scope for the resident anchor composition and expose no calibration fault-injection site, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the MLX Chroma1-Flash base-only text-to-image path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "text_to_image",
+        "modelId": "chroma1_flash",
+        "overlay": "none",
+        "provider": "chroma1_flash",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

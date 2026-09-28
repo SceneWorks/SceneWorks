@@ -1,0 +1,248 @@
+{
+  "plugins": [
+    "react",
+    "import"
+  ],
+  "rules": {
+    "react/forbid-elements": [
+      "warn",
+      {
+        "forbid": []
+      }
+    ],
+    "no-restricted-imports": [
+      "warn",
+      {
+        "patterns": [
+          {
+            "group": [
+              "components/brand/**",
+              "components/content/**",
+              "components/controls/**",
+              "components/core/**",
+              "components/feedback/**",
+              "theme/**",
+              "ui_kits/studio/**"
+            ],
+            "message": "Import design-system components from 'index.js', not component internals."
+          }
+        ]
+      }
+    ],
+    "no-restricted-syntax": [
+      "warn",
+      {
+        "selector": "Literal[value=/#[0-9a-fA-F]{3,8}\\b/]",
+        "message": "Raw hex color — use a design-system color token via var()."
+      },
+      {
+        "selector": "Literal[value=/\\b\\d+px\\b/]",
+        "message": "Raw px value — use a design-system spacing token via var()."
+      },
+      {
+        "selector": "Literal[value=/font-family\\s*:\\s*(?!['\\\"]?(?:Plus Jakarta Sans|JetBrains Mono))/i]",
+        "message": "Font not provided by the design system. Available: Plus Jakarta Sans, JetBrains Mono."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='AccentPicker'] > JSXAttribute > JSXIdentifier[name!=/^(?:accent|onChange|key|ref|className|style|children)$/]",
+        "message": "<AccentPicker> doesn't accept that prop. Declared props: accent, onChange."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute > JSXIdentifier[name!=/^(?:variant|icon|iconRight|children|key|ref|className|style|children)$/]",
+        "message": "<Button> doesn't accept that prop. Declared props: variant, icon, iconRight, children."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Button'] > JSXAttribute[name.name='variant'] > Literal[value!=/^(?:primary|secondary|danger|icon)$/]",
+        "message": "<Button> variant must be one of 'primary' | 'secondary' | 'danger' | 'icon'."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='CompactSelectorItem'] > JSXAttribute > JSXIdentifier[name!=/^(?:id|name|key|ref|className|style|children)$/]",
+        "message": "<CompactSelectorItem> doesn't accept that prop. Declared props: id, name."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='IconGlyph'] > JSXAttribute > JSXIdentifier[name!=/^(?:size|className|style|key|ref|className|style|children)$/]",
+        "message": "<IconGlyph> doesn't accept that prop. Declared props: size, className, style."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Logo'] > JSXAttribute > JSXIdentifier[name!=/^(?:size|title|className|key|ref|className|style|children)$/]",
+        "message": "<Logo> doesn't accept that prop. Declared props: size, title, className."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Markdown'] > JSXAttribute > JSXIdentifier[name!=/^(?:content|key|ref|className|style|children)$/]",
+        "message": "<Markdown> doesn't accept that prop. Declared props: content."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='Modal'] > JSXAttribute > JSXIdentifier[name!=/^(?:children|onClose|className|labelledBy|label|key|ref|className|style|children)$/]",
+        "message": "<Modal> doesn't accept that prop. Declared props: children, onClose, className, labelledBy, label."
+      },
+      {
+        "selector": "JSXOpeningElement[name.name='StatusDot'] > JSXAttribute > JSXIdentifier[name!=/^(?:ok|key|ref|className|style|children)$/]",
+        "message": "<StatusDot> doesn't accept that prop. Declared props: ok."
+      }
+    ]
+  },
+  "overrides": [
+    {
+      "files": [
+        "**/index.js"
+      ],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    }
+  ],
+  "x-omelette": {
+    "components": {
+      "AccentPicker": {
+        "replaces": []
+      },
+      "Button": {
+        "replaces": []
+      },
+      "CompactSelectorItem": {
+        "replaces": []
+      },
+      "IconGlyph": {
+        "replaces": []
+      },
+      "Logo": {
+        "replaces": []
+      },
+      "Markdown": {
+        "replaces": []
+      },
+      "Modal": {
+        "replaces": []
+      },
+      "StatusDot": {
+        "replaces": []
+      }
+    },
+    "tokens": [
+      "--accent",
+      "--accent-fg",
+      "--accent-h",
+      "--accent-soft",
+      "--accent-strong",
+      "--ai",
+      "--ai-fg",
+      "--ai-soft",
+      "--ai-strong",
+      "--bg",
+      "--bg-2",
+      "--border",
+      "--border-strong",
+      "--control-h",
+      "--danger",
+      "--danger-soft",
+      "--ease-out",
+      "--font-mono",
+      "--font-ui",
+      "--gap-1",
+      "--gap-2",
+      "--gap-3",
+      "--gap-4",
+      "--gap-5",
+      "--ink",
+      "--logo-ground",
+      "--logo-seam",
+      "--mist",
+      "--pad-panel",
+      "--pad-tile",
+      "--paper",
+      "--r-lg",
+      "--r-md",
+      "--r-pill",
+      "--r-sm",
+      "--r-xl",
+      "--r-xs",
+      "--row-h",
+      "--shadow-glow",
+      "--shadow-lg",
+      "--shadow-md",
+      "--shadow-sm",
+      "--side-w",
+      "--success",
+      "--surface",
+      "--surface-2",
+      "--surface-hover",
+      "--t-fast",
+      "--t-med",
+      "--teal",
+      "--text",
+      "--text-faint",
+      "--text-muted",
+      "--warm",
+      "--warm-h",
+      "--warm-soft",
+      "--warn",
+      "--warn-soft",
+      "--wordmark-strong"
+    ],
+    "tokenKinds": {
+      "--bg": "color",
+      "--bg-2": "color",
+      "--surface": "color",
+      "--surface-2": "color",
+      "--surface-hover": "color",
+      "--border": "color",
+      "--border-strong": "color",
+      "--text": "font",
+      "--text-muted": "font",
+      "--text-faint": "font",
+      "--accent-h": "other",
+      "--accent": "color",
+      "--accent-strong": "color",
+      "--accent-soft": "color",
+      "--accent-fg": "color",
+      "--ai": "color",
+      "--ai-strong": "color",
+      "--ai-soft": "color",
+      "--ai-fg": "color",
+      "--ink": "color",
+      "--mist": "color",
+      "--paper": "color",
+      "--teal": "color",
+      "--logo-ground": "color",
+      "--logo-seam": "color",
+      "--wordmark-strong": "color",
+      "--warm-h": "other",
+      "--warm": "color",
+      "--warm-soft": "color",
+      "--danger": "color",
+      "--danger-soft": "color",
+      "--warn": "color",
+      "--warn-soft": "color",
+      "--success": "color",
+      "--shadow-sm": "shadow",
+      "--shadow-md": "shadow",
+      "--shadow-lg": "shadow",
+      "--shadow-glow": "shadow",
+      "--font-ui": "font",
+      "--font-mono": "font",
+      "--r-xs": "spacing",
+      "--r-sm": "spacing",
+      "--r-md": "spacing",
+      "--r-lg": "spacing",
+      "--r-xl": "spacing",
+      "--r-pill": "spacing",
+      "--gap-1": "spacing",
+      "--gap-2": "spacing",
+      "--gap-3": "spacing",
+      "--gap-4": "spacing",
+      "--gap-5": "spacing",
+      "--pad-tile": "spacing",
+      "--pad-panel": "spacing",
+      "--row-h": "spacing",
+      "--control-h": "spacing",
+      "--ease-out": "other",
+      "--t-fast": "other",
+      "--t-med": "other",
+      "--side-w": "spacing"
+    },
+    "fontFamilies": [
+      "JetBrains Mono",
+      "Plus Jakarta Sans"
+    ]
+  }
+}

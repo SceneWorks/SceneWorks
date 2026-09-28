@@ -1,0 +1,13 @@
+{
+  "$comment": "sc-22738. The ONE declaration of the per-lane default anchor composition. Read by scripts/memory-calibration-harness.mjs (ANCHOR_STRATEGY, which planAnchor applies to any plan row carrying no `strategy` override) AND by crates/sceneworks-worker/src/inference_runtime.rs (every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung, via include_str!). Both sides used to spell it out independently and nothing bound them; changing a rung here now reds the Rust test unless the contracts follow. This is the LAW's composition, not an operator knob — see the ANCHOR_STRATEGY doc comment for why, and for the single per-row escape.",
+  "lanes": {
+    "mlx": {
+      "rung": "resident",
+      "engagedRungs": ["resident"]
+    },
+    "candle": {
+      "rung": "staged_residency",
+      "engagedRungs": ["resident", "staged_residency"]
+    }
+  }
+}

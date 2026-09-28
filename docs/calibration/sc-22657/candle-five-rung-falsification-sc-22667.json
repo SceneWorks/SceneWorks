@@ -1,0 +1,2442 @@
+{
+  "story": "sc-22667",
+  "epic": "sc-22657",
+  "requirement": "E6",
+  "description": "ONE falsification pass of the image derivation law on the candle five-rung batch path: memory-candle-adapter run_batch on GPU 1, one model load per tier, five rungs in canonical order. observedMemory.*.activeBytes are device-VRAM deltas (bytes) above the run's idle baseline. coldStagedControl is the staged rung alone in a fresh process (the shape the packaged anchors were captured in); it isolates the batch path's warm carry-over on rung 2.",
+  "inferencePin": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
+  "adapter": {
+    "binary": "target-candle/release/memory-candle-adapter.exe",
+    "build": "cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter (MSVC 14.44, CUDA_COMPUTE_CAP=120)"
+  },
+  "hardware": {
+    "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+    "memoryBytes": 102641958912,
+    "deviceId": "1",
+    "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "computeCapability": "12.0",
+    "driverVersion": "596.36",
+    "runtimeVersion": "12.9"
+  },
+  "capturedAt": "2026-09-03",
+  "tiers": [
+    {
+      "provider": "z_image_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "environment": {
+        "CUDA_VISIBLE_DEVICES": "1",
+        "SCENEWORKS_Z_IMAGE_REPOSITORY": "SceneWorks/z-image-turbo-mlx",
+        "SCENEWORKS_Z_IMAGE_REVISION": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+        "SCENEWORKS_Z_IMAGE_ROOT": "E:\\huggingface\\hub\\models--SceneWorks--z-image-turbo-mlx\\snapshots\\bb2bc9893b3c49ae96c813350775f791a2e8bc80\\q4"
+      },
+      "batch": {
+        "idleBaselineMiB": 1131,
+        "stdin": {
+          "action": "run_batch",
+          "planned": [
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "z_image_turbo",
+                "modelId": "z_image_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "resident",
+                "engagedRungs": [
+                  "resident"
+                ],
+                "parameters": {}
+              },
+              "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "z_image_turbo",
+                "modelId": "z_image_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "staged_residency",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "parameters": {}
+              },
+              "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "z_image_turbo",
+                "modelId": "z_image_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_decode",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128
+                }
+              },
+              "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "z_image_turbo",
+                "modelId": "z_image_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_attention",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128,
+                  "attentionChunkSize": 67108864
+                }
+              },
+              "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "z_image_turbo",
+                "modelId": "z_image_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_transformer_residency",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128,
+                  "attentionChunkSize": 67108864,
+                  "transformerWindowSize": 1
+                }
+              },
+              "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+              "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+            }
+          ],
+          "hardware": {
+            "memoryBytes": 102641958912
+          }
+        },
+        "modelLoads": 1,
+        "fragments": [
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/z-image-turbo-mlx",
+              "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [],
+              "cases": [
+                {
+                  "parameters": {},
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 7186939904,
+                "allocatorBytes": 7186939904,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 10542383104,
+                "allocatorBytes": 10542383104,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 17790140416,
+                "allocatorBytes": 17790140416,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 17790140416,
+                "allocatorBytes": 17790140416,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 7186939904
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 10542383104
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 17790140416
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 17790140416
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T22:56:48Z",
+            "strategy": {
+              "rung": "resident",
+              "engagedRungs": [
+                "resident"
+              ],
+              "parameters": {}
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/z-image-turbo-mlx",
+              "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [],
+              "cases": [
+                {
+                  "parameters": {},
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 6952058880,
+                "allocatorBytes": 6952058880,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 9099542528,
+                "allocatorBytes": 9099542528,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 11783897088,
+                "allocatorBytes": 11783897088,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 11783897088,
+                "allocatorBytes": 11783897088,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 6952058880
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 9099542528
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 11783897088
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 11783897088
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T22:57:03Z",
+            "strategy": {
+              "rung": "staged_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "parameters": {}
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/z-image-turbo-mlx",
+              "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 2992635904,
+                "allocatorBytes": 2992635904,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 8025800704,
+                "allocatorBytes": 8025800704,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 4502585344,
+                "allocatorBytes": 4502585344,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 8025800704,
+                "allocatorBytes": 8025800704,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 2992635904
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 8025800704
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 4502585344
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 8025800704
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T22:57:53Z",
+            "strategy": {
+              "rung": "bounded_decode",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128
+              }
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/z-image-turbo-mlx",
+              "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                },
+                {
+                  "parameter": "attentionChunkSize",
+                  "testedValues": [
+                    67108864
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128,
+                    "attentionChunkSize": 67108864
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 3126853632,
+                "allocatorBytes": 3126853632,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 5375000576,
+                "allocatorBytes": 5375000576,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 4502585344,
+                "allocatorBytes": 4502585344,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 5375000576,
+                "allocatorBytes": 5375000576,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3126853632
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 5375000576
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 4502585344
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 5375000576
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T22:58:43Z",
+            "strategy": {
+              "rung": "bounded_attention",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode",
+                "bounded_attention"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128,
+                "attentionChunkSize": 67108864
+              }
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/z-image-turbo-mlx",
+              "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                },
+                {
+                  "parameter": "attentionChunkSize",
+                  "testedValues": [
+                    67108864
+                  ]
+                },
+                {
+                  "parameter": "transformerWindowSize",
+                  "testedValues": [
+                    1
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128,
+                    "attentionChunkSize": 67108864,
+                    "transformerWindowSize": 1
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 3126853632,
+                "allocatorBytes": 3126853632,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 2992635904,
+                "allocatorBytes": 2992635904,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 1147142144,
+                "allocatorBytes": 1147142144,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 3126853632,
+                "allocatorBytes": 3126853632,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3126853632
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 2992635904
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 1147142144
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3126853632
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T22:59:36Z",
+            "strategy": {
+              "rung": "bounded_transformer_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode",
+                "bounded_attention",
+                "bounded_transformer_residency"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128,
+                "attentionChunkSize": 67108864,
+                "transformerWindowSize": 1
+              }
+            },
+            "loadShape": "deferred_materialization"
+          }
+        ]
+      },
+      "providerContract": {
+        "providerId": "z_image_turbo",
+        "loadShape": "deferred_materialization",
+        "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+        "assetFacts": {
+          "baseBytes": 6530202054,
+          "conditioningBytes": 2514307072,
+          "transformerBytes": 3848255616,
+          "decoderBytes": 167639366,
+          "overlayBytes": 137096832
+        },
+        "architectureFacts": {
+          "attentionHeads": 30,
+          "headDim": 128,
+          "transformerBlocks": 30,
+          "patchSize": 2,
+          "latentChannels": 16,
+          "vaeSpatialScale": 8,
+          "vaeTemporalScale": null,
+          "activationDtypeWidth": 2
+        },
+        "strategies": [
+          {
+            "strategy": "resident",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "staged_residency",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_decode",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "parameters": {
+              "decodeTileEdges": [
+                512
+              ],
+              "decodeOverlaps": [
+                128
+              ],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_attention",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [
+                67108864
+              ],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_transformer_residency",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [
+                1,
+                2,
+                4,
+                8,
+                15,
+                30
+              ],
+              "transformerWindowComponents": []
+            }
+          }
+        ]
+      },
+      "coldStagedControl": {
+        "idleBaselineMiB": 1140,
+        "stdin": {
+          "action": "run",
+          "hardware": {
+            "memoryBytes": 102641958912
+          },
+          "planned": {
+            "backend": "candle",
+            "target": {
+              "provider": "z_image_turbo",
+              "modelId": "z_image_turbo",
+              "tier": "q4",
+              "mode": "text_to_image",
+              "overlay": "none",
+              "geometry": {
+                "width": 1024,
+                "height": 1024,
+                "batch": 1,
+                "frames": 1
+              }
+            },
+            "loadShape": "deferred_materialization",
+            "strategy": {
+              "rung": "staged_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "parameters": {}
+            },
+            "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+            "fixture": "fresh-five-rung-z-image-turbo-q4-1024-seed16402-step2-sc-22667"
+          }
+        },
+        "fragment": {
+          "status": "gated",
+          "artifact": {
+            "repository": "SceneWorks/z-image-turbo-mlx",
+            "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+            "variant": "q4"
+          },
+          "sweep": {
+            "axes": [],
+            "cases": [
+              {
+                "parameters": {},
+                "result": "passed"
+              }
+            ],
+            "rangeVerified": false
+          },
+          "scenarios": [
+            {
+              "name": "exact_fit",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "unknown_budget",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "stale_evidence",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "warm_repeat",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "cancel",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "error",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "loadability",
+              "result": "not_run",
+              "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "overlay",
+              "result": "not_applicable",
+              "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+            }
+          ],
+          "predictedPeakBytes": null,
+          "observedMemory": {
+            "conditioning": {
+              "activeBytes": 2989490176,
+              "allocatorBytes": 2989490176,
+              "reclaimableBytes": 0
+            },
+            "denoise": {
+              "activeBytes": 8056209408,
+              "allocatorBytes": 8056209408,
+              "reclaimableBytes": 0
+            },
+            "decode": {
+              "activeBytes": 11747196928,
+              "allocatorBytes": 11747196928,
+              "reclaimableBytes": 0
+            },
+            "overall": {
+              "activeBytes": 11747196928,
+              "allocatorBytes": 11747196928,
+              "reclaimableBytes": 0
+            }
+          },
+          "quality": {
+            "result": "not_run"
+          },
+          "negativeMutation": null,
+          "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q4"
+          },
+          "diagnostics": {
+            "adapter": "memory-candle-adapter:z_image_turbo-five-rung-reference",
+            "execution": "executed",
+            "blockers": [
+              "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            ],
+            "measurements": [
+              {
+                "name": "conditioningDevicePeakDelta",
+                "unit": "bytes",
+                "value": 2989490176
+              },
+              {
+                "name": "denoiseDevicePeakDelta",
+                "unit": "bytes",
+                "value": 8056209408
+              },
+              {
+                "name": "decodeDevicePeakDelta",
+                "unit": "bytes",
+                "value": 11747196928
+              },
+              {
+                "name": "overallDevicePeakDelta",
+                "unit": "bytes",
+                "value": 11747196928
+              }
+            ]
+          },
+          "capturedAt": "2026-09-03T23:04:38Z",
+          "strategy": {
+            "rung": "staged_residency",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {}
+          },
+          "loadShape": "deferred_materialization"
+        }
+      }
+    },
+    {
+      "provider": "krea_2_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "batch": 1,
+        "frames": 1
+      },
+      "environment": {
+        "CUDA_VISIBLE_DEVICES": "1",
+        "SCENEWORKS_KREA_REPOSITORY": "SceneWorks/krea-2-turbo-mlx",
+        "SCENEWORKS_KREA_REVISION": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+        "SCENEWORKS_KREA_ROOT": "E:\\huggingface\\hub\\models--SceneWorks--krea-2-turbo-mlx\\snapshots\\d009674080cc1bccf2b629d834c34bf5eccdb723\\q4"
+      },
+      "batch": {
+        "idleBaselineMiB": 1131,
+        "stdin": {
+          "action": "run_batch",
+          "planned": [
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "krea_2_turbo",
+                "modelId": "krea_2_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "resident",
+                "engagedRungs": [
+                  "resident"
+                ],
+                "parameters": {}
+              },
+              "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+              "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "krea_2_turbo",
+                "modelId": "krea_2_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "staged_residency",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency"
+                ],
+                "parameters": {}
+              },
+              "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+              "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "krea_2_turbo",
+                "modelId": "krea_2_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_decode",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128
+                }
+              },
+              "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+              "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "krea_2_turbo",
+                "modelId": "krea_2_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_attention",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128,
+                  "attentionChunkSize": 134217728
+                }
+              },
+              "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+              "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+            },
+            {
+              "backend": "candle",
+              "target": {
+                "provider": "krea_2_turbo",
+                "modelId": "krea_2_turbo",
+                "tier": "q4",
+                "mode": "text_to_image",
+                "overlay": "none",
+                "geometry": {
+                  "width": 1024,
+                  "height": 1024,
+                  "batch": 1,
+                  "frames": 1
+                }
+              },
+              "loadShape": "deferred_materialization",
+              "strategy": {
+                "rung": "bounded_transformer_residency",
+                "engagedRungs": [
+                  "resident",
+                  "staged_residency",
+                  "bounded_decode",
+                  "bounded_attention",
+                  "bounded_transformer_residency"
+                ],
+                "parameters": {
+                  "decodeTileEdge": 512,
+                  "decodeOverlap": 128,
+                  "attentionChunkSize": 134217728,
+                  "transformerWindowSize": 1
+                }
+              },
+              "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+              "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+            }
+          ],
+          "hardware": {
+            "memoryBytes": 102641958912
+          }
+        },
+        "modelLoads": 1,
+        "fragments": [
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/krea-2-turbo-mlx",
+              "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [],
+              "cases": [
+                {
+                  "parameters": {},
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 12726566912,
+                "allocatorBytes": 12726566912,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 17927503872,
+                "allocatorBytes": 17927503872,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 25177358336,
+                "allocatorBytes": 25177358336,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 25177358336,
+                "allocatorBytes": 25177358336,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 12726566912
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 17927503872
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 25177358336
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 25177358336
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T23:02:10Z",
+            "strategy": {
+              "rung": "resident",
+              "engagedRungs": [
+                "resident"
+              ],
+              "parameters": {}
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/krea-2-turbo-mlx",
+              "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [],
+              "cases": [
+                {
+                  "parameters": {},
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 12292456448,
+                "allocatorBytes": 12292456448,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 13601079296,
+                "allocatorBytes": 13601079296,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 24472715264,
+                "allocatorBytes": 24472715264,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 24472715264,
+                "allocatorBytes": 24472715264,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 12292456448
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 13601079296
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 24472715264
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 24472715264
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T23:02:19Z",
+            "strategy": {
+              "rung": "staged_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "parameters": {}
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/krea-2-turbo-mlx",
+              "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 3702521856,
+                "allocatorBytes": 3702521856,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 14909702144,
+                "allocatorBytes": 14909702144,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 9239003136,
+                "allocatorBytes": 9239003136,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 14909702144,
+                "allocatorBytes": 14909702144,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3702521856
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 14909702144
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 9239003136
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 14909702144
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T23:02:28Z",
+            "strategy": {
+              "rung": "bounded_decode",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128
+              }
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/krea-2-turbo-mlx",
+              "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                },
+                {
+                  "parameter": "attentionChunkSize",
+                  "testedValues": [
+                    134217728
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128,
+                    "attentionChunkSize": 134217728
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 3836739584,
+                "allocatorBytes": 3836739584,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 11118051328,
+                "allocatorBytes": 11118051328,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 9239003136,
+                "allocatorBytes": 9239003136,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 11118051328,
+                "allocatorBytes": 11118051328,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3836739584
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 11118051328
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 9239003136
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 11118051328
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T23:02:37Z",
+            "strategy": {
+              "rung": "bounded_attention",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode",
+                "bounded_attention"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128,
+                "attentionChunkSize": 134217728
+              }
+            },
+            "loadShape": "deferred_materialization"
+          },
+          {
+            "status": "gated",
+            "artifact": {
+              "repository": "SceneWorks/krea-2-turbo-mlx",
+              "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+              "variant": "q4"
+            },
+            "sweep": {
+              "axes": [
+                {
+                  "parameter": "decodeTileEdge",
+                  "testedValues": [
+                    512
+                  ]
+                },
+                {
+                  "parameter": "decodeOverlap",
+                  "testedValues": [
+                    128
+                  ]
+                },
+                {
+                  "parameter": "attentionChunkSize",
+                  "testedValues": [
+                    134217728
+                  ]
+                },
+                {
+                  "parameter": "transformerWindowSize",
+                  "testedValues": [
+                    1
+                  ]
+                }
+              ],
+              "cases": [
+                {
+                  "parameters": {
+                    "decodeTileEdge": 512,
+                    "decodeOverlap": 128,
+                    "attentionChunkSize": 134217728,
+                    "transformerWindowSize": 1
+                  },
+                  "result": "passed"
+                }
+              ],
+              "rangeVerified": false
+            },
+            "scenarios": [
+              {
+                "name": "exact_fit",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "unknown_budget",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "stale_evidence",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "warm_repeat",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "cancel",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "error",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "loadability",
+                "result": "not_run",
+                "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              },
+              {
+                "name": "overlay",
+                "result": "not_applicable",
+                "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+              }
+            ],
+            "predictedPeakBytes": null,
+            "observedMemory": {
+              "conditioning": {
+                "activeBytes": 3702521856,
+                "allocatorBytes": 3702521856,
+                "reclaimableBytes": 0
+              },
+              "denoise": {
+                "activeBytes": 4038066176,
+                "allocatorBytes": 4038066176,
+                "reclaimableBytes": 0
+              },
+              "decode": {
+                "activeBytes": 3836739584,
+                "allocatorBytes": 3836739584,
+                "reclaimableBytes": 0
+              },
+              "overall": {
+                "activeBytes": 4038066176,
+                "allocatorBytes": 4038066176,
+                "reclaimableBytes": 0
+              }
+            },
+            "quality": {
+              "result": "not_run"
+            },
+            "negativeMutation": null,
+            "loadability": {
+              "result": "passed",
+              "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+            },
+            "diagnostics": {
+              "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+              "execution": "executed",
+              "blockers": [
+                "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+              ],
+              "measurements": [
+                {
+                  "name": "conditioningDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3702521856
+                },
+                {
+                  "name": "denoiseDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 4038066176
+                },
+                {
+                  "name": "decodeDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 3836739584
+                },
+                {
+                  "name": "overallDevicePeakDelta",
+                  "unit": "bytes",
+                  "value": 4038066176
+                }
+              ]
+            },
+            "capturedAt": "2026-09-03T23:02:51Z",
+            "strategy": {
+              "rung": "bounded_transformer_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency",
+                "bounded_decode",
+                "bounded_attention",
+                "bounded_transformer_residency"
+              ],
+              "parameters": {
+                "decodeTileEdge": 512,
+                "decodeOverlap": 128,
+                "attentionChunkSize": 134217728,
+                "transformerWindowSize": 1
+              }
+            },
+            "loadShape": "deferred_materialization"
+          }
+        ]
+      },
+      "providerContract": {
+        "providerId": "krea_2_turbo",
+        "loadShape": "deferred_materialization",
+        "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+        "assetFacts": {
+          "baseBytes": 11727534692,
+          "conditioningBytes": 2765258240,
+          "transformerBytes": 8454706328,
+          "decoderBytes": 507570124,
+          "overlayBytes": 0
+        },
+        "architectureFacts": {
+          "attentionHeads": 48,
+          "headDim": 128,
+          "transformerBlocks": 28,
+          "patchSize": 2,
+          "latentChannels": 16,
+          "vaeSpatialScale": 8,
+          "vaeTemporalScale": null,
+          "activationDtypeWidth": 2
+        },
+        "strategies": [
+          {
+            "strategy": "resident",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "staged_residency",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_decode",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode"
+            ],
+            "parameters": {
+              "decodeTileEdges": [
+                512
+              ],
+              "decodeOverlaps": [
+                128
+              ],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_attention",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [
+                134217728
+              ],
+              "transformerWindowSizes": [],
+              "transformerWindowComponents": []
+            }
+          },
+          {
+            "strategy": "bounded_transformer_residency",
+            "support": "Implemented",
+            "engagedRungs": [
+              "resident",
+              "staged_residency",
+              "bounded_decode",
+              "bounded_attention",
+              "bounded_transformer_residency"
+            ],
+            "parameters": {
+              "decodeTileEdges": [],
+              "decodeOverlaps": [],
+              "attentionChunkSizes": [],
+              "transformerWindowSizes": [
+                1
+              ],
+              "transformerWindowComponents": []
+            }
+          }
+        ]
+      },
+      "coldStagedControl": {
+        "idleBaselineMiB": 1140,
+        "stdin": {
+          "action": "run",
+          "hardware": {
+            "memoryBytes": 102641958912
+          },
+          "planned": {
+            "backend": "candle",
+            "target": {
+              "provider": "krea_2_turbo",
+              "modelId": "krea_2_turbo",
+              "tier": "q4",
+              "mode": "text_to_image",
+              "overlay": "none",
+              "geometry": {
+                "width": 1024,
+                "height": 1024,
+                "batch": 1,
+                "frames": 1
+              }
+            },
+            "loadShape": "deferred_materialization",
+            "strategy": {
+              "rung": "staged_residency",
+              "engagedRungs": [
+                "resident",
+                "staged_residency"
+              ],
+              "parameters": {}
+            },
+            "calibrationFingerprint": "krea-turbo-cuda-phase-curves-v1",
+            "fixture": "fresh-five-rung-krea-q4-1024-seed16402-step2-sc-22667"
+          }
+        },
+        "fragment": {
+          "status": "gated",
+          "artifact": {
+            "repository": "SceneWorks/krea-2-turbo-mlx",
+            "resolvedRevision": "d009674080cc1bccf2b629d834c34bf5eccdb723",
+            "variant": "q4"
+          },
+          "sweep": {
+            "axes": [],
+            "cases": [
+              {
+                "parameters": {},
+                "result": "passed"
+              }
+            ],
+            "rangeVerified": false
+          },
+          "scenarios": [
+            {
+              "name": "exact_fit",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "unknown_budget",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "stale_evidence",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "warm_repeat",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "cancel",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "error",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "loadability",
+              "result": "not_run",
+              "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            },
+            {
+              "name": "overlay",
+              "result": "not_applicable",
+              "reason": "the calibration target declares overlay \"none\"; the Candle Krea base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+            }
+          ],
+          "predictedPeakBytes": null,
+          "observedMemory": {
+            "conditioning": {
+              "activeBytes": 3694133248,
+              "allocatorBytes": 3694133248,
+              "reclaimableBytes": 0
+            },
+            "denoise": {
+              "activeBytes": 15099494400,
+              "allocatorBytes": 15099494400,
+              "reclaimableBytes": 0
+            },
+            "decode": {
+              "activeBytes": 22349348864,
+              "allocatorBytes": 22349348864,
+              "reclaimableBytes": 0
+            },
+            "overall": {
+              "activeBytes": 22349348864,
+              "allocatorBytes": 22349348864,
+              "reclaimableBytes": 0
+            }
+          },
+          "quality": {
+            "result": "not_run"
+          },
+          "negativeMutation": null,
+          "loadability": {
+            "result": "passed",
+            "resolvedPathFingerprint": "SceneWorks/krea-2-turbo-mlx@d009674080cc1bccf2b629d834c34bf5eccdb723:q4"
+          },
+          "diagnostics": {
+            "adapter": "memory-candle-adapter:krea_2_turbo-five-rung-reference",
+            "execution": "executed",
+            "blockers": [
+              "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+            ],
+            "measurements": [
+              {
+                "name": "conditioningDevicePeakDelta",
+                "unit": "bytes",
+                "value": 3694133248
+              },
+              {
+                "name": "denoiseDevicePeakDelta",
+                "unit": "bytes",
+                "value": 15099494400
+              },
+              {
+                "name": "decodeDevicePeakDelta",
+                "unit": "bytes",
+                "value": 22349348864
+              },
+              {
+                "name": "overallDevicePeakDelta",
+                "unit": "bytes",
+                "value": 22349348864
+              }
+            ]
+          },
+          "capturedAt": "2026-09-03T23:05:09Z",
+          "strategy": {
+            "rung": "staged_residency",
+            "engagedRungs": [
+              "resident",
+              "staged_residency"
+            ],
+            "parameters": {}
+          },
+          "loadShape": "deferred_materialization"
+        }
+      }
+    }
+  ],
+  "contractRestamp": {
+    "pin": "c6d6a4dbd61ab09c26ff5526632cae2cefea60ed",
+    "restampedAt": "2026-09-03",
+    "scope": "providerContract.assetFacts only",
+    "method": "weights-free contract read of the SAME snapshot roots named in each tier’s environment block, through the production seam (inference_runtime::media().memory_strategy_contract). No render, no device allocation, no re-measurement.",
+    "why": "inference c6d6a4db stopped the gen-core weight walkers recursing into the hidden .candle-device-format-v1/ cache and split the VAE encoder out of decoder_bytes into a typed ReferenceEncoder overlay. observedMemory is the ORIGINAL a5f643ae measurement and is deliberately untouched: the device the adapter measured did not change, only what the contract claims about it.",
+    "measuredColumnPin": "a5f643ae58a4ed81e6be8280afbf29750da5ffe2",
+    "measuredColumnValidAtPin": {
+      "verified": "git -C <inference> diff --stat a5f643ae58a4ed81e6be8280afbf29750da5ffe2..c6d6a4dbd61ab09c26ff5526632cae2cefea60ed -- crates/contracts/gen-core/src crates/media/candle-gen (the whole candle-gen tree: every crate in the z_image_turbo:candle and krea_2_turbo:candle loader closures per config/anchor-loader-closures.json, plus every sibling)",
+      "filesChanged": [
+        { "path": "crates/contracts/gen-core/src/lib.rs", "class": "accounting-only", "what": "re-exports CANDLE_DEVICE_FORMAT_CACHE_DIR" },
+        { "path": "crates/contracts/gen-core/src/memory_strategy.rs", "class": "accounting-only", "what": "contract types: the typed ReferenceEncoder overlay and its pricing" },
+        { "path": "crates/contracts/gen-core/src/weightsmeta.rs", "class": "accounting-only", "what": "tensor-free byte walkers (safetensors_dir_bytes / safetensors_path_tensor_headers) skip hidden directories; is_hidden_dir; a unit test. Pricing reads only - the loader opens shards by name, never through these walkers" },
+        { "path": "crates/media/candle-gen/candle-gen-z-image/src/memory_strategy.rs", "class": "accounting-only", "what": "the Z-Image contract's asset facts (transformer_bytes from the source file alone, encoder split out) and tests" },
+        { "path": "crates/media/candle-gen/candle-gen/src/quant/sidecar.rs", "class": "accounting-only", "what": "CACHE_DIR literal re-homed to gen-core's CANDLE_DEVICE_FORMAT_CACHE_DIR constant with the identical value \".candle-device-format-v1\"; the sidecar reader/writer logic is untouched" }
+      ],
+      "candleGenKreaTouched": false,
+      "why": "None of the five files changed between the measured column's pin (a5f643ae) and the landed pin (c6d6a4db) is on a load, pipeline, weights, kernel, quant-compute or device-format execution path: three are contract-accounting functions the adapter's providerContract read exercises (which is exactly what contractRestamp re-read), one is a re-export line, and one moves a string constant without changing its value. crates/media/candle-gen/candle-gen-krea is byte-identical across the range, so the krea_2_turbo measured column needs no argument at all; the z_image_turbo column stands on the same five files. The observedMemory column measured at a5f643ae therefore describes the c6d6a4db binary's device behaviour, and only the contract column was re-read at c6d6a4db."
+    }
+  }
+}

@@ -11,6 +11,7 @@ import {
   assetCanRenderAsAudio,
   assetCanRenderAsVideo,
   assetUrl,
+  isVectorAsset,
   suppressThumbnailContextMenu,
 } from "./assetMedia.jsx";
 import {
@@ -941,7 +942,7 @@ function FullscreenPreviewComponent({
   // the "and nowhere else" half: no envelope, no button.
   const hasRecordedRecipe = Boolean(
     onUseRecipe &&
-      ["image", "video"].includes(asset.type) &&
+      ["image", "video", "vector"].includes(asset.type) &&
       (asset.generationSet?.recipe || asset.recipe),
   );
   // `asset.type === "image"` rather than the sibling's `["image", "video"]`: this button launches
@@ -1184,10 +1185,10 @@ function FullscreenPreviewComponent({
         items.push({ key: "fit", label: "Fit to View", onSelect: fitToView });
       }
       const submenuItems = [];
-      if (onEditImage) {
+      if (onEditImage && !isVectorAsset(asset)) {
         submenuItems.push({ key: "image-editor", label: "Image Editor", onSelect: () => onEditImage(asset) });
       }
-      if (onEditInStudio) {
+      if (onEditInStudio && !isVectorAsset(asset)) {
         submenuItems.push({ key: "image-studio", label: "Image Studio", onSelect: () => onEditInStudio(asset) });
       }
       const submenu = submenuItems.length ? { label: "Edit in", items: submenuItems } : null;

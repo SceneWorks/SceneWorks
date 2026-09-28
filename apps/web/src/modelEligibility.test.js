@@ -7,6 +7,7 @@ import { DEFAULT_MAC_CAPABILITIES } from "./macGating.js";
 import {
   AUDIO_MODES,
   VIDEO_MODES,
+  VECTOR_MODES,
   angleModelUsable,
   audioModelServesMode,
   audioModelUsable,
@@ -23,12 +24,72 @@ import {
   videoModelServesMode,
   videoModelUsable,
   visionCaptionModelUsable,
+  vectorModelAvailability,
+  vectorModelServesMode,
+  vectorModelUsable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID, fallbackModels } from "./constants.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
 describe("modelEligibility predicates", () => {
+  it("routes StarVector image_to_svg by backend and offers missing installs", () => {
+    const model = {
+      id: "starvector_1b",
+      type: "vector",
+      capabilities: ["image_to_svg"],
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-1b", available: true },
+        candle: { id: "candle-starvector-1b", available: true },
+      } },
+      installState: "installed",
+      cacheState: "complete",
+    };
+    expect(VECTOR_MODES).toEqual(["image_to_svg", "text_to_svg"]);
+    expect(vectorModelServesMode(model, "image_to_svg", { platform: "macos" })).toBe(true);
+    expect(vectorModelServesMode(model, "text_to_svg", { platform: "macos" })).toBe(false);
+    expect(vectorModelAvailability(model, "image_to_svg", { platform: "macos" })).toMatchObject({
+      available: true,
+      backend: "mlx",
+      providerId: "mlx-starvector-1b",
+    });
+    const missing = { ...model, installState: "missing", cacheState: "missing", downloadable: true };
+    expect(vectorModelAvailability(missing, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "model_missing",
+      backend: "candle",
+    });
+    expect(downloadOffersFor([missing], vectorModelUsable, { platform: "win32" })).toEqual([missing]);
+    const unavailable = {
+      ...model,
+      vector: { providers: { ...model.vector.providers, candle: {
+        id: "candle-starvector-1b",
+        available: false,
+        reason: "pending_terminal_inference_pin",
+      } } },
+    };
+    expect(vectorModelAvailability(unavailable, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      reason: "pending_terminal_inference_pin",
+      backend: "candle",
+    });
+
+    const eightB = {
+      ...model,
+      id: "starvector_8b",
+      vector: { providers: {
+        mlx: { id: "mlx-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+        candle: { id: "candle-starvector-8b", available: false, reason: "pending_terminal_candidate" },
+      } },
+    };
+    expect(vectorModelAvailability(eightB, "image_to_svg", { platform: "win32" })).toMatchObject({
+      available: false,
+      backend: "candle",
+      reason: "pending_terminal_candidate",
+    });
+    expect(vectorModelServesMode(eightB, "text_to_svg", { platform: "win32" })).toBe(false);
+  });
+
   it("imageModelUsable matches image models serving a mode, rejects other types", () => {
     expect(imageModelUsable({ type: "image", capabilities: ["text_to_image"] }, caps)).toBe(true);
     expect(imageModelUsable({ type: "image", capabilities: ["edit_image"] }, caps)).toBe(true);
@@ -336,7 +397,32 @@ describe("audio model eligibility (sc-13403)", () => {
     audio: { languages: ["zh", "en"], sampleRates: [24000], maxDurationSecs: 300, supportsMultiSpeaker: true, maxSpeakers: 2 },
   };
 
+  // YuE lyrics2song (sc-19383): no editModes, so `supportsSegmentedLyrics` is its music signal. The
+  // CoT checkpoint would otherwise fall into the residual sfx bucket (it advertises sampleRates), and
+  // the ICL checkpoint into voiceclone (its ReferenceAudio is a song prompt, not a voice to clone).
+  const yueCot = {
+    id: "yue_en_cot",
+    type: "audio",
+    audio: { languages: ["en"], sampleRates: [44100], supportsGuidance: true, supportsSegmentedLyrics: true, supportsRepetitionPenalty: true, supportsOutputLimiter: true },
+  };
+  const yueIcl = {
+    id: "yue_en_icl",
+    type: "audio",
+    audio: {
+      languages: ["en"],
+      sampleRates: [44100],
+      conditioning: ["ReferenceAudio"],
+      supportsGuidance: true,
+      supportsSegmentedLyrics: true,
+      supportsRepetitionPenalty: true,
+      supportsReferenceRegion: true,
+      supportsOutputLimiter: true,
+    },
+  };
+
   const seeded = [
+    ["YuE CoT (lyrics2song)", yueCot, "music"],
+    ["YuE ICL (lyrics2song, reference song prompt)", yueIcl, "music"],
     ["Kokoro-82M", kokoro, "speech"],
     ["MOSS-TTS-Realtime (streaming)", mossTtsRealtime, "speech"],
     ["MOSS-TTSD (multi-speaker)", mossTtsd, "speech"],
@@ -436,6 +522,12 @@ describe("audio model eligibility (sc-13403)", () => {
         "moss_tts_realtime",
         "moss_ttsd_v05",
         "openvoice_v2",
+        "yue_en_cot",
+        "yue_en_icl",
+        "yue_zh_cot",
+        "yue_zh_icl",
+        "yue_jp_kr_cot",
+        "yue_jp_kr_icl",
       ].sort(),
     );
     const expectedMode = {
@@ -447,6 +539,12 @@ describe("audio model eligibility (sc-13403)", () => {
       openvoice_v2: "voiceclone",
       chatterbox_ve: "voiceclone",
       chatterbox_tts: "voiceclone",
+      yue_en_cot: "music",
+      yue_en_icl: "music",
+      yue_zh_cot: "music",
+      yue_zh_icl: "music",
+      yue_jp_kr_cot: "music",
+      yue_jp_kr_icl: "music",
     };
     for (const model of fallbackAudio) {
       expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);

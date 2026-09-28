@@ -33,7 +33,7 @@ pub fn format_unix_seconds(timestamp: i64) -> String {
 /// a sane elapsed time rather than silently reading as `None`. That behavior is
 /// pinned by `elapsed_seconds_accepts_fractional_rfc3339_timestamps` in the
 /// integration tests, so the branch is kept deliberately here.
-pub(crate) fn parse_utc_seconds(value: &str) -> Option<i64> {
+pub fn parse_utc_seconds(value: &str) -> Option<i64> {
     if value.len() < 20 {
         return None;
     }

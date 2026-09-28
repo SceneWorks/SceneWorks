@@ -1767,7 +1767,7 @@ fn checkpoint_plan_raw_settings(
 /// shapes) — so this is the identity `krea_imported_memory_inputs(request, &[], None, 0)` produces
 /// for the same request, and the two lanes price the same geometry.
 #[cfg(target_os = "macos")]
-fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate::MlxRequestInputs {
+fn checkpoint_plan_memory_inputs(request: &ImageRequest, engine_id: &str, spec: &gen_core::LoadSpec) -> crate::mlx_fit_gate::MlxRequestInputs {
     crate::mlx_fit_gate::MlxRequestInputs {
         width: request.width,
         height: request.height,
@@ -1779,7 +1779,21 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest) -> crate::mlx_fit_gate:
         reference_count: 0,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: Some(crate::mlx_fit_gate::clip_windows_for_spec(
+            engine_id, spec, &request.prompt,
+            &request.negative_prompt,
+        )),
     }
+}
+
+/// Ignore an unused negative prompt using the bound provider's capability contract.
+fn checkpoint_plan_negative_prompt(
+    request: &ImageRequest,
+    descriptor: &gen_core::ModelDescriptor,
+) -> Option<String> {
+    let negative = request.negative_prompt.trim();
+    (descriptor.capabilities.supports_negative_prompt && !negative.is_empty())
+        .then(|| negative.to_owned())
 }
 
 /// Plan-driven text-to-image: `count` renders, each its own seed, through the provider the
@@ -1802,8 +1816,7 @@ async fn generate_checkpoint_plan_stream(
     let steps = checkpoint_plan_u32_override(request, "steps").map(|steps| steps.clamp(1, 100));
     let guidance = checkpoint_plan_f32_override(request, "guidanceScale");
     let raw_settings = checkpoint_plan_raw_settings(request, &sources, steps, guidance, quant_bits);
-    let negative_prompt = (!request.negative_prompt.trim().is_empty())
-        .then(|| request.negative_prompt.clone());
+    let negative_prompt = checkpoint_plan_negative_prompt(request, &sources.descriptor);
     let work: Vec<(i64, String)> = (0..request.count as usize)
         .map(|index| (resolve_seed(request, index), request.prompt.clone()))
         .collect();
@@ -1840,7 +1853,7 @@ async fn generate_checkpoint_plan_stream(
         None,
     )?;
     #[cfg(target_os = "macos")]
-    let memory_inputs = checkpoint_plan_memory_inputs(request);
+    let memory_inputs = checkpoint_plan_memory_inputs(request, engine_id, &spec);
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let cold_admission = {
         let companions = checkpoint_plan_candle_companion_dirs(&sources, &spec)?;

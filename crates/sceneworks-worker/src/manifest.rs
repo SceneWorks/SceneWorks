@@ -3,7 +3,7 @@ use super::*;
 
 use std::io::Write as _;
 
-use fs2::FileExt as _;
+use sceneworks_core::file_lock::FileLock;
 
 /// Max time to block waiting for the cross-process manifest lock before giving up
 /// with a clear error. Manifest RMW is a few KB of JSON, so a real hold is sub-ms;
@@ -162,15 +162,17 @@ fn merge_manifest_entry_locked(
 }
 
 /// RAII holder for a cross-process advisory exclusive lock on a `<manifest>.lock`
-/// sibling file. The lock is released when the underlying file handle drops.
+/// sibling file. Released with an explicit `LOCK_UN`, not by `close(2)` alone, which
+/// leaves the lock held while any forked child still references the same open file
+/// description (sc-22738).
 struct ManifestLock {
-    _file: std::fs::File,
+    _lock: FileLock,
 }
 
 impl ManifestLock {
     fn acquire(manifest_path: &Path) -> WorkerResult<Self> {
         let lock_path = manifest_lock_path(manifest_path);
-        let file = std::fs::OpenOptions::new()
+        let mut file = std::fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
@@ -185,9 +187,10 @@ impl ManifestLock {
         // which is correct on every platform.
         let contended = fs2::lock_contended_error().raw_os_error();
         loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(error) if error.raw_os_error() == contended => {
+            match FileLock::try_exclusive_retryable(file) {
+                Ok(lock) => return Ok(Self { _lock: lock }),
+                Err((handle, error)) if error.raw_os_error() == contended => {
+                    file = handle;
                     if std::time::Instant::now() >= deadline {
                         return Err(WorkerError::Io(std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
@@ -200,7 +203,7 @@ impl ManifestLock {
                     }
                     std::thread::sleep(MANIFEST_LOCK_POLL);
                 }
-                Err(error) => return Err(error.into()),
+                Err((_handle, error)) => return Err(error.into()),
             }
         }
     }
@@ -261,6 +264,40 @@ pub(crate) async fn write_json_value(path: &Path, value: &Value) -> WorkerResult
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// sc-22738: a released manifest lock must be free IMMEDIATELY, even while a descriptor this
+    /// process handed to a child still references the same open file description. `flock(2)` locks
+    /// live on the open file description, so a close-only release only takes effect once every
+    /// such reference is gone — and this process forks (ffmpeg, converters) throughout a manifest
+    /// merge. The assertion uses the non-blocking primitive so the failure is an assertion rather
+    /// than a 30-second spin-wait.
+    #[test]
+    fn a_released_manifest_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        use fs2::FileExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("user.loras.jsonc");
+
+        let held = ManifestLock::acquire(&manifest).expect("manifest lock acquires");
+        let inherited = held
+            ._lock
+            .inherited_descriptor()
+            .expect("descriptor duplicates");
+        drop(held);
+
+        let probe = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(manifest_lock_path(&manifest))
+            .expect("probe opens lock file");
+        assert!(
+            probe.try_lock_exclusive().is_ok(),
+            "a manifest lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
+    }
 
     fn entry(id: &str) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();

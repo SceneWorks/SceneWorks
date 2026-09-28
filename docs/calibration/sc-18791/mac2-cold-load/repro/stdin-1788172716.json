@@ -1,0 +1,14 @@
+{
+  "action": "probe",
+  "repositories": {
+    "inference": {
+      "dirty": false,
+      "revision": "21d17666f691a59358f2147517ac11cb34aa6f0b"
+    },
+    "sceneWorks": {
+      "dirty": false,
+      "matrixSourceRevision": "source-tree:7b15fe28783aeeb7af8705286c3f629571ad327ebf048845847079d21447d803",
+      "revision": "e75ab6e2fc431c5495b395ffb67118279c1682a6"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "purpose": "Focused production regression evidence; not a calibration matrix or measured admission record",
+  "inferenceRevision": "fe5b55139bffe3714db680e727b8bcfc303dcdce",
+  "sceneWorksBaseRevision": "5e5787d447efcc5a2e479f9df3c13c9c786b686e",
+  "hardware": {
+    "model": "Mac17,6",
+    "chip": "Apple M5 Max",
+    "memoryBytes": 137438953472
+  },
+  "artifact": {
+    "repository": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
+    "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+    "tier": "q4"
+  },
+  "request": {
+    "prompt": "A cinematic frame of a woman in a red raincoat holding a red umbrella standing in the middle of a neon street on a rainy night",
+    "negativePrompt": "",
+    "width": 1024,
+    "height": 1024,
+    "count": 1,
+    "steps": 2,
+    "seed": 1234
+  },
+  "execution": {
+    "loadShape": "eager_materialization",
+    "offloadPolicy": "sequential",
+    "stageResidency": true,
+    "decodeTileEdge": 192,
+    "decodeOverlap": 48,
+    "mechanism": "dense global-attention head followed by tiled convolutional tail"
+  },
+  "wholeRequestColdPeakBytes": 3537563004,
+  "phaseCapture": {
+    "method": "reset_peak_memory at Loading(TextEncoder), Loading(Renderer), Decoding; report final peak after generate returns",
+    "conditioningPeakBytes": 3864237044,
+    "denoisePeakBytes": 4118238400,
+    "decodePeakBytes": 3140425096,
+    "activeBytesAtRendererBoundary": 1393840,
+    "activeBytesAtDecodeBoundary": 131072,
+    "activeBytesAfterRequest": 0
+  },
+  "referenceLoadedTensorBytes": {
+    "conditioning": 2318787072,
+    "transformer": 1992341184
+  },
+  "limitations": [
+    "Physical host has 128 GiB; 8 GiB is an admission budget emulation, not hardware runtime proof.",
+    "Whole-request and phase-reset runs differ; the estimator uses the larger per-phase observations and the existing uncertainty policy.",
+    "Derived geometry and other-tier values are estimates, not measured records.",
+    "Decode observation is retained whole as workspace; current destination decoder weights are additionally charged."
+  ]
+}

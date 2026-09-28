@@ -1,3 +1,4 @@
+import { AppVersion, useAppUpdate } from "./components/AppVersion.jsx";
 import React, {
   useCallback,
   useEffect,
@@ -17,7 +18,7 @@ import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "./createJob.js";
 import { pollJobToCompletion } from "./pollJob.js";
 import { AccentPicker } from "./components/AccentPicker.jsx";
 import { Icon } from "./components/Icons.jsx";
-import { lazyScreen } from "./components/LazyScreen.jsx";
+import { lazyInteraction, lazyScreen } from "./components/LazyScreen.jsx";
 import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
@@ -38,7 +39,6 @@ import { useTimelines } from "./hooks/useTimelines.js";
 import { useAccessGate } from "./hooks/useAccessGate.js";
 import { useDropNavigationGuard } from "./hooks/useDropNavigationGuard.js";
 import { useWorkflowDrop } from "./hooks/useWorkflowDrop.js";
-import { WorkflowDropPanel } from "./components/WorkflowDropPanel.jsx";
 import { WorkflowEmbedDecisionModal } from "./components/WorkflowEmbedNotice.jsx";
 import {
   persistWorkflowEmbedPreference,
@@ -112,6 +112,7 @@ import {
   hasVisibleLocalFailureForView,
   isCurrentProjectRequest,
   reconcileSelectedAssetId,
+  selectEditorMediaAssets,
 } from "./appStateHelpers.js";
 import {
   hydrationDomainsForRoute,
@@ -185,6 +186,11 @@ const ImageEditor = lazyScreen(
   "ImageEditor",
   "Image Editor",
 );
+const VectorStudio = lazyScreen(
+  () => import("./screens/VectorStudio.jsx"),
+  "VectorStudio",
+  "Vector Studio",
+);
 const QueueScreen = lazyScreen(
   () => import("./screens/QueueScreen.jsx"),
   "QueueScreen",
@@ -230,6 +236,11 @@ const SimpleShell = lazyScreen(
   "SimpleShell",
   "Simple UI",
 );
+const WorkflowDropPanel = lazyInteraction(
+  () => import("./components/WorkflowDropPanel.jsx"),
+  "WorkflowDropPanel",
+  "Workflow details",
+);
 
 // Selective lazy keep-alive (sc-11959, backbone for epic 11949's edit persistence).
 // These view ids mount on FIRST visit and then stay mounted (hidden) so their React
@@ -253,6 +264,7 @@ export const KEEP_ALIVE_VIEWS = Object.freeze(
     "Keypoints",
     "Editor",
     "ImageEditor",
+    "VectorStudio",
   ]),
 );
 
@@ -272,10 +284,6 @@ function KeepAlivePane({ active, children }) {
   );
 }
 
-// Product version, injected at build time from package.json (see vite.config.js).
-// Empty in unconfigured contexts (e.g. some test paths); the footer is hidden then.
-const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
-
 // Exported so the nav registration (Workspace / Library / System sections) is assertable in
 // unit tests without rendering the whole App (epic 13400 C0 mirrors the KEEP_ALIVE_VIEWS export).
 export const navSections = [
@@ -292,6 +300,7 @@ export const navSections = [
       { id: "Document", icon: Icon.Wand },
       { id: "Train", icon: Icon.Train },
       { id: "ImageEditor", label: "Image Editor", icon: Icon.ImageEditor },
+      { id: "VectorStudio", label: "Vector Studio", icon: Icon.Wand },
       { id: "Editor", label: "Video Editor", icon: Icon.Editor },
     ],
   },
@@ -339,6 +348,7 @@ export const viewTitles = {
   Train: { title: "Training Studio", blurb: "Build datasets and prepare LoRA training plans." },
   Editor: { title: "Video Editor", blurb: "Cut, sequence and export your timeline." },
   ImageEditor: { title: "Image Editor", blurb: "Crop, upscale and refine a single image on a canvas." },
+  VectorStudio: { title: "Vector Studio", blurb: "Convert a project raster image or create one through a disclosed raster-to-vector workflow." },
   Characters: { title: "Characters", blurb: "Keep the same face across every shot." },
   Presets: { title: "Presets", blurb: "Save and share recurring generation setups." },
   Models: { title: "Models", blurb: "Download, import and manage local checkpoints." },
@@ -1340,6 +1350,7 @@ export function App() {
     refreshTimelines,
     createTimeline,
     saveTimeline,
+    resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,
@@ -1534,10 +1545,7 @@ export function App() {
     const ids = visibleWorkers.filter(isSelectableGpuWorker).map((worker) => worker.gpuId);
     return ["auto", ...Array.from(new Set(ids))];
   }, [visibleWorkers]);
-  const mediaAssets = useMemo(
-    () => assets.filter((asset) => ["image", "video", "upload", "frame", "render", "document"].includes(asset.type)),
-    [assets],
-  );
+  const mediaAssets = useMemo(() => selectEditorMediaAssets(assets), [assets]);
 
   useEffect(() => {
     activeViewRef.current = activeView;
@@ -2516,6 +2524,14 @@ export function App() {
       }),
     [token, activeProject, requestedGpu, setError, confirmWorkflowEmbeddingBeforeGeneration],
   );
+  const createVectorJob = useMemo(
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vector, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setError],
+  );
+  const createVectorPromptWorkflow = useMemo(
+    () => makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.vectorPrompt, token, project: activeProject, requestedGpu, setJobs, setError }),
+    [token, activeProject, requestedGpu, setError],
+  );
 
   // Standalone video upscale (epic 4811 / sc-4816): the net-new `video_upscale` job runs
   // on the generic /api/v1/jobs endpoint (like image_upscale), not the generation video
@@ -2542,7 +2558,10 @@ export function App() {
       pollJobToCompletion({
         createPath: "/api/v1/prompts/refine",
         body: { prompt, modelId, workflow, guide },
-        deadlineMs: 120000,
+        // 180 s, matching magicPrompt: a rewrite that runs to the worker's full 1536-token budget
+        // (sc-24029) measures ~60-75 s on the dev Mac and can exceed 120 s on a slower host, so the
+        // old 120 s deadline could time out a decode that was still going to succeed.
+        deadlineMs: 180000,
         resolveResult: (job) => {
           const refined = job.result?.refinedPrompt;
           if (!refined) {
@@ -2555,6 +2574,54 @@ export function App() {
         startError: "Could not start prompt refinement.",
         failureError: "Prompt refinement failed.",
         timeoutError: "Prompt refinement timed out. Is the refinement runtime running?",
+      }),
+    [token],
+  );
+
+  // Qwen-Image 2.1's OFFICIAL prompt rewriting (sc-24113, epic 24107): the SAME `prompts/refine`
+  // endpoint and poll-to-completion contract as the refiner above, with `task:
+  // "qwen_image_rewrite"`. No new route and no second LLM runtime — the two PE checkpoints are
+  // Qwen3.5/3.6 (`qwen3_5`), the architecture the native TextLlm lane already loads for the
+  // optional film planner.
+  //
+  // Two differences from `refinePrompt`, both of which the caller needs:
+  //
+  //  * It resolves the WHOLE result object, not just a string. The rewriter returns an aspect-ratio
+  //    suggestion alongside the prose, and the user accepts or ignores the two independently.
+  //  * `sourceAssetIds` carries the ORDERED references. Their presence is what selects the editing
+  //    rewriter over the text-to-image one — server-side, from the request — and their order is
+  //    what the rewrite's `<imageN>` numbering refers to.
+  //
+  // The deadline matches the caption tasks rather than the 120 s rewrite: a 9B checkpoint emitting
+  // a reasoning block and a long paragraph is closer to a caption than to a one-line rewrite, and a
+  // cold load of ~19 GB of weights happens inside this window.
+  const qwenRewritePrompt = useCallback(
+    ({ prompt, modelId, projectId, sourceAssetIds, signal }) =>
+      pollJobToCompletion({
+        createPath: "/api/v1/prompts/refine",
+        body: {
+          prompt,
+          modelId,
+          projectId,
+          task: "qwen_image_rewrite",
+          workflow: "image",
+          sourceAssetIds: Array.isArray(sourceAssetIds) ? sourceAssetIds : [],
+        },
+        deadlineMs: 180000,
+        resolveResult: (job) => {
+          const refinedPrompt = job.result?.refinedPrompt;
+          if (!refinedPrompt) {
+            // An empty rewrite must never reach the review panel: Apply would paste it over the
+            // user's own prompt.
+            throw new Error("The rewriter returned an empty prompt.");
+          }
+          return { refinedPrompt, rewriteSuggestion: job.result?.rewriteSuggestion ?? null };
+        },
+        signal,
+        token,
+        startError: "Could not start prompt rewriting.",
+        failureError: "Prompt rewriting failed.",
+        timeoutError: "Prompt rewriting timed out. Is the worker running?",
       }),
     [token],
   );
@@ -2874,6 +2941,13 @@ export function App() {
   function sendAssetRecipeToStudio(asset, options = {}) {
     if (asset?.type === "video") {
       sendAssetRecipeToVideo(asset, options);
+      return;
+    }
+    if (asset?.type === "vector") {
+      setSelectedAssetId(asset.id);
+      closePreview();
+      setActiveView("VectorStudio");
+      setStudioLaunch({ id: crypto.randomUUID(), view: "VectorStudio", assetId: asset.lineage?.sourceAssetId, recipe: asset.recipe });
       return;
     }
     sendAssetRecipeToImage(asset, options);
@@ -3275,7 +3349,7 @@ export function App() {
   useDropNavigationGuard({ onUnclaimedFileDrop: workflowDrop.handleDroppedFile });
   // Rendered from a single place even though the app has two shells: `Modal` portals to
   // <body>, so this element does not have to sit inside whichever shell is on screen.
-  const workflowDropPanel = (
+  const workflowDropPanel = workflowDrop.offer ? (
     <WorkflowDropPanel
       assets={workflowInputAssets}
       canImport={Boolean(activeProject)}
@@ -3286,7 +3360,7 @@ export function App() {
       onImport={workflowDrop.importImage}
       onUse={workflowDrop.useWorkflow}
     />
-  );
+  ) : null;
 
   // The unavailable-model-library prompt and its post-relocation restart disclosure (sc-19709).
   // Built once and rendered in BOTH shells for the same reason `workflowDropPanel` is: the handler
@@ -3321,6 +3395,8 @@ export function App() {
       />
     </>
   );
+
+  const appUpdate = useAppUpdate(token, authenticated);
 
   const jobAction = useCallback(
     async (job, action, options = {}) => {
@@ -3525,9 +3601,11 @@ export function App() {
     isActiveTimelineDirty,
     createTimeline,
     saveTimeline,
+    resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,
+    refreshTimelines,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
     assetsReady: Boolean(
@@ -3568,8 +3646,11 @@ export function App() {
     createVideoJob,
     createVideoUpscaleJob,
     createImageJob,
+    createVectorJob,
+    createVectorPromptWorkflow,
     createAudioJob,
     refinePrompt,
+    qwenRewritePrompt,
     magicPrompt,
     imageCaption,
     imageDescribe,
@@ -3710,12 +3791,12 @@ export function App() {
     navigationHydrated,
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
-    createTimeline, saveTimeline, exportTimeline, extractTimelineFrame, queueTimelineVideoJob,
+    createTimeline, saveTimeline, resolveTimelineTrim, exportTimeline, extractTimelineFrame, queueTimelineVideoJob, refreshTimelines,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, createAudioJob, refinePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,
@@ -3769,6 +3850,7 @@ export function App() {
       <AppStaticContext.Provider value={appStaticValue}>
         <AppLiveContext.Provider value={appLiveValue}>
           <SimpleShell
+            appVersion={<AppVersion update={appUpdate} />}
             accent={accent}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
@@ -3809,64 +3891,63 @@ export function App() {
     <AppLiveContext.Provider value={appLiveValue}>
     <main className="app">
       <aside className="sidebar" aria-label="Primary">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            <Logo size={32} />
-          </span>
-          <div>
-            <h1>Scene<span className="light">Works</span></h1>
-            <p>Local creative studio</p>
+        <div className="sidebar-scroll">
+          <div className="brand">
+            <span className="brand-mark" aria-hidden="true">
+              <Logo size={32} />
+            </span>
+            <div>
+              <h1>Scene<span className="light">Works</span></h1>
+              <p>Local creative studio</p>
+            </div>
           </div>
+
+          <ProjectSwitcher
+            activeProject={activeProject}
+            disabled={!authenticated}
+            onCreate={createProject}
+            onSelect={selectProject}
+            projects={projects}
+          />
+
+          {navSections.map((section) => (
+            <div className="sidebar-section" key={section.label}>
+              <div className="sidebar-section-title">{section.label}</div>
+              <nav className="nav-list">
+                {section.items.map((item) => {
+                  const IconComponent = item.icon;
+                  const active = activeIndicators[item.id];
+                  const label = item.label ?? item.id;
+                  return (
+                    <button
+                      className={activeView === item.id ? "nav-item active" : "nav-item"}
+                      key={item.id}
+                      onClick={() => navTo(item.id)}
+                      title={label}
+                      type="button"
+                    >
+                      <IconComponent />
+                      <span className="nav-label">{label}</span>
+                      {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
+                    </button>
+                  );
+                })}
+              </nav>
+            </div>
+          ))}
+
         </div>
-
-        <ProjectSwitcher
-          activeProject={activeProject}
-          disabled={!authenticated}
-          onCreate={createProject}
-          onSelect={selectProject}
-          projects={projects}
-        />
-
-        {navSections.map((section) => (
-          <div className="sidebar-section" key={section.label}>
-            <div className="sidebar-section-title">{section.label}</div>
-            <nav className="nav-list">
-              {section.items.map((item) => {
-                const IconComponent = item.icon;
-                const active = activeIndicators[item.id];
-                const label = item.label ?? item.id;
-                return (
-                  <button
-                    className={activeView === item.id ? "nav-item active" : "nav-item"}
-                    key={item.id}
-                    onClick={() => navTo(item.id)}
-                    title={label}
-                    type="button"
-                  >
-                    <IconComponent />
-                    <span className="nav-label">{label}</span>
-                    {active ? <span aria-hidden="true" className="nav-pulse" /> : null}
-                  </button>
-                );
-              })}
-            </nav>
-          </div>
-        ))}
 
         {/* Simple ⇄ Advanced switch (design handoff). The ONE addition this shell makes for
             the Simple UI; the same component renders in the Simple sidebar footer, so the
             control can never present differently between the two. */}
         <div className="sidebar-footer">
+          <AppVersion update={appUpdate} />
           <SimpleModeSwitch
             locked={uiModeLocked}
             mode={ADVANCED_MODE}
             onChange={setUiModeOverride}
           />
-          {APP_VERSION ? (
-            <span className="app-version" title={`SceneWorks ${APP_VERSION}`}>
-              v{APP_VERSION}
-            </span>
-          ) : null}
         </div>
       </aside>
 
@@ -4082,6 +4163,11 @@ export function App() {
         {keepAliveMounted("ImageEditor") ? (
           <KeepAlivePane active={activeView === "ImageEditor"}>
             <ImageEditor key={activeProject?.id ?? "default"} />
+          </KeepAlivePane>
+        ) : null}
+        {keepAliveMounted("VectorStudio") ? (
+          <KeepAlivePane active={activeView === "VectorStudio"}>
+            <VectorStudio key={activeProject?.id ?? "default"} />
           </KeepAlivePane>
         ) : null}
           </>

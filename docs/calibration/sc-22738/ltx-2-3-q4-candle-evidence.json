@@ -1,0 +1,197 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/ltx-2.3-mlx",
+        "resolvedRevision": "01df27d308466533aa09d251e3aebdcc627d07eb",
+        "variant": "q4"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "sc-20772-ltx-2-3-candle-q4-i2v-v1",
+      "capturedAt": "2026-09-12T02:29:36Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:ltx-2.3",
+        "blockers": [
+          "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 49826234368
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 56939773952
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 61805166592
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 61805166592
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 97
+          },
+          {
+            "name": "renderedFps",
+            "unit": "fps",
+            "value": 24
+          },
+          {
+            "name": "renderedAudio",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "referenceCount",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-3-i2v-candle-q4-768x512-f97-fps24-seed22737",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-8e42c3a1c155f14dd720",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.3-mlx@01df27d308466533aa09d251e3aebdcc627d07eb:q4:gemma:ltx_2_3:f97:768x512:fps24:seed22737",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-ebbcdfb242f71eb1af3b",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 49826234368,
+          "allocatorBytes": 49826234368,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 61805166592,
+          "allocatorBytes": 61805166592,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 56939773952,
+          "allocatorBytes": 56939773952,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 61805166592,
+          "allocatorBytes": 61805166592,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "29c53676ca88e130b8cee2e358493f1404e62c796ae2a3cda0cca10e9153540f",
+          "dirty": false,
+          "revision": "8fb95eb05cee4cf1e482aa050874fae98ccb3f78"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:81ce2af232a1bb10641bd0c4c026f5aabd1c56895c59995294960e27ff4a13a4",
+          "revision": "ee72f084cb0a730d5d17ddbdcbdecd5d380271b4"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "sc-22737 capture measured the selected real provider path on this cell; promotion remains gated on terminal CUDA repetition/quality evidence, which this arm does not produce",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle LTX-2.3 image-to-video path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 97,
+          "height": 512,
+          "width": 768
+        },
+        "mode": "image_to_video",
+        "modelId": "ltx_2_3",
+        "overlay": "none",
+        "provider": "ltx_2_3_distilled",
+        "referenceCount": 1,
+        "tier": "q4"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

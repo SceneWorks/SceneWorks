@@ -1308,6 +1308,10 @@ pub(super) struct VideoGenInput {
     pub(super) auto_duration: Option<gen_core::duration_head::AutoDurationRange>,
     /// LTX-2.5 DFR temporal x2 refinement rounds. `None`/0 is the established plain pipeline.
     pub(super) temporal_upsample_rounds: Option<u32>,
+    /// MiniMax-H3's reference-image short edge in pixels (`advanced.referenceImageShortEdge`,
+    /// sc-23402). `None` ⇒ the engine's own default; set only by the reference-partition arms, since
+    /// it sizes a reference and a request carrying none has nothing to apply it to.
+    pub(super) reference_image_short_edge: Option<u32>,
     /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
     pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
@@ -1429,6 +1433,7 @@ impl Default for VideoGenInput {
             fps: 0,
             auto_duration: None,
             temporal_upsample_rounds: None,
+            reference_image_short_edge: None,
             use_diffusion_decoder: false,
             steps: None,
             guidance: None,
@@ -2122,6 +2127,9 @@ pub(super) fn run_loaded_video_generation(
         fps: Some(input.fps),
         auto_duration: input.auto_duration,
         temporal_upsample_rounds: input.temporal_upsample_rounds,
+        // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
+        // value never reaches here, because the parse that produced it refused it.
+        reference_image_short_edge: input.reference_image_short_edge,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
@@ -2174,7 +2182,10 @@ pub(super) fn run_loaded_video_generation(
             }),
             adapter_apply_reports: generator.adapter_apply_reports(),
         }),
-        GenerationOutput::Images(_) => Err(WorkerError::Engine(
+        // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
+        // unreachable on this path — no video request sets `output_channels` — but the match
+        // must name it rather than let a four-channel still arrive unannounced.
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => Err(WorkerError::Engine(
             "video model returned images, expected video frames".to_owned(),
         )),
         // `GenerationOutput::Audio` arrived with the candle-audio lane (sc-12834); no video engine
@@ -2614,14 +2625,8 @@ pub(super) async fn generate_video_using(
     // Bind fitted curves to the same request mode `VideoRequest::from_payload` resolves. The
     // promoted LTX curve is T2V; every other mode falls back until its own curve exists.
     let admission_mode = sceneworks_core::video_request::payload_video_mode(&job.payload);
-    // Curve currency is the provider's live packaged compile closure, independent of whether an
-    // exact per-cell calibration binding exists in the manifest (sc-19020). An undeclared provider
-    // keeps the established sentinel and therefore cannot match a closure-bound fitted curve.
-    let admission_closure_digest = sceneworks_core::memory_calibration::packaged_closure_digest(
-        crate::video_admission::LANE.as_key(),
-        input.engine_id,
-    )
-    .unwrap_or_else(|| crate::mlx_fit_gate::UNCALIBRATED_CLOSURE.to_owned());
+    // No closure lookup here (sc-22738): a packaged curve or anchor matches this request on its
+    // identity alone, whether or not the provider's compile closure has moved since capture.
 
     let cancel = CancelFlag::new();
     let stall_policy = video_stall_timeout(&input);
@@ -2734,7 +2739,6 @@ pub(super) async fn generate_video_using(
                     fps: input.fps,
                     runtime: None,
                     headroom_bytes: spec_headroom_bytes,
-                    expected_closure_digest: &admission_closure_digest,
                 };
                 // Evidence is the preflight: an unsupported request stays direct generation without
                 // attempting a platform memory probe that could fail independently of admission.

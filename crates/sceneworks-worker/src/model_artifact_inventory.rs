@@ -146,6 +146,13 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/vector_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ReceiptProvenance,
+        },
+    },
+    ModelConsumerInventoryEntry {
         source_files: &["crates/sceneworks-worker/src/catalog_semantic_jobs.rs"],
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
@@ -446,6 +453,10 @@ mod tests {
         (
             "crates/sceneworks-worker/src/model_jobs.rs",
             "shared resolver implementation",
+        ),
+        (
+            "crates/sceneworks-worker/src/model_jobs/receipt_verification.rs",
+            "shared receipt provenance verification and migration, not a model loader",
         ),
         (
             "crates/sceneworks-worker/src/paths.rs",

@@ -525,9 +525,31 @@ fn run_ffmpeg_to_png(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
 /// 32 kHz audio VAE) resamples per request at conditioning time.
 ///
 /// ffmpeg-only on every platform — `sips` is an image tool, so unlike [`transcode_to_png`] there is
-/// no always-present macOS fallback. A host with no reachable ffmpeg cannot import audio, and says
-/// so.
+/// no always-present macOS fallback. A host with no reachable ffmpeg cannot import audio that is
+/// not already canonical, and says so.
+///
+/// # The one input that needs no ffmpeg (sc-22715)
+///
+/// A file whose header ALREADY declares exactly the encoding `read_wav_pcm16` accepts — RIFF/WAVE,
+/// a `fmt ` chunk saying PCM (format tag 1) at 16 bits with a real rate and channel count, and a
+/// non-empty `data` chunk — is copied byte for byte instead of being decoded and re-encoded to the
+/// same thing. The normalization still ALWAYS runs (there is no pass-through at the store: every
+/// audio upload comes through here), so the sc-18650 invariant that the stored file is the one
+/// encoding the product reads back is kept; what is skipped is a decode→encode round trip whose
+/// output would be sample-identical to its input. The check is [`is_canonical_pcm16_wav`], and it
+/// is deliberately the same acceptance rule as the reader's, so an input that would satisfy the
+/// reader is stored unchanged and everything else — 24-bit, float, WAVE_FORMAT_EXTENSIBLE, a
+/// container with a picture in it — goes through ffmpeg exactly as before.
 pub fn transcode_to_wav_pcm16(src: &Path, dst: &Path) -> Result<(), TranscodeError> {
+    if is_canonical_pcm16_wav(src) {
+        std::fs::copy(src, dst).map_err(|error| {
+            TranscodeError(format!(
+                "failed to copy the canonical PCM-16 WAV {} into place: {error}",
+                src.display()
+            ))
+        })?;
+        return ensure_nonempty(dst, "WAV");
+    }
     let program = ffmpeg_program();
     let output = Command::new(resolve_ffmpeg_program(&program).as_ref())
         .arg("-y")
@@ -560,6 +582,67 @@ pub fn transcode_to_wav_pcm16(src: &Path, dst: &Path) -> Result<(), TranscodeErr
     ensure_nonempty(dst, "WAV")
 }
 
+/// Whether `path` is a RIFF/WAVE file whose header declares exactly the encoding
+/// `sceneworks_worker::audio_jobs::read_wav_pcm16` accepts: a `fmt ` chunk (>= 16 bytes) with
+/// format tag 1 (PCM), 16 bits per sample, a non-zero rate and channel count, and a `data` chunk
+/// with a non-zero declared length. Header-only, bounded to the first 64 KiB, and `false` on any
+/// doubt — a chunk list that runs past the window without reaching `data`, a second `fmt ` after
+/// the first, a truncated header — so the only file this ever admits is one ffmpeg would have
+/// re-encoded to the same bytes.
+pub fn is_canonical_pcm16_wav(path: &Path) -> bool {
+    const WINDOW: usize = 64 * 1024;
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = vec![0u8; WINDOW];
+    let mut filled = 0usize;
+    loop {
+        match std::io::Read::read(&mut file, &mut head[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(_) => return false,
+        }
+        if filled == head.len() {
+            break;
+        }
+    }
+    let bytes = &head[..filled];
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return false;
+    }
+    let le16 = |offset: usize| u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+    let le32 = |offset: usize| {
+        u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ])
+    };
+    let mut position = 12usize;
+    let mut format: Option<(u16, u16, u32, u16)> = None; // (tag, channels, rate, bits)
+    let mut data_len: Option<u32> = None;
+    while position + 8 <= bytes.len() {
+        let id = &bytes[position..position + 4];
+        let size = le32(position + 4) as usize;
+        let body = position + 8;
+        if id == b"fmt " {
+            if format.is_some() || size < 16 || body + 16 > bytes.len() {
+                return false;
+            }
+            format = Some((le16(body), le16(body + 2), le32(body + 4), le16(body + 14)));
+        } else if id == b"data" {
+            data_len = Some(le32(position + 4));
+            break;
+        }
+        position = body + size + (size & 1);
+    }
+    let (Some((tag, channels, rate, bits)), Some(data_len)) = (format, data_len) else {
+        return false;
+    };
+    tag == 1 && bits == 16 && channels > 0 && rate > 0 && data_len > 0
+}
+
 /// The ffmpeg the desktop bundle points at (`SCENEWORKS_FFMPEG`), else `ffmpeg` on PATH — the same
 /// resolution the worker's `media_jobs::run_ffmpeg` performs.
 fn ffmpeg_program() -> String {
@@ -588,6 +671,83 @@ fn ensure_nonempty(dst: &Path, label: &str) -> Result<(), TranscodeError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A RIFF/WAVE with one `fmt ` chunk of the given tag/bits and a `data` chunk of `samples`
+    /// 16-bit frames, with `extra` chunks inserted before `fmt `.
+    fn wav_bytes(tag: u16, bits: u16, channels: u16, samples: usize, extra: &[u8]) -> Vec<u8> {
+        let block_align = channels * bits / 8;
+        let data_len = samples * usize::from(block_align);
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&((4 + extra.len() + 24 + 8 + data_len) as u32).to_le_bytes());
+        wav.extend_from_slice(b"WAVE");
+        wav.extend_from_slice(extra);
+        wav.extend_from_slice(b"fmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&tag.to_le_bytes());
+        wav.extend_from_slice(&channels.to_le_bytes());
+        wav.extend_from_slice(&8_000u32.to_le_bytes());
+        wav.extend_from_slice(&(8_000 * u32::from(block_align)).to_le_bytes());
+        wav.extend_from_slice(&block_align.to_le_bytes());
+        wav.extend_from_slice(&bits.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&(data_len as u32).to_le_bytes());
+        for index in 0..data_len {
+            wav.push((index % 251) as u8);
+        }
+        wav
+    }
+
+    /// sc-22715: a file that already IS the one encoding the product reads back is copied through
+    /// without an ffmpeg — byte for byte — and everything that is not (the float WAV sc-18650 was
+    /// about, 24-bit, an extensible header, a file with no data) still needs the converter.
+    #[test]
+    fn a_canonical_pcm16_wav_is_copied_through_and_nothing_else_is() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let canonical = dir.path().join("canonical.wav");
+        std::fs::write(&canonical, wav_bytes(1, 16, 1, 800, &[])).unwrap();
+        assert!(is_canonical_pcm16_wav(&canonical));
+        let out = dir.path().join("out.wav");
+        transcode_to_wav_pcm16(&canonical, &out).expect("a canonical WAV needs no ffmpeg");
+        assert_eq!(
+            std::fs::read(&out).unwrap(),
+            std::fs::read(&canonical).unwrap(),
+            "the copy is byte-identical"
+        );
+
+        // A LIST chunk ahead of `fmt ` is still canonical: the walker skips it.
+        let mut list = Vec::from(*b"LIST");
+        list.extend_from_slice(&5u32.to_le_bytes());
+        list.extend_from_slice(b"INFOx");
+        list.push(0); // word-align the odd body
+        let listed = dir.path().join("listed.wav");
+        std::fs::write(&listed, wav_bytes(1, 16, 2, 800, &list)).unwrap();
+        assert!(is_canonical_pcm16_wav(&listed));
+
+        for (label, bytes) in [
+            ("IEEE float", wav_bytes(3, 32, 1, 800, &[])),
+            ("24-bit PCM", wav_bytes(1, 24, 1, 800, &[])),
+            ("WAVE_FORMAT_EXTENSIBLE", wav_bytes(0xFFFE, 16, 2, 800, &[])),
+            ("zero channels", wav_bytes(1, 16, 0, 0, &[])),
+            ("empty data", wav_bytes(1, 16, 1, 0, &[])),
+            ("not a WAV", b"RIFF\0\0\0\0WEBPVP8 ".to_vec()),
+        ] {
+            let path = dir.path().join(format!("{}.wav", label.replace(' ', "_")));
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                !is_canonical_pcm16_wav(&path),
+                "{label} must go through ffmpeg, not be copied through"
+            );
+        }
+        // A second `fmt ` chunk is a file the reader would read differently from the header this
+        // walker saw, so it is refused the copy and handed to ffmpeg.
+        let mut second_fmt = Vec::from(*b"fmt ");
+        second_fmt.extend_from_slice(&16u32.to_le_bytes());
+        second_fmt.extend_from_slice(&[0u8; 16]);
+        let doubled = dir.path().join("doubled.wav");
+        std::fs::write(&doubled, wav_bytes(1, 16, 1, 800, &second_fmt)).unwrap();
+        assert!(!is_canonical_pcm16_wav(&doubled));
+    }
 
     #[test]
     fn sniffs_natively_supported_formats() {

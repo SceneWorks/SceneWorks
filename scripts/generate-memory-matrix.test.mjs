@@ -33,8 +33,11 @@ import {
   MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
+  IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+  IMAGE_MLX_DERIVATION_ENTRY_POINTS,
   parseAnchorDerivationLanes,
   parseCandleBespokeStagedLanes,
+  parseRouteRegistryLaneTiers,
   parseInternalCandleVideoRoutes,
   parseVideoEngineIds,
   parseVideoRoutes,
@@ -172,6 +175,58 @@ test("provenance is stamped once on the document, never per row", async () => {
   assert.ok(
     !JSON.stringify(matrix.cells).includes(matrix.generatedFrom.sceneWorksRevision),
     "no cell may embed the source revision under any other key either",
+  );
+});
+
+test("InstantID provenance hashes only the parsed backend-tier contract", async () => {
+  const instantId = await readFile(
+    new URL(`../${SOURCE_PATHS.instantId}`, import.meta.url),
+    "utf8",
+  );
+  const baseline = await buildMatrix({ publish: false });
+
+  const unrelatedImplementation = await buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      instantId: `${instantId}\nconst MATRIX_IRRELEVANT_INSTANTID_IMPLEMENTATION: &str = "changed";\n`,
+    },
+  });
+  assert.equal(
+    unrelatedImplementation.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "implementation details outside the parsed tier contract must not rotate matrix provenance",
+  );
+
+  const changedTierSource = instantId.replace(
+    /(\#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?)"bf16"([\s\S]*?\};)/,
+    '$1"fp16"$2',
+  );
+  assert.notEqual(changedTierSource, instantId, "fixture must mutate the parsed Candle tier");
+  const changedTier = await buildMatrix({
+    publish: false,
+    sourceOverrides: { instantId: changedTierSource },
+  });
+  assert.notEqual(
+    changedTier.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+    "a consumed tier mutation must rotate matrix provenance",
+  );
+  assert.ok(
+    baseline.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "bf16",
+    ),
+  );
+  assert.ok(
+    changedTier.cells.some(
+      (cell) =>
+        cell.modelId === "instantid_realvisxl" &&
+        cell.backend === "candle" &&
+        cell.tier === "fp16",
+    ),
+    "the tier mutation must alter generated output, not only its hash",
   );
 });
 
@@ -1651,7 +1706,14 @@ test("every generated cell's state re-derives from its own three published facts
   const store = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
   );
-  const target = matrix.cells.find((cell) => cell.anchor !== null);
+  const target = matrix.cells.find((cell) =>
+    cell.anchor !== null && cell.state !== cellState({
+      implementation: cell.implementation,
+      anchorPresent: false,
+      derivationDefined: cell.derivationDefined,
+      anchorDerivable: false,
+    }),
+  );
   assert.ok(target, "no anchored cell to flip — the negative case would be vacuous");
   const flipped = {
     ...store,
@@ -1702,10 +1764,31 @@ test("every generated cell's state re-derives from its own three published facts
 });
 
 test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)", async () => {
-  const baseline = await buildMatrix({ publish: false });
   const closures = JSON.parse(
     await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
   );
+  // The baseline must carry CURRENT anchors for the mutation below to have teeth. Whether the
+  // checked-in store is current at this pin is provenance, not this test's claim, so restamp the
+  // existing store shape to the live content-derived closure keys before staling every anchor.
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const current = {
+    ...store,
+    anchors: store.anchors.map((anchor) => ({
+      ...anchor,
+      source: {
+        ...anchor.source,
+        loaderClosureDigest:
+          closures.models[`${anchor.modelId}:${anchor.backend}`]?.digest ??
+          anchor.source.loaderClosureDigest,
+      },
+    })),
+  };
+  const baseline = await buildMatrix({
+    publish: false,
+    sourceOverrides: { anchorStore: JSON.stringify(current) },
+  });
   // Stale EVERY anchor's loader closure at once. Currency is a report, so the state of every cell
   // must be byte-identical; only the reported `current` flags may move.
   const staled = {
@@ -1716,15 +1799,108 @@ test("anchor CURRENCY is reported and cannot move a state (sc-22511, sc-22513)",
   };
   const mutated = await buildMatrix({
     publish: false,
-    sourceOverrides: { anchorLoaderClosures: JSON.stringify(staled) },
+    sourceOverrides: {
+      anchorStore: JSON.stringify(current),
+      anchorLoaderClosures: JSON.stringify(staled),
+    },
   });
   assert.deepEqual(
     mutated.cells.map((cell) => [cell.id, cell.state]),
     baseline.cells.map((cell) => [cell.id, cell.state]),
   );
-  assert.ok(baseline.cells.some((cell) => cell.anchor?.current === true));
+  assert.ok(baseline.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === true));
   assert.ok(mutated.cells.filter((cell) => cell.anchor).every((cell) => cell.anchor.current === false));
   assert.equal(mutated.summary.staleAnchors, mutated.anchors.length);
+});
+
+test("pin provenance alone does not invalidate the matrix fingerprint", async () => {
+  const baseline = await buildMatrix();
+  const manifest = JSON.parse(
+    stripJsoncComments(
+      await readFile(new URL(`../${SOURCE_PATHS.manifest}`, import.meta.url), "utf8"),
+    ),
+  );
+  const starvector = manifest.models.find((model) => model.id === "starvector_8b");
+  const candidate = starvector?.vector?.deviceAdmission?.terminalCandidate;
+  assert.ok(candidate, "StarVector terminal candidate fixture is missing");
+  candidate.inferenceRevision = "f".repeat(40);
+  candidate.productionClosure.sha256 = "e".repeat(64);
+
+  const closures = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorLoaderClosures}`, import.meta.url), "utf8"),
+  );
+  closures.inferenceRevision = "d".repeat(40);
+  const provenanceOnly = await buildMatrix({
+    sourceOverrides: {
+      manifest: JSON.stringify(manifest),
+      anchorLoaderClosures: JSON.stringify(closures),
+    },
+  });
+  assert.equal(provenanceOnly.generatedFrom.sceneWorksRevision, baseline.generatedFrom.sceneWorksRevision);
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.manifest.sha256,
+    baseline.generatedFrom.sources.manifest.sha256,
+  );
+  assert.equal(
+    provenanceOnly.generatedFrom.sources.anchorLoaderClosures.sha256,
+    baseline.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+  assert.deepEqual(provenanceOnly.cells, baseline.cells);
+
+  const store = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  for (const anchor of store.anchors) {
+    closures.models[`${anchor.modelId}:${anchor.backend}`].digest =
+      anchor.source.loaderClosureDigest;
+  }
+  const currentContract = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  const currentAnchor = currentContract.anchors.find((anchor) => anchor.current);
+  assert.ok(currentAnchor, "fixture could not make any recorded loader contract current");
+  const target = store.anchors.find((anchor) => anchor.id === currentAnchor.id);
+  const targetKey = `${target.modelId}:${target.backend}`;
+  closures.models[targetKey].digest = "0".repeat(64);
+  const contentChanged = await buildMatrix({
+    sourceOverrides: { anchorLoaderClosures: JSON.stringify(closures) },
+  });
+  assert.equal(
+    contentChanged.anchors.find((anchor) => anchor.id === target.id).current,
+    false,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sceneWorksRevision,
+    currentContract.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    contentChanged.generatedFrom.sources.anchorLoaderClosures.sha256,
+    currentContract.generatedFrom.sources.anchorLoaderClosures.sha256,
+  );
+
+  const anchorStore = JSON.parse(
+    await readFile(new URL(`../${SOURCE_PATHS.anchorStore}`, import.meta.url), "utf8"),
+  );
+  const tierEvidence = anchorStore.analyticOnly.find(
+    (entry) => entry.basis === "manifest_tier_declaration",
+  );
+  assert.ok(tierEvidence, "fixture has no measured-tier analytic evidence");
+  tierEvidence.evidence.values = {
+    ...tierEvidence.evidence.values,
+    vramGbByTier: "54.525",
+  };
+  tierEvidence.evidence.sha256 = "c".repeat(64);
+  const measuredContentChanged = await buildMatrix({
+    sourceOverrides: { anchorStore: JSON.stringify(anchorStore) },
+  });
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sceneWorksRevision,
+    baseline.generatedFrom.sceneWorksRevision,
+  );
+  assert.notEqual(
+    measuredContentChanged.generatedFrom.sources.anchorStore.sha256,
+    baseline.generatedFrom.sources.anchorStore.sha256,
+  );
 });
 
 test("removing an anchor demotes exactly its own coordinates, and nothing else (sc-22513)", async () => {
@@ -1808,6 +1984,37 @@ test("the derivation is defined per LANE, read off the Rust that declares and wi
   );
   // And a law nothing declares defines nothing, so the fixtures above are not a parallel universe.
   assert.ok(!parseAnchorDerivationLanes("", laneMap(wires)).size);
+
+  // sc-22667: a lane may name the law ITSELF as an entry point. It wires only when the source
+  // declares that entry point too — an entry point nothing declares wires nothing.
+  const imageDeclares =
+    "pub fn derive_phase_peaks(&self, request: &ImageDeriveRequest) {}\n" +
+    "pub fn derive_image_phase_peaks(&self, request: AnchorImageDeriveRequest) {}";
+  const imageWires =
+    "anchor.backend != sceneworks_core::memory_anchor::AnchorBackend::Candle;\n" +
+    "anchor.derive_phase_peaks(&request, components, facts)";
+  const imageLane = (entryPoints) => ({
+    "image:candle": { law: "image", sources: [imageWires], entryPoints },
+  });
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_phase_peaks"]))],
+    ["image:candle"],
+  );
+  assert.deepEqual(
+    [...parseAnchorDerivationLanes(imageDeclares, imageLane(["derive_image_phase_peaks"]))],
+    [],
+    "the source calls the law, not the shim",
+  );
+  assert.deepEqual(
+    [
+      ...parseAnchorDerivationLanes(
+        "pub fn derive_image_phase_peaks(&self) {}",
+        imageLane(["derive_phase_peaks"]),
+      ),
+    ],
+    [],
+    "an entry point the derivation source does not declare wires nothing",
+  );
 });
 
 test("the shipped derivation reaches every lane through its REAL admission source (epic 22505)", async () => {
@@ -1821,9 +2028,36 @@ test("the shipped derivation reaches every lane through its REAL admission sourc
   const lanes = parseAnchorDerivationLanes(derivation, {
     "video:mlx": { law: "video", sources: [admission] },
     "video:candle": { law: "video", sources: [admission] },
-    "image:candle": { law: "image", sources: [vram, candleStrategy] },
-    "image:mlx": { law: "mlx_image", sources: [mlxFitGate] },
+    "image:candle": {
+      law: "image",
+      sources: [vram, candleStrategy],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
+    },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
+  // sc-22667: the candle image lane is wired through the LAW ITSELF — neither admission source
+  // calls the shallow `derive_image_phase_peaks` shim any more — so the wiring read must see
+  // `derive_phase_peaks`, and a read keyed on the shim alone would collapse every anchored candle
+  // image cell to `Anchored/underived` while the lane prices from the law.
+  assert.ok(
+    !vram.includes("derive_image_phase_peaks(") &&
+      !candleStrategy.includes("derive_image_phase_peaks("),
+    "no candle admission source calls the shallow shim since sc-22667",
+  );
+  assert.ok(
+    vram.includes("derive_phase_peaks(") && candleStrategy.includes("derive_phase_peaks("),
+    "both candle admission sources call the law",
+  );
+  assert.ok(
+    !parseAnchorDerivationLanes(derivation, {
+      "image:candle": { law: "image", sources: [vram, candleStrategy] },
+    }).has("image:candle"),
+    "keyed on the shim alone the lane reads unwired — which is why the entry points name the law",
+  );
   assert.deepEqual(
     [...lanes].sort(),
     ["image:candle", "image:mlx", "video:candle", "video:mlx"],
@@ -2125,4 +2359,327 @@ test("the anchor inventory is closed against the cells, in both directions (sc-2
   // The retired vocabulary may not appear as a rendered STATE (the prose says it was retired).
   assert.ok(!markdown.includes("| Runtime verified |"));
   assert.ok(!markdown.includes("| Implemented/unverified |"));
+});
+
+// ---------------------------------------------------------------------------------------------
+// sc-22666 (epic 22657 E5): every retained corpus is packaged, so a cell whose evidence is
+// committed reads `Anchored` rather than analytic-only. SHAPE, never a count: the claim is that a
+// published cell backed by a packaged anchor states that anchor and its currency, and that no
+// published cell claims an anchor the store does not carry.
+// ---------------------------------------------------------------------------------------------
+
+test("a cell whose retained corpus is packaged reads Anchored, with its currency stated", async () => {
+  const matrix = await buildMatrix();
+  const anchored = matrix.cells.filter((cell) => cell.anchor);
+  assert.ok(anchored.length > 0, "the store must anchor at least one published cell");
+  for (const cell of anchored) {
+    // A rung the route does not implement stays `Structurally N/A` whatever the store holds —
+    // `state` is a function of implementation first. The anchor claim applies to implemented rungs.
+    assert.ok(
+      cell.implementation !== "implemented" || cell.state.startsWith("Anchored"),
+      `${cell.id} cites an anchor but does not read Anchored (${cell.state})`,
+    );
+    assert.equal(
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id} must state whether its anchor is current`,
+    );
+  }
+  // The sc-15859 Z-Image-Turbo candle captures were retained but UNPACKAGED before sc-22666, so
+  // their cells read `Implemented`. They are compiled in now, so every one of them must carry the
+  // packaged anchor, read `Anchored`, and STATE its currency. Named by cell coordinates rather
+  // than by anchor id, so a re-capture that rotates the id does not red this.
+  //
+  // CURRENCY IS NOT ASSERTED TRUE HERE, and that is the point of sc-22511: `current` is a report
+  // the MATRIX may not turn into a state, and demanding `true` would assert a coincidence about
+  // the pin. What the worker does with a non-current anchor is a different question with a
+  // different answer — admission REFUSES it and prices from the manifest floor
+  // (`candle_image_anchor` / `krea_store_anchor`), which is exactly why sc-22667 made these rows
+  // current at the pin through a reviewed attestation rather than leaving them stale (see the
+  // attestation test below and `the_production_anchor_source_admits_z_image_q4_on_eight_gb_at_
+  // rung_four_from_the_contracts_facts`, which asserts currency on the packaged row). The claims
+  // that survive here are the matrix's own: the anchor is packaged, it backs the cell, the cell
+  // reads `Anchored`, and the currency is published as a boolean either way so a stale lane
+  // cannot read identically to a fresh one.
+  const zImageCandle = matrix.cells.filter(
+    (cell) => cell.modelId === "z_image_turbo" && cell.backend === "candle",
+  );
+  assert.ok(zImageCandle.length > 0, "z_image_turbo publishes candle cells");
+  for (const cell of zImageCandle) {
+    assert.ok(cell.anchor, `${cell.id} must carry the packaged sc-15859 anchor`);
+    assert.equal(
+      typeof cell.anchor.current,
+      "boolean",
+      `${cell.id}: the packaged sc-15859 capture must publish its currency either way`,
+    );
+    if (cell.implementation === "implemented") {
+      assert.equal(cell.state, "Anchored", cell.id);
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Attestations retain their provenance whether their closure is current or historical.
+// Currency is advisory in CI: neither the packaged store nor a fixture must stay current.
+function assertAttestationsPublished(matrix, store) {
+  const attested = store.anchors.filter((anchor) => anchor.source.currencyAttestation);
+  for (const anchor of attested) {
+    const row = matrix.anchors.find((entry) => entry.id === anchor.id);
+    assert.ok(row, `${anchor.id} is in the inventory`);
+    assert.deepEqual(row.currencyAttestation, anchor.source.currencyAttestation);
+    const cells = matrix.cells.filter((cell) => cell.anchor?.id === anchor.id);
+    assert.ok(cells.length > 0, `${anchor.id} backs a published cell`);
+    for (const cell of cells) {
+      assert.deepEqual(cell.anchor.currencyAttestation, anchor.source.currencyAttestation, cell.id);
+    }
+  }
+  for (const row of matrix.anchors.filter((entry) => !attested.some((a) => a.id === entry.id))) {
+    assert.equal(row.currencyAttestation, null, `${row.id}: unattested anchors publish null`);
+  }
+  assert.equal(
+    matrix.summary.attestedAnchors,
+    matrix.anchors.filter((row) => row.current && row.currencyAttestation).length,
+  );
+  const markdown = renderMarkdown(matrix);
+  for (const anchor of attested) {
+    const row = matrix.anchors.find((entry) => entry.id === anchor.id);
+    const line = markdown.split("\n").find((entry) => entry.startsWith(`| \`${anchor.id}\` |`));
+    assert.ok(line, `${anchor.id} has a table row`);
+    const { class: kind, measuredRevision, attestedRevision, story } = anchor.source.currencyAttestation;
+    assert.ok(
+      line.includes(row.current
+        ? `| yes — attested ${kind} ${measuredRevision.slice(0, 8)}→${attestedRevision.slice(0, 8)} (${story}) |`
+        : "| no — advisory |"),
+      line,
+    );
+  }
+  assert.match(markdown, /current by attestation\)/);
+}
+
+test("packaged attestation provenance is published regardless of currency", async (t) => {
+  const store = await memoryContractSource("anchorStore");
+  const matrix = await buildMatrix();
+  assertAttestationsPublished(matrix, store);
+  if (matrix.summary.staleAnchors > 0) {
+    t.diagnostic(`WARNING (advisory): ${matrix.summary.staleAnchors}/${matrix.anchors.length} ` +
+      "anchors have different loader-closure provenance. Measurements remain usable; " +
+      "CI does not require remeasurement or attestation renewal.");
+  }
+});
+
+test("pin and shared-loader drift pass the same attestation checks without renewal", async () => {
+  const store = await memoryContractSource("anchorStore");
+  const closures = await memoryContractSource("anchorLoaderClosures");
+  // Synthetic provenance makes this regression independent of which attestations happen to
+  // ship. Keep every measured value and coordinate intact, and vary only the live provenance.
+  const attestation = {
+    measuredRevision: "1".repeat(40), attestedRevision: "2".repeat(40),
+    attestedAt: "2026-09-16", story: "sc-23692", class: "accounting-only",
+    why: "fixture: no loading change", witness: "fixture: source review",
+  };
+  const published = new Set((await buildMatrix()).anchors.map((anchor) => anchor.id));
+  const fixture = structuredClone(store);
+  const fixtureAnchors = fixture.anchors.filter((anchor) => published.has(anchor.id));
+  for (const anchor of fixtureAnchors) {
+    anchor.source.loaderClosureDigest = closures.models[`${anchor.modelId}:${anchor.backend}`].digest;
+    anchor.source.currencyAttestation = attestation;
+  }
+  const build = (source, liveClosures) => buildMatrix({
+    publish: false,
+    sourceOverrides: {
+      anchorStore: JSON.stringify(source), anchorLoaderClosures: JSON.stringify(liveClosures),
+    },
+  });
+  const baseline = await build(fixture, { ...closures, inferenceRevision: attestation.attestedRevision });
+  assert.equal(baseline.summary.attestedAnchors, fixtureAnchors.length);
+  assertAttestationsPublished(baseline, fixture);
+  const movedPin = { ...closures, inferenceRevision: "3".repeat(40) };
+  const pinOnly = await build(fixture, movedPin);
+  assertAttestationsPublished(pinOnly, fixture);
+  assert.equal(pinOnly.summary.attestedAnchors, fixtureAnchors.length);
+  const movedClosure = {
+    ...movedPin,
+    models: Object.fromEntries(Object.entries(closures.models).map(([key, entry]) =>
+      [key, { ...entry, digest: "0".repeat(64) }])),
+  };
+  const stale = await build(fixture, movedClosure);
+  assertAttestationsPublished(stale, fixture);
+  assert.equal(stale.summary.attestedAnchors, 0);
+  assert.equal(stale.summary.staleAnchors, fixtureAnchors.length);
+  assert.deepEqual(stale.cells.map((cell) => [cell.id, cell.state]),
+    baseline.cells.map((cell) => [cell.id, cell.state]));
+  for (const anchor of fixture.anchors) delete anchor.source.currencyAttestation;
+  const unattested = await build(fixture, movedClosure);
+  assertAttestationsPublished(unattested, fixture);
+  assert.equal(unattested.summary.attestedAnchors, 0);
+});
+
+// sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+// `tiersFor` used to union `downloads[].variant` across ALL platforms, so a model whose candle
+// block carries no `vramGbByTier` inherited the other lane's tier axis: `sana_1600m` advertised a
+// three-tier Candle axis whose q4/q8 halves are `platforms: ["macos"]` MLX turnkeys, contradicting
+// its own shipped contract (`"tiers": ["bf16"]` on every candle implementation), the worker (which
+// pins the candle SANA tier to bf16) and the route registry (`BF16_ONLY`).
+//
+// Asserted as the INVARIANT over the whole published matrix rather than as a list of fixed cells,
+// so a newly platform-gated download is covered without editing this test.
+test("no lane advertises a tier that nothing routes", async () => {
+  const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")),
+  );
+  const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
+  const routeLaneTiers = parseRouteRegistryLaneTiers(
+    await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+  );
+  // MLX is macOS-only by construction; Candle is the off-Mac lane. `platforms` selection itself is
+  // the shipped rule (`model_artifacts/artifact_selection.rs`) — a row with no `platforms` key
+  // applies everywhere; this map is only which OS stands for which lane.
+  const lanePlatform = { mlx: "macos", candle: "linux" };
+  const exercised = new Set();
+  for (const model of matrix.models) {
+    const entry = models.get(model.id);
+    const downloads = entry?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      const serves = (download) =>
+        !download.platforms || download.platforms.includes(lanePlatform[backend]);
+      // A row with NO `variant` that this lane's host fetches is an untiered bundle whose tiers live
+      // inside it — `SceneWorks/bernini` is the case, and LTX-2.3's dense co-requisite is another.
+      const bundled = downloads.some((download) => typeof download.variant !== "string" && serves(download));
+      for (const tier of axes.tiers) {
+        // `default` is the generator's "this lane advertises no tier axis" sentinel, and a tier the
+        // BACKEND block declares (`vramGbByTier`, `quantize`) is a lane-local claim rather than a
+        // download claim. Only a tier that could ONLY have come from `downloads[]` is in scope.
+        if (tier === "default") continue;
+        const variants = downloads.filter((download) => download.variant === tier);
+        if (variants.length === 0) continue;
+        const laneDeclares = Object.keys(entry?.[backend]?.vramGbByTier ?? {}).includes(tier);
+        assert.ok(
+          laneDeclares ||
+            bundled ||
+            variants.some(serves) ||
+            (routeLaneTiers.get(`${backend}:${model.id}`)?.has(tier) ?? false),
+          `${model.id}:${backend} advertises ${tier}, but nothing routes it: no lane-local ` +
+            "declaration, no untiered bundle, no download this host fetches, no route rule",
+        );
+        exercised.add(`${model.id}:${backend}:${tier}`);
+      }
+    }
+  }
+  // A SET, not a `checked > 100` floor (sc-22731 review): the scope is re-derived independently
+  // from the same two artifacts, so a regression that stopped VISITING coordinates — an `axes` key
+  // renamed, a manifest join broken — fails naming the coordinates it lost instead of quietly
+  // sliding under a magic number.
+  const expected = new Set();
+  for (const model of matrix.models) {
+    const downloads = models.get(model.id)?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      for (const tier of axes.tiers) {
+        if (tier === "default") continue;
+        if (!downloads.some((download) => download.variant === tier)) continue;
+        expected.add(`${model.id}:${backend}:${tier}`);
+      }
+    }
+  }
+  assert.deepEqual([...exercised].sort(), [...expected].sort());
+  assert.ok(expected.size > 0, "the invariant must actually be exercised");
+  // The coordinates this story armed are inside that scope, so the invariant is not vacuous for
+  // the two families sc-22731 added.
+  for (const key of ["sana_1600m:mlx:q4", "chroma1_hd:candle:q8", "bernini_image:candle:q4"]) {
+    assert.ok(expected.has(key), `${key} must be inside the invariant's scope`);
+  }
+});
+
+// sc-22731 review. The companion DIRECTION, and the one that caught the regression: `tiersFor`'s
+// `platforms` filter must never remove a tier `memory_route_registry.rs` declares for that exact
+// (backend, provider). The registry is a FLOOR, not a ceiling — a rule's `tiers` is the scope at
+// which that memory-route rule shapes a load, not an enumeration of what the lane can open
+// (`ltx_2_3` has no rule at all and routes three tiers, `lens` is `Q4_ONLY` on MLX and advertises
+// three), so this asserts containment one way only.
+//
+// `bernini`/`bernini_image` is the case: their only off-Mac download is one UNTIERED
+// `SceneWorks/bernini` tree, so a bare `platforms` test sent both candle axes to `["default"]` and
+// deleted six analytic anchors and six burndown cells for a lane whose Candle route rule declares
+// `BF16_Q4_Q8`. Under epic 22723 E1 only a (lane, tier) the worker does NOT route is exempt.
+test("every tier a route rule declares, and a download ships, survives onto the published axis", async () => {
+  const matrix = JSON.parse(await readFile("docs/generated/memory-matrix.json", "utf8"));
+  const manifest = JSON.parse(
+    stripJsoncComments(await readFile("config/manifests/builtin.models.jsonc", "utf8")),
+  );
+  const models = new Map((manifest.models ?? manifest).map((model) => [model.id, model]));
+  const routeLaneTiers = parseRouteRegistryLaneTiers(
+    await readFile("crates/sceneworks-worker/src/memory_route_registry.rs", "utf8"),
+  );
+  const checked = new Set();
+  for (const model of matrix.models) {
+    const downloads = models.get(model.id)?.downloads ?? [];
+    for (const [backend, axes] of Object.entries(model.axes ?? {})) {
+      // sc-22738: keyed on the RESOLVED ENGINE PROVIDER, which is what `RULES` is keyed on and what
+      // `tiersFor` looks the floor up under (`routedLaneTiers` -> `route.engineFor(backend)`). The
+      // matrix publishes that same resolution per backend, so this reads the generator's own answer
+      // rather than forming a second opinion about it.
+      //
+      // It used to key on the CATALOG id, and that alone made this test blind to the regression it
+      // is named for: `candle:flux_dev` and `candle:flux_schnell` are absent from `RULES` — the
+      // rules are `candle:flux1_dev` / `candle:flux1_schnell` — so the loop `continue`d past both
+      // lanes without ever evaluating the assertion. Every id whose provider differs from its
+      // catalog id (`flux_dev`, `flux_schnell`, `bernini_image`, `ltx_2_3` on candle, …) was
+      // exempt by accident.
+      const provider = model.resolvedRoutes?.[backend] ?? model.resolvedRoute;
+      const routed = routeLaneTiers.get(`${backend}:${provider}`);
+      if (!routed) continue;
+      for (const tier of routed) {
+        if (!downloads.some((download) => download.variant === tier)) continue;
+        assert.ok(
+          axes.tiers.includes(tier),
+          `${model.id}:${backend} routes ${tier} and ships a ${tier} download, but the published ` +
+            `axis is [${axes.tiers.join(", ")}] — a filter narrowed a lane the worker routes`,
+        );
+        checked.add(`${model.id}:${backend}:${tier}`);
+      }
+    }
+  }
+  assert.ok(checked.size > 0, "no (model, backend) joined a route rule; the parse is broken");
+  // The regression cell itself, by name.
+  assert.ok(checked.has("bernini:candle:q4"), "the bernini candle floor must be exercised");
+  // sc-22738: the cells the two removed exemptions used to hide, asserted BY NAME so neither can
+  // come back as a silent narrowing of scope. A `continue` reinstated anywhere above turns the
+  // whole invariant into a vacuous pass — `checked.size > 0` cannot see that, because the lanes
+  // that still qualify keep it non-empty. `flux_dev` and `flux_schnell` were exempt TWICE (the
+  // catalog-id keying missed them, and so did the `vramGbByTier` skip); `flux2_dev` was exempt
+  // once, by `vramGbByTier`, and the old comment on that skip named it as an accepted case.
+  //
+  // The candle q8 cells the same generator bug also hid — `sd3_5_large`, `sd3_5_large_turbo`,
+  // `sd3_5_medium` — are deliberately NOT here: no `RULES` entry names their provider, so this
+  // test's floor is empty for them and it has nothing to say. They are held by the `tiersFor`
+  // union itself, and re-introducing the short-circuit still reds this test through the three
+  // above.
+  for (const cell of [
+    "flux_dev:candle:bf16",
+    "flux_schnell:candle:bf16",
+    "flux2_dev:candle:bf16",
+  ]) {
+    assert.ok(
+      checked.has(cell),
+      `${cell} is routed (memory_route_registry.rs declares it for this lane's ENGINE provider) ` +
+        "and ships an ungated download, so the invariant must be EVALUATED on it — an exemption " +
+        "that skips it makes this test vacuous rather than green",
+    );
+  }
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "bernini_image")?.axes?.candle?.tiers,
+    ["bf16", "q4", "q8"],
+    "bernini_image's candle axis is the registry's BF16_Q4_Q8, not the `default` sentinel",
+  );
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "ltx_2_3")?.axes?.candle?.tiers,
+    ["bf16", "q4", "q8"],
+    "candle_ltx_requested_tier resolves mlxQuantize <= 0 to CandleLtxTier::Bf16, so the routed " +
+      "bf16 cell must survive even though its own download row is platforms: [macos]",
+  );
+  assert.deepEqual(
+    matrix.models.find((model) => model.id === "sana_1600m")?.axes?.candle?.tiers,
+    ["bf16"],
+    "...and the narrowing this story exists for still holds: no packed SANA turnkey off-Mac",
+  );
 });

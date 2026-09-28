@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SceneWorks/z-image-turbo-mlx",
+        "resolvedRevision": "bb2bc9893b3c49ae96c813350775f791a2e8bc80",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "z-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2",
+      "capturedAt": "2026-09-11T01:38:37Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:z_image_turbo-edit-five-rung-reference",
+        "blockers": [
+          "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 512753664
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 13296992256
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14158921728
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 14158921728
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "fresh-five-rung-z-image-edit-q8-1024-seed16402-step4",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-e331f361edcabbd304c0",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/z-image-turbo-mlx@bb2bc9893b3c49ae96c813350775f791a2e8bc80:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-196d2c10f110c60e758b",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 512753664,
+          "allocatorBytes": 512753664,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 14158921728,
+          "allocatorBytes": 14158921728,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 13296992256,
+          "allocatorBytes": 13296992256,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 14158921728,
+          "allocatorBytes": 14158921728,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "a5226302ccd57082729a0a64a6e66987ca3a82e06be60f26b374562b44dc2648",
+          "dirty": false,
+          "revision": "e11fd9f0fd26a0eee3a0eb1f4ca7f81c32b5aeb8"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:1b0facc1fc3e034a59fafceb97a4eb23b51c68101e7d10365abaa5b2143105a1",
+          "revision": "c09680882b0179aa440d177721782e9a338a0344"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "reason": "SC-15859 anchor capture measures exact per-phase memory and strategy identity for the Candle Z-Image-Turbo lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite",
+          "result": "not_run"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the Candle Z-Image-Turbo reference-conditioned edit path (the z_image_edit route) executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "edit_image",
+        "modelId": "z_image_edit",
+        "overlay": "none",
+        "provider": "z_image_turbo",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

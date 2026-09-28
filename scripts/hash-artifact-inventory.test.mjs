@@ -110,3 +110,40 @@ test("cached artifact listing permits confined HF blob links and rejects escapin
     /broken, empty, or escaped/,
   );
 });
+
+// sc-22738 — a snapshot's own `.gitattributes` is not artifact content, and hashing it made the
+// receipt depend on HOW the operator obtained the snapshot rather than on the weights: a whole-repo
+// hub fetch carries it, a glob-scoped one does not, and `candle-gen-sdxl`'s `collect_files` REFUSES
+// to seal any source containing a dot-prefixed file at all.
+test("artifact inventory ignores dotfiles and dot-directories, so the receipt is the weights", async () => {
+  const clean = await mkdtemp(path.join(tmpdir(), "artifact-inventory-clean-"));
+  const trusted = await mkdtemp(path.join(tmpdir(), "artifact-inventory-dot-"));
+  const polluted = path.join(trusted, "snapshot");
+  await mkdir(polluted);
+  for (const root of [clean, polluted]) {
+    await mkdir(path.join(root, "unet"));
+    await writeFile(path.join(root, "unet/model.safetensors"), "weights");
+    await writeFile(path.join(root, "model_index.json"), "{}");
+  }
+  await writeFile(path.join(polluted, ".gitattributes"), "*.safetensors filter=lfs\n");
+  await mkdir(path.join(polluted, ".cache", "huggingface", "download"), { recursive: true });
+  await writeFile(path.join(polluted, ".cache/huggingface/download/model.metadata"), "meta");
+  await writeFile(path.join(polluted, "unet/.gitattributes"), "nested\n");
+
+  const before = await hashArtifactInventory(clean);
+  const after = await hashArtifactInventory(polluted);
+  assert.equal(after.files, 2, "only the two artifact files are inventoried");
+  assert.equal(after.bytes, before.bytes, "a dotfile adds no bytes to the receipt");
+  assert.equal(after.sha256, before.sha256, "the same weights mint the same receipt on either host");
+
+  // `listCachedArtifactFiles` deliberately does NOT filter: it is the tamper check over a staged
+  // authority, and the CUDA harness's Candle sidecar obstructions are dot-named files it installs
+  // inside the artifact on purpose and re-verifies through this listing.
+  assert.deepEqual(
+    await listCachedArtifactFiles(polluted, trusted),
+    [
+      ".cache/huggingface/download/model.metadata", ".gitattributes",
+      "model_index.json", "unet/.gitattributes", "unet/model.safetensors",
+    ],
+  );
+});

@@ -1,0 +1,399 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "inventorySha256": "48b7b1ab3329d060760934994b7f0f2579845c3cc332779b44d009369283a344",
+        "repository": "SceneWorks/ltx-2.5-mlx",
+        "resolvedRevision": "081658ce6886cacba20817ce0359bbefef706ff2",
+        "variant": "q8"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+      "capturedAt": "2026-09-07T08:31:51Z",
+      "derivation": {
+        "justification": "Exact physical MLX provider response, artifact inventory, and selected/reference outputs are preserved as immutable capture receipts.",
+        "lifecycle": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        },
+        "loadability": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        },
+        "memory": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        },
+        "negativeMutation": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        },
+        "overlay": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        },
+        "quality": {
+          "kind": "direct",
+          "sourceSessionIds": [
+            "ims-07a2eb94a1cad7b42269"
+          ]
+        }
+      },
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:ltx-2.5-full-pipeline",
+        "blockers": [
+          "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity render per fresh process; cancellation and injected-error lifecycle cases remain explicitly unexecuted here and are not used as calibration currency"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 35111816612
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 35112335972
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 25522093382
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 38893782518
+          },
+          {
+            "name": "predictedOverallCeiling",
+            "unit": "bytes",
+            "value": 36909875200
+          },
+          {
+            "name": "renderedFrames",
+            "unit": "count",
+            "value": 145
+          },
+          {
+            "name": "outputFps",
+            "unit": "count",
+            "value": 24
+          },
+          {
+            "name": "devVariant",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "diffusionDecoder",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 67
+          },
+          {
+            "name": "negativeMutationRootMeanSquareErrorPer255",
+            "unit": "count",
+            "value": 69
+          },
+          {
+            "name": "audioMutationMaximumAbsoluteErrorMicrounits",
+            "unit": "count",
+            "value": 250000
+          },
+          {
+            "name": "audioMutationMeanAbsoluteErrorMicrounits",
+            "unit": "count",
+            "value": 250000
+          },
+          {
+            "name": "audioMutationRootMeanSquareErrorMicrounits",
+            "unit": "count",
+            "value": 250000
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "ltx-2-5-mlx-q8-dev-conv-512x768-f145-fps24-seed18755",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-038c5bc9be604ae9f70e",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/ltx-2.5-mlx@081658ce6886cacba20817ce0359bbefef706ff2:q8",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1e0fd5f041c62237f8f7",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 35111816612,
+          "allocatorBytes": 38893263158,
+          "reclaimableBytes": 3781446546
+        },
+        "decode": {
+          "activeBytes": 25522093382,
+          "allocatorBytes": 25522093382,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 35112335972,
+          "allocatorBytes": 35112335972,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 35112335972,
+          "allocatorBytes": 38893782518,
+          "reclaimableBytes": 3781446546
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 36909875200,
+        "decode": 26843545600,
+        "denoise": 36909875200,
+        "overall": 36909875200
+      },
+      "quality": {
+        "audio": {
+          "channels": 2,
+          "maximumAbsoluteError": 0,
+          "maximumAbsoluteErrorThreshold": 0.011764705882352941,
+          "meanAbsoluteError": 0,
+          "meanAbsoluteErrorThreshold": 0.00392156862745098,
+          "referencePcmSha256": "56f09dd9ac4ff2ed99b800631660cfddbdd6ba476c8d17d6fd88cc978f7933cf",
+          "result": "passed",
+          "rootMeanSquareError": 0,
+          "rootMeanSquareErrorThreshold": 0.0058823529411764705,
+          "sampleCount": 576960,
+          "sampleRateHz": 48000,
+          "selectedPcmSha256": "56f09dd9ac4ff2ed99b800631660cfddbdd6ba476c8d17d6fd88cc978f7933cf"
+        },
+        "contract": "identical public artifact revision, transformer variant, decoder, prompt, seed, geometry, cadence, tier, required adapter recipe, and loaded provider; every video pixel and interleaved PCM sample in the measured render versus warm full-pipeline repeat",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "c5405daa2a2132bf79c28d00dc56a9c3948c7b1312cefdf7098e94a2350d7116",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:5af5f609bd5963407e0ebbe4ba89e90b652300c20720c4ad3d97cf9eb3895026",
+          "revision": "8dc1cd1ee0436c81b909df28e98b7aed5eaf1fe5"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 36909875200,
+          "name": "exact_fit",
+          "predictedBytes": 36909875200,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the loaded provider rejected a zero/unknown budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the loaded provider rejected a mutated calibration fingerprint",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "an identical-input full-pipeline request completed on the same loaded provider",
+          "result": "passed"
+        },
+        {
+          "name": "cancel",
+          "reason": "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity render per fresh process; cancellation and injected-error lifecycle cases remain explicitly unexecuted here and are not used as calibration currency",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "SC-18783 executes the measured full-pipeline render plus one identical-input warm parity render per fresh process; cancellation and injected-error lifecycle cases remain explicitly unexecuted here and are not used as calibration currency",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "target.overlay is none; transformerVariant and decoder are typed base-recipe axes, including dev's mandatory refinement adapter",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "runtime_complete",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "decoder": "conv",
+        "geometry": {
+          "batch": 1,
+          "frames": 145,
+          "height": 768,
+          "width": 512
+        },
+        "mode": "text_to_video",
+        "modelId": "ltx_2_5",
+        "overlay": "none",
+        "provider": "ltx_2_5",
+        "tier": "q8",
+        "transformerVariant": "dev"
+      }
+    }
+  ],
+  "schemaVersion": 6,
+  "sourceSessions": [
+    {
+      "capturedAt": "2026-09-07T08:31:51Z",
+      "claims": [
+        "memory",
+        "quality",
+        "negative_mutation",
+        "lifecycle",
+        "loadability",
+        "overlay"
+      ],
+      "command": "[\"/private/tmp/claude-501/-Users-michael-Repos-SceneWorks--claude-worktrees-sceneworks-epic-status-cbfe0f/347adef4-fdbc-4075-a376-a15914ddb32e/scratchpad/campaign-mlx/target/release/memory-mlx-adapter\"]",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "26.6.2",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "id": "ims-07a2eb94a1cad7b42269",
+      "inputs": [
+        {
+          "bytes": 41836075248,
+          "path": "/Volumes/Models/huggingface/hub/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2/dev/q8",
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "resolvedRevision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "role": "base",
+          "sha256": "48b7b1ab3329d060760934994b7f0f2579845c3cc332779b44d009369283a344",
+          "variant": "q8"
+        },
+        {
+          "bytes": 23951748129,
+          "path": "/Volumes/Models/huggingface/hub/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2/enhancer",
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "resolvedRevision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "role": "enhancer",
+          "sha256": "8c91bd63a7d481eeb0115e71a0ce5df375cc8dc009357bb3284df15c6e135119",
+          "variant": "enhancer"
+        },
+        {
+          "bytes": 8899889568,
+          "path": "/Volumes/Models/huggingface/hub/models--SceneWorks--ltx-2.5-mlx/snapshots/081658ce6886cacba20817ce0359bbefef706ff2/distilled_lora/ltx-2.5-22b-distilled-lora-450-bf16.safetensors",
+          "repository": "SceneWorks/ltx-2.5-mlx",
+          "resolvedRevision": "081658ce6886cacba20817ce0359bbefef706ff2",
+          "role": "adapter",
+          "sha256": "86370bbf79a9eb4edaa158907e2b48a5188fe4c5dc8ce30c7eb8f2f131a9bbf5",
+          "variant": "dev_refinement_lora"
+        }
+      ],
+      "kind": "physical_mlx",
+      "outputs": [
+        {
+          "bytes": 2109,
+          "path": "docs/calibration/sc-22738/ims-07a2eb94a1cad7b42269.request.json",
+          "role": "request",
+          "sha256": "182a70ee0921800c5300f7e7f7763e34c971847c6ec35e36d0fcd77c710bed81"
+        },
+        {
+          "bytes": 173359165,
+          "path": "docs/calibration/sc-22738/implan-1e0fd5f041c62237f8f7-selected_av-512x768-f145-76dd45c36a4c482d64ecedca6b67cb8f926d616f38727aa5628250155469a9e6.avbin",
+          "role": "selected_av",
+          "sha256": "76dd45c36a4c482d64ecedca6b67cb8f926d616f38727aa5628250155469a9e6"
+        },
+        {
+          "bytes": 173359165,
+          "path": "docs/calibration/sc-22738/implan-1e0fd5f041c62237f8f7-reference_av-512x768-f145-76dd45c36a4c482d64ecedca6b67cb8f926d616f38727aa5628250155469a9e6.avbin",
+          "role": "reference_av",
+          "sha256": "76dd45c36a4c482d64ecedca6b67cb8f926d616f38727aa5628250155469a9e6"
+        }
+      ],
+      "repositories": {
+        "inference": {
+          "closureDigest": "c5405daa2a2132bf79c28d00dc56a9c3948c7b1312cefdf7098e94a2350d7116",
+          "dirty": false,
+          "revision": "3b922bac6094e06f98bb2598a6d6fe10dc92739e"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:5af5f609bd5963407e0ebbe4ba89e90b652300c20720c4ad3d97cf9eb3895026",
+          "revision": "8dc1cd1ee0436c81b909df28e98b7aed5eaf1fe5"
+        }
+      },
+      "result": "passed",
+      "sourcePath": "docs/calibration/sc-22738/ims-07a2eb94a1cad7b42269.log",
+      "stdoutSha256": "16e6892b4bc2a360bf8640824f2c66ceb3d6c6d2b7803a53fc5e03109e76d4e3",
+      "target": {
+        "decoder": "conv",
+        "mode": "text_to_video",
+        "overlay": "none",
+        "rung": "resident",
+        "tier": "q8",
+        "transformerVariant": "dev"
+      }
+    }
+  ]
+}

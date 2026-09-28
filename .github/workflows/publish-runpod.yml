@@ -74,11 +74,31 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
+          components: rustfmt
+
+      - name: Install pinned scaffold dependencies
+        run: npm ci --ignore-scripts
+      # The scaffold suite reads real inference source at both the current pin
+      # and the packaged anchor revisions, just as check.yml's parity-scaffold does.
+      - name: Fetch the pinned inference source for the anchor-closure suite
+        run: |
+          set -euo pipefail
+          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
+          git init -q "$RUNNER_TEMP/inference"
+          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
+          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
+          while read -r rev; do
+            [ -n "$rev" ] || continue
+            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
+          done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
+          git -C "$RUNNER_TEMP/inference" checkout -q "$pin"
 
       # Do the cheap repository invariants before spending runner time on nvcc.
       # The Dockerfile itself performs the web + embed-web/backend-candle release
       # builds, so repeating those host compilations here would double the cost.
       - name: Validate scaffold and RunPod publication contracts
+        env:
+          INFERENCE_REPO: ${{ runner.temp }}/inference
         run: |
           npm run check
           npm run check:runpod:image-contract

@@ -49,8 +49,9 @@ use sceneworks_core::lora_url::{lora_source_url_file_stem, parse_lora_source_url
 use sceneworks_core::project_store::{
     AssetStatusPatch, AssetTagsPatch, CharacterCreateInput, CharacterLookInput,
     CharacterLookUpdateInput, CharacterLoraInput, CharacterLoraUpdateInput,
-    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput, ProjectStore,
-    ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR, POSE_UPLOADS_CACHE_DIR,
+    CharacterReferenceInput, CharacterReferenceUpdateInput, CharacterUpdateInput,
+    FilmReferenceInput, ProjectStore, ProjectStoreError, UploadAsset, KEYPOINT_UPLOADS_CACHE_DIR,
+    POSE_UPLOADS_CACHE_DIR,
 };
 use sceneworks_core::time::{format_unix_seconds, now_unix_seconds};
 use sceneworks_core::training::{
@@ -79,6 +80,7 @@ use tokio::time::{Instant as TokioInstant, MissedTickBehavior};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 use tokio_util::io::ReaderStream;
+use tokio_util::sync::CancellationToken;
 use tower_http::compression::{
     predicate::{Predicate, SizeAbove},
     CompressionLayer, CompressionLevel,
@@ -153,7 +155,8 @@ use training::{
 };
 mod generation;
 use generation::{
-    create_audio_job, create_image_job, create_interleave_job, create_video_job, create_vqa_job,
+    create_audio_job, create_image_job, create_interleave_job, create_vector_job,
+    create_vector_prompt_workflow, create_video_job, create_vqa_job,
     parse_recipe_preset_resolution, typed_generation_route, JobCatalogSnapshot,
 };
 #[cfg(test)]
@@ -191,8 +194,8 @@ use dto::{
     PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
     PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
     SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VerifyResponse,
-    VideoJobRequest, VqaJobRequest,
+    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
+    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -279,7 +282,34 @@ use logs::list_logs;
 // The shared HTTP error type (sc-8890, F-088), re-exported so the `use super::*`
 // in every handler module keeps resolving `ApiError` unchanged.
 mod error;
+// Local filmmaking harness (epic 22708, sc-22710): plan -> jobs -> assets -> timeline -> export.
+pub mod film_harness;
+mod film_lifecycle;
+pub mod film_planner;
+mod film_planner_connections;
+mod film_planning;
+mod film_review;
+mod films;
+mod openai_planner;
 pub(crate) use error::ApiError;
+use film_lifecycle::{cancel_film_run, get_film_run_progress, list_film_runs, resume_film_run};
+use film_planner_connections::{
+    list_film_planner_connections, save_film_planner_connection, test_film_planner_connection,
+};
+use film_planning::{
+    apply_film_planning_candidate, cancel_film_planning, film_planner_availability,
+    get_film_planning_operation, parse_film_draft_script, start_film_planning,
+};
+use film_review::{
+    analyze_film_take, decide_film_take, get_film_review, repair_film_take, replace_film_take,
+    swap_film_take,
+};
+use films::{
+    add_film_reference, add_film_sound, create_film_draft, create_film_run, export_film_run,
+    get_film_draft, get_film_render_options, get_film_run, get_reference_pack, list_film_drafts,
+    preflight_film_draft, preview_film_render_options, start_film_run, update_film_draft,
+    update_reference_pack,
+};
 // Serde `#[serde(default = "...")]` value providers for the DTOs (sc-8890, F-088),
 // re-exported so the `#[serde(default = "default_x")]` string paths and sibling
 // call sites keep resolving unchanged.
@@ -387,7 +417,10 @@ const STALE_UPLOAD_SECONDS: u64 = 24 * 60 * 60;
 // sc-8884 (F-082): the char cap applied to every free-text prompt field (`prompt` and
 // `negativePrompt`). Both are persisted into jobs.db and re-broadcast over SSE on every
 // `job.updated`, so an uncapped field bloats the row and every subscriber's payload.
-const MAX_PROMPT_CHARS: usize = 4000;
+// Declared in sceneworks-core (sc-22710) so the pre-dispatch plan validator in
+// `sceneworks_core::film_plan` refuses exactly what this route refuses instead of hand-copying
+// the number and drifting.
+pub(crate) use sceneworks_core::MAX_PROMPT_CHARS;
 // sc-8884 (F-082): serialized-size ceiling for the free-form `advanced` object. It is a
 // pass-through bag threaded to the worker, so it has no per-key schema — bound its total
 // serialized size instead. 64 KiB is generous for legitimate advanced settings.
@@ -541,6 +574,16 @@ fn json_rejection_response(rejection: JsonRejection) -> Response {
         JsonRejection::JsonSyntaxError(error) => error.body_text(),
         other => other.body_text(),
     };
+    json_decode_error_response(detail)
+}
+
+/// The 422 body a failed JSON decode answers with, as ONE definition (sc-24029).
+///
+/// A handler that has to look at its body BEFORE the typed decode extracts a `Value` and decodes
+/// the typed shape itself, so it also has to report a decode failure itself. Without this it would
+/// invent a second shape for the same failure, and the same malformed body would be reported two
+/// ways depending on which route received it.
+pub(crate) fn json_decode_error_response(detail: String) -> Response {
     (
         StatusCode::UNPROCESSABLE_ENTITY,
         Json(json!({
@@ -785,7 +828,10 @@ async fn parent_death(parent_pid: Option<i32>) {
     }
 }
 
-async fn shutdown_signal() {
+async fn shutdown_signal(
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -821,6 +867,14 @@ async fn shutdown_signal() {
             );
         }
     }
+    // Set intent before Axum starts draining. Film controllers call this API over loopback and can
+    // therefore exit as soon as the listener closes; their lease Drop must already distinguish
+    // process shutdown from an ordinary handled controller error.
+    film_controller_shutdown.request();
+    // Axum stops accepting connections when this future returns, but waits for existing
+    // connections indefinitely. End app-owned long-lived streams immediately and wake the
+    // server's finite drain deadline before returning control to Axum.
+    api_shutdown.cancel();
 }
 
 /// Stream a multipart field to `temp_path`, enforcing `max_bytes` (returning
@@ -1159,7 +1213,12 @@ pub fn create_app(settings: Settings) -> Result<Router, JobsStoreError> {
 pub(crate) fn create_app_with_state(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, false)
+    create_app_with_state_mode(
+        settings,
+        false,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
 }
 
 #[cfg(test)]
@@ -1174,15 +1233,31 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     Ok((router, state))
 }
 
+#[cfg(test)]
 pub(crate) fn create_app_with_pending_startup_maintenance(
     settings: Settings,
 ) -> Result<(Router, AppState), JobsStoreError> {
-    create_app_with_state_mode(settings, true)
+    create_app_with_state_mode(
+        settings,
+        true,
+        film_harness::FilmControllerShutdown::default(),
+        CancellationToken::new(),
+    )
+}
+
+pub(crate) fn create_app_with_pending_startup_maintenance_with_shutdowns(
+    settings: Settings,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
+) -> Result<(Router, AppState), JobsStoreError> {
+    create_app_with_state_mode(settings, true, film_controller_shutdown, api_shutdown)
 }
 
 fn create_app_with_state_mode(
     settings: Settings,
     defer_upload_sweeps: bool,
+    film_controller_shutdown: film_harness::FilmControllerShutdown,
+    api_shutdown: CancellationToken,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let _filesystem_phase = StartupPhaseTimer::start(
         "filesystem_preflight",
@@ -1331,6 +1406,8 @@ fn create_app_with_state_mode(
         },
         progress_side_effects_lock: Arc::new(AsyncMutex::new(())),
         catalog_scan_supervisor: Arc::new(catalog_scan_supervisor::CatalogScanSupervisor::default()),
+        film_controller_shutdown,
+        api_shutdown,
         catalog_scan_invalid_recovery_reported: Arc::new(AsyncMutex::new(
             std::collections::HashSet::new(),
         )),
@@ -1373,6 +1450,7 @@ fn create_app_with_state_mode(
     };
     let cors = cors_layer(&state.settings);
     let returned_state = state.clone();
+    generation::spawn_vector_prompt_workflow_recovery(state.clone());
 
     // MCP server (epic 10231, sc-10233): the rmcp streamable-HTTP service is
     // nested at `/mcp` INSIDE this router, so the `access_control` layer below
@@ -1679,8 +1757,124 @@ fn create_app_with_state_mode(
             get(list_timelines).post(create_timeline),
         )
         .route(
+            "/api/v1/projects/:project_id/films",
+            get(list_film_drafts).post(create_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id",
+            get(get_film_draft).put(update_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/reference-pack",
+            get(get_reference_pack).put(update_reference_pack),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/references",
+            post(add_film_reference),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/sound",
+            post(add_film_sound),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/runs",
+            post(create_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/preflight",
+            post(preflight_film_draft),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/render-options",
+            get(get_film_render_options).post(preview_film_render_options),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/brief/parse",
+            post(parse_film_draft_script),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planners",
+            get(film_planner_availability),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning",
+            get(get_film_planning_operation).post(start_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/cancel",
+            post(cancel_film_planning),
+        )
+        .route(
+            "/api/v1/projects/:project_id/films/:draft_id/planning/apply",
+            post(apply_film_planning_candidate),
+        )
+        .route(
+            "/api/v1/film-planner-connections",
+            get(list_film_planner_connections),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id",
+            put(save_film_planner_connection),
+        )
+        .route(
+            "/api/v1/film-planner-connections/:connection_id/test",
+            post(test_film_planner_connection),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id",
+            get(get_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs",
+            get(list_film_runs),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/progress",
+            get(get_film_run_progress),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/start",
+            post(start_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/resume",
+            post(resume_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/cancel",
+            post(cancel_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/export",
+            post(export_film_run),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review",
+            get(get_film_review).post(analyze_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/decision",
+            post(decide_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/swap",
+            post(swap_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/replace",
+            post(replace_film_take),
+        )
+        .route(
+            "/api/v1/projects/:project_id/film-runs/:run_id/review/repair",
+            post(repair_film_take),
+        )
+        .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id",
             get(get_timeline).put(update_timeline),
+        )
+        .route(
+            "/api/v1/projects/:project_id/timelines/:timeline_id/film-deliveries",
+            post(timelines::deliver_film_timeline),
         )
         .route(
             "/api/v1/projects/:project_id/timelines/:timeline_id/exports",
@@ -1711,6 +1905,11 @@ fn create_app_with_state_mode(
             post(save_person_track_corrections),
         )
         .route("/api/v1/image/jobs", post(create_image_job))
+        .route("/api/v1/image/vectorize/jobs", post(create_vector_job))
+        .route(
+            "/api/v1/image/vectorize/prompt/jobs",
+            post(create_vector_prompt_workflow),
+        )
         .route("/api/v1/image/vqa/jobs", post(create_vqa_job))
         .route("/api/v1/image/interleave/jobs", post(create_interleave_job))
         .route("/api/v1/video/jobs", post(create_video_job))
@@ -2113,6 +2312,16 @@ async fn get_project_file(
     // One fixed representation prevents unbounded cache variants. Derivatives
     // are generated on first use, so assets written before this route existed
     // backfill without a migration.
+    let force_download = project_file
+        .content_type
+        .eq_ignore_ascii_case("image/svg+xml");
+    if force_download && query.thumbnail.is_some() {
+        // Do not let the generic thumbnail branch become a second inline SVG preview route. Vector
+        // sidecars point at the worker-rendered PNG instead.
+        return Err(ApiError::bad_request(
+            "SVG thumbnails are not supported; use the vector PNG preview",
+        ));
+    }
     let (served_path, content_type) = if let Some(size) = query.thumbnail {
         if size != GRID_THUMBNAIL_SIZE {
             return Err(ApiError::bad_request(format!(
@@ -2509,6 +2718,17 @@ fn project_file_response_headers(
     last_modified: Option<SystemTime>,
 ) -> Result<HeaderMap, ApiError> {
     let mut headers = HeaderMap::new();
+    // Every representation, including stripWorkflow, ranges and 304 responses, shares this
+    // boundary. SVG source is download-only; only the worker-rendered PNG is inline media.
+    let content_type = if content_type.eq_ignore_ascii_case("image/svg+xml") {
+        headers.insert(
+            header::CONTENT_DISPOSITION,
+            HeaderValue::from_static("attachment"),
+        );
+        "application/octet-stream"
+    } else {
+        content_type
+    };
     for (name, value) in [
         (header::CONTENT_TYPE, content_type.to_owned()),
         (header::ACCEPT_RANGES, "bytes".to_owned()),
@@ -4459,8 +4679,13 @@ fn optional_number_to_f64(
     number.map(|value| number_to_f64(value, field)).transpose()
 }
 
+/// The only output heights `POST /api/v1/projects/:id/timelines/:id/exports` admits. One
+/// declaration (sc-22710): the film harness picks an export resolution before it dispatches, and a
+/// second hand-copied list would turn a pre-dispatch diagnostic into a 400 at enqueue on drift.
+pub(crate) const TIMELINE_EXPORT_RESOLUTIONS: &[u32] = &[640, 720, 1024, 1280];
+
 fn validate_timeline_export(payload: &TimelineExportRequest) -> Result<(), ApiError> {
-    if ![640, 720, 1024, 1280].contains(&payload.resolution) {
+    if !TIMELINE_EXPORT_RESOLUTIONS.contains(&payload.resolution) {
         return Err(ApiError::bad_request(
             "Resolution must be one of 640, 720, 1024, or 1280.",
         ));
@@ -4816,11 +5041,33 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // Only a *named* dimension is bounded here: an omitted side is resolved from the model's
     // declared `defaults.resolution` in `create_image_job` (sc-12400), the same shape as the video
     // route's duration/fps/size.
+    //
+    // sc-24113 lowers the FLOOR of this shape check from 256 to 32 and nothing else. This gate runs
+    // before the model is known, so — exactly like the video route's `1..=30` duration blanket — it
+    // is a payload-sanity outer bound, not the model's envelope. It had to widen because
+    // Qwen-Image 2.1 genuinely renders from 32 px per side, which the old blanket refused outright
+    // with no model ever getting a say.
+    //
+    // Nothing is loosened for any other model: `create_image_job` immediately re-checks the
+    // resolved geometry against the model's own `limits.minDimension` / `maxDimension` /
+    // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
+    // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
+    // to any pre-existing model still 400s, just one layer down and with the model named.
     if let Some(width) = payload.width {
-        validate_dimension(width, "width", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            width,
+            "width",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if let Some(height) = payload.height {
-        validate_dimension(height, "height", MAX_IMAGE_DIMENSION)?;
+        validate_dimension_in(
+            height,
+            "height",
+            SHAPE_MIN_IMAGE_DIMENSION,
+            MAX_IMAGE_DIMENSION,
+        )?;
     }
     if payload.upscale.enabled {
         if ![2, 4].contains(&payload.upscale.factor) {
@@ -5268,6 +5515,263 @@ fn validate_audio_job(payload: &AudioJobRequest) -> Result<(), ApiError> {
         }
     }
     validate_model_id(&payload.base_model)?;
+    validate_audio_song_fields(payload)?;
+    Ok(())
+}
+
+/// The ICL reference modes a YuE `_icl` checkpoint accepts (sc-19384): one mixed clip, or a
+/// vocal + instrumental pair.
+const AUDIO_ICL_MODES: &[&str] = &["single", "dual"];
+/// The weight tiers an audio model can ship as physical per-tier downloads (sc-19384).
+const AUDIO_QUANT_TIERS: &[&str] = &["bf16", "q8", "q4"];
+/// Upstream YuE's `prompt_end_time` default: the ICL window end when only a start is given.
+const AUDIO_ICL_DEFAULT_END_SECS: f32 = 30.0;
+/// The output limiters a segmented-song model applies to its stems (YuE `save_audio`, sc-19384).
+const AUDIO_OUTPUT_LIMITERS: &[&str] = &["clamp", "rescale"];
+
+/// Payload-shape floor for the segmented-song / ICL / tier fields (YuE, sc-19384), before the model
+/// is known: numeric knobs finite and in a sane blanket range, guidance on/off coherent with the
+/// scale, the ICL mode a known token with exactly its own asset ids, and the reference window
+/// well-ordered. [`validate_audio_job_for_model`] then gates each field on the model's declared
+/// capability once the manifest entry is resolved.
+fn validate_audio_song_fields(payload: &AudioJobRequest) -> Result<(), ApiError> {
+    if let Some(segments) = payload.segments {
+        if !(1..=100).contains(&segments) {
+            return Err(ApiError::bad_request("segments must be between 1 and 100"));
+        }
+    }
+    if let Some(tokens) = payload.max_new_tokens_per_segment {
+        // YuE's stage-1 context is 16384 positions and each segment keeps `16384 - budget - 1` of
+        // them for its prompt, which must be at least 1 — so 16382 is the largest budget the engine
+        // accepts. Refused here rather than after admission, the ICL encode and the 7B load.
+        if !(1..=16_382).contains(&tokens) {
+            return Err(ApiError::bad_request(
+                "maxNewTokensPerSegment must be between 1 and 16382",
+            ));
+        }
+    }
+    if let Some(penalty) = payload.repetition_penalty {
+        if !penalty.is_finite() || penalty <= 0.0 || penalty > 10.0 {
+            return Err(ApiError::bad_request(
+                "repetitionPenalty must be greater than 0 and at most 10",
+            ));
+        }
+    }
+    if payload.guidance_enabled == Some(false) && payload.guidance.is_some() {
+        return Err(ApiError::bad_request(
+            "guidance (CFG scale) cannot be set while guidanceEnabled is false",
+        ));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        if !AUDIO_QUANT_TIERS.contains(&tier.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "quantTier must be one of {AUDIO_QUANT_TIERS:?}"
+            )));
+        }
+    }
+    if let Some(limiter) = payload.output_limiter.as_deref() {
+        if !AUDIO_OUTPUT_LIMITERS.contains(&limiter.trim().to_lowercase().as_str()) {
+            return Err(ApiError::bad_request(format!(
+                "outputLimiter must be one of {AUDIO_OUTPUT_LIMITERS:?}"
+            )));
+        }
+    }
+    let present = |value: &Option<String>| value.as_deref().is_some_and(|id| !id.trim().is_empty());
+    let single = present(&payload.icl_reference_asset_id);
+    let vocal = present(&payload.icl_vocal_asset_id);
+    let instrumental = present(&payload.icl_instrumental_asset_id);
+    let window = payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some();
+    match payload
+        .icl_mode
+        .as_deref()
+        .map(|mode| mode.trim().to_lowercase())
+        .filter(|mode| !mode.is_empty())
+        .as_deref()
+    {
+        None => {
+            if single || vocal || instrumental || window {
+                return Err(ApiError::bad_request(
+                    "ICL reference fields need an iclMode (\"single\" or \"dual\")",
+                ));
+            }
+        }
+        Some("single") => {
+            if !single || vocal || instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"single\" takes exactly iclReferenceAssetId (no vocal/instrumental ids)",
+                ));
+            }
+        }
+        Some("dual") => {
+            if single || !vocal || !instrumental {
+                return Err(ApiError::bad_request(
+                    "iclMode \"dual\" takes both iclVocalAssetId and iclInstrumentalAssetId (no \
+                     iclReferenceAssetId)",
+                ));
+            }
+        }
+        Some(_) => {
+            return Err(ApiError::bad_request(format!(
+                "iclMode must be one of {AUDIO_ICL_MODES:?}"
+            )));
+        }
+    }
+    for (field, value) in [
+        ("iclStartSecs", payload.icl_start_secs),
+        ("iclEndSecs", payload.icl_end_secs),
+    ] {
+        if let Some(secs) = value {
+            if !secs.is_finite() || !(0.0..=3600.0).contains(&secs) {
+                return Err(ApiError::bad_request(format!(
+                    "{field} must be between 0 and 3600"
+                )));
+            }
+        }
+    }
+    // A window with only a start ends at upstream YuE's `prompt_end_time` default (30 s), so a start
+    // at or past 30 s with no end is as ill-ordered as an explicit end <= start.
+    if let Some(start) = payload.icl_start_secs {
+        let end = payload.icl_end_secs.unwrap_or(AUDIO_ICL_DEFAULT_END_SECS);
+        if end <= start {
+            return Err(ApiError::bad_request(format!(
+                "iclEndSecs must be greater than iclStartSecs (the window ends at \
+                 {AUDIO_ICL_DEFAULT_END_SECS} s when iclEndSecs is omitted)"
+            )));
+        }
+    }
+    if payload.icl_mode.is_some()
+        && (present(&payload.reference_audio_asset_id) || present(&payload.source_audio_asset_id))
+    {
+        return Err(ApiError::bad_request(
+            "an ICL reference cannot be combined with referenceAudioAssetId or sourceAudioAssetId",
+        ));
+    }
+    Ok(())
+}
+
+/// Gate the segmented-song / ICL / tier fields on the resolved model's DECLARED audio capabilities
+/// (sc-19384) — the manifest mirrors the engine's `Capabilities` flags, so a request the engine
+/// would refuse is a 400 here instead of a failed job. In particular an ICL mode is reachable only
+/// on an in-context-learning checkpoint (`audio.supportsSegmentedLyrics` + `ReferenceAudio`
+/// conditioning — the YuE `_icl` variants); such a checkpoint may also run WITHOUT one, as a plain
+/// prompt run, as upstream allows. A segmented-lyrics
+/// model also refuses the knobs it does not read (it sings lyrics to genre tags; length follows the
+/// lyrics and `segments`) rather than silently dropping them.
+pub(crate) fn validate_audio_job_for_model(
+    payload: &AudioJobRequest,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    let model = &payload.model;
+    let audio = entry.get("audio");
+    let flag = |key: &str| {
+        audio
+            .and_then(|audio| audio.get(key))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let segmented = flag("supportsSegmentedLyrics");
+    let repetition = flag("supportsRepetitionPenalty");
+    let region = flag("supportsReferenceRegion");
+    let reference_audio = audio
+        .and_then(|audio| audio.get("conditioning"))
+        .and_then(Value::as_array)
+        .is_some_and(|kinds| kinds.iter().any(|kind| kind == "ReferenceAudio"));
+    let icl_model = segmented && reference_audio;
+
+    if (payload.segments.is_some() || payload.max_new_tokens_per_segment.is_some()) && !segmented {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not render segmented lyrics (segments / maxNewTokensPerSegment)"
+        )));
+    }
+    if payload.output_limiter.is_some() && !flag("supportsOutputLimiter") {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take an outputLimiter"
+        )));
+    }
+    if payload.repetition_penalty.is_some() && !repetition {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a repetitionPenalty"
+        )));
+    }
+    if payload.icl_mode.is_some() && !icl_model {
+        return Err(ApiError::bad_request(format!(
+            "iclMode needs an in-context-learning (`_icl`) checkpoint; {model} is not one"
+        )));
+    }
+    if (payload.icl_start_secs.is_some() || payload.icl_end_secs.is_some()) && !region {
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take a reference window (iclStartSecs / iclEndSecs)"
+        )));
+    }
+    // An `_icl` checkpoint WITHOUT a reference is a plain prompt run, exactly as upstream YuE allows
+    // (epic R1); only the reverse — ICL fields on a CoT checkpoint — is refused above.
+    if segmented {
+        if payload
+            .lyrics
+            .as_deref()
+            .is_none_or(|lyrics| lyrics.trim().is_empty())
+        {
+            return Err(ApiError::bad_request(format!(
+                "{model} sings structured lyrics — lyrics are required"
+            )));
+        }
+        let refused = [
+            ("steps", payload.steps.is_some()),
+            ("targetDurationSecs", payload.target_duration_secs.is_some()),
+            ("bpm", payload.bpm.is_some()),
+            ("musicalKey", payload.musical_key.is_some()),
+            ("voice", payload.voice.is_some()),
+            ("script", payload.script.is_some()),
+            (
+                "sourceAudioAssetId",
+                payload.source_audio_asset_id.is_some(),
+            ),
+            (
+                "referenceAudioAssetId",
+                payload.reference_audio_asset_id.is_some(),
+            ),
+        ];
+        if let Some((field, _)) = refused.iter().find(|(_, present)| *present) {
+            return Err(ApiError::bad_request(format!(
+                "{field} is not a control of {model} (put tempo, key and voice in the genre tags; \
+                 song length follows the lyrics and segments)"
+            )));
+        }
+        // A segmented-song model reads a scale in 0..=1 as "guidance off", so an explicit ON scale
+        // must be above 1 — turn guidance off with guidanceEnabled: false instead.
+        if payload.guidance_enabled != Some(false) && payload.guidance.is_some_and(|g| g <= 1.0) {
+            return Err(ApiError::bad_request(format!(
+                "{model}: a guidance scale must be greater than 1 (set guidanceEnabled: false to \
+                 turn guidance off)"
+            )));
+        }
+    } else if payload.guidance_enabled.is_some() {
+        // The on/off switch is the segmented-song contract (a `0.0` scale reads as "no CFG" there);
+        // on any other model a `0.0` scale is a range error, so refuse the switch up front.
+        return Err(ApiError::bad_request(format!(
+            "{model} does not take guidanceEnabled (set a guidance scale instead)"
+        )));
+    }
+    if let Some(tier) = payload.quant_tier.as_deref() {
+        let tier = tier.trim().to_lowercase();
+        let offered = entry
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|downloads| {
+                downloads.iter().any(|download| {
+                    download.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                        && download
+                            .get("variant")
+                            .and_then(Value::as_str)
+                            .is_some_and(|variant| variant.eq_ignore_ascii_case(&tier))
+                })
+            });
+        if !offered {
+            return Err(ApiError::bad_request(format!(
+                "{model} does not ship a {tier} tier"
+            )));
+        }
+    }
     Ok(())
 }
 
@@ -5346,6 +5850,21 @@ fn validate_audio_edit_fields(payload: &AudioJobRequest) -> Result<(), ApiError>
 /// governed by manifest `limits.resolutions` + the UI. Covers SenseNova-U1's
 /// largest trained bucket (3456) with headroom; video uses its own lower cap.
 const MAX_IMAGE_DIMENSION: u32 = 4096;
+
+/// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
+///
+/// 32, not 256, because Qwen-Image 2.1's envelope really starts at 32 px per side and this check
+/// runs with no model in hand. It is the outer bound only — see
+/// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
+const SHAPE_MIN_IMAGE_DIMENSION: u32 = 32;
+
+/// The per-model fallback floor applied in `create_image_job` to any image model that declares no
+/// `limits.minDimension` (sc-24113).
+///
+/// This is the 256 that `validate_image_job` used to enforce for everything, moved down one layer
+/// so that widening the shape check could not loosen a single already-shipped model: a request
+/// below 256 to a model with no declared floor is refused exactly as before, now naming the model.
+const HISTORICAL_MIN_IMAGE_DIMENSION: u32 = 256;
 
 /// Upper bound for video width/height — a lower backstop than images, matching
 /// the cap enforced when validating a video job request.
@@ -5467,9 +5986,23 @@ pub(crate) fn validate_video_reference_asset_ids_payload(
 }
 
 fn validate_dimension(value: u32, field: &'static str, max: u32) -> Result<(), ApiError> {
-    if !(256..=max).contains(&value) {
+    validate_dimension_in(value, field, 256, max)
+}
+
+/// [`validate_dimension`] with an explicit floor (sc-24113).
+///
+/// Every caller but the image-generation shape check passes the historical 256 through the wrapper
+/// above and is byte-identical. The image route passes [`SHAPE_MIN_IMAGE_DIMENSION`] because its
+/// real floor is per-model and is applied once the manifest entry is resolved.
+fn validate_dimension_in(
+    value: u32,
+    field: &'static str,
+    min: u32,
+    max: u32,
+) -> Result<(), ApiError> {
+    if !(min..=max).contains(&value) {
         return Err(ApiError::bad_request(format!(
-            "{field} must be between 256 and {max}"
+            "{field} must be between {min} and {max}"
         )));
     }
     Ok(())

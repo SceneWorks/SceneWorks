@@ -34,6 +34,12 @@ use crate::contracts::ExtraFields;
 use crate::dataset_quality::{
     CachedTier0Scalars, DatasetEmbeddings, DatasetFaceRecords, QualityAck, QualityCheck,
 };
+use crate::film_compile::{production_plan_sha256, CompiledPlan, COMPILED_PACK_STALENESS_FIELD};
+use crate::film_plan::{
+    validate_reference_pack, ReferenceEntry, ReferencePack, PLAN_SCHEMA_VERSION, REFERENCE_KINDS,
+    REFERENCE_PACK_SCHEMA_VERSION,
+};
+use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
@@ -72,6 +78,9 @@ pub const PROJECT_FOLDERS: &[&str] = &[
     "person-tracks",
     "recipes",
     "timelines",
+    "films/drafts",
+    "films/draft-assets",
+    "films/runs",
     "training/datasets",
     "training/uploads",
     "trash",
@@ -132,6 +141,10 @@ pub enum ProjectStoreError {
     Json(serde_json::Error),
     BadRequest(String),
     NotFound(String),
+    TimelineConflict {
+        code: &'static str,
+        context: Value,
+    },
     /// The workspace storage location rejected the writes a project needs — the
     /// raw SQLite/IO error ("attempt to write a readonly database", permission
     /// denied) is opaque, so this carries an actionable, path-naming message
@@ -149,6 +162,7 @@ impl std::fmt::Display for ProjectStoreError {
             Self::Json(error) => write!(formatter, "{error}"),
             Self::BadRequest(detail) => write!(formatter, "{detail}"),
             Self::NotFound(detail) => write!(formatter, "{detail}"),
+            Self::TimelineConflict { code, context } => write!(formatter, "{code}: {context}"),
             Self::StorageNotWritable(detail) => write!(formatter, "{detail}"),
         }
     }
@@ -217,6 +231,16 @@ pub struct TimelineFile {
 pub struct TimelineFileDocument {
     pub file: TimelineFile,
     pub document: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilmRunFiles {
+    pub directory: PathBuf,
+    pub authoring_snapshot: PathBuf,
+    pub plan: PathBuf,
+    pub reference_pack: PathBuf,
+    pub compiled: PathBuf,
+    pub review_plan: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -411,6 +435,42 @@ pub struct UploadAsset {
     pub provenance: Option<Value>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmReferenceInput {
+    pub draft_revision: u32,
+    /// The project-library image this role is backed by, or `None` for a DESCRIBED-ONLY role
+    /// (sc-24025): one the pack states in words because no photograph of it exists. A fileless
+    /// role is how the Film workspace authors the subjects the compiler holds steady by repeating
+    /// their `description`, so the panel that adds them posts to this same route with no
+    /// `assetId` rather than through a second path with a second validator.
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    pub role: String,
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+    /// Which subject in the image this role names, when the same library image backs several roles
+    /// (sc-24024). Adding one asset twice under two roles gives both the same
+    /// `references/<assetId>.<ext>` file, which is exactly the shared-file case the pack now
+    /// supports — and which [`validate_reference_pack`] refuses without a locator on each.
+    #[serde(default)]
+    pub locator: Option<String>,
+    #[serde(default)]
+    pub approved: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FilmSoundInput {
+    pub draft_revision: u32,
+    pub asset_id: String,
+    pub role: String,
+    pub kind: String,
+    #[serde(default)]
+    pub description: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProjectFile {
     pub path: PathBuf,
@@ -598,6 +658,128 @@ pub struct TrainingDatasetUpload {
     pub source_path: PathBuf,
 }
 
+fn copy_film_reference_files(
+    project_path: &Path,
+    draft_id: &str,
+    pack: &ReferencePack,
+    destination_root: &Path,
+    include_sound: bool,
+) -> ProjectStoreResult<()> {
+    // Nothing to copy when no entry names a file on disk. A DESCRIBED-ONLY reference role is words
+    // and nothing else (sc-24025), exactly as a synthesized dialogue line is, so a pack made only
+    // of them stages no images — and must not be sent through the staging directory lookup below,
+    // which refuses a draft whose immutable input directory was never created.
+    if pack
+        .references
+        .iter()
+        .all(|reference| reference.file().is_none())
+        && (!include_sound || pack.sound.iter().all(|sound| sound.file.is_none()))
+    {
+        return Ok(());
+    }
+    let destination_relative = destination_root.strip_prefix(project_path).map_err(|_| {
+        ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        )
+    })?;
+    if destination_relative
+        .components()
+        .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        ));
+    }
+
+    let canonical_project = fs::canonicalize(project_path)?;
+    fs::create_dir_all(destination_root)?;
+    let canonical_destination = fs::canonicalize(destination_root)?;
+    if !canonical_destination.starts_with(&canonical_project) {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference destination must remain inside its project".to_owned(),
+        ));
+    }
+
+    let draft_assets = project_path.join("films/draft-assets").join(draft_id);
+    let canonical_assets = fs::canonicalize(&draft_assets).map_err(|_| {
+        ProjectStoreError::BadRequest(format!(
+            "Film draft {draft_id:?} is missing its immutable reference directory"
+        ))
+    })?;
+    if !canonical_assets.starts_with(&canonical_project) {
+        return Err(ProjectStoreError::BadRequest(
+            "Film reference source must remain inside its project".to_owned(),
+        ));
+    }
+    for reference in &pack.references {
+        // A described-only role stages no image, so there is nothing to find or copy (sc-24025).
+        let Some(file) = reference.file() else {
+            continue;
+        };
+        if !is_safe_relative_path(file) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} has an unsafe file path",
+                reference.role
+            )));
+        }
+        let source = draft_assets.join(file);
+        let canonical_source = fs::canonicalize(&source).map_err(|_| {
+            ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} is missing its staged image {file}",
+                reference.role
+            ))
+        })?;
+        if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film reference {:?} resolves outside its immutable draft input",
+                reference.role
+            )));
+        }
+        let destination = canonical_destination.join(file);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(canonical_source, destination)?;
+    }
+    if include_sound {
+        for sound in &pack.sound {
+            let Some(file) = sound.file.as_deref() else {
+                continue;
+            };
+            if !is_safe_relative_path(file) {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film sound {:?} has an unsafe file path",
+                    sound.role
+                )));
+            }
+            let source = draft_assets.join(file);
+            // Generated dialogue may reserve its eventual filename. The harness creates that
+            // file; every prerecorded clip must already be staged and remain within the draft.
+            if !source.is_file() && sound.text.is_some() {
+                continue;
+            }
+            let canonical_source = fs::canonicalize(&source).map_err(|_| {
+                ProjectStoreError::BadRequest(format!(
+                    "Film sound {:?} is missing its staged audio {}",
+                    sound.role, file
+                ))
+            })?;
+            if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film sound {:?} resolves outside its immutable draft input",
+                    sound.role
+                )));
+            }
+            let destination = canonical_destination.join(file);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(canonical_source, destination)?;
+        }
+    }
+    Ok(())
+}
+
 impl ProjectStore {
     pub fn new(data_dir: impl Into<PathBuf>, app_version: impl Into<String>) -> Self {
         Self {
@@ -688,6 +870,783 @@ impl ProjectStore {
         }
 
         self.provision_project_locked(&project_id, name, &project_path, &mut registry_cache)
+    }
+
+    pub fn list_film_drafts(&self, project_id: &str) -> ProjectStoreResult<Vec<FilmDraft>> {
+        let project_path = self.find_project_path(project_id)?;
+        let drafts_dir = project_path.join("films/drafts");
+        if !drafts_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut drafts = Vec::new();
+        for path in read_dir_paths(&drafts_dir)? {
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let draft = Self::carry_film_draft_forward(read_json(&path)?)?;
+            if draft.project_id != project_id {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "film draft {} belongs to a different project",
+                    draft.id
+                )));
+            }
+            drafts.push(draft);
+        }
+        drafts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+        Ok(drafts)
+    }
+
+    pub fn create_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        title: &str,
+    ) -> ProjectStoreResult<FilmDraft> {
+        self.create_film_draft_document(
+            project_id,
+            FilmDraft::manual_one_shot(project_id, draft_id, title),
+        )
+    }
+
+    /// Persist a freshly constructed draft without a revision bump. The API uses this after it has
+    /// resolved host-dependent render defaults; ordinary edits still go through
+    /// [`Self::save_film_draft`] and optimistic revision checks.
+    pub fn create_film_draft_document(
+        &self,
+        project_id: &str,
+        draft: FilmDraft,
+    ) -> ProjectStoreResult<FilmDraft> {
+        let draft_id = draft.id.as_str();
+        if !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft ID".to_owned(),
+            ));
+        }
+        if draft.project_id != project_id || draft.revision != 1 {
+            return Err(ProjectStoreError::BadRequest(
+                "New film draft identity or revision does not match its project".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if path.exists() {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft already exists".to_owned(),
+            ));
+        }
+        write_json(&path, &draft)?;
+        Ok(draft)
+    }
+
+    /// Carry a persisted film draft forward to the schema versions this build reads, then decode
+    /// it (sc-24024, sc-24026).
+    ///
+    /// THE one place a draft read from `films/drafts/<id>.json` is brought up to date, called from
+    /// every read path so they cannot drift, and the place a later schema bump extends rather than
+    /// adding a fourth copy of the same idea.
+    ///
+    /// It takes the raw [`Value`] rather than a decoded [`FilmDraft`] because part of the
+    /// carry-forward has to happen BEFORE serde sees it. Plan schema version 3 renamed the optional
+    /// `shots[].sound` to a required `shots[].audio`, and [`crate::film_plan::Shot`] is
+    /// `deny_unknown_fields`: a draft written by an earlier build has both faults at once and each
+    /// is a hard decode error, so no helper that accepts a `FilmDraft` can ever run on one. The
+    /// reference-pack stamp is applied after the decode, on the typed value, because a version 1
+    /// pack decodes perfectly well.
+    ///
+    /// A draft is project-store STATE, not a document a person authors: it is deserialized verbatim
+    /// and the workspace offers no way to edit a `schemaVersion` key inside it. Left alone, a
+    /// pre-existing draft breaks in two ways at once. The plan faults above make a single stale
+    /// draft 500 its own GET — and, because `list_film_drafts` propagates, take the whole Films
+    /// list for that project down with it, so the user cannot even reach the draft to repair it.
+    /// And when the reference pack went to version 2 (sc-24024), every draft on disk still said
+    /// version 1, while `validate_reference_pack` — which `add_film_reference`, `add_film_sound`
+    /// and the pack PUT all run — refuses a pack by version, so each of those would fail on every
+    /// pre-existing draft with a refusal telling the user to make an edit they cannot make.
+    ///
+    /// Carrying forward is honest here and only here, and for a different reason per field. Pack
+    /// version 2 only ADDS the optional `locator`, so a version 1 draft pack IS a structurally
+    /// valid version 2 pack. The shot's old `sound` prose moves into `audio` when it said something
+    /// and blanks when it did not, which is the truth in both cases: the version 2 field meant the
+    /// same thing, and a draft that never had one has an author who has not yet said what the shot
+    /// sounds like. Blank is not silently accepted — it surfaces as the shot-named `audio` finding,
+    /// in the Audio field the workspace now shows, which is exactly where it gets fixed.
+    ///
+    /// DOCUMENTS on disk stay refused by version, both kinds: a pack document under E6, and a plan
+    /// document in [`crate::film_plan::parse_plan_document`]. Those have an author who can edit
+    /// them.
+    fn carry_film_draft_forward(mut stored: Value) -> ProjectStoreResult<FilmDraft> {
+        Self::carry_film_draft_plan_forward(&mut stored);
+        let mut draft: FilmDraft = serde_json::from_value(stored)?;
+        draft.reference_pack.schema_version = REFERENCE_PACK_SCHEMA_VERSION;
+        Ok(draft)
+    }
+
+    /// The JSON-level half of [`Self::carry_film_draft_forward`]: the production-plan fixups that
+    /// must land before the typed decode, because each of them is a hard serde error (sc-24026).
+    fn carry_film_draft_plan_forward(stored: &mut Value) {
+        let Some(plan) = stored
+            .get_mut("productionPlan")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        if let Some(shots) = plan.get_mut("shots").and_then(Value::as_array_mut) {
+            for shot in shots {
+                let Some(shot) = shot.as_object_mut() else {
+                    continue;
+                };
+                // Removed either way: version 3 has no `sound` on a shot, and leaving the key would
+                // be an unknown field whichever way `audio` resolved.
+                let carried = shot.remove("sound");
+                if !shot.contains_key("audio") {
+                    let audio = carried
+                        .as_ref()
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.trim().is_empty())
+                        .unwrap_or_default()
+                        .to_owned();
+                    shot.insert("audio".to_owned(), Value::String(audio));
+                }
+            }
+        }
+        // Stamped last, and only from a version this carry-forward actually handles: an unknown
+        // FUTURE version must stay unstamped so it is still reported rather than claimed.
+        if plan
+            .get("schemaVersion")
+            .and_then(Value::as_u64)
+            .is_some_and(|version| version == 1 || version == 2)
+        {
+            plan.insert("schemaVersion".to_owned(), Value::from(PLAN_SCHEMA_VERSION));
+        }
+    }
+
+    pub fn get_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft = Self::carry_film_draft_forward(read_json(&path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        Ok(draft)
+    }
+
+    pub fn save_film_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        mut draft: FilmDraft,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) || draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity cannot be changed".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let current = Self::carry_film_draft_forward(read_json(&path)?)?;
+        if draft.revision != current.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                current.revision, draft.revision
+            )));
+        }
+        // A production+compiled import is one document transaction. If the supplied compile
+        // exactly matches the supplied plan, carry it across the store-owned revision bump by
+        // updating only its identity hash. If the plan was edited independently, preserve the old
+        // identity so preflight reports it stale and rendering cannot silently use old prompts.
+        //
+        // The question asked here is about the PLAN only (sc-24029). The bump this carries across
+        // rewrites the plan's identity — `version`, and therefore its hash — and nothing else, so
+        // a pack that no longer matches must survive the save as exactly that: one finding naming
+        // the pack. Counting the pack here instead would withhold the plan carry-across, and a
+        // pack edit would then surface as a STALE PLAN as well, putting the wrong cause first in
+        // the refusal the operator reads.
+        let supplied_plan_sha = production_plan_sha256(&draft.production_plan)?;
+        let compiled_was_current = draft.compiled_plan.as_ref().is_some_and(|compiled| {
+            compiled
+                .staleness_findings(
+                    &draft.production_plan,
+                    &supplied_plan_sha,
+                    &draft.reference_pack,
+                )
+                .iter()
+                // Everything BUT the pack: a pack finding is not an answer about the plan, and
+                // it is deliberately carried through the save rather than resolved by it.
+                .all(|finding| finding.field == COMPILED_PACK_STALENESS_FIELD)
+        });
+        draft.reconcile_review_plan();
+        draft.revision = current.revision.saturating_add(1);
+        draft.created_at = current.created_at;
+        draft.updated_at = utc_now();
+        draft.production_plan.id = draft.id.clone();
+        draft.production_plan.version = draft.revision;
+        draft.production_plan.title = draft.title.clone();
+        if compiled_was_current {
+            let normalized_sha = production_plan_sha256(&draft.production_plan)?;
+            if let Some(compiled) = draft.compiled_plan.as_mut() {
+                compiled.plan_id = draft.production_plan.id.clone();
+                compiled.plan_version = draft.production_plan.version;
+                compiled.plan_sha256 = normalized_sha;
+            }
+        }
+        write_json(&path, &draft)?;
+        Ok(draft)
+    }
+
+    /// Copy a project-library image into a draft-owned reference pack and persist the new draft
+    /// revision. Runs later copy from this immutable draft input rather than reading mutable asset
+    /// library state.
+    ///
+    /// With no [`FilmReferenceInput::asset_id`] this authors a DESCRIBED-ONLY role instead
+    /// (sc-24025): no image is resolved, none is copied, and the entry names neither a `file` nor a
+    /// `sourceAssetId`. Both shapes are checked by the one [`validate_reference_pack`] below, so a
+    /// described-only role with no `description` is refused in the core's own words rather than by
+    /// a rule this route states a second time.
+    pub fn add_film_reference(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        input: FilmReferenceInput,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id)
+            || input
+                .asset_id
+                .as_deref()
+                .is_some_and(|asset_id| !is_safe_id(asset_id))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or source asset ID".to_owned(),
+            ));
+        }
+        if !REFERENCE_KINDS.contains(&input.kind.as_str()) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Reference kind must be one of {}",
+                REFERENCE_KINDS.join(", ")
+            )));
+        }
+        // Resolved BEFORE the project lock exactly as it always was, and only for a role that
+        // names an image. A described-only role has no bytes to find, stat or copy.
+        let image = match input.asset_id.as_deref() {
+            Some(asset_id) => {
+                let source = self.resolve_asset_media_path(project_id, asset_id)?;
+                let extension = source
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .map(str::to_ascii_lowercase)
+                    .filter(|value| matches!(value.as_str(), "png" | "jpg" | "jpeg" | "webp"))
+                    .ok_or_else(|| {
+                        ProjectStoreError::BadRequest(
+                            "Film references must use a PNG, JPEG, or WebP image asset".to_owned(),
+                        )
+                    })?;
+                Some((source, format!("references/{asset_id}.{extension}")))
+            }
+            None => None,
+        };
+
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let mut draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if input.draft_revision != draft.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                draft.revision, input.draft_revision
+            )));
+        }
+
+        draft.reference_pack.references.push(ReferenceEntry {
+            role: input.role,
+            kind: input.kind,
+            // BOTH or NEITHER (sc-24025). An entry naming a `sourceAssetId` with no `file` is
+            // refused by `validate_reference_pack` as an image-backed role that forgot where its
+            // picture is, so the described-only shape has to drop the asset id too — which it
+            // does by construction here, because both are read from the one `image` above.
+            file: image.as_ref().map(|(_, file)| file.clone()),
+            source_asset_id: input.asset_id,
+            description: input.description,
+            locator: input.locator,
+            approved: input.approved,
+            generated: false,
+            generation: None,
+        });
+        draft.reference_pack.version = draft.reference_pack.version.saturating_add(1);
+        let findings = validate_reference_pack(&draft.reference_pack);
+        if !findings.is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+
+        if let Some((source, relative_file)) = image {
+            let destination = project_path
+                .join("films/draft-assets")
+                .join(draft_id)
+                .join(&relative_file);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            fs::copy(&source, &destination)?;
+        }
+        draft.revision = draft.revision.saturating_add(1);
+        draft.production_plan.version = draft.revision;
+        draft.updated_at = utc_now();
+        write_json(&draft_path, &draft)?;
+        Ok(draft)
+    }
+
+    /// Pin a draft revision's immutable reference bytes beside one planning operation. The caller
+    /// writes the matching `references.json`; this method guarantees every file named by that
+    /// document is copied from the draft-owned store into the contained operation directory.
+    pub fn stage_film_planning_references(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        draft_revision: u32,
+        operation_id: &str,
+    ) -> ProjectStoreResult<()> {
+        if !is_safe_id(draft_id) || !is_safe_id(operation_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or planning operation ID".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if draft.revision != draft_revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {draft_revision}",
+                draft.revision
+            )));
+        }
+        let operation_dir = project_path
+            .join("films/planning")
+            .join(draft_id)
+            .join("operations")
+            .join(operation_id);
+        fs::create_dir_all(&operation_dir)?;
+        copy_film_reference_files(
+            &project_path,
+            draft_id,
+            &draft.reference_pack,
+            &operation_dir,
+            false,
+        )
+    }
+
+    /// Copy a project-library audio asset into a draft-owned sound pack and persist the new draft
+    /// revision. The immutable staged file is what a later run pins, even if the library asset is
+    /// renamed, replaced, or removed in the meantime.
+    pub fn add_film_sound(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        input: FilmSoundInput,
+    ) -> ProjectStoreResult<FilmDraft> {
+        if !is_safe_id(draft_id) || !is_safe_id(&input.asset_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film draft or source asset ID".to_owned(),
+            ));
+        }
+        if !crate::film_plan::SOUND_KINDS.contains(&input.kind.as_str()) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Sound kind must be one of {}",
+                crate::film_plan::SOUND_KINDS.join(", ")
+            )));
+        }
+        let source = self.resolve_asset_media_path(project_id, &input.asset_id)?;
+        let extension = source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .filter(|value| {
+                matches!(
+                    value.as_str(),
+                    "wav" | "mp3" | "m4a" | "aac" | "flac" | "ogg" | "opus"
+                )
+            })
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest(
+                    "Film sound must use a WAV, MP3, M4A, AAC, FLAC, OGG, or Opus audio asset"
+                        .to_owned(),
+                )
+            })?;
+
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let mut draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if input.draft_revision != draft.revision {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, got {}",
+                draft.revision, input.draft_revision
+            )));
+        }
+
+        let relative_file = format!("sound/{}.{}", input.asset_id, extension);
+        draft
+            .reference_pack
+            .sound
+            .push(crate::film_plan::SoundEntry {
+                role: input.role,
+                kind: input.kind,
+                file: Some(relative_file.clone()),
+                description: input.description,
+                text: None,
+                voice: None,
+                model: None,
+            });
+        draft.reference_pack.version = draft.reference_pack.version.saturating_add(1);
+        let findings = validate_reference_pack(&draft.reference_pack);
+        if !findings.is_empty() {
+            return Err(ProjectStoreError::BadRequest(
+                findings
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            ));
+        }
+
+        let destination = project_path
+            .join("films/draft-assets")
+            .join(draft_id)
+            .join(&relative_file);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&source, &destination)?;
+        draft.revision = draft.revision.saturating_add(1);
+        draft.production_plan.version = draft.revision;
+        draft.updated_at = utc_now();
+        write_json(&draft_path, &draft)?;
+        Ok(draft)
+    }
+
+    pub fn create_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+        selected_shot_ids: Vec<String>,
+        compiled: Option<CompiledPlan>,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        self.pin_film_run(
+            project_id,
+            run_locator_id,
+            draft_id,
+            None,
+            selected_shot_ids,
+            compiled,
+        )
+    }
+
+    /// Pin exactly the draft the caller validated; the comparison and all documents share a lock.
+    pub fn create_film_run_at_revision(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+        expected_revision: u32,
+        selected_shot_ids: Vec<String>,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        self.pin_film_run(
+            project_id,
+            run_locator_id,
+            draft_id,
+            Some(expected_revision),
+            selected_shot_ids,
+            None,
+        )
+    }
+
+    fn pin_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+        draft_id: &str,
+        expected_revision: Option<u32>,
+        selected_shot_ids: Vec<String>,
+        compiled: Option<CompiledPlan>,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        if !is_safe_id(run_locator_id) || !is_safe_id(draft_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film run ID".to_owned(),
+            ));
+        }
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let draft_path = project_path
+            .join("films/drafts")
+            .join(format!("{draft_id}.json"));
+        if !draft_path.exists() {
+            return Err(ProjectStoreError::NotFound(
+                "Film draft not found".to_owned(),
+            ));
+        }
+        let draft = Self::carry_film_draft_forward(read_json(&draft_path)?)?;
+        if draft.id != draft_id || draft.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film draft identity does not match its project path".to_owned(),
+            ));
+        }
+        if expected_revision.is_some_and(|expected| expected != draft.revision) {
+            return Err(ProjectStoreError::BadRequest(format!(
+                "Film draft revision conflict: expected {}, found {}; reload and preflight the draft before rendering",
+                expected_revision.expect("checked"), draft.revision)));
+        }
+        let selected_shot_ids = if selected_shot_ids.is_empty() {
+            draft
+                .production_plan
+                .shots
+                .iter()
+                .map(|shot| shot.id.clone())
+                .collect()
+        } else {
+            selected_shot_ids
+        };
+        if selected_shot_ids.iter().any(|id| {
+            !draft
+                .production_plan
+                .shots
+                .iter()
+                .any(|shot| &shot.id == id)
+        }) {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run selection contains an unknown shot".to_owned(),
+            ));
+        }
+        let compiled = compiled.or_else(|| draft.compiled_plan.clone());
+        if let Some(compiled) = &compiled {
+            let sha = production_plan_sha256(&draft.production_plan)?;
+            let findings =
+                compiled.staleness_findings(&draft.production_plan, &sha, &draft.reference_pack);
+            if !findings.is_empty() {
+                // `Display`, not `{:?}` — this string reaches an operator through the API, and a
+                // `Vec<PlanDiagnostic>` struct dump is the store's private notation (sc-24029).
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film compiled plan does not match the pinned draft: {}",
+                    findings
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )));
+            }
+        }
+        let mut draft = draft;
+        draft.reconcile_review_plan();
+        let relative_dir = format!("films/runs/{run_locator_id}");
+        let run_dir = project_path.join(&relative_dir);
+        if run_dir.exists() {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run already exists".to_owned(),
+            ));
+        }
+        fs::create_dir_all(&run_dir)?;
+        let pin_result = (|| -> ProjectStoreResult<()> {
+            copy_film_reference_files(
+                &project_path,
+                draft_id,
+                &draft.reference_pack,
+                &run_dir,
+                true,
+            )?;
+            write_json(&run_dir.join("authoring.json"), &draft)?;
+            write_json(&run_dir.join("plan.json"), &draft.production_plan)?;
+            write_json(&run_dir.join("references.json"), &draft.reference_pack)?;
+            write_json(&run_dir.join("review.jsonc"), &draft.review_plan_for_run())?;
+            if let Some(compiled) = compiled.as_ref() {
+                write_json(&run_dir.join("compiled.json"), compiled)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = pin_result {
+            let _ = fs::remove_dir_all(&run_dir);
+            return Err(error);
+        }
+        let locator = FilmRunLocator {
+            schema_version: crate::film_workspace::FILM_RUN_LOCATOR_SCHEMA_VERSION,
+            id: run_locator_id.to_owned(),
+            project_id: project_id.to_owned(),
+            draft_id: draft_id.to_owned(),
+            draft_revision: draft.revision,
+            selected_shot_ids,
+            record_directory: relative_dir,
+            authoring_snapshot_path: Some(format!("films/runs/{run_locator_id}/authoring.json")),
+            created_at: utc_now(),
+        };
+        write_json(&run_dir.join("locator.json"), &locator)?;
+        Ok(locator)
+    }
+
+    pub fn get_film_run(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<FilmRunLocator> {
+        let files = self.film_run_files(project_id, run_locator_id)?;
+        let path = files.directory.join("locator.json");
+        if !path.exists() {
+            return Err(ProjectStoreError::NotFound("Film run not found".to_owned()));
+        }
+        let locator: FilmRunLocator = serde_json::from_value(read_json(&path)?)?;
+        if locator.id != run_locator_id || locator.project_id != project_id {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run identity does not match its project path".to_owned(),
+            ));
+        }
+        Ok(locator)
+    }
+
+    /// Read the complete authoring document retained for a run. Locators created before authoring
+    /// snapshots were introduced return `None`; derived render documents are never used to invent
+    /// a historical draft.
+    pub fn get_film_run_authoring_snapshot(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<Option<FilmDraft>> {
+        let locator = self.get_film_run(project_id, run_locator_id)?;
+        let Some(relative_path) = locator.authoring_snapshot_path.as_deref() else {
+            return Ok(None);
+        };
+        if !is_safe_relative_path(relative_path) {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot path must be project-relative".to_owned(),
+            ));
+        }
+        let files = self.film_run_files(project_id, run_locator_id)?;
+        let expected_path = format!("{}/authoring.json", locator.record_directory);
+        if relative_path != expected_path {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot path does not match its run directory".to_owned(),
+            ));
+        }
+        let snapshot = Self::carry_film_draft_forward(read_json(&files.authoring_snapshot)?)?;
+        if snapshot.id != locator.draft_id
+            || snapshot.project_id != locator.project_id
+            || snapshot.revision != locator.draft_revision
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "Film run authoring snapshot identity does not match its locator".to_owned(),
+            ));
+        }
+        Ok(Some(snapshot))
+    }
+
+    pub fn list_film_runs(&self, project_id: &str) -> ProjectStoreResult<Vec<FilmRunLocator>> {
+        let project_path = self.find_project_path(project_id)?;
+        let runs_dir = project_path.join("films/runs");
+        if !runs_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut runs = Vec::new();
+        for directory in read_dir_paths(&runs_dir)? {
+            let locator_path = directory.join("locator.json");
+            if !locator_path.is_file() {
+                continue;
+            }
+            let locator: FilmRunLocator = serde_json::from_value(read_json(&locator_path)?)?;
+            if locator.project_id != project_id
+                || directory.file_name().and_then(|value| value.to_str())
+                    != Some(locator.id.as_str())
+            {
+                return Err(ProjectStoreError::BadRequest(format!(
+                    "Film run identity does not match {}",
+                    locator_path.display()
+                )));
+            }
+            runs.push(locator);
+        }
+        runs.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(runs)
+    }
+
+    pub fn film_run_files(
+        &self,
+        project_id: &str,
+        run_locator_id: &str,
+    ) -> ProjectStoreResult<FilmRunFiles> {
+        if !is_safe_id(run_locator_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid film run ID".to_owned(),
+            ));
+        }
+        let project_path = self.find_project_path(project_id)?;
+        let directory = project_path.join("films/runs").join(run_locator_id);
+        Ok(FilmRunFiles {
+            authoring_snapshot: directory.join("authoring.json"),
+            plan: directory.join("plan.json"),
+            reference_pack: directory.join("references.json"),
+            compiled: directory.join("compiled.json"),
+            review_plan: directory.join("review.jsonc"),
+            directory,
+        })
     }
 
     /// Provision a project directory (folders + project file + db + registry entry)
@@ -854,6 +1813,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/") {
             return Err(ProjectStoreError::BadRequest(
                 "Only image dataset uploads are supported".to_owned(),
@@ -1282,6 +2254,36 @@ impl ProjectStore {
                 "Invalid timeline id".to_owned(),
             ));
         }
+        let existing = match find_timeline_file(&project_path, &timeline_id) {
+            Ok(file) => Some(read_json(&file.path)?),
+            Err(ProjectStoreError::NotFound(_)) => None,
+            Err(error) => return Err(error),
+        };
+        let current_revision = existing
+            .as_ref()
+            .map(crate::film_timeline::revision)
+            .unwrap_or(0);
+        if timeline
+            .get("revision")
+            .is_some_and(|value| value.as_u64().is_none())
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "revision must be a non-negative integer".into(),
+            ));
+        }
+        let expected_revision = crate::film_timeline::revision(&timeline);
+        if expected_revision != current_revision {
+            return Err(ProjectStoreError::TimelineConflict {
+                code: "timeline_revision_conflict",
+                context: json!({"timelineId": timeline_id, "expectedRevision": expected_revision, "currentRevision": current_revision}),
+            });
+        }
+        crate::film_timeline::validate_metadata(&timeline)?;
+        if let Some(previous) = &existing {
+            crate::film_timeline::validate_metadata(previous)?;
+            crate::film_timeline::reconcile_cut(previous, &mut timeline, current_revision + 1);
+        }
+        timeline["revision"] = json!(current_revision + 1);
         let timeline_project_id = required_str(&timeline, "projectId")?;
         if timeline_project_id != project_id {
             return Err(ProjectStoreError::BadRequest(
@@ -1340,7 +2342,64 @@ impl ProjectStore {
                 "Timeline ID mismatch".to_owned(),
             ));
         }
+        let (_path, _guard) = self.lock_project(project_id)?;
+        self.get_timeline(project_id, timeline_id)?;
         self.save_timeline(project_id, timeline)
+    }
+
+    /// The same project lock covers delivery read, merge, validation and CAS write.
+    pub fn deliver_film_timeline(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+        delivery: Value,
+    ) -> ProjectStoreResult<Value> {
+        let (_path, _guard) = self.lock_project(project_id)?;
+        let mut timeline = self.get_timeline(project_id, timeline_id)?;
+        if let Some(expected) = delivery.get("expectedRevision").and_then(Value::as_u64) {
+            let current = crate::film_timeline::revision(&timeline);
+            if expected != current {
+                return Err(ProjectStoreError::TimelineConflict {
+                    code: "timeline_revision_conflict",
+                    context: json!({"timelineId": timeline_id, "expectedRevision": expected, "currentRevision": current}),
+                });
+            }
+        }
+        let before = timeline.clone();
+        crate::film_timeline::deliver(&mut timeline, delivery, |asset_id| {
+            let asset = self.get_asset(project_id, asset_id)?;
+            asset
+                .get("file")
+                .and_then(|file| file.get("duration"))
+                .and_then(Value::as_f64)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .ok_or_else(|| {
+                    ProjectStoreError::BadRequest(format!(
+                        "Asset {asset_id} has no measured duration"
+                    ))
+                })
+        })?;
+        if timeline == before {
+            return Ok(before);
+        }
+        self.save_existing_timeline(project_id, timeline_id, timeline)
+    }
+
+    /// Freeze the document the export worker will actually read. A later edit cannot change it.
+    pub fn snapshot_timeline_export(
+        &self,
+        project_id: &str,
+        timeline_id: &str,
+    ) -> ProjectStoreResult<TimelineFileDocument> {
+        let (project_path, _guard) = self.lock_project(project_id)?;
+        let mut result = self.timeline_file_and_document(project_id, timeline_id)?;
+        let dir = project_path.join("timeline-exports");
+        fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{}_{}.json", timeline_id, random_hex(16)?));
+        write_json(&path, &result.document)?;
+        result.file.relative_path = relative_string(&project_path, &path)?;
+        result.file.path = path;
+        Ok(result)
     }
 
     pub fn timeline_file(
@@ -1448,8 +2507,8 @@ impl ProjectStore {
         // with a null origin (should not occur after the schema-bump reindex)
         // fail open and stay visible.
         let origin_filter = match scope {
-            AssetScope::All => "",
-            AssetScope::Library => " and (origin is null or origin != 'character_studio')",
+            AssetScope::All => " and (origin is null or origin != 'vector_workflow_intermediate')",
+            AssetScope::Library => " and (origin is null or origin not in ('character_studio', 'vector_workflow_intermediate'))",
         };
         let mut statement = connection.prepare(&format!(
             "
@@ -1936,6 +2995,19 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        // SVG is active document syntax, not a generic upload format. Vector assets may enter
+        // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
+        // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
+        if content_type.eq_ignore_ascii_case("image/svg+xml")
+            || Path::new(&upload.filename)
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            return Err(ProjectStoreError::BadRequest(
+                "SVG uploads are not supported; use Vector Studio".to_owned(),
+            ));
+        }
         if !content_type.starts_with("image/")
             && !content_type.starts_with("video/")
             && !content_type.starts_with("audio/")
@@ -3069,6 +4141,101 @@ impl ProjectStore {
         normalize_asset(project_id, &project_path, &sidecar_path)
     }
 
+    /// Mark the raster produced by a disclosed prompt-to-vector workflow as hidden but retained.
+    /// The exact workflow and parent ids are the deletion authority used by cleanup; callers can
+    /// never turn an arbitrary project asset into a cleanup target by naming only its id.
+    pub fn mark_vector_workflow_intermediate(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        workflow_id: &str,
+        parent_job_id: &str,
+        child_job_id: &str,
+    ) -> ProjectStoreResult<Value> {
+        if !is_safe_id(workflow_id) || !is_safe_id(parent_job_id) || !is_safe_id(child_job_id) {
+            return Err(ProjectStoreError::BadRequest(
+                "Invalid vector workflow ownership id".to_owned(),
+            ));
+        }
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let sidecar_path = self.find_asset_sidecar(&project_path, asset_id)?;
+        let mut asset = read_json(&sidecar_path)?;
+        let object = asset.as_object_mut().ok_or_else(|| {
+            ProjectStoreError::BadRequest("Asset sidecar must be an object".to_owned())
+        })?;
+        if object.get("type").and_then(Value::as_str) != Some("image") {
+            return Err(ProjectStoreError::BadRequest(
+                "Vector workflow intermediate must be a raster image".to_owned(),
+            ));
+        }
+        object.insert(
+            "origin".to_owned(),
+            Value::String("vector_workflow_intermediate".to_owned()),
+        );
+        let extra = object
+            .entry("extra")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| {
+                ProjectStoreError::BadRequest("Asset extra must be an object".to_owned())
+            })?;
+        extra.insert(
+            "vectorWorkflow".to_owned(),
+            json!({
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": workflow_id,
+                "parentJobId": parent_job_id,
+                "childJobId": child_job_id,
+                "hidden": true,
+            }),
+        );
+        let index_mutation = AssetIndexMutation::begin(&project_path)?;
+        write_json(&sidecar_path, &asset)?;
+        index_asset(project_id, &project_path, &asset, Some(&sidecar_path))?;
+        index_mutation.commit();
+        normalize_asset(project_id, &project_path, &sidecar_path)
+    }
+
+    /// Permanently purge a workflow-owned intermediate only when every ownership fact matches.
+    /// Returns false for a user asset, another workflow's asset, or an already-cleaned id.
+    pub fn purge_vector_workflow_intermediate(
+        &self,
+        project_id: &str,
+        asset_id: &str,
+        workflow_id: &str,
+        parent_job_id: &str,
+    ) -> ProjectStoreResult<bool> {
+        let asset = match self.get_asset(project_id, asset_id) {
+            Ok(asset) => asset,
+            Err(ProjectStoreError::NotFound(_)) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let owned = asset.get("origin").and_then(Value::as_str)
+            == Some("vector_workflow_intermediate")
+            && asset
+                .pointer("/extra/vectorWorkflow/workflowId")
+                .and_then(Value::as_str)
+                == Some(workflow_id)
+            && asset
+                .pointer("/extra/vectorWorkflow/parentJobId")
+                .and_then(Value::as_str)
+                == Some(parent_job_id)
+            && asset
+                .pointer("/extra/vectorWorkflow/role")
+                .and_then(Value::as_str)
+                == Some("retained_intermediate")
+            && asset
+                .pointer("/extra/vectorWorkflow/publication")
+                .and_then(Value::as_str)
+                == Some("unpublished");
+        if !owned {
+            return Ok(false);
+        }
+        self.purge_asset(project_id, asset_id, true)?;
+        Ok(true)
+    }
+
     pub fn get_asset_poster(
         &self,
         project_id: &str,
@@ -4182,22 +5349,59 @@ fn reindex_project_path(
     Ok(counts)
 }
 
+/// Every aspect ratio a timeline may declare, with the frame it renders at. One declaration
+/// (sc-22710): a caller that must CHOOSE a ratio for footage of some other shape — the film
+/// harness picks one before it creates a timeline — reads this list rather than hand-copying it
+/// and drifting into a 400 here.
+pub const TIMELINE_ASPECT_RATIOS: &[(&str, u32, u32)] = &[
+    ("16:9", 1280, 720),
+    ("9:16", 720, 1280),
+    ("1:1", 1024, 1024),
+];
+
 fn timeline_dimensions(aspect_ratio: &str) -> ProjectStoreResult<(u32, u32)> {
-    match aspect_ratio {
-        "16:9" => Ok((1280, 720)),
-        "9:16" => Ok((720, 1280)),
-        "1:1" => Ok((1024, 1024)),
-        _ => Err(ProjectStoreError::BadRequest(
-            "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
-        )),
+    TIMELINE_ASPECT_RATIOS
+        .iter()
+        .find(|(name, _, _)| *name == aspect_ratio)
+        .map(|(_, width, height)| (*width, *height))
+        .ok_or_else(|| {
+            ProjectStoreError::BadRequest(
+                "Aspect ratio must be one of 16:9, 9:16, or 1:1".to_owned(),
+            )
+        })
+}
+
+/// Roles a timeline track may declare. `kind` says how a track is rendered (picture, overlay,
+/// mixed audio); `role` says what it CARRIES, which is what lets dialogue, ambience and music be
+/// three independently gained and muted buses rather than one undifferentiated "Audio" lane
+/// (sc-22712). The exporter mixes every non-muted `kind: "audio"` track regardless of role — role
+/// is descriptive, never a routing switch — so an unrecognised bed still reaches the MP4.
+pub const TIMELINE_TRACK_ROLES: &[&str] = &[
+    "picture", "overlay", "dialogue", "ambience", "music", "sfx", "sound",
+];
+
+/// What a picture item's own (generated) audio does in the mix. Defaults to `mute`, which is the
+/// only default that cannot silently double a placed dialogue clip (sc-22712): a generated take
+/// whose model spoke the line and a recorded dialogue clip for the same beat would otherwise both
+/// land in the mix, and nothing in the timeline would say which one the editor meant.
+pub const TIMELINE_GENERATED_AUDIO: &[&str] = &["include", "mute"];
+
+/// The role a track's `kind` implies when a document does not declare one. Keeps every timeline
+/// written before sc-22712 loading unchanged: its three default tracks become picture / overlay /
+/// sound, and `sound` is mixed exactly like a named bed.
+fn default_track_role(kind: &str) -> &'static str {
+    match kind {
+        "overlay" => "overlay",
+        "audio" => "sound",
+        _ => "picture",
     }
 }
 
 fn default_timeline_tracks() -> Value {
     json!([
-        {"id": "track_main", "name": "Main", "kind": "video", "locked": false, "muted": false, "items": []},
-        {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": []},
-        {"id": "track_audio", "name": "Audio", "kind": "audio", "locked": false, "muted": false, "items": []}
+        {"id": "track_main", "name": "Main", "kind": "video", "role": "picture", "locked": false, "muted": false, "gain": 1.0, "items": []},
+        {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "role": "overlay", "locked": false, "muted": false, "gain": 1.0, "items": []},
+        {"id": "track_audio", "name": "Audio", "kind": "audio", "role": "sound", "locked": false, "muted": false, "gain": 1.0, "items": []}
     ])
 }
 
@@ -4269,6 +5473,7 @@ fn validate_timeline_track(track: &mut Value) -> ProjectStoreResult<()> {
     required_str(track, "id")?;
     required_str(track, "name")?;
     validate_enum(track, "kind", &["video", "overlay", "audio"])?;
+    let kind = required_str(track, "kind")?.to_owned();
     let object = track.as_object_mut().ok_or_else(|| {
         ProjectStoreError::BadRequest("Timeline track must be an object".to_owned())
     })?;
@@ -4278,11 +5483,27 @@ fn validate_timeline_track(track: &mut Value) -> ProjectStoreResult<()> {
     object
         .entry("muted".to_owned())
         .or_insert_with(|| Value::Bool(false));
+    // sc-22712: `gain` is the track's bus fader, and `role` names the bus. Both are defaulted from
+    // what the document already says, so a timeline saved before this existed round-trips to the
+    // same audible result (unity gain, role implied by kind) rather than being rejected or muted.
+    object
+        .entry("gain".to_owned())
+        .or_insert_with(|| json!(1.0));
+    if !object.contains_key("role") || object.get("role") == Some(&Value::Null) {
+        let role = default_track_role(&kind);
+        object.insert("role".to_owned(), Value::String(role.to_owned()));
+    }
     object
         .entry("items".to_owned())
         .or_insert_with(|| json!([]));
     validate_bool(track, "locked")?;
     validate_bool(track, "muted")?;
+    validate_enum(track, "role", TIMELINE_TRACK_ROLES)?;
+    let gain = validate_f64_range(track, "gain", 0.0, 4.0)?;
+    track
+        .as_object_mut()
+        .expect("checked above")
+        .insert("gain".to_owned(), json!(gain));
     let items = track
         .get_mut("items")
         .and_then(Value::as_array_mut)
@@ -4330,6 +5551,21 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     object
         .entry("volume".to_owned())
         .or_insert_with(|| json!(1.0));
+    // sc-22712. `fadeInSeconds`/`fadeOutSeconds` are AUDIO fades, measured from the item's own
+    // ends, and are what lets a continuous bed come up under the first cut and away under the last
+    // without being chopped into per-shot pieces. They are deliberately separate from
+    // `transitionIn`/`transitionOut`, which are picture transitions with their own vocabulary.
+    object
+        .entry("fadeInSeconds".to_owned())
+        .or_insert_with(|| json!(0.0));
+    object
+        .entry("fadeOutSeconds".to_owned())
+        .or_insert_with(|| json!(0.0));
+    // A picture item's own audio track is MUTED unless the document says otherwise. See
+    // `TIMELINE_GENERATED_AUDIO`: this default is the doubling guard, so it must stay `mute`.
+    object
+        .entry("generatedAudio".to_owned())
+        .or_insert_with(|| Value::String("mute".to_owned()));
     object
         .entry("versionAssetIds".to_owned())
         .or_insert_with(|| json!([]));
@@ -4346,6 +5582,9 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     let speed = validate_f64_range(item, "speed", 0.1, 8.0)?;
     validate_enum(item, "fit", &["fit", "fill", "stretch"])?;
     let volume = validate_f64_range(item, "volume", 0.0, 2.0)?;
+    let fade_in = validate_f64_range(item, "fadeInSeconds", 0.0, 60.0)?;
+    let fade_out = validate_f64_range(item, "fadeOutSeconds", 0.0, 60.0)?;
+    validate_enum(item, "generatedAudio", TIMELINE_GENERATED_AUDIO)?;
     let object = item.as_object_mut().ok_or_else(|| {
         ProjectStoreError::BadRequest("Timeline item must be an object".to_owned())
     })?;
@@ -4355,6 +5594,8 @@ fn validate_timeline_item(item: &mut Value) -> ProjectStoreResult<()> {
     object.insert("timelineEnd".to_owned(), json!(timeline_end));
     object.insert("speed".to_owned(), json!(speed));
     object.insert("volume".to_owned(), json!(volume));
+    object.insert("fadeInSeconds".to_owned(), json!(fade_in));
+    object.insert("fadeOutSeconds".to_owned(), json!(fade_out));
     object
         .entry("transitionIn".to_owned())
         .or_insert(Value::Null);
@@ -4869,6 +6110,7 @@ fn build_generated_asset_sidecar(
         "video" => build_video_sidecar_parts(job_id, fact),
         "audio" => build_audio_sidecar_parts(job_id, fact),
         "document" => build_document_sidecar_parts(job_id, fact),
+        "vector" => build_vector_sidecar_parts(job_id, fact),
         _ => build_image_sidecar_parts(job_id, fact),
     };
     let mut asset = json!({
@@ -4893,6 +6135,53 @@ fn build_generated_asset_sidecar(
     if let Some(extra) = fact.get("extra") {
         if let Some(object) = asset.as_object_mut() {
             object.insert("extra".to_owned(), extra.clone());
+        }
+    }
+    // The API strips this field from every worker report and restores it only from the persisted
+    // server-owned child relationship. Applying it during sidecar construction closes the window
+    // in which a composed workflow's unpublished raster could appear in the Asset Library.
+    if media_type == "image" {
+        if let Some(ownership) = fact
+            .get("vectorWorkflowOwnership")
+            .and_then(Value::as_object)
+        {
+            let workflow_id = ownership.get("workflowId").and_then(Value::as_str);
+            let parent_job_id = ownership.get("parentJobId").and_then(Value::as_str);
+            let child_job_id = ownership.get("childJobId").and_then(Value::as_str);
+            let valid = [workflow_id, parent_job_id, child_job_id]
+                .into_iter()
+                .all(|id| id.is_some_and(is_safe_id))
+                && ownership.get("role").and_then(Value::as_str) == Some("retained_intermediate")
+                && ownership.get("publication").and_then(Value::as_str) == Some("unpublished")
+                && ownership.get("hidden").and_then(Value::as_bool) == Some(true);
+            if valid {
+                let object = asset.as_object_mut().expect("generated asset is an object");
+                object.insert(
+                    "origin".to_owned(),
+                    Value::String("vector_workflow_intermediate".to_owned()),
+                );
+                let extra = object.entry("extra").or_insert_with(|| json!({}));
+                if !extra.is_object() {
+                    *extra = json!({});
+                }
+                extra
+                    .as_object_mut()
+                    .expect("workflow asset extra is an object")
+                    .insert(
+                        "vectorWorkflow".to_owned(),
+                        Value::Object(ownership.clone()),
+                    );
+            }
+        }
+    }
+    // SVG is never a browser-previewable media type. The worker supplies a separately stored,
+    // bounded PNG fact after sanitizing/rasterizing the SVG; keep it on the vector sidecar rather
+    // than asking clients to infer a sibling filename or to fetch the active source document.
+    if media_type == "vector" {
+        if let Some(preview) = fact.get("preview") {
+            if let Some(object) = asset.as_object_mut() {
+                object.insert("preview".to_owned(), preview.clone());
+            }
         }
     }
     asset
@@ -4944,6 +6233,47 @@ fn build_image_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value
         "sourceAssetId": get("sourceAssetId"),
         "sourceTimestamp": Value::Null,
         "jobId": job_id,
+    });
+    (file, recipe, lineage)
+}
+
+/// Vector Studio replay is intentionally explicit rather than inheriting the image recipe's
+/// width/height/LoRA shape. These are the complete generation inputs and the two versioned
+/// post-processing boundaries required to reproduce or explain a stored SVG.
+fn build_vector_sidecar_parts(job_id: &str, fact: &Value) -> (Value, Value, Value) {
+    let get = |key: &str| fact.get(key).cloned().unwrap_or(Value::Null);
+    let source_asset_id = get("sourceAssetId");
+    let parents = source_asset_id
+        .as_str()
+        .map(|source| vec![Value::String(source.to_owned())])
+        .unwrap_or_default();
+    let file = json!({
+        "path": get("mediaPath"),
+        "mimeType": get("mimeType"),
+        "width": get("width"),
+        "height": get("height"),
+        "duration": Value::Null,
+        "fps": Value::Null,
+    });
+    let recipe = json!({
+        "mode": get("mode"),
+        "model": get("model"),
+        "adapter": get("adapter"),
+        "prompt": get("prompt"),
+        "sampling": get("sampling"),
+        "detailBudget": get("detailBudget"),
+        "sanitizerVersion": get("sanitizerVersion"),
+        "rendererVersion": get("rendererVersion"),
+        "workflow": get("workflow"),
+    });
+    let workflow_id = fact.pointer("/workflow/id").cloned().unwrap_or(Value::Null);
+    let lineage = json!({
+        "parents": parents,
+        "sourceAssetId": source_asset_id,
+        "sourceTimestamp": Value::Null,
+        "jobId": job_id,
+        "workflowId": workflow_id,
+        "intermediateAssetId": get("sourceAssetId"),
     });
     (file, recipe, lineage)
 }
@@ -5332,15 +6662,17 @@ fn normalize_image_upload(
 }
 
 /// Normalize an audio upload to the canonical PCM-16 RIFF/WAVE the product can actually read back
-/// (sc-18650), ALWAYS — there is no pass-through branch.
+/// (sc-18650), ALWAYS — there is no pass-through branch HERE.
 ///
 /// The rule is deliberately unlike [`normalize_image_upload`]'s, where an already-decodable PNG or
 /// JPEG is stored byte-for-byte. Audio has exactly one reader,
 /// `sceneworks_worker::audio_jobs::read_wav_pcm16`, and it accepts exactly one encoding, so
 /// "already supported" is a much narrower set than "already audio": a 24-bit WAV, a float WAV, or a
-/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Sniffing for that narrow set and
-/// branching would mean the conversion path only ran for some inputs — the shape of latent bug this
-/// story exists to remove — for a saving of one ffmpeg pass on a file measured in megabytes.
+/// WAVE_FORMAT_EXTENSIBLE header are all `.wav` files it refuses. Every upload therefore goes
+/// through `transcode_to_wav_pcm16`; the ONE encoding that converter copies through unchanged
+/// (`media_convert::is_canonical_pcm16_wav`, sc-22715) is exactly the reader's own acceptance
+/// rule, decided inside the converter rather than by a sniff here, so the stored file is the
+/// canonical one on every path and a host with no ffmpeg can still import a file that already is.
 ///
 /// A conversion failure is a `BadRequest`: the caller named a file that is not decodable audio (or
 /// carries no audio stream), which is a fact about the upload, not about the host. The one host-shaped
@@ -6232,17 +7564,18 @@ mod tests {
         is_safe_upload_extension, normalize_asset_tags, normalize_image_upload, read_json,
         read_registry_payload, sniff_image_format, upload_extension, upscale_lineage_group,
         write_json, AssetIndexMutation, AssetScope, AssetStatusPatch, CharacterCreateInput,
-        CharacterLookInput, CharacterReferenceInput, ProjectStore, ProjectStoreError, UploadAsset,
-        WorkflowScan, ASSET_INDEX_DIRTY_MARKER, ASSET_INDEX_VERSION_KEY,
-        GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID, IMPORTED_WORKFLOW_KEY,
-        MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS, PROJECT_SCHEMA_VERSION,
-        SAFE_UPLOAD_EXTENSIONS, UPSCALE_LINEAGE_QUERY,
+        CharacterLookInput, CharacterReferenceInput, FilmReferenceInput, ProjectStore,
+        ProjectStoreError, UploadAsset, WorkflowScan, ASSET_INDEX_DIRTY_MARKER,
+        ASSET_INDEX_VERSION_KEY, GLOBAL_KEYPOINTS_PROJECT_ID, GLOBAL_POSES_PROJECT_ID,
+        IMPORTED_WORKFLOW_KEY, MAX_REGISTRY_BYTES, ORPHANED_SIDECAR_DIR, PROJECT_FOLDERS,
+        PROJECT_SCHEMA_VERSION, REFERENCE_PACK_SCHEMA_VERSION, SAFE_UPLOAD_EXTENSIONS,
+        UPSCALE_LINEAGE_QUERY,
     };
     use rusqlite::{params, Connection, OptionalExtension};
     use serde_json::{json, Value};
-    use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
+    use std::{fs, path::Path};
 
     fn jpeg_fixture(rgb: [u8; 3]) -> Vec<u8> {
         let mut bytes = Vec::new();
@@ -6882,6 +8215,135 @@ mod tests {
             json!(false)
         );
         assert_eq!(asset["lineage"]["jobId"], json!("job-1"));
+    }
+
+    #[test]
+    fn generated_workflow_intermediate_is_hidden_on_its_first_sidecar_write() {
+        let mut fact = json!({
+            "assetId": "asset_intermediate",
+            "mediaPath": "assets/images/genset_workflow/intermediate.png",
+            "mimeType": "image/png",
+            "width": 1024,
+            "height": 1024,
+            "displayName": "workflow raster",
+            "createdAt": "2026-08-29T00:00:00Z",
+            "mode": "text_to_image",
+            "model": "raster_model",
+            "prompt": "mark",
+            "vectorWorkflowOwnership": {
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": "vwf_workflow1",
+                "parentJobId": "job_parent1",
+                "childJobId": "job_child1",
+                "hidden": true
+            }
+        });
+        let asset =
+            build_generated_asset_sidecar("project-1", "job_child1", "genset_workflow", &fact);
+        assert_eq!(asset["origin"], json!("vector_workflow_intermediate"));
+        assert_eq!(
+            asset["extra"]["vectorWorkflow"],
+            fact["vectorWorkflowOwnership"]
+        );
+
+        fact["vectorWorkflowOwnership"]
+            .as_object_mut()
+            .expect("ownership object")
+            .remove("publication");
+        let untrusted =
+            build_generated_asset_sidecar("project-1", "job_child1", "genset_workflow", &fact);
+        assert_ne!(untrusted["origin"], json!("vector_workflow_intermediate"));
+        assert!(untrusted.get("extra").is_none());
+    }
+
+    #[test]
+    fn build_generated_vector_sidecar_keeps_svg_source_and_png_preview_distinct() {
+        let fact = json!({
+            "assetId": "asset_vector",
+            "type": "vector",
+            "mediaPath": "assets/images/genset_v/asset_vector/vector.svg",
+            "mimeType": "image/svg+xml",
+            "width": 12,
+            "height": 8,
+            "createdAt": "2026-08-29T00:00:00Z",
+            "mode": "image_to_svg",
+            "model": "starvector_1b",
+            "adapter": "starvector",
+            "prompt": "preserve the bold silhouette",
+            "sourceAssetId": "asset_source",
+            "sampling": {
+                "temperature": 0.2,
+                "topP": 0.9,
+                "topK": 0,
+                "repetitionPenalty": 1.0,
+                "repetitionContext": 0,
+                "seed": 17,
+            },
+            "detailBudget": {
+                "maxNewTokens": 4096,
+                "maxSvgBytes": 262144,
+                "maxWallTimeMs": 120000,
+            },
+            "sanitizerVersion": "sceneworks-inert-svg-v1",
+            "rendererVersion": "resvg-0.45",
+            "workflow": {
+                "kind": "create_from_prompt",
+                "id": "vwf_1",
+                "parentJobId": "job-1",
+                "childJobId": "job-raster",
+                "intermediateAssetId": "asset_source",
+                "rasterStage": {
+                    "model": "flux_schnell",
+                    "revision": "1111111111111111111111111111111111111111"
+                },
+                "vectorStage": {
+                    "model": "starvector_1b",
+                    "revision": "2222222222222222222222222222222222222222"
+                }
+            },
+            "count": 1,
+            "normalizedWidth": 12,
+            "normalizedHeight": 8,
+            "preview": {
+                "path": "assets/images/genset_v/asset_vector/preview.png",
+                "mimeType": "image/png",
+                "width": 12,
+                "height": 8,
+            },
+        });
+        let asset = build_generated_asset_sidecar("project-1", "job-1", "genset_v", &fact);
+        assert_eq!(asset["type"], "vector");
+        assert_eq!(asset["file"]["path"], fact["mediaPath"]);
+        assert_eq!(asset["file"]["mimeType"], "image/svg+xml");
+        assert_eq!(asset["preview"]["mimeType"], "image/png");
+        assert_ne!(asset["file"]["path"], asset["preview"]["path"]);
+        assert_eq!(asset["recipe"]["mode"], "image_to_svg");
+        assert_eq!(asset["recipe"]["model"], "starvector_1b");
+        assert_eq!(asset["recipe"]["sampling"]["seed"], 17);
+        assert_eq!(asset["recipe"]["detailBudget"]["maxNewTokens"], 4096);
+        assert_eq!(
+            asset["recipe"]["sanitizerVersion"],
+            "sceneworks-inert-svg-v1"
+        );
+        assert_eq!(asset["recipe"]["rendererVersion"], "resvg-0.45");
+        assert_eq!(
+            asset["recipe"]["workflow"]["rasterStage"]["revision"],
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            asset["recipe"]["workflow"]["vectorStage"]["revision"],
+            "2222222222222222222222222222222222222222"
+        );
+        assert_eq!(asset["lineage"]["sourceAssetId"], "asset_source");
+        assert_eq!(asset["lineage"]["parents"], json!(["asset_source"]));
+        assert_eq!(asset["lineage"]["workflowId"], "vwf_1");
+        assert_eq!(asset["lineage"]["intermediateAssetId"], "asset_source");
+
+        let encoded = serde_json::to_vec(&asset).expect("vector sidecar serializes");
+        let replayed: Value = serde_json::from_slice(&encoded).expect("vector sidecar parses");
+        assert_eq!(replayed["recipe"], asset["recipe"]);
+        assert_eq!(replayed["lineage"], asset["lineage"]);
     }
 
     /// sc-4408: a scored generation's `rawAdapterSettings.faceLikeness` block (attached worker-side by
@@ -11690,6 +13152,46 @@ mod tests {
         assert!(!is_safe_upload_extension("html"));
     }
 
+    #[test]
+    fn import_asset_refuses_svg_even_when_the_client_claims_png() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("No raw SVG").expect("project creates");
+        let source = temp_dir.path().join("untrusted.svg");
+        std::fs::write(
+            &source,
+            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script/></svg>",
+        )
+        .expect("fixture writes");
+
+        let error = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "untrusted.svg".to_owned(),
+                    // The filename check must still win when the client lies about the MIME type.
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect_err("generic SVG import is forbidden");
+        assert!(matches!(error, ProjectStoreError::BadRequest(_)));
+        assert!(store
+            .list_assets(&project.id, false, false, AssetScope::All)
+            .expect("list")
+            .is_empty());
+        assert!(
+            !Path::new(&project.path)
+                .join("assets/uploads")
+                .read_dir()
+                .expect("upload dir")
+                .any(|entry| entry.is_ok()),
+            "rejected SVG leaves neither asset nor sidecar"
+        );
+    }
+
     /// sc-8872 (F-070): end-to-end — a `video/mp4` upload named `evil.html` is stored with a `.mp4`
     /// extension and `project_file` serves it as `video/mp4`, never `text/html`. A legitimate
     /// `.webm` upload still round-trips. This pins the content-type-confusion fix through the exact
@@ -12386,6 +13888,154 @@ mod tests {
         assert_eq!(
             found.relative_path,
             "timelines/main.sceneworks.timeline.json"
+        );
+    }
+
+    /// A timeline saved before sc-22712 existed still loads, still round-trips, and still sounds
+    /// the same.
+    ///
+    /// The new fields are `gain` and `role` on a track and `fadeInSeconds` / `fadeOutSeconds` /
+    /// `generatedAudio` on an item. None of them can be REQUIRED, because every timeline already on
+    /// disk lacks all five — a validator that rejected them would make the editor unable to open
+    /// the user's own projects, and one that defaulted `gain` to anything but unity would change
+    /// what an untouched project sounds like. So the check here is not "the keys appear": it is
+    /// that the values they appear with are the ones that mean "nothing has changed".
+    #[test]
+    fn a_timeline_saved_before_gain_and_fades_existed_still_round_trips_at_unity() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Legacy").expect("project creates");
+        let created = store
+            .create_timeline(&project.id, "Old cut", "16:9", 24)
+            .expect("timeline creates");
+        let timeline_id = created["id"].as_str().expect("timeline id").to_owned();
+
+        // Exactly the shape the store wrote before this story: three tracks with `locked`/`muted`
+        // and no `role`/`gain`, and an item with no fades and no generated-audio policy.
+        let legacy = json!({
+            "id": timeline_id,
+            "projectId": project.id,
+            "name": "Old cut",
+            "aspectRatio": "16:9",
+            "width": 1280,
+            "height": 720,
+            "fps": 24,
+            "duration": 0.0,
+            "tracks": [
+                {"id": "track_main", "name": "Main", "kind": "video", "locked": false, "muted": false, "items": [{
+                    "id": "item_abcdef0123456789abcdef0123456789",
+                    "trackId": "track_main",
+                    "assetId": "asset_legacy",
+                    "displayName": "Legacy clip",
+                    "type": "video",
+                    "sourceIn": 0.0,
+                    "sourceOut": 4.0,
+                    "timelineStart": 0.0,
+                    "timelineEnd": 4.0,
+                    "speed": 1.0,
+                    "fit": "fit",
+                    "volume": 1.0
+                }]},
+                {"id": "track_overlay", "name": "Overlay", "kind": "overlay", "locked": false, "muted": false, "items": []},
+                {"id": "track_audio", "name": "Audio", "kind": "audio", "locked": true, "muted": true, "items": []}
+            ],
+            "transitions": []
+        });
+        // Model an actual legacy file (revision 0), rather than a stale revisionless
+        // client overwriting the freshly created revision 1 document.
+        let legacy_file = store.timeline_file(&project.id, &timeline_id).unwrap();
+        super::write_json(&legacy_file.path, &legacy).unwrap();
+        let saved = store
+            .save_timeline(&project.id, legacy)
+            .expect("a pre-sc-22712 timeline still saves");
+
+        let tracks = saved["tracks"].as_array().expect("tracks");
+        assert_eq!(tracks.len(), 3);
+        // Role is inferred from what the document already said, and gain defaults to unity — so a
+        // timeline nobody has touched sounds exactly as it did.
+        assert_eq!(tracks[0]["role"], json!("picture"));
+        assert_eq!(tracks[1]["role"], json!("overlay"));
+        assert_eq!(tracks[2]["role"], json!("sound"));
+        for track in tracks {
+            assert_eq!(
+                track["gain"],
+                json!(1.0),
+                "an untouched track must default to unity gain: {track}"
+            );
+        }
+        // The flags the document DID carry are untouched.
+        assert_eq!(tracks[2]["locked"], json!(true));
+        assert_eq!(tracks[2]["muted"], json!(true));
+
+        let item = &tracks[0]["items"][0];
+        assert_eq!(item["fadeInSeconds"], json!(0.0));
+        assert_eq!(item["fadeOutSeconds"], json!(0.0));
+        assert_eq!(
+            item["generatedAudio"],
+            json!("mute"),
+            "the default cannot be `include`: a legacy picture item whose clip happens to carry \
+             audio would start being mixed into exports that never had it"
+        );
+        // Nothing else about the item moved.
+        assert_eq!(item["assetId"], json!("asset_legacy"));
+        assert_eq!(item["sourceOut"], json!(4.0));
+        assert_eq!(item["timelineEnd"], json!(4.0));
+        assert_eq!(saved["duration"], json!(4.0));
+
+        // And it round-trips: saving what was read back changes nothing.
+        let again = store
+            .save_timeline(&project.id, saved.clone())
+            .expect("the defaulted document saves again");
+        for key in ["tracks", "duration", "fps", "aspectRatio"] {
+            assert_eq!(again[key], saved[key], "{key} is not stable across a save");
+        }
+    }
+
+    /// The new fields are validated, not merely defaulted.
+    #[test]
+    fn track_gain_and_item_generated_audio_are_range_checked() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp_dir.path().join("data"), "test-version");
+        let project = store.create_project("Ranges").expect("project creates");
+        let created = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .expect("timeline creates");
+
+        let with = |mutate: &dyn Fn(&mut Value)| {
+            let mut timeline = created.clone();
+            mutate(&mut timeline);
+            store.save_timeline(&project.id, timeline)
+        };
+
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(9.0)).is_err(),
+            "a gain of 9 is 19 dB of boost and is refused"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(-1.0)).is_err(),
+            "a negative gain is refused"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["role"] = json!("foley")).is_err(),
+            "an unknown track role is refused rather than silently kept"
+        );
+        assert!(
+            with(&|timeline| {
+                timeline["tracks"][0]["items"] = json!([{
+                    "id": "item_abcdef0123456789abcdef0123456789",
+                    "trackId": "track_main",
+                    "assetId": "asset_x",
+                    "displayName": "Clip",
+                    "generatedAudio": "maybe"
+                }]);
+            })
+            .is_err(),
+            "`generatedAudio` takes include|mute and nothing else — a third spelling would be a \
+             policy nobody implemented"
+        );
+        assert!(
+            with(&|timeline| timeline["tracks"][2]["gain"] = json!(2.5)).is_ok(),
+            "a legitimate boost inside the range is accepted"
         );
     }
 
@@ -13295,6 +14945,749 @@ mod tests {
     }
 
     #[test]
+    fn film_run_revision_barrier_refuses_concurrent_save_without_creating_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Revision race").unwrap();
+        let draft = store
+            .create_film_draft(&project.id, "film_race", "Race")
+            .unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let handle = scope.spawn(|| {
+                let validated_revision = store
+                    .get_film_draft(&project.id, &draft.id)
+                    .unwrap()
+                    .revision;
+                barrier.wait();
+                barrier.wait();
+                store.create_film_run_at_revision(
+                    &project.id,
+                    "run_stale",
+                    &draft.id,
+                    validated_revision,
+                    vec![],
+                )
+            });
+            barrier.wait();
+            let mut newer = draft.clone();
+            newer.production_plan.shots[0].prompt = "Changed by the other session".to_owned();
+            let newer = store
+                .save_film_draft(&project.id, &draft.id, newer)
+                .unwrap();
+            barrier.wait();
+            assert!(handle
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .to_string()
+                .contains("revision conflict"));
+            assert!(store.list_film_runs(&project.id).unwrap().is_empty());
+            assert!(!std::path::Path::new(&project.path)
+                .join("films/runs/run_stale")
+                .exists());
+            let locator = store
+                .create_film_run_at_revision(
+                    &project.id,
+                    "run_current",
+                    &draft.id,
+                    newer.revision,
+                    vec![],
+                )
+                .unwrap();
+            assert_eq!(locator.draft_revision, newer.revision);
+            assert_eq!(locator.selected_shot_ids, vec!["SH010"]);
+            let files = store.film_run_files(&project.id, &locator.id).unwrap();
+            assert_eq!(
+                read_json(&files.plan).unwrap(),
+                serde_json::to_value(&newer.production_plan).unwrap()
+            );
+            assert_eq!(read_json(&files.review_plan).unwrap(), newer.review_plan);
+        });
+    }
+
+    /// sc-24026. A draft written before plan schema version 3 has `shots[].sound` and no
+    /// `shots[].audio`. `Shot` is `deny_unknown_fields` and `audio` has no default, so BOTH faults
+    /// are hard serde errors: without the read carry-forward every one of these calls is a 500, and
+    /// because `list_film_drafts` propagates, one stale draft takes the whole Films list with it —
+    /// the user cannot even reach the draft to repair it.
+    #[test]
+    fn a_draft_stored_before_the_audio_sentence_opens_lists_and_saves_with_its_sound_carried_over()
+    {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Stale draft")
+            .expect("project creates");
+        let created = store
+            .create_film_draft(&project.id, "film_stale", "Stale")
+            .expect("draft creates");
+        let draft_path = store
+            .find_project_path(&project.id)
+            .expect("project path")
+            .join("films/drafts")
+            .join("film_stale.json");
+
+        // Rewrite the stored file as the previous build wrote it: plan schema 2, the shot's
+        // sentence under `sound`, no `audio` key at all. Shot 0 said something about sound; a
+        // second shot never did, which is the other half of the migration.
+        let mut stored = read_json(&draft_path).expect("stored draft reads");
+        {
+            let plan = stored
+                .get_mut("productionPlan")
+                .and_then(Value::as_object_mut)
+                .expect("plan object");
+            plan.insert("schemaVersion".to_owned(), Value::from(2));
+            let shots = plan
+                .get_mut("shots")
+                .and_then(Value::as_array_mut)
+                .expect("shots array");
+            let mut silent = shots[0].clone();
+            let first = shots[0].as_object_mut().expect("shot object");
+            first.remove("audio");
+            first.insert(
+                "sound".to_owned(),
+                Value::from("Room tone and a door latch. No music."),
+            );
+            let second = silent.as_object_mut().expect("shot object");
+            second.insert("id".to_owned(), Value::from("SH020"));
+            second.remove("audio");
+            shots.push(silent);
+        }
+        write_json(&draft_path, &stored).expect("stale draft writes");
+
+        for opened in [
+            store
+                .get_film_draft(&project.id, "film_stale")
+                .expect("a stale draft still opens"),
+            store
+                .list_film_drafts(&project.id)
+                .expect("a stale draft does not take the project's film list down")
+                .into_iter()
+                .find(|draft| draft.id == "film_stale")
+                .expect("the stale draft is listed"),
+        ] {
+            assert_eq!(
+                opened.production_plan.schema_version,
+                crate::film_plan::PLAN_SCHEMA_VERSION
+            );
+            assert_eq!(
+                opened.production_plan.shots[0].audio, "Room tone and a door latch. No music.",
+                "the version 2 sentence is carried into the field that dispatches it"
+            );
+            // The shot that never said anything comes back blank rather than inventing prose...
+            assert_eq!(opened.production_plan.shots[1].audio, "");
+        }
+
+        // ...and blank is not silently accepted: it surfaces as the shot-named finding the
+        // workspace's Audio field is there to clear.
+        let opened = store
+            .get_film_draft(&project.id, "film_stale")
+            .expect("a stale draft still opens");
+        let findings = crate::film_plan::validate_plan_structure(&opened.production_plan);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.shot_id.as_deref() == Some("SH020")
+                    && finding.field == "audio"),
+            "{findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.field == "schemaVersion"),
+            "the carried-forward plan is not also refused by version: {findings:?}"
+        );
+
+        // The PUT the user makes after fixing it reads the stored document back to check the
+        // revision, so it goes through the same carry-forward.
+        let mut edited = opened;
+        edited.production_plan.shots[1].audio = "Silence. No audio.".to_owned();
+        let saved = store
+            .save_film_draft(&project.id, "film_stale", edited)
+            .expect("the repaired draft saves");
+        assert_eq!(saved.revision, created.revision + 1);
+        assert_eq!(saved.production_plan.shots[1].audio, "Silence. No audio.");
+        assert!(
+            !read_json(&draft_path)
+                .expect("saved draft reads")
+                .to_string()
+                .contains("\"sound\":\"Room tone"),
+            "the version 2 key is gone from the persisted document, not merely from the decode"
+        );
+    }
+
+    #[test]
+    fn film_runs_retain_exact_authoring_revision_across_later_draft_saves() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Pinned authoring")
+            .expect("project creates");
+        let mut first = store
+            .create_film_draft(&project.id, "film_authoring", "Authoring")
+            .expect("draft creates");
+        first.original_script = "INT. WORKSHOP - NIGHT\nMIRA enters with a red parcel.".to_owned();
+        first.brief = "Keep the parcel visible throughout the handoff.".to_owned();
+        first.structured_brief.synopsis = "A courier completes a late delivery.".to_owned();
+        first.structured_brief.style_notes = "Warm practical light; restrained camera.".to_owned();
+        first.structured_brief.target_total_seconds = 12.5;
+        first.structured_brief.beats = vec![crate::film_workspace::FilmBeat {
+            id: "beat_delivery".to_owned(),
+            summary: "Mira hands over the parcel.".to_owned(),
+        }];
+        first.structured_brief.dialogue = vec![crate::film_workspace::FilmDialogueLine {
+            id: "line_delivery".to_owned(),
+            beat_id: "beat_delivery".to_owned(),
+            speaker: "MIRA".to_owned(),
+            text: "Delivery. It's on the bench.".to_owned(),
+        }];
+        first.planning.provider = "external".to_owned();
+        first.planning.connection_id = Some("connection_first".to_owned());
+        first.planning.thinking_mode = "enabled".to_owned();
+        first.planning.refine_prompts = true;
+        first.planning.send_reference_pixels = true;
+        first.production_plan.shots[0].prompt = "Mira enters with a red parcel.".to_owned();
+        let first = store
+            .save_film_draft(&project.id, "film_authoring", first)
+            .expect("first revision saves");
+        let first_locator = store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_first_authoring",
+                &first.id,
+                first.revision,
+                vec![],
+            )
+            .expect("first run pins");
+        let first_files = store
+            .film_run_files(&project.id, &first_locator.id)
+            .expect("first run files");
+        let first_render_documents = [
+            fs::read(&first_files.plan).expect("plan reads"),
+            fs::read(&first_files.reference_pack).expect("references read"),
+            fs::read(&first_files.review_plan).expect("review reads"),
+        ];
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &first_locator.id)
+                .expect("snapshot reads"),
+            Some(first.clone())
+        );
+        let snapshot_path = first_locator
+            .authoring_snapshot_path
+            .as_deref()
+            .expect("new locator names its authoring snapshot");
+        assert_eq!(
+            store
+                .project_file(&project.id, snapshot_path)
+                .expect("snapshot is readable through the contained project-file contract")
+                .path,
+            first_files.authoring_snapshot.canonicalize().unwrap()
+        );
+
+        let mut second = first.clone();
+        second.original_script = "EXT. STATION - DAWN\nMIRA boards the first train.".to_owned();
+        second.brief = "Hold on the empty platform after departure.".to_owned();
+        second.structured_brief.synopsis = "A courier leaves town after the delivery.".to_owned();
+        second.structured_brief.style_notes = "Cold dawn light; locked camera.".to_owned();
+        second.structured_brief.target_total_seconds = 18.0;
+        second.structured_brief.beats[0].summary = "Mira boards the train.".to_owned();
+        second.structured_brief.dialogue[0].text = "I made the delivery.".to_owned();
+        second.planning.connection_id = Some("connection_second".to_owned());
+        second.planning.thinking_mode = "disabled".to_owned();
+        second.planning.refine_prompts = false;
+        second.planning.send_reference_pixels = false;
+        second.production_plan.shots[0].prompt = "Mira boards a train at dawn.".to_owned();
+        let second = store
+            .save_film_draft(&project.id, "film_authoring", second)
+            .expect("second revision saves");
+        assert_eq!(second.revision, first.revision + 1);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &first_locator.id)
+                .expect("first snapshot still reads"),
+            Some(first)
+        );
+        assert_eq!(
+            first_render_documents,
+            [
+                fs::read(&first_files.plan).expect("pinned plan still reads"),
+                fs::read(&first_files.reference_pack).expect("pinned references still read"),
+                fs::read(&first_files.review_plan).expect("pinned review still reads"),
+            ],
+            "adding an authoring snapshot must not change existing pinned render documents"
+        );
+
+        let second_locator = store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_second_authoring",
+                &second.id,
+                second.revision,
+                vec![],
+            )
+            .expect("second run pins");
+        assert_eq!(second_locator.draft_revision, second.revision);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &second_locator.id)
+                .expect("second snapshot reads"),
+            Some(second)
+        );
+    }
+
+    /// A draft persisted before the reference pack moved to version 2 keeps working (sc-24024).
+    ///
+    /// The pack version is a DOCUMENT contract; a draft is project-store state with no author and
+    /// no edit surface for a `schemaVersion` key, so every read carries it forward. Without that,
+    /// the first reference or sound added to any pre-existing draft — and every pack PUT from the
+    /// React editor — would fail with `BadRequest` naming a version the user cannot change.
+    #[test]
+    fn a_draft_persisted_at_reference_pack_version_1_still_accepts_a_reference() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Legacy pack")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_legacy_pack", "Legacy pack")
+            .expect("draft creates");
+
+        // Exactly what is on disk for every draft written before this commit.
+        let draft_path = store
+            .project_file(&project.id, "films/drafts/film_legacy_pack.json")
+            .expect("the draft document is readable")
+            .path;
+        let mut persisted = read_json(&draft_path).expect("draft reads");
+        persisted["referencePack"]["schemaVersion"] = json!(1);
+        write_json(&draft_path, &persisted).expect("version 1 draft writes");
+        assert_eq!(
+            read_json(&draft_path).unwrap()["referencePack"]["schemaVersion"],
+            json!(1),
+            "the fixture has to be a version 1 document on disk"
+        );
+
+        // The read path carries it forward rather than handing the validator a stale number.
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_legacy_pack")
+                .expect("legacy draft reads")
+                .reference_pack
+                .schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+
+        let source = temp.path().join("plate.png");
+        fs::write(&source, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "plate.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let updated = store
+            .add_film_reference(
+                &project.id,
+                "film_legacy_pack",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: Some(asset["id"].as_str().expect("asset id").to_owned()),
+                    role: "workshop_plate".to_owned(),
+                    kind: "plate".to_owned(),
+                    description: "Wide plate.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect("a version 1 draft still accepts a reference");
+        assert_eq!(
+            updated.reference_pack.schema_version,
+            REFERENCE_PACK_SCHEMA_VERSION
+        );
+        assert_eq!(updated.reference_pack.references.len(), 1);
+
+        // The entry this route authors names BOTH the library asset it came from and the file it
+        // was stored as. `validate_reference_pack` refuses a `sourceAssetId` with no `file`
+        // (sc-24025), so a route that wrote only the asset id would author a draft the workspace
+        // then rejects — and the pack is validated inside `add_film_reference`, so this test is
+        // the reason that refusal can never reach the UI's own add path.
+        let added = &updated.reference_pack.references[0];
+        assert_eq!(
+            added.source_asset_id.as_deref(),
+            Some(asset["id"].as_str().expect("asset id"))
+        );
+        assert_eq!(
+            added.file(),
+            Some(format!("references/{}.png", asset["id"].as_str().expect("asset id")).as_str()),
+            "an image-backed role must name the file it is stored as"
+        );
+        assert!(crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty());
+    }
+
+    /// sc-24028. The Film workspace authors a DESCRIBED-ONLY role (sc-24025) through this same
+    /// route with no `assetId`: the panel has no second path and no second validator, so the
+    /// entry it stores has to be fileless, survive a re-read, and pass the core's own pack check.
+    #[test]
+    fn add_film_reference_without_an_asset_stores_a_described_only_role() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Described roles")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_described", "Described")
+            .expect("draft creates");
+
+        let updated = store
+            .add_film_reference(
+                &project.id,
+                "film_described",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: None,
+                    role: "courier".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The courier: blue jacket, carries the parcel.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect("a role with no image is authored from its description alone");
+
+        let added = &updated.reference_pack.references[0];
+        assert!(
+            added.is_described_only(),
+            "a role added with no assetId must have no file: {added:?}"
+        );
+        assert!(
+            added.source_asset_id.is_none(),
+            "a fileless entry may not name an image asset either: {added:?}"
+        );
+        assert_eq!(
+            added.description,
+            "The courier: blue jacket, carries the parcel."
+        );
+        assert!(
+            crate::film_plan::validate_reference_pack(&updated.reference_pack).is_empty(),
+            "the stored pack must pass the core validator unchanged"
+        );
+
+        // It survives the round trip the workspace reloads through.
+        let reloaded = store
+            .get_film_draft(&project.id, "film_described")
+            .expect("draft reads back");
+        assert_eq!(
+            reloaded.reference_pack.references,
+            updated.reference_pack.references
+        );
+        assert!(reloaded.reference_pack.references[0].is_described_only());
+
+        // And a described-only role with nothing said about it is refused in the CORE's words,
+        // not in a sentence this route invents.
+        let refused = store
+            .add_film_reference(
+                &project.id,
+                "film_described",
+                FilmReferenceInput {
+                    draft_revision: reloaded.revision,
+                    asset_id: None,
+                    role: "silent".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "   ".to_owned(),
+                    locator: None,
+                    approved: false,
+                },
+            )
+            .expect_err("a role with neither an image nor words says nothing");
+        let message = refused.to_string();
+        assert!(
+            message.contains("no `file` and no `description`"),
+            "expected the core's described-only refusal, got {message:?}"
+        );
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_described")
+                .expect("draft reads")
+                .reference_pack
+                .references
+                .len(),
+            1,
+            "a refused add must not leave a partial entry behind"
+        );
+    }
+
+    /// sc-24028. Two roles on ONE library image (sc-24024): the pack ends up with one `file`
+    /// under two roles, and the core requires a distinct locator on each — which is the refusal
+    /// the reference panel surfaces under its locator field.
+    #[test]
+    fn add_film_reference_twice_on_one_asset_shares_a_file_and_requires_locators() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Shared image")
+            .expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_shared", "Shared")
+            .expect("draft creates");
+        let source = temp.path().join("pair.png");
+        fs::write(&source, b"\x89PNG bytes").expect("source writes");
+        let asset = store
+            .import_asset(
+                &project.id,
+                UploadAsset {
+                    filename: "pair.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .expect("asset imports");
+        let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+
+        let first = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: draft.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "courier".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The courier: blue jacket.".to_owned(),
+                    locator: Some("the woman on the left".to_owned()),
+                    approved: true,
+                },
+            )
+            .expect("the first role on an image needs no locator, but may carry one");
+
+        // A second role on the same asset with NO locator is refused, naming both roles.
+        let refused = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: first.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "guard".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The guard: grey coat.".to_owned(),
+                    locator: None,
+                    approved: true,
+                },
+            )
+            .expect_err("two roles on one image cannot both be unlocated");
+        let message = refused.to_string();
+        assert!(
+            message.contains("share the file") && message.contains("locator"),
+            "expected the core's shared-file locator refusal, got {message:?}"
+        );
+
+        let second = store
+            .add_film_reference(
+                &project.id,
+                "film_shared",
+                FilmReferenceInput {
+                    draft_revision: first.revision,
+                    asset_id: Some(asset_id.clone()),
+                    role: "guard".to_owned(),
+                    kind: "character".to_owned(),
+                    description: "The guard: grey coat.".to_owned(),
+                    locator: Some("the man on the right".to_owned()),
+                    approved: true,
+                },
+            )
+            .expect("a distinct locator on each role admits both");
+
+        let shared_file = format!("references/{asset_id}.png");
+        let files: Vec<Option<&str>> = second
+            .reference_pack
+            .references
+            .iter()
+            .map(crate::film_plan::ReferenceEntry::file)
+            .collect();
+        assert_eq!(
+            files,
+            vec![Some(shared_file.as_str()), Some(shared_file.as_str())],
+            "adding one asset twice must produce ONE file under two roles"
+        );
+        assert!(crate::film_plan::validate_reference_pack(&second.reference_pack).is_empty());
+        assert_eq!(
+            store
+                .get_film_draft(&project.id, "film_shared")
+                .expect("draft reads")
+                .reference_pack
+                .references,
+            second.reference_pack.references,
+            "both roles survive the reload the workspace does"
+        );
+    }
+
+    #[test]
+    fn legacy_film_run_reports_missing_authoring_snapshot_without_fabrication() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Legacy run").expect("project creates");
+        let draft = store
+            .create_film_draft(&project.id, "film_legacy", "Legacy")
+            .expect("draft creates");
+        let locator = store
+            .create_film_run(&project.id, "run_legacy", &draft.id, vec![], None)
+            .expect("run creates");
+        let files = store
+            .film_run_files(&project.id, &locator.id)
+            .expect("run files");
+        let locator_path = files.directory.join("locator.json");
+        let mut legacy = read_json(&locator_path).expect("locator reads");
+        legacy["schemaVersion"] = json!(1);
+        legacy
+            .as_object_mut()
+            .expect("locator object")
+            .remove("authoringSnapshotPath");
+        write_json(&locator_path, &legacy).expect("legacy locator writes");
+        fs::remove_file(&files.authoring_snapshot).expect("new-only snapshot removed");
+
+        let legacy_locator = store
+            .get_film_run(&project.id, &locator.id)
+            .expect("legacy locator remains readable");
+        assert_eq!(legacy_locator.schema_version, 1);
+        assert_eq!(legacy_locator.authoring_snapshot_path, None);
+        assert_eq!(
+            store
+                .get_film_run_authoring_snapshot(&project.id, &locator.id)
+                .expect("legacy absence is readable"),
+            None
+        );
+        assert!(files.plan.is_file());
+        assert!(files.reference_pack.is_file());
+        assert!(files.review_plan.is_file());
+    }
+
+    #[test]
+    fn film_save_and_pin_add_missing_review_questions_without_replacing_custom_questions() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Questions").unwrap();
+        let mut draft = store
+            .create_film_draft(&project.id, "film_questions", "Questions")
+            .unwrap();
+        draft.review_plan["shots"]["SH010"]["questions"][0]["ask"] =
+            json!("Is the blue parcel visible?");
+        let authored = draft.review_plan["shots"]["SH010"].clone();
+        let mut second = draft.production_plan.shots[0].clone();
+        second.id = "SH020".to_owned();
+        second.end_state = "Parcel handed over".to_owned();
+        draft.production_plan.shots.push(second);
+        let saved = store
+            .save_film_draft(&project.id, &draft.id.clone(), draft)
+            .unwrap();
+        assert_eq!(saved.review_plan["shots"]["SH010"], authored);
+        assert_eq!(
+            saved.review_plan["shots"]["SH020"]["questions"][0]["intended"],
+            "Parcel handed over"
+        );
+        store
+            .create_film_run_at_revision(
+                &project.id,
+                "run_questions",
+                &saved.id,
+                saved.revision,
+                vec![],
+            )
+            .unwrap();
+        let files = store.film_run_files(&project.id, "run_questions").unwrap();
+        assert_eq!(read_json(&files.review_plan).unwrap(), saved.review_plan);
+    }
+
+    #[test]
+    fn film_generated_topology_keeps_detached_custom_authoring_but_pins_only_current_shots() {
+        let mut draft =
+            crate::film_workspace::FilmDraft::manual_one_shot("project", "film", "Topology");
+        draft.review_plan["shots"]["SH010"]["questions"][0]["ask"] =
+            json!("Custom question retained for the old shot");
+        let old = draft.review_plan["shots"]["SH010"].clone();
+        draft.production_plan.shots[0].id = "SH020".to_owned();
+        draft.reconcile_review_plan();
+        assert_eq!(draft.review_plan["shots"]["SH010"], old);
+        let pinned = draft.review_plan_for_run();
+        assert!(pinned["shots"].get("SH010").is_none());
+        assert_eq!(
+            pinned["shots"]["SH020"],
+            draft.review_plan["shots"]["SH020"]
+        );
+    }
+
+    #[test]
+    fn film_run_pins_review_plan_independently_of_later_draft_edits() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store
+            .create_project("Pinned review")
+            .expect("project creates");
+        let mut draft = store
+            .create_film_draft(&project.id, "film_review", "Review")
+            .expect("draft creates");
+        draft.review_plan["description"] = json!("Pinned first version");
+        let draft = store
+            .save_film_draft(&project.id, "film_review", draft)
+            .expect("draft saves");
+        store
+            .create_film_run(
+                &project.id,
+                "run_review",
+                "film_review",
+                vec!["SH010".to_owned()],
+                None,
+            )
+            .expect("run creates");
+        let files = store
+            .film_run_files(&project.id, "run_review")
+            .expect("run files");
+        let pinned = read_json(&files.review_plan).expect("pinned review reads");
+        assert_eq!(pinned["description"], "Pinned first version");
+
+        let mut edited = draft;
+        edited.review_plan["description"] = json!("Future version");
+        let edited = store
+            .save_film_draft(&project.id, "film_review", edited)
+            .expect("later draft saves");
+        assert_eq!(
+            read_json(&files.review_plan).expect("pinned review still reads"),
+            pinned
+        );
+
+        let mut legacy = edited;
+        legacy.review_plan = json!({"schemaVersion": 1, "questions": []});
+        store
+            .save_film_draft(&project.id, "film_review", legacy)
+            .expect("legacy draft saves");
+        store
+            .create_film_run(
+                &project.id,
+                "run_legacy_review",
+                "film_review",
+                vec!["SH010".to_owned()],
+                None,
+            )
+            .expect("legacy run creates");
+        let legacy_files = store
+            .film_run_files(&project.id, "run_legacy_review")
+            .expect("legacy files");
+        let legacy_pin = read_json(&legacy_files.review_plan).expect("legacy pin reads");
+        assert_eq!(
+            legacy_pin["shots"]["SH010"]["questions"][0]["frames"],
+            "last"
+        );
+    }
+
+    #[test]
     fn concurrent_look_adds_do_not_lose_updates() {
         // sc-1633: create_character_look does a read-modify-write of the character
         // sidecar (read looks -> prepend -> write). The per-project file lock makes
@@ -13359,6 +15752,102 @@ mod tests {
         assert_eq!(looks.len(), threads * per_thread);
     }
 
+    #[test]
+    fn vector_workflow_intermediate_is_hidden_and_cleanup_requires_exact_ownership() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = ProjectStore::new(temp.path().join("data"), "test-app");
+        let project = store.create_project("Vector workflow").expect("project");
+        let import = |name: &str| {
+            let source = temp.path().join(name);
+            std::fs::write(&source, b"\x89PNG\r\n\x1a\n fixture").expect("source writes");
+            store
+                .import_asset(
+                    &project.id,
+                    UploadAsset {
+                        filename: name.to_owned(),
+                        content_type: Some("image/png".to_owned()),
+                        source_path: source,
+                        source_asset_id: None,
+                        provenance: None,
+                    },
+                )
+                .expect("asset imports")
+        };
+        let intermediate = import("intermediate.png");
+        let user_asset = import("user.png");
+        let intermediate_id = intermediate["id"].as_str().expect("id").to_owned();
+        let user_asset_id = user_asset["id"].as_str().expect("id").to_owned();
+
+        let marked = store
+            .mark_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+                "job_child",
+            )
+            .expect("intermediate marked");
+        assert_eq!(marked["origin"], json!("vector_workflow_intermediate"));
+        assert_eq!(
+            marked["extra"]["vectorWorkflow"],
+            json!({
+                "role": "retained_intermediate",
+                "publication": "unpublished",
+                "workflowId": "vwf_owned",
+                "parentJobId": "job_parent",
+                "childJobId": "job_child",
+                "hidden": true
+            })
+        );
+        let listed = store
+            .list_assets(&project.id, true, true, AssetScope::All)
+            .expect("assets list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["id"], json!(user_asset_id));
+        assert!(store.get_asset(&project.id, &intermediate_id).is_ok());
+
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_other",
+                "job_parent",
+            )
+            .expect("foreign workflow refuses"));
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &user_asset_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("user asset refuses"));
+        assert!(store.get_asset(&project.id, &intermediate_id).is_ok());
+        assert!(store.get_asset(&project.id, &user_asset_id).is_ok());
+
+        assert!(store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("owned cleanup"));
+        assert!(matches!(
+            store.get_asset(&project.id, &intermediate_id),
+            Err(ProjectStoreError::NotFound(_))
+        ));
+        assert!(store.get_asset(&project.id, &user_asset_id).is_ok());
+        assert!(!store
+            .purge_vector_workflow_intermediate(
+                &project.id,
+                &intermediate_id,
+                "vwf_owned",
+                "job_parent",
+            )
+            .expect("cleanup is idempotent"));
+    }
+
     /// issue #1435 / sc-11855: a workspace folder that rejects writes must fail
     /// with the actionable `StorageNotWritable` error (naming the folder), not a
     /// raw `SQLITE_READONLY`/`unable to open database file` that the UI shows
@@ -13390,5 +15879,65 @@ mod tests {
             }
             other => panic!("expected StorageNotWritable, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod timeline_revision_tests {
+    use super::*;
+    #[test]
+    fn timeline_cas_rejects_stale_saves_and_has_one_concurrent_winner() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Concurrent cut").unwrap();
+        let cut = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .unwrap();
+        assert_eq!(cut["revision"], 1);
+        let barrier = std::sync::Barrier::new(2);
+        let outcomes = std::thread::scope(|scope| {
+            let run = || {
+                barrier.wait();
+                store.save_timeline(&project.id, cut.clone())
+            };
+            let first = scope.spawn(run);
+            let second = scope.spawn(run);
+            [first.join().unwrap(), second.join().unwrap()]
+        });
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+        assert!(outcomes.iter().any(|r| matches!(
+            r,
+            Err(ProjectStoreError::TimelineConflict {
+                code: "timeline_revision_conflict",
+                ..
+            })
+        )));
+        let id = cut["id"].as_str().unwrap();
+        let file = store.timeline_file(&project.id, id).unwrap();
+        let bytes = fs::read(&file.path).unwrap();
+        assert!(store.save_timeline(&project.id, cut).is_err());
+        assert_eq!(bytes, fs::read(file.path).unwrap());
+    }
+    #[test]
+    fn legacy_revision_zero_migrates_once_and_export_snapshot_is_immutable() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ProjectStore::new(temp.path().join("data"), "test");
+        let project = store.create_project("Legacy cut").unwrap();
+        let mut cut = store
+            .create_timeline(&project.id, "Cut", "16:9", 24)
+            .unwrap();
+        let id = cut["id"].as_str().unwrap().to_owned();
+        cut.as_object_mut().unwrap().remove("revision");
+        let file = store.timeline_file(&project.id, &id).unwrap();
+        write_json(&file.path, &cut).unwrap();
+        let saved = store.save_timeline(&project.id, cut.clone()).unwrap();
+        assert_eq!(saved["revision"], 1);
+        assert!(store.save_timeline(&project.id, cut).is_err());
+        let snapshot = store.snapshot_timeline_export(&project.id, &id).unwrap();
+        let mut changed = saved;
+        changed["name"] = json!("Edited");
+        store.save_timeline(&project.id, changed).unwrap();
+        assert_eq!(read_json(&snapshot.file.path).unwrap()["name"], "Cut");
+        assert_eq!(snapshot.document["revision"], 1);
     }
 }

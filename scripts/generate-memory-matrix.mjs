@@ -132,6 +132,10 @@ export const MODEL_STORIES = {
   z_image: { mlx: 15457, candle: 16170 },
   z_image_edit: { mlx: 15458, candle: 15862 },
   qwen_image: { mlx: 15459, candle: 15865 },
+  // Qwen-Image 2.1 (epic 24107): one engine id on two backends, each owned by the story that
+  // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
+  // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
+  qwen_image_2_1: { mlx: 24108, candle: 24109 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -1080,18 +1084,174 @@ export function backendScopes(model, routedBackends) {
   return ["mlx", "candle"].filter((backend) => served.has(backend));
 }
 
-function tiersFor(model, backend, backendTierOverrides) {
+/**
+ * The per-lane tier sets `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares,
+ * keyed `backend:provider` — read off the Rust SOURCE, the way `parseBackendTierOverrides` reads
+ * InstantID's dense tier, so a rule the worker changes cannot silently stop matching the matrix.
+ *
+ * Why it exists (sc-22731 review): `tiersFor`'s `platforms` filter answers "could this lane's HOST
+ * fetch this download", which is NOT the same question as "does the worker route this lane at this
+ * tier". `bernini`/`bernini_image` is the case that separated them — the only off-Mac download is
+ * the untiered `SceneWorks/bernini` tree, yet the Candle route rule declares `BF16_Q4_Q8` because
+ * `expected_packing` and the published tier subdirs are inside that one repo. Filtering on
+ * `platforms` alone deleted three real Candle tiers on two model ids: six analytic anchors and six
+ * burndown cells for a lane the worker demonstrably routes, which epic 22723 E1 does not exempt
+ * (only a lane/tier the worker does NOT route is exempt).
+ *
+ * Consumed as a FLOOR and never as a ceiling. A rule's `tiers` is the scope at which that
+ * memory-route rule SHAPES a load, not an enumeration of what the lane can open: `ltx_2_3` has no
+ * rule at all and routes three tiers, and `lens` is `Q4_ONLY` on MLX while advertising three. So
+ * this may only keep a tier the `platforms` test would have dropped; it may never drop one.
+ */
+export function parseRouteRegistryLaneTiers(registrySource) {
+  const table = registrySource.match(/const RULES: &\[MemoryRouteRule\] = &\[([\s\S]*?)\n\];/);
+  if (!table) {
+    throw new Error("memory-matrix: could not locate RULES in memory_route_registry.rs");
+  }
+  // Scoped to `impl MemoryRouteTier`: several enums in this file declare a `pub const ALL`, and an
+  // unanchored match would resolve `ALL_TIERS` to whichever one happened to come first.
+  const tierImpl = registrySource.match(/impl MemoryRouteTier \{([\s\S]*?)\n\}/);
+  const all = tierImpl?.[1].match(/pub const ALL: \[Self; \d+\] = \[([^\]]*)\];/);
+  if (!all) {
+    throw new Error("memory-matrix: could not derive MemoryRouteTier::ALL from memory_route_registry.rs");
+  }
+  const variant = (name) => name.replace(/^Self::|^MemoryRouteTier::/, "").toLowerCase();
+  const tierConstants = new Map([
+    ["ALL_TIERS", all[1].split(",").map((entry) => entry.trim()).filter(Boolean).map(variant)],
+  ]);
+  const KNOWN_TIERS = new Set(["bf16", "q4", "q8", "nvfp4"]);
+  for (const tier of tierConstants.get("ALL_TIERS")) {
+    if (!KNOWN_TIERS.has(tier)) {
+      throw new Error(`memory-matrix: MemoryRouteTier::ALL parsed an unknown tier ${tier}`);
+    }
+  }
+  for (const constant of registrySource.matchAll(
+    /const (\w+): &\[MemoryRouteTier\] = &\[([\s\S]*?)\];/g,
+  )) {
+    tierConstants.set(
+      constant[1],
+      [...constant[2].matchAll(/MemoryRouteTier::(\w+)/g)].map((entry) => variant(entry[1])),
+    );
+  }
+  const lanes = new Map();
+  let seen = 0;
+  for (const row of table[1].matchAll(/MemoryRouteRule \{([\s\S]*?)\n {4}\},/g)) {
+    seen += 1;
+    const backend = row[1].match(/backend: MemoryRouteBackend::(\w+)/)?.[1];
+    const provider = row[1].match(/provider: "([a-z0-9_]+)"/)?.[1];
+    const tiers = row[1].match(/tiers: (\w+)/)?.[1];
+    if (!backend || !provider || !tiers) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} is under-keyed for tiers`);
+    }
+    const resolved = tierConstants.get(tiers);
+    if (!resolved) {
+      throw new Error(`memory-matrix: memory-route rule ${seen} names unknown tier set ${tiers}`);
+    }
+    const key = `${backend.toLowerCase()}:${provider}`;
+    const set = lanes.get(key) ?? new Set();
+    for (const tier of resolved) set.add(tier);
+    lanes.set(key, set);
+  }
+  if (seen === 0) throw new Error("memory-matrix: RULES parsed to zero memory-route rules");
+  return lanes;
+}
+
+/**
+ * The tiers `memory_route_registry.rs` admits for the ENGINE provider this catalog entry routes to
+ * on this lane — `bernini_image` resolves to the engine id `bernini`, which is what the rules are
+ * keyed on. Empty when the registry names no rule for it: silence is not a denial, it just means
+ * this floor contributes nothing and the other two tests in `tiersFor` decide the tier.
+ */
+function routedLaneTiers(routeLaneTiers, route, backend) {
+  if (!routeLaneTiers || !route) return new Set();
+  let provider;
+  try {
+    provider = route.engineFor(backend);
+  } catch {
+    return new Set();
+  }
+  return routeLaneTiers.get(`${backend}:${provider}`) ?? new Set();
+}
+
+function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
   const override = backendTierOverrides.get(`${model.id}:${backend}`);
   if (override) return override;
   const backendTiers = Object.keys(model[backend]?.vramGbByTier ?? {});
+  // sc-22731: a download this lane's HOST would never fetch is not a tier this lane advertises.
+  // The manifest's own `platforms` selection is the rule
+  // (`crates/sceneworks-core/src/model_artifacts/artifact_selection.rs`; a row with no `platforms`
+  // key applies everywhere), and MLX is macOS-only by construction while Candle is the off-Mac
+  // lane. Without the filter, `sana_1600m` — whose three packed tiers are `platforms: ["macos"]`
+  // turnkeys and whose only off-Mac download is the dense diffusers snapshot — advertised a
+  // three-tier Candle axis: 20 coordinates no Candle load can reach, contradicting its own shipped
+  // contract (every `sana_1600m` candle implementation declares `"tiers": ["bf16"]`), the worker
+  // (`base.rs` pins the candle SANA tier to `bf16`) and the route registry (`BF16_ONLY`).
+  //
+  // The filter NARROWS ONLY, and only where nothing routes the tier. Epic 22723 E1 exempts exactly
+  // one thing — a (lane, tier) the WORKER DOES NOT ROUTE — so a tier that survives any of the three
+  // tests below stays on the axis even when its own download row is gated away (sc-22731 review;
+  // the first spelling of this filter had only the `platforms` test and got two families wrong):
+  //
+  //   1. An UNTIERED download this lane's host fetches. A row with no `variant` is a bundle whose
+  //      tiers live INSIDE it, so it serves every tier the lane advertises. `bernini`/
+  //      `bernini_image`'s only off-Mac download is exactly that — one untiered `SceneWorks/bernini`
+  //      tree — which is why the Candle route rule declares `BF16_Q4_Q8` ("matches
+  //      `expected_packing` and the published tier subdirs"). Filtering on `platforms` alone sent
+  //      both ids to `["default"]`, deleting six analytic anchors and six burndown cells for a lane
+  //      the worker demonstrably routes. `ltx_2_3` is the same shape from the other direction: its
+  //      bf16 row is `platforms: ["macos"]`, but `video_jobs/candle.rs` resolves `mlxQuantize <= 0`
+  //      to `CandleLtxTier::Bf16` and `candle_ltx_bundle_tier_across_revisions` returns `None` for
+  //      it BECAUSE bf16 is the untiered dense bundle root rather than a packed tier subdir — and
+  //      that bundle is the co-requisite download, which serves every platform.
+  //   2. A tier `crates/sceneworks-worker/src/memory_route_registry.rs#RULES` declares for this
+  //      exact (backend, provider). The registry is consulted as a FLOOR and never as a ceiling: a
+  //      rule's `tiers` is the scope at which that memory-route rule shapes a load, not an
+  //      enumeration of the tiers the lane can open (`ltx_2_3` has no rule at all and loads three),
+  //      so it can only keep a tier, never remove one.
+  //   3. The lane's own `vramGbByTier` / `quantize` block, which is a lane-local claim rather than a
+  //      download claim, and is unioned in below regardless.
+  const lanePlatform = backend === "mlx" ? "macos" : "linux";
+  const servesLane = (download) =>
+    !download.platforms || download.platforms.includes(lanePlatform);
+  const routedTiers = routedLaneTiers(routeLaneTiers, route, backend);
+  const bundledLane = (model.downloads ?? []).some(
+    (download) => typeof download.variant !== "string" && servesLane(download),
+  );
   const downloadTiers = (model.downloads ?? [])
+    .filter(
+      (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
+    )
     .map((download) => download.variant)
     .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
-  const advertised =
-    backend === "candle" && backendTiers.length
-      ? backendTiers
-      : [...backendTiers, ...downloadTiers, ...inferred];
+  // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
+  // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment
+  // a candle lane declared ANY `vramGbByTier` key, threw `downloadTiers` and `inferred` away.
+  //
+  // That was the original (sc-15506) crude proxy for the one thing the filter above now does
+  // properly: keep a download row this lane's host would never fetch off this lane's axis. It was
+  // written when `downloadTiers` had no `platforms` test at all, so an MLX-only turnkey set would
+  // otherwise have advertised a bogus candle axis. sc-22731 replaced that proxy with the real rule
+  // (`servesLane` + `bundledLane` + `routedTiers`), and the proxy was left behind — still firing,
+  // and now reading `vramGbByTier` as a routing CEILING. It is a MEASUREMENT block: a missing key
+  // says a peak has not been recorded, never that the lane refuses the tier — the same distinction
+  // `parseBackendTierOverrides` is documented on. Its residue deleted six real coordinates:
+  //
+  //   * `flux_dev`, `flux_schnell`, `flux2_dev` at bf16 — `memory_route_registry.rs` declares
+  //     `BF16_NVFP4_Q4_Q8` for `candle:flux1_dev` / `candle:flux1_schnell` / `candle:flux2_dev`,
+  //     and each ships an ungated `bf16/` download row that serves every platform. The sc-22738
+  //     campaign then MEASURED flux_dev and flux_schnell there (executed, authoritative,
+  //     `loadability.result: "passed"` on a `…:bf16` resolved path), and the drop is what left
+  //     those two bundles compiled into `PACKAGED_MEMORY_ANCHOR_SOURCES` citing nothing.
+  //   * `sd3_5_large`, `sd3_5_large_turbo`, `sd3_5_medium` at q8 — no registry rule names their
+  //     provider (silence is not a denial; see `routedLaneTiers`), but each lane's own
+  //     `memoryStrategyContract` declares `"tiers": ["q4", "q8", "bf16"]` on every implementation
+  //     and each ships an ungated `q8/` download row. Only `vramGbByTier` was missing q8.
+  //
+  // Removing it does NOT re-open what sc-22731 closed: `sana_1600m` / `sana_sprint_1600m` stay at
+  // `["bf16"]` on candle, because their three packed tiers are `platforms: ["macos"]` and
+  // `servesLane` — not this short-circuit — is what keeps them off the off-Mac axis.
+  const advertised = [...backendTiers, ...downloadTiers, ...inferred];
   return sortedUnique(advertised).filter(
     (tier) => tier !== "int8-convrot",
   ).length
@@ -1099,7 +1259,18 @@ function tiersFor(model, backend, backendTierOverrides) {
     : ["default"];
 }
 
-function parseBackendTierOverrides(instantIdSource) {
+/**
+ * The per-lane tier overrides that come from CODE rather than from a manifest declaration: the
+ * InstantID Candle dense tier, read out of the worker's own `instantid.rs`, plus the converter
+ * families' packed tier sets. These are ROUTING facts — what the lane can load at all.
+ *
+ * Exported (sc-22729) so the measurability gap set can narrow a model's tier axis by exactly these
+ * and nothing else. `tiersFor` also consults `model[backend].vramGbByTier`, which is a MEASUREMENT
+ * declaration: a missing key there says a peak has not been recorded, never that the lane refuses
+ * the tier, so a gap set that intersected against it would delete the very cells it exists to
+ * count.
+ */
+export function parseBackendTierOverrides(instantIdSource) {
   const candleDense = instantIdSource.match(
     /#\[cfg\(not\(target_os = "macos"\)\)\]\s*let preferred = \{[\s\S]*?"([^"]+)"\s*\};/,
   )?.[1];
@@ -1109,6 +1280,18 @@ function parseBackendTierOverrides(instantIdSource) {
   // The converter-packed tier sets are shared with the projector's `catalogAxes` so the matrix's
   // cell universe and the projection's declaration universe cannot disagree about them (sc-21510).
   return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
+}
+
+// `instantid.rs` is a large production route, but the matrix consumes exactly one fact from it:
+// the backend-tier override map above. Fingerprint that parsed contract instead of every unrelated
+// implementation detail in the route. Sorting the keys makes the projection stable without hiding
+// tier order, which is itself part of the generated catalog axes.
+function backendTierOverridesRevisionBody(overrides) {
+  return JSON.stringify(
+    [...overrides.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, tiers]) => [key, [...tiers]]),
+  );
 }
 
 function modesFor(model) {
@@ -1727,8 +1910,8 @@ export function implementationVerdict({
  *
  * Nothing else may enter: not a record, not a plan row, not a geometry, not a campaign, not a
  * currency digest. Anchor CURRENCY is reported on the cell beside the state (sc-22511 makes it a
- * report, never a gate) and deliberately does not move it — a staled loader closure means the
- * anchor needs re-extraction, not that the rung stopped existing.
+ * report, never a gate) and deliberately does not move it — a staled loader closure reports
+ * historical provenance, not that the rung stopped existing.
  *
  * The state vocabulary that replaces Missing / Implemented-unverified / Runtime-verified / Verified:
  *
@@ -2115,6 +2298,18 @@ export function indexLoaderClosures(body) {
 }
 
 /**
+ * The store's own record of HOW an anchor's currency key was derived (sc-22667): `null` when at
+ * the record's measurement revision, else the reviewed attestation — measured and attested
+ * revisions, class, why and witness — that `anchor-loader-closure.mjs --stamp-anchors` copied in
+ * from `config/anchor-currency-attestations.json`. Published verbatim so a current anchor never
+ * hides whether it is current by measurement or by attestation.
+ */
+export function currencyAttestationOf(anchor) {
+  const attestation = anchor?.source?.currencyAttestation;
+  return attestation && typeof attestation === "object" ? { ...attestation } : null;
+}
+
+/**
  * The lanes the analytic derivation is DEFINED and WIRED for, as `<modality>:<backend>` keys.
  *
  * Read off the Rust rather than declared here, in both halves, because both halves are code facts:
@@ -2129,10 +2324,17 @@ export function indexLoaderClosures(body) {
  * read crossed `video_admission.rs`'s backends with every declared law, so `image:candle` read as
  * wired off a file that never priced an image.
  *
- * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources }`: the lane is wired
- * exactly when the law is declared in the derivation source AND some admission source both calls
- * `derive_<law>_phase_peaks` (directly or through the store's `_for_cell` fall-through, which the
- * call-name check also matches by prefix) and names the lane's `AnchorBackend`.
+ * `admissionSourcesByLane` maps `<modality>:<backend>` to `{ law, sources, entryPoints? }`: the
+ * lane is wired exactly when the law is declared in the derivation source AND some admission
+ * source both calls one of the lane's DECLARED entry points and names the lane's
+ * `AnchorBackend`. The entry points default to `derive_<law>_phase_peaks` (directly or through the
+ * store's `_for_cell` fall-through, which the call-name check also matches by prefix). The image
+ * lanes name the ONE image law as well (sc-22667, epic 22657 E3): `derive_phase_peaks` is the law
+ * both `derive_image_phase_peaks` and `derive_mlx_image_phase_peaks` translate onto, and since
+ * sc-22664/sc-22665/sc-22667 the candle ladder, the Krea lane and the MLX floor call it (or its
+ * activation half, `derive_phase_activation_residues`) directly with the rung's regime rather than
+ * through the shallow shims — so a lane priced from the law itself is wired, and a lane that calls
+ * nothing declared is not.
  */
 export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByLane) {
   const declared = new Set(
@@ -2140,16 +2342,29 @@ export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByL
       (match) => match[1],
     ),
   );
+  // Every anchor-derivation entry point the source declares, by full name: the per-law shims,
+  // the law itself, and its activation half.
+  const declaredEntryPoints = new Set(
+    [
+      ...derivationSource.matchAll(
+        /pub fn (derive_[a-z0-9_]*?(?:phase_peaks|phase_activation_residues))\b/g,
+      ),
+    ].map((match) => match[1]),
+  );
   const backendTokens = { mlx: "AnchorBackend::Mlx", candle: "AnchorBackend::Candle" };
   const lanes = new Set();
-  for (const [lane, { law, sources }] of Object.entries(admissionSourcesByLane)) {
+  for (const [lane, { law, sources, entryPoints }] of Object.entries(
+    admissionSourcesByLane,
+  )) {
     if (!declared.has(law)) continue;
     const backend = lane.split(":")[1];
     const token = backendTokens[backend];
     if (!token) throw new Error(`unknown backend in derivation lane ${lane}`);
+    const calls = (entryPoints ?? [`derive_${law}_phase_peaks`]).filter((name) =>
+      declaredEntryPoints.has(name),
+    );
     const wired = sources.some(
-      (source) =>
-        source.includes(`derive_${law}_phase_peaks`) && source.includes(token),
+      (source) => calls.some((name) => source.includes(name)) && source.includes(token),
     );
     if (wired) lanes.add(lane);
   }
@@ -2157,19 +2372,84 @@ export function parseAnchorDerivationLanes(derivationSource, admissionSourcesByL
 }
 
 /**
+ * The image lanes' entry points onto the law (see `parseAnchorDerivationLanes`): the lane shim,
+ * the law itself, and — for the MLX floor — the law's activation half.
+ */
+export const IMAGE_CANDLE_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_image_phase_peaks",
+  "derive_phase_peaks",
+]);
+export const IMAGE_MLX_DERIVATION_ENTRY_POINTS = Object.freeze([
+  "derive_mlx_image_phase_peaks",
+  "derive_phase_activation_residues",
+  "derive_phase_peaks",
+]);
+
+/**
  * Catalog entries deliberately held OUT of the matrix universe (sc-18663, re-homed by sc-22513).
  *
  * This used to be read from the rung-4 survey, which has left the fingerprint with the rest of the
  * measurement-absence machinery. The fact itself survives the collapse and is not a memory fact at
- * all: `familyGroup` has no arm for MiniMax-H3 and no video-route resolver row exists, so admitting
- * these entries fails generation at `resolveRoute` rather than producing a row. Declared here, in
- * the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails LOUDLY the day the family is
- * routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses an entry the generator can
- * now resolve.
+ * all. Declared here, in the generator, exactly like `UNROUTED_CATALOG_ENTRIES` — and it fails
+ * LOUDLY the day the family is routed, because `assertOutOfMatrixEntriesAreStillUnroutable` refuses
+ * an entry the generator can now resolve.
+ *
+ * ## sc-22737: the recorded reason was STALE, and the true one is narrower
+ *
+ * The old reason read "no familyGroup arm and no video-route resolver row exists". Only the first
+ * clause was ever a fact about this generator, and the second was wrong about the WORKER:
+ * `video_jobs/minimax_h3.rs#minimax_h3_engine_id` exists and `resolve_video_route` consults it, so
+ * the MLX lane IS routed. Re-examined against both sources, the two conditions that actually keep
+ * these entries out are:
+ *
+ * 1. **MLX — the resolver is not in a shape this generator can read.** Every other family's
+ *    `*_engine_id` enumerates its catalog ids (`match model { "a" => Some("x"), … }`, `model == …`,
+ *    or `matches!(model, …)`), and `parseVideoEngineIds` parses exactly those three forms into a
+ *    model -> engine map. MiniMax-H3's is
+ *    `is_minimax_h3_model(model).then_some(MINIMAX_H3_ENGINE_ID)`, and that predicate
+ *    (`sceneworks_core::video_request::is_minimax_h3_model`) is `model.starts_with("minimax_h3")` —
+ *    a PREFIX test, which enumerates nothing. Admitting the family therefore needs the parser to
+ *    grow a fourth form that resolves a prefix predicate out of another crate and expands it
+ *    against the manifest, not merely a `VIDEO_ROUTE_RESOLVERS` row; adding the row alone throws
+ *    `minimax_h3_engine_id declared no model -> engine arm`, which is how this was measured.
+ *
+ * 2. **Candle — the generator's PUBLIC route parser cannot see the arm either.** `parseVideoRoutes`
+ *    reads `video_jobs/candle.rs#candle_video_engine_id`, which has no `minimax_h3` arm; the Candle
+ *    dispatch is deliberately kept OUT of it, in `video_jobs/mod.rs#resolve_candle_video_route`
+ *    (`} else if let Some(engine_id) = minimax_h3_engine_id(&request.model) { CandleVideoRoute::
+ *    MiniMaxH3(engine_id) }`), and is parsed separately by `parseInternalCandleVideoRoutes` for
+ *    exactly that reason. So this half is the SAME parser fact as (1), on the other lane.
+ *
+ * ## sc-22738: reason 2 used to claim the Candle LANE was unrouted. It is not.
+ *
+ * The previous wording read "Candle — the lane is not routed at all", and cited the absent
+ * `candle_video_engine_id` arm as proof. That confused this generator's parser with the ROUTER:
+ * `resolve_candle_video_route` has selected `CandleVideoRoute::MiniMaxH3` since sc-19508, and the
+ * routing catalog declares `VideoModelCaps::new("minimax_h3", true, true, …)` and the same for
+ * `minimax_h3_ref` (`crates/sceneworks-core/src/jobs_store/routing/catalog.rs`), so BOTH lanes are
+ * routed and neither is epic 22723 E1's unrouted-lane exemption.
+ *
+ * That mattered beyond the comment: `measure-memory-catalog.test.mjs` used to take its routed-lane
+ * axis from this generator's `models[].backends`, so the subtraction below silently removed all
+ * twelve MiniMax-H3 cells from the E1 burndown — deleting their plan rows left the measurability
+ * test green. The burndown now reads the routing catalog directly (`routedCatalogLanes`), so this
+ * subtraction is scoped to the MATRIX and cannot exempt a cell from measurability.
+ *
+ * The `minimax_h3` / `minimax_h3_ref` ANCHORS are planned, armed and closed over on BOTH lanes by
+ * sc-22737 (`config/memory-calibration-plan.json`,
+ * `crates/sceneworks-memory-adapter/src/bin/{mlx,candle}.rs`), so the cells are measurable through
+ * `measure-memory-catalog.mjs` — the oracle epic 22723 E2 names — even while this generator still
+ * subtracts them from the MATRIX universe.
  */
+const MINIMAX_OUT_OF_MATRIX_REASON =
+  "both lanes ARE routed (VideoModelCaps mlx+candle, resolve_candle_video_route's MiniMaxH3 arm), " +
+  "but this generator's route parsers cannot enumerate either: the MLX resolver is a PREFIX " +
+  "PREDICATE and the Candle arm lives outside candle_video_engine_id. Matrix-only — the E1 " +
+  "measurability burndown reads the routing catalog and DOES claim these cells";
+
 export const OUT_OF_MATRIX_CATALOG_ENTRIES = new Map([
-  ["minimax_h3", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
-  ["minimax_h3_ref", { epic: 17137, reason: "no familyGroup arm and no video-route resolver row" }],
+  ["minimax_h3", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
+  ["minimax_h3_ref", { epic: 17137, reason: MINIMAX_OUT_OF_MATRIX_REASON }],
 ]);
 
 /**
@@ -2261,8 +2541,10 @@ export const SOURCE_PATHS = Object.freeze({
 // `matrixSourceRevision` is generated provenance written back into the manifest's calibration
 // bindings. Including that value in the source-tree hash creates an impossible fixed point:
 // regenerating the matrix rotates the value, certification writes the new value into the
-// manifest, and the next regeneration rotates it again. Keep every binding field that affects
-// eligibility in the semantic hash, but replace only this self-stamped provenance value.
+// manifest, and the next regeneration rotates it again. A terminal candidate is likewise outside
+// this generator's capability and memory inputs: it records a campaign pin and source closure but
+// cannot move a matrix cell. Keep every field that can affect a cell in the semantic hash, while
+// replacing these provenance-only subtrees.
 function manifestRevisionBody(body) {
   const parsed = JSON.parse(stripJsoncComments(body));
   const visit = (value) => {
@@ -2271,11 +2553,75 @@ function manifestRevisionBody(body) {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        key === "matrixSourceRevision" ? "source-tree:<generated>" : visit(child),
+        key === "matrixSourceRevision"
+          ? "source-tree:<generated>"
+          : key === "terminalCandidate"
+            ? "<terminal-candidate-provenance>"
+            : visit(child),
       ]),
     );
   };
   return JSON.stringify(visit(parsed));
+}
+
+// Currency reads only `models[*].digest` (see `indexLoaderClosures`). The closure file's top-level
+// inference pin, entry-point inventory and source-file inventory are provenance for how those
+// digests were produced; if every content-derived digest is unchanged, they cannot move a cell and
+// must not invalidate the matrix. Sort the projection so JSON member order is also inert.
+function anchorLoaderClosureRevisionBody(body) {
+  const parsed = JSON.parse(body);
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(parsed.models ?? {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, entry.digest ?? null]),
+    ),
+  );
+}
+
+// The fingerprint is a staleness tripwire for the PUBLISHED contract, not a source-control receipt.
+// If the complete published document is byte-for-byte unchanged apart from `generatedFrom`, carry
+// its existing provenance rather than making a source-only refactor or pin record invalidate it.
+// Any cell, anchor-currency, census, claim or model-slice change breaks this equality and records the
+// newly derived fingerprint.
+async function carryGeneratedFromForUnchangedContract(matrix) {
+  let previous;
+  try {
+    previous = JSON.parse(await readFile(path.join(ROOT, OUTPUT_JSON), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return matrix;
+    throw error;
+  }
+  const withoutGeneratedFrom = ({ generatedFrom: _generatedFrom, ...contract }) => contract;
+  const provenanceOnlySources = new Set([
+    "manifest",
+    "anchorLoaderClosures",
+    "anchorExtractor",
+    // The InstantID source is projected to the exact backend-tier facts the matrix consumes. During
+    // the transition from the old whole-file fingerprint, carry the prior provenance whenever that
+    // projected contract leaves the published document byte-identical.
+    "instantId",
+  ]);
+  const currentSources = matrix.generatedFrom?.sources ?? {};
+  const previousSources = previous.generatedFrom?.sources ?? {};
+  const sourceNames = new Set([...Object.keys(currentSources), ...Object.keys(previousSources)]);
+  for (const name of sourceNames) {
+    const current = currentSources[name];
+    const recorded = previousSources[name];
+    if (
+      current?.path !== recorded?.path ||
+      (!provenanceOnlySources.has(name) && current?.sha256 !== recorded?.sha256)
+    ) {
+      return matrix;
+    }
+  }
+  if (
+    JSON.stringify(withoutGeneratedFrom(previous)) ===
+    JSON.stringify(withoutGeneratedFrom(matrix))
+  ) {
+    return { ...matrix, generatedFrom: previous.generatedFrom };
+  }
+  return matrix;
 }
 
 /**
@@ -2318,6 +2664,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       name,
       name === "manifest"
         ? manifestRevisionBody(bodies[name])
+        : name === "anchorLoaderClosures"
+          ? anchorLoaderClosureRevisionBody(bodies[name])
         : semanticSourceBody(relative, bodies[name]),
     ]),
   );
@@ -2330,8 +2678,13 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     "image:candle": {
       law: "image",
       sources: [bodies.anchorAdmissionImageVram, bodies.anchorAdmissionImageCandle],
+      entryPoints: IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
     },
-    "image:mlx": { law: "mlx_image", sources: [bodies.mlxFitGate] },
+    "image:mlx": {
+      law: "mlx_image",
+      sources: [bodies.mlxFitGate],
+      entryPoints: IMAGE_MLX_DERIVATION_ENTRY_POINTS,
+    },
   });
   // sc-18815: the model universe is MODALITY-AWARE, not `type === "image"`. Every entry of an
   // admitted modality is in, whether or not anything has been measured on it — an entry the matrix
@@ -2357,6 +2710,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
+  revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
+  const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
   );
@@ -2422,7 +2777,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     modelSummary.axes = {};
     const axesRoute = resolveRoute(model, routes, videoRoutes, modelSummary.backends);
     for (const backend of modelSummary.backends) {
-      const tiers = tiersFor(model, backend, backendTierOverrides);
+      const tiers = tiersFor(model, backend, backendTierOverrides, routeLaneTiers, axesRoute);
       const modes = modesFor(model);
       const overlays = overlaysFor(model, backend, axesRoute);
       modelSummary.axes[backend] = { tiers, modes, overlays, rungs: [...RUNGS] };
@@ -2450,19 +2805,24 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       // never of the rung, the mode or the overlay — so it is resolved once per tier here and the
       // rung loop below cannot make it depend on anything narrower.
       const derivationDefined = derivationLanes.has(`${modelSummary.modality}:${backend}`);
-      for (const tier of tiersFor(model, backend, backendTierOverrides)) {
+      for (const tier of tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route)) {
         const anchor = anchorStore.anchors.get(`${model.id}:${backend}:${tier}`) ?? null;
         const anchorRow = anchor
           ? {
               id: anchor.id,
               tier: anchor.tier,
               source: `config/memory-anchors.json#${anchor.id}`,
-              // sc-22511: REPORTED, never gated. A staled loader closure means the anchor needs
-              // re-extraction; it does not mean the rung stopped existing, so it may not — and by
+              // sc-22511: REPORTED, never gated. A staled loader closure reports historical provenance
+              // for optional review; it does not mean the rung stopped existing, so it may not — and by
               // `cellState`'s signature cannot — move the state.
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
                 anchor.source.loaderClosureDigest,
+              // sc-22667: HOW the key was derived. `null` means at the record's own measurement
+              // revision; otherwise the reviewed currency attestation (config/
+              // anchor-currency-attestations.json) that keyed it at a later revision because the
+              // closure diff since the measurement is accounting-only or witnessed unchanged.
+              currencyAttestation: currencyAttestationOf(anchor),
               // Anchor-level derivability (epic 22505 feature-end fix round, E5): whether the
               // lane's law accepts THIS anchor, read off the store's own `underivedReason` field
               // — which the Rust laws honor byte-for-byte — with the stated reason published so
@@ -2552,6 +2912,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       current:
         loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
         anchor.source.loaderClosureDigest,
+      currencyAttestation: currencyAttestationOf(anchor),
       cells: anchorCellCounts.get(anchor.id) ?? 0,
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
@@ -2686,6 +3047,11 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       analyticOnlyCells: anchorStore.analyticOnly,
       anchoredCells: cells.filter((cell) => cell.anchor !== null && cell.state !== "Missing").length,
       staleAnchors: anchorInventory.filter((anchor) => !anchor.current).length,
+      // sc-22667: how many of the CURRENT anchors are current by attestation rather than by
+      // measurement at the pin's own closure. A report beside `staleAnchors`, moving nothing.
+      attestedAnchors: anchorInventory.filter(
+        (anchor) => anchor.current && anchor.currencyAttestation !== null,
+      ).length,
       fullModels: 0,
     },
     models,
@@ -2720,7 +3086,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     ]),
   );
   assertPublishedDocumentIsClosed(matrix, cells.length);
-  return matrix;
+  return carryGeneratedFromForUnchangedContract(matrix);
 }
 
 export function renderMarkdown(matrix) {
@@ -2757,12 +3123,14 @@ export function renderMarkdown(matrix) {
         .join(", ") || "none"
     })`,
     `- MLX staged-residency static coverage: image ${matrix.summary.mlxStagedStaticCoverage}/${matrix.summary.mlxStagedStaticCoverageDenominator}, video ${matrix.summary.videoMlxStagedStaticCoverage}/${matrix.summary.videoMlxStagedStaticCoverageDenominator}`,
-    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale)`,
+    `- Measured anchors: ${matrix.summary.anchors} (covering ${matrix.summary.anchoredCells} coordinates; ${matrix.summary.staleAnchors} stale; ${matrix.summary.attestedAnchors} current by attestation)`,
     `- Coordinates the store classifies analytic-only: ${matrix.summary.analyticOnlyCells}`,
     "",
     `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
-    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a differing loader closure is advisory provenance, never a CI failure or an automatic requirement to remeasure (sc-23692).`,
+    "",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation records the review at the revision it names. Later pin or closure changes may report historical currency, but require no renewal and do not block CI.",
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
@@ -2770,7 +3138,7 @@ export function renderMarkdown(matrix) {
     "",
     "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell.",
     "",
-    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers behind the widened margin — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
+    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers with unchanged runtime admission — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
     "",
     "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
     "| --- | --- | --- | --- | --- | ---: | --- |",
@@ -2835,8 +3203,14 @@ export function renderMarkdown(matrix) {
     const geometry = `${anchor.geometry.width}x${anchor.geometry.height}${
       anchor.geometry.frames > 1 ? `x${anchor.geometry.frames}f` : ""
     }`;
+    const attested = anchor.currencyAttestation;
+    const current = !anchor.current
+      ? "no — advisory"
+      : attested
+        ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
+        : "yes";
     lines.push(
-      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${anchor.current ? "yes" : "no — re-extract"} | ${anchor.cells} |`,
+      `| \`${anchor.id}\` | \`${anchor.modelId}\` | ${anchor.backend} | ${anchor.tier} | ${geometry} | ${current} | ${anchor.cells} |`,
     );
   }
   lines.push("");

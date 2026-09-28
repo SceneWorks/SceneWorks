@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "703d10d916e80a5fedd88be318159cb0ff553184";
+pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "1744de6e5786687b1558af1df5c27efab762b875";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -664,7 +664,8 @@ async fn generate_vision_json(
     image_path: PathBuf,
 ) -> WorkerResult<String> {
     use gen_core::core_llm::{
-        CancelFlag, Constraint, Content, Message, ModelRequirements, Role, Sampling, TextLlmRequest,
+        CancelFlag, Constraint, Content, Message, ModelRequirements, Role, Sampling, StreamEvent,
+        TextLlmRequest,
     };
 
     let image = tokio::task::spawn_blocking(move || {
@@ -676,7 +677,12 @@ async fn generate_vision_json(
     let blocking_cancel = cancel.clone();
     let spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
-        quantize: None,
+        // Only a separable Prism GGUF load needs an explicit projector artifact. Every SceneWorks
+        // vision model is a snapshot directory whose projector is part of the model, so the
+        // default `projector_source: None` is the load this code has always performed — it does
+        // not turn vision off. Every other load option keeps its default too (dense weights, the
+        // backend's own decode defaults), so a load option the contract adds needs no edit here.
+        ..Default::default()
     };
     let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
     let generation = crate::refine_model_cache::with_cached_refiner(
@@ -704,8 +710,19 @@ async fn generate_vision_json(
                 cancel: blocking_cancel,
                 ..Default::default()
             };
+            // sc-24029: the KV cache grows per token here too, and this closure is the only hook
+            // interleaved with the decode — MLX's freed-buffer cache is PROCESS-GLOBAL, so the
+            // clear is not thread-scoped and will also discard buffers a concurrent image render
+            // had cached (up to once per 16 streamed token events, plus once at decode end). The
+            // terminal clear fires when this job closure returns — on the mapped output or on the
+            // error path below alike.
+            let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
             model
-                .generate(&request, &mut |_| {})
+                .generate(&request, &mut |event| {
+                    if matches!(event, StreamEvent::Token { .. }) {
+                        cache_bound.note_event();
+                    }
+                })
                 .map(|output| output.text)
                 .map_err(|error| {
                     WorkerError::Engine(format!("catalog vision inference failed: {error}"))

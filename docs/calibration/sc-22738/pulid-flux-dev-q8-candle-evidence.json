@@ -1,0 +1,182 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "inventorySha256": "8921757aed26fed6daa853d1daa95c2df283700fd15584a0dba6a8a5b4527afb",
+        "repository": "SceneWorks/flux1-dev-mlx",
+        "resolvedRevision": "323fd12d79f78ad444e882e8d8e871914584f2b9",
+        "variant": "q8"
+      },
+      "backend": "candle",
+      "calibrationFingerprint": "pulid-flux-cuda-identity-stack-staged-decode-attention-block-window-v1",
+      "capturedAt": "2026-09-13T06:02:21Z",
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:pulid-flux-bespoke-reference",
+        "blockers": [
+          "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the bespoke route opens no memory-strategy request scope to inject a calibration fault into"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 19660800000
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 23217569792
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 30465327104
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 30465327104
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 1
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "pulid-flux-face-sc16956-candle-q8-1024-seed22726-step2",
+      "hardware": {
+        "computeCapability": "12.0",
+        "deviceId": "1",
+        "driverVersion": "596.36",
+        "memoryBytes": 102641958912,
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "runtimeVersion": "12.9"
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-7709075e035c9bb00cdf",
+      "loadShape": "deferred_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SceneWorks/flux1-dev-mlx@323fd12d79f78ad444e882e8d8e871914584f2b9:q8+identity:8921757aed26fed6daa853d1daa95c2df283700fd15584a0dba6a8a5b4527afb",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-1bbb76cd08564a81a55b",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 19660800000,
+          "allocatorBytes": 19660800000,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 30465327104,
+          "allocatorBytes": 30465327104,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 23217569792,
+          "allocatorBytes": 23217569792,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 30465327104,
+          "allocatorBytes": 30465327104,
+          "reclaimableBytes": 0
+        }
+      },
+      "predictedPeakBytes": null,
+      "quality": {
+        "result": "not_run"
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "a20389ecfa85d1febcf204a70c5427d24e292591d064914965b346ae68dfc10a",
+          "dirty": false,
+          "revision": "290fa1f3e7dbf2039dd7f7434cf58f3c29eec35f"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:32af032b221a3a79c1c3640d0f73ae4ba6f3adc6b479b88687962641d7f56630",
+          "revision": "e85325c0d4e3d4a28ef7d25e15ab31d9e8b5903c"
+        }
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "reason": "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the bespoke route opens no memory-strategy request scope to inject a calibration fault into",
+          "result": "not_run"
+        },
+        {
+          "name": "unknown_budget",
+          "reason": "the pinned PuLID-FLUX admission check rejected a zero/unknown budget before load",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned PuLID-FLUX admission check rejected a mutated calibration fingerprint before load",
+          "result": "passed"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the bespoke route opens no memory-strategy request scope to inject a calibration fault into",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the bespoke route opens no memory-strategy request scope to inject a calibration fault into",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "sc-22726 anchor capture measures exact per-phase memory and strategy identity for the Candle PuLID-FLUX lane; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite, and the bespoke route opens no memory-strategy request scope to inject a calibration fault into",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the PuLID identity stack (adapter, EVA tower, and the three face models) was resident for the measured render and is declared as its own resident component by the pinned contract",
+          "result": "passed"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident",
+          "staged_residency"
+        ],
+        "parameters": {},
+        "rung": "staged_residency"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 1024,
+          "width": 1024
+        },
+        "mode": "character_image",
+        "modelId": "pulid_flux_dev",
+        "overlay": "identity",
+        "provider": "pulid_flux",
+        "tier": "q8"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

@@ -454,8 +454,330 @@ pub(crate) fn load_for_model_with(
     text().load_for_model_with(spec, requirements)
 }
 
+/// Every plan row on `lane` must resolve through the shipped registry to a weights-free provider
+/// contract that implements the rung the plan will select for it (sc-18408 item (d); sc-22736 for
+/// the rung). Derived from the plan rather than a hand-maintained provider list: adding a planned
+/// lane without registering its contract, or planning a rung the provider's contract refuses
+/// (Candle SCAIL-2 declares `Resident` alone, so a `staged_residency` plan would fail
+/// `validate_selection` on every attempt — the 3-cell blocker the sc-22736 review found), must
+/// fail here before the calibration adapter reaches a physical capture.
+///
+/// Provider-owned contract fixtures avoid filesystem-shaped test doubles where providers expose
+/// them — or, for a route with no optimized surface, the typed resident-only witness, which is the
+/// same weights-free builder on the other of the two mutually exclusive seams (the registry
+/// builder refuses both at once); SDXL and FLUX.2-dev intentionally fall back to their normal
+/// registrations, whose contract builders are themselves weights-free.
+///
+/// A weights-free contract is not required to carry a calibration identity (sc-22738): families
+/// whose identity is keyed on the artifact-proven tier (Candle SD3.5, Ideogram 4) publish it only
+/// from a sealed load receipt. Where a weights-free surface does publish one, it must preserve the
+/// row's load shape.
+///
+/// The planned rung is exactly what `memory-calibration-harness.mjs` `planAnchor` sends: the row's
+/// own `rung` when it states one, else the lane default. That default is not respelled here
+/// (sc-22738) — both sides read `config/anchor-lane-default-strategy.json`, so a change to either
+/// side that this does not follow is a red here.
+#[cfg(all(
+    test,
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung(
+    lane: &str,
+    expected_backend: gen_core::MemoryBackend,
+) {
+    use gen_core::{MemorySelection, MemoryStrategy, WeightsSource};
+    let plan: serde_json::Value =
+        serde_json::from_str(include_str!("../../../config/memory-calibration-plan.json"))
+            .expect("memory calibration plan parses");
+    // sc-22514: the plan is an ANCHOR plan — an object keyed `<modelId>:<tier>:<backend>` with
+    // exactly one entry per cell — so the tier and the lane come out of the KEY and everything
+    // else out of the entry.
+    let anchors = plan["anchors"].as_object().expect("plan anchors object");
+    let registry = media();
+    // sc-22738: the lane default is READ, never respelled. `memory-calibration-harness.mjs`'s
+    // `ANCHOR_STRATEGY` — the composition `planAnchor` applies to every row with no `strategy`
+    // override — is built from this same file, so a change to the JS default reaches this walk
+    // instead of leaving it asserting a rung the plan no longer captures at. Fail-closed: an absent
+    // lane or a non-string rung panics rather than falling back to a default nothing declared.
+    let lane_defaults: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../config/anchor-lane-default-strategy.json"
+    ))
+    .expect("anchor lane default strategy parses");
+    let lane_default_rung = lane_defaults["lanes"][lane]["rung"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!("config/anchor-lane-default-strategy.json declares no rung for lane {lane}")
+        })
+        .to_owned();
+    let lane_default_rung = lane_default_rung.as_str();
+    let mut checked = 0_usize;
+    let mut overridden = 0_usize;
+    let mut forced = 0_usize;
+
+    for (key, row) in anchors.iter() {
+        let coordinates: Vec<&str> = key.split(':').collect();
+        let [_model_id, tier, backend] = coordinates.as_slice() else {
+            panic!("anchor key {key} must be <modelId>:<tier>:<backend>")
+        };
+        if *backend != lane {
+            continue;
+        }
+        let provider = row["provider"].as_str().expect("anchor provider");
+        let mode = row["mode"].as_str().expect("anchor mode");
+        let overlay = row["overlay"].as_str().expect("anchor overlay");
+        let load_shape = match row["loadShape"].as_str().expect("anchor loadShape") {
+            "eager_materialization" => gen_core::LoadShape::EagerMaterialization,
+            "deferred_materialization" => gen_core::LoadShape::DeferredMaterialization,
+            other => {
+                panic!("planned {lane} lane {provider}/{mode} names unknown load shape {other}")
+            }
+        };
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(std::path::PathBuf::from("fixture")))
+            .with_load_shape(load_shape);
+        let quant = match *tier {
+            "q4" => Some(gen_core::Quant::Q4),
+            "q8" => Some(gen_core::Quant::Q8),
+            "bf16" => None,
+            other => panic!("planned {lane} lane {provider}/{mode} names unknown tier {other}"),
+        };
+        if let Some(quant) = quant {
+            spec = spec.with_quant(quant);
+        }
+        match overlay {
+            "none" => {}
+            "control:1" => {
+                spec = spec.with_control(WeightsSource::File(std::path::PathBuf::from(
+                    "fixture-control",
+                )));
+            }
+            // sc-22728: production represents a `lora` overlay as an adapter stack on the
+            // LoadSpec — the built-in Qwen edit Lightning distill is one LoRA at scale 1.0
+            // ahead of any user adapters (`image_jobs/qwen.rs`), which is exactly the shape
+            // the memory adapter's Lightning arm builds.
+            "lora" => {
+                spec = spec.with_adapters(vec![gen_core::AdapterSpec::new(
+                    std::path::PathBuf::from("fixture-lora.safetensors"),
+                    1.0,
+                    gen_core::AdapterKind::Lora,
+                )]);
+            }
+            // sc-22726: production represents the PuLID identity overlay as the typed
+            // `LoadSpec::identity` seam — the adapter checkpoint, the EVA tower, and the
+            // directory the three face models are read out of by name
+            // (`image_jobs/pulid.rs::pulid_identity_weights`). All three slots are required by
+            // the loader, so a fixture must fill all three or the contract builder refuses.
+            "identity" => {
+                spec.identity = Some(gen_core::IdentityWeights {
+                    encoder: Some(WeightsSource::File(std::path::PathBuf::from(
+                        "fixture-identity-encoder",
+                    ))),
+                    eva: Some(WeightsSource::File(std::path::PathBuf::from(
+                        "fixture-identity-eva",
+                    ))),
+                    face_dir: Some(WeightsSource::Dir(std::path::PathBuf::from(
+                        "fixture-identity-face",
+                    ))),
+                });
+            }
+            other => panic!(
+                "planned {lane} lane {provider}/{mode} names unmapped overlay {other}; teach the \
+                 generic contract guard how production represents it"
+            ),
+        }
+
+        // sc-22729: a BESPOKE provider registers no `ModelDescriptor` and no memory-strategy
+        // registration at all (`mlx_gen_catalog::BESPOKE_UTILITY_CRATES` lists `instantid`), so
+        // there is no weights-free REGISTRY contract for this guard to resolve — the adapter arm
+        // calls the crate's own `InstantId::load_with_memory_context`, which needs resolved paths,
+        // not a fixture `LoadSpec`. Skipping silently would let a genuinely registered provider
+        // take the same exit and lose its coverage, so the absence is ASSERTED here rather than
+        // assumed, and the lane is not counted toward `checked`.
+        //
+        // sc-22738: the Candle catalog registers no descriptor named `instantid`, `pulid` or
+        // `pulid_flux` either (`candle-gen-catalog`: "PuLID is a plain struct the worker drives");
+        // `image_jobs/pulid_candle.rs` builds its contract from resolved paths through
+        // `runtime_cuda::providers::pulid::memory_strategy::provider_contract` and prices it via
+        // `evaluate_shared_bespoke_image`, which is the bespoke seam this walk cannot reach
+        // weights-free.
+        const BESPOKE_PROVIDERS: [(&str, &str); 3] = [
+            ("mlx", "instantid"),
+            ("candle", "instantid"),
+            ("candle", "pulid_flux"),
+        ];
+        if BESPOKE_PROVIDERS.contains(&(lane, provider)) {
+            assert!(
+                registry
+                    .memory_strategy_registrations()
+                    .all(|registration| registration.provider_id != provider),
+                "planned {lane} lane {provider}/{mode} IS registered in the shipped runtime \
+                 registry, so it must resolve a weights-free contract like every other lane \
+                 instead of taking the bespoke exit"
+            );
+            continue;
+        }
+
+        let registration = registry
+            .memory_strategy_registrations()
+            .find(|registration| registration.provider_id == provider)
+            .unwrap_or_else(|| {
+                panic!(
+                    "planned {lane} lane {provider}/{mode} has no memory-strategy registration in \
+                     the shipped runtime registry"
+                )
+            });
+        // sc-22736: a provider publishes its weights-free contract on exactly ONE of two seams,
+        // and the registry builder refuses both at once ("has both a contract-surface fixture and
+        // a resident-only witness"). A route with no optimized surface — SCAIL-2 on both lanes —
+        // publishes the typed RESIDENT-ONLY WITNESS instead of a fixture, and it is the same
+        // weights-free builder; reading only the fixture seam skipped it and fell through to the
+        // normal registration, whose builder opens the artifact and fails with the snapshot's own
+        // io error.
+        let weights_free = registry
+            .memory_contract_fixture_registrations()
+            .find(|fixture| fixture.provider_id == provider)
+            .map(|fixture| fixture.contract)
+            .or_else(|| {
+                registry
+                    .resident_only_memory_contract_registrations()
+                    .find(|witness| witness.provider_id == provider)
+                    .map(|witness| witness.contract)
+            });
+        let contract = match weights_free {
+            Some(build) => build(&spec),
+            None => (registration.contract)(&spec),
+        }
+        .unwrap_or_else(|error| {
+            panic!(
+                "planned {lane} lane {provider}/{mode} cannot build a weights-free memory \
+                 contract: {error}"
+            )
+        });
+
+        assert_eq!(
+            contract.provider_id, provider,
+            "planned {lane} lane {provider}/{mode} resolved another provider's contract"
+        );
+        assert_eq!(
+            contract.backend.backend_kind(),
+            expected_backend,
+            "planned {lane} lane {provider}/{mode} resolved a contract on another lane"
+        );
+        assert_eq!(
+            contract.load_shape, load_shape,
+            "planned {lane} lane {provider}/{mode} contract does not preserve its load shape"
+        );
+        // A weights-free contract MAY carry no calibration identity (sc-22738). Epic 22723 keyed
+        // the production identity on the ARTIFACT-PROVEN tier — the Candle SD3.5 (sc-22730) and
+        // Ideogram 4 (sc-22732) families publish it only from a sealed load receipt, and every
+        // weights-free path in those crates passes `None` on purpose ("a named tier is not a
+        // proven one"). That `None` is not the pre-epic "provider has not adopted calibration"
+        // compatibility default this walk used to refuse: the loaded contract the capture arm
+        // reads does publish the identity, and the adapter refuses a loaded contract without one.
+        // So the identity is asserted only where a weights-free surface publishes it, and what
+        // every row is held to weights-free is the rung check below.
+        if let Some(calibration) = contract.calibration.as_ref() {
+            assert_eq!(
+                calibration.load_shape, load_shape,
+                "planned {lane} lane {provider}/{mode} calibration identity does not preserve \
+                 its load shape"
+            );
+        }
+
+        // The planned rung — the row's own `strategy.rung` (sc-22734's single-composition
+        // override), else the lane default `planAnchor` applies — must be one this contract
+        // EXECUTES. `validate_selection` is the production refusal the adapter hits after the load;
+        // asking it here, weights-free, is what makes every planned cell non-vacuous rather than
+        // three of them unrunnable by construction.
+        let override_rung = row["strategy"]["rung"].as_str();
+        let planned_rung = override_rung.unwrap_or(lane_default_rung);
+        let as_strategy = |rung: &str| match rung {
+            "resident" => MemoryStrategy::Resident,
+            "staged_residency" => MemoryStrategy::StagedResidency,
+            other => panic!("{key}: plans a rung an anchor may not plan: {other}"),
+        };
+        let selection_for = |strategy: MemoryStrategy| MemorySelection {
+            strategy,
+            parameters: gen_core::MemoryStrategyParameters::default(),
+            tier: gen_core::MemoryNumericTier {
+                precision: gen_core::Precision::Bf16,
+                quant,
+                component_precision_floors: &[],
+            },
+        };
+        contract
+            .validate_selection(&selection_for(as_strategy(planned_rung)))
+            .unwrap_or_else(|error| {
+                panic!(
+                "{key}: the plan selects {planned_rung} but the {provider} contract refuses it — \
+                 the anchor would fail at `contract.validate_selection` on every attempt: {error}"
+            )
+            });
+        // An override is DERIVED, never picked (sc-22734, sc-22736): a row may move off the lane
+        // default only because the contract refuses that default — SenseNova classifies
+        // `StagedResidency` structurally not applicable, Candle SCAIL-2 implements `Resident`
+        // alone — so an override that names a rung other than the default is legitimate exactly
+        // when the default itself fails `validate_selection`. Same rung as the default (the MLX
+        // SenseNova rows) moves nothing and proves nothing.
+        if override_rung.is_some() {
+            overridden += 1;
+        }
+        if planned_rung != lane_default_rung {
+            let default_refused = contract
+                .validate_selection(&selection_for(as_strategy(lane_default_rung)))
+                .is_err();
+            assert!(
+                default_refused,
+                "{key}: overrides the {lane} lane default {lane_default_rung} with {planned_rung}, \
+                 but the {provider} contract would have executed the default — an override must be \
+                 forced by the contract, not chosen"
+            );
+            forced += 1;
+        }
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "the shipped plan must contain at least one {lane} anchor"
+    );
+    // The mechanism is exercised, not merely tolerated: the candle lane carries at least one
+    // contract-forced override (SenseNova's six and SCAIL-2's three today); on MLX the default is
+    // already `resident`, so any override there is a no-op and nothing is forced.
+    if lane == "candle" {
+        assert!(
+            forced > 0,
+            "candle: the plan must carry at least one contract-forced rung override"
+        );
+    } else {
+        assert_eq!(
+            forced, 0,
+            "{lane}: no override can move off a resident default"
+        );
+    }
+    assert!(
+        overridden > 0,
+        "{lane}: the plan exercises the strategy override at least once"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    /// The candle half of sc-18408 item (d) / sc-22736: every candle plan row resolves a
+    /// weights-free contract that implements its planned rung — including the three SCAIL-2 cells
+    /// whose provider declares `Resident` alone and which the plan therefore anchors resident.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn every_planned_candle_lane_resolves_a_weights_free_provider_contract() {
+        super::every_planned_lane_row_resolves_a_weights_free_contract_implementing_its_rung(
+            "candle",
+            gen_core::MemoryBackend::Candle,
+        );
+    }
+
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")

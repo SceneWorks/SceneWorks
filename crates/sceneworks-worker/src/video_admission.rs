@@ -14,7 +14,10 @@
 //!
 //! **Request selection is evidence-gated; prediction is exact-or-floor.** The request entry point
 //! first requires a full curve match across catalog/provider/lane/tier/mode/reference shape and
-//! count/output FPS/overlay/rung/load-shape/ABI/fingerprint/closure/decode-regime. A candidate
+//! count/output FPS/overlay/rung/load-shape/ABI/fingerprint/decode-regime — never the provider's
+//! compile closure (sc-22738): a curve fitted under a closure that has since moved matches and
+//! prices exactly as a fresh fit would, and the same holds for a measured anchor or a measured
+//! lower bound. Currency is a re-capture signal for the probe tooling only. A candidate
 //! whose identity matches a packaged fitted curve then uses
 //! its three residual-bounded affine cross laws
 //! (`fixed + perMpx*mpx + perMpxFrame*mpx*frames + maxResidual`). The internal selector retains
@@ -43,7 +46,9 @@ use sceneworks_core::video_request::{
 };
 use sha2::Digest;
 
-use crate::memory_strategy::{Budget, Candidate, CandidateBasis, RequestScope, Selection};
+use crate::memory_strategy::{
+    AnchorDerivationLane, Budget, Candidate, CandidateBasis, RequestScope, Selection,
+};
 
 pub(crate) const BERNINI_R2V_RECEIPT_DOMAIN: &str = "bernini-r2v-references-v2";
 pub(crate) const BERNINI_R2V_SEAL_DOMAIN: &str = "bernini-r2v-request-seal-v1";
@@ -872,10 +877,6 @@ pub(crate) struct VideoRequestIdentity<'a> {
     /// identity so an ABI mismatch fails the fitted curve even if a malformed/legacy identity was
     /// minted with a misleading fingerprint.
     pub(crate) calibration_abi: u32,
-    /// The live compile-closure digest of the provider being admitted (sc-17774). Both sides carry
-    /// the same value on a route with no measured cell, which states plainly that there is no
-    /// measured closure to be current against.
-    pub(crate) expected_closure_digest: &'a str,
 }
 
 /// Core's [`VideoStrategySelector`] seam, answered by the shared ladder selector.
@@ -1087,6 +1088,7 @@ impl PhasePeaks {
 /// `mlx_fit_gate::estimate_floor_weights_bytes(contract, engaged) + headroom_bytes`, the same
 /// number the cold-load residency gate already charges this load. It is phase-blind, so all three
 /// phases carry it and [`PhasePeaks::peak_bytes`] returns that scalar unchanged.
+#[cfg(test)]
 fn floor_phase_peaks(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
@@ -1111,7 +1113,21 @@ fn profiled_floor_phase_peaks(
     selection: MemorySelection,
     engaged: &[MemoryStrategy],
 ) -> (PhasePeaks, Option<&'static str>) {
-    let generic = floor_phase_peaks(selector.contract, engaged, selector.headroom_bytes);
+    let weights = if selector.backend() == MemoryBackend::Mlx {
+        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
+            selector.contract,
+            engaged,
+            selection.parameters,
+        )
+    } else {
+        crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged)
+    };
+    let scalar = weights.saturating_add(selector.headroom_bytes);
+    let generic = PhasePeaks {
+        conditioning_bytes: scalar,
+        denoise_bytes: scalar,
+        decode_bytes: scalar,
+    };
     let resolved = match (selector.decode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
@@ -1127,7 +1143,6 @@ fn profiled_floor_phase_peaks(
     let Some(resolved) = resolved else {
         return (generic, None);
     };
-    let weights = crate::mlx_fit_gate::estimate_floor_weights_bytes(selector.contract, engaged);
     let Some(profiled) = resolved
         .profile
         .checked_composed_peak(weights, selector.contract.asset_facts.decoder_bytes)
@@ -1175,37 +1190,112 @@ fn curve_decode_pass(decode_pass: VideoDecodePass) -> VideoCurveDecodePass {
     }
 }
 
-/// Whether the anchor's evidence is CURRENT (sc-22511, epic 22505 E9).
+// There is deliberately no anchor-currency predicate in this module any more (sc-22738). Until this
+// story `anchor_currency_matches` compared an anchor's loader-closure digest (sc-22511) with the
+// packaged declaration and every anchor lookup on every lane — this module's video derivation,
+// `mlx_fit_gate::mlx_image_anchor_match`, `vram_gate::krea_store_anchor` and
+// `candle_memory_strategy::candle_image_anchor` — refused a stale anchor, which floored the cell.
+// Michael's standing rule: the runtime ALWAYS behaves as if the measurement were valid. The digest
+// is a re-capture signal for `scripts/measure-memory-catalog.mjs`, `generate-memory-matrix.mjs`
+// and `stale-lane-report.mjs`; the runtime carries no function that could express "stale".
+
+/// The component bytes the image derivation law subtracts from an anchor's measured peaks and
+/// re-adds per the request's regime (sc-22663, epic 22657 E3), read off the live provider
+/// contract's asset facts. The law takes them as an explicit argument because the anchor store
+/// carries none today; this is the single translation from `gen_core` to the core type, shared by
+/// both image lanes' anchor consumers.
+pub(crate) fn anchor_component_bytes(
+    facts: gen_core::MemoryAssetFacts,
+) -> sceneworks_core::memory_anchor::ComponentBytes {
+    sceneworks_core::memory_anchor::ComponentBytes {
+        conditioning: facts.conditioning_bytes,
+        transformer: facts.transformer_bytes,
+        decoder: facts.decoder_bytes,
+    }
+}
+
+/// The architecture facts the image derivation law scales its residues by (sc-22663, epic 22657
+/// E3), read off the live provider contract's `architecture_facts` block (sc-22667) — the
+/// companion translation to [`anchor_component_bytes`], shared by both image lanes' anchor
+/// consumers (`candle_memory_strategy::CandleLadderAnchors::packaged` and the MLX estimate
+/// floor) and the ONE worker-edge seam through which gen-core's facts reach the core law.
 ///
-/// The one currency question an anchor answers to: does the code that LOADS THIS MODEL on THIS
-/// backend still hash to what it hashed when the anchor was measured? The key is the digest of that
-/// model's own loader closure (`scripts/anchor-loader-closure.mjs`, checked in at
-/// `config/anchor-loader-closures.json`), so none of these can demote an anchor any more:
+/// WHY THE INPUT DIFFERS FROM ITS COMPANION'S, and why that is not an oversight to "fix" by
+/// matching signatures: [`anchor_component_bytes`] takes [`gen_core::MemoryAssetFacts`] because
+/// component bytes are a property of the resolved ASSET — the weight files this tier actually
+/// loads — and the contract already decomposes them there. Architecture facts are a property of
+/// the MODEL's topology (head count, head dim, block count, patch size, VAE scales, activation
+/// dtype width) and are identical across every tier and asset set of one model, so they live on
+/// the CONTRACT-level [`gen_core::MemoryArchitectureFacts`] block rather than in per-tier asset
+/// facts.
 ///
-///   * an inference PIN BUMP whose loader source is unchanged — the unit contains no revision, no
-///     `Cargo.lock` and no workspace codegen input;
-///   * a SIBLING model's edit — sibling crates are not in the closure, and a sibling model in the
-///     SAME crate is a different file;
-///   * a SHARED crate the loader never reaches — reachability is walked from the loader's entry
-///     points, not linked at crate granularity;
-///   * a new CALIBRATION CAMPAIGN — the fingerprint is provenance on the anchor's source record and
-///     is deliberately no longer a currency term. That is E9's point: the anchor's evidence is the
-///     retained render, not the campaign that scheduled it.
-///
-/// Fail-closed on a missing declaration or an unparsable/version-bumped closure file: an anchor
-/// whose loader nothing tracks cannot be shown to be current, so the caller keeps its floor.
-///
-/// This is the SINGLE currency seam for anchors, for EVERY lane. [`anchor_evidence_covers_request`]
-/// calls it, and since sc-22509 so do the candle image lane's two anchor lookups
-/// (`vram_gate::krea_store_anchor` and `candle_memory_strategy::candle_image_anchor`) — a second,
-/// inline copy of the comparison is how a pre-gate and a derivation would silently disagree about
-/// whether the evidence is live. It lives here rather than in the candle modules because this
-/// module is compiled unconditionally while both of those are `backend-candle`-gated.
-pub(crate) fn anchor_currency_matches(
-    anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
-) -> bool {
-    sceneworks_core::memory_anchor::packaged_anchor_loader_closures()
-        .is_some_and(|closures| anchor.is_current(closures))
+/// AXIS BY AXIS, `None` PRESERVED. The two structs state the same eight axes in the same units;
+/// the contract's block is destructured exhaustively, so a ninth axis added upstream is a compile
+/// error here rather than a silently dropped fact. An absent axis stays absent: the law documents
+/// `None` as "leave the residue this fact would have scaled UNSCALED" (core test
+/// `missing_facts_leave_residues_unscaled_and_never_shrink_the_estimate`), so a contract that
+/// states nothing — the registry's weights-free sentinel surfaces, a single-file import, a
+/// provider that has not adopted the block — prices its bounded rungs at their unbounded residue,
+/// never below it. Nothing is defaulted to zero: a zero axis is not a fact (a defaulted `0` would
+/// poison every ratio that multiplies by it), and gen-core's own facts conformance
+/// (`MemoryArchitectureFacts::zero_valued_axes`) refuses one at the provider.
+pub(crate) fn architecture_facts_from_contract(
+    contract: &MemoryProviderContract,
+) -> sceneworks_core::memory_anchor::ArchitectureFacts {
+    #[cfg(test)]
+    if let Some(facts) = INJECTED_ARCHITECTURE_FACTS.with(std::cell::Cell::get) {
+        return facts;
+    }
+    let &gen_core::MemoryArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    } = &contract.architecture_facts;
+    sceneworks_core::memory_anchor::ArchitectureFacts {
+        attention_heads,
+        head_dim,
+        transformer_blocks,
+        patch_size,
+        latent_channels,
+        vae_spatial_scale,
+        vae_temporal_scale,
+        activation_dtype_width,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_ARCHITECTURE_FACTS: std::cell::Cell<
+        Option<sceneworks_core::memory_anchor::ArchitectureFacts>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam (sc-22667): stand `facts` in for what [`architecture_facts_from_contract`] reads off
+/// the contract, for the lifetime of the returned guard, so a fixture can grade the lanes' rung
+/// ratios through their PRODUCTION admission paths on a fixture contract that states no facts of
+/// its own. The same shape as `vram_gate::tests::with_injected_anchor_store`.
+#[cfg(test)]
+#[must_use = "the injection lasts exactly as long as the guard"]
+pub(crate) struct InjectedArchitectureFacts;
+
+#[cfg(test)]
+impl Drop for InjectedArchitectureFacts {
+    fn drop(&mut self) {
+        INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(None));
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn inject_architecture_facts(
+    facts: sceneworks_core::memory_anchor::ArchitectureFacts,
+) -> InjectedArchitectureFacts {
+    INJECTED_ARCHITECTURE_FACTS.with(|cell| cell.set(Some(facts)));
+    InjectedArchitectureFacts
 }
 
 /// Derive per-phase peaks from the measured memory anchor for this
@@ -1215,9 +1305,9 @@ pub(crate) fn anchor_currency_matches(
 /// Deliberately NOT hull-restricted: the whole point of the anchor + analytic derivation is that
 /// a request at a `(geometry, frames)` never measured is priced from the anchor plus architecture
 /// facts instead of falling to the phase-blind floor. Identity stays strict — model, family, route,
-/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free, and a
-/// current loader closure ([`anchor_currency_matches`]) — and the anchor store itself is validated
-/// against the retained evidence it was extracted from at load.
+/// provider, lane, tier, pipeline variant/decoder, mode, overlay-free, reference-free — and the
+/// anchor store itself is validated against the retained evidence it was extracted from at load.
+/// Loader-closure currency is NOT a conjunct (sc-22738).
 fn anchor_derived_phase_peaks<'a>(
     selector: &LadderVideoSelector<'a>,
     geometry: VideoAdmissionGeometry,
@@ -1227,11 +1317,6 @@ fn anchor_derived_phase_peaks<'a>(
 
     let store = selector.anchors?;
     let identity = &selector.identity;
-    // The anchors were measured overlay-free with zero references; a differently-conditioned
-    // surface must not borrow them.
-    if identity.overlay.is_some() || identity.reference_count != 0 {
-        return None;
-    }
     let backend = match identity.lane {
         VideoLane::Mlx => AnchorBackend::Mlx,
         VideoLane::Candle => AnchorBackend::Candle,
@@ -1242,6 +1327,11 @@ fn anchor_derived_phase_peaks<'a>(
     // SIBLING anchor of the same (model, tier, lane) plus the bound component deltas (the
     // variant's adapter/refiner file sizes, the decoder's weight file sizes, from the shipped
     // inventory), and refuses — floor again — whenever an axis has no bound delta.
+    //
+    // The pipeline axes travel as the request states them (sc-22736): an LTX-2.5 request carries
+    // both and resolves its exact or sibling cell as before; a Wan 2.2 / SCAIL-2 / LTX-2.3 request
+    // carries neither and resolves the axis-free anchor of its `(model, tier, lane)`, which the core
+    // law prices at and below its measured point only.
     //
     // `decode_tiled` is keyed on the ENGAGED RUNG, not on `geometry.decode_pass`, because the rung
     // is what actually bounds the decoder's working set: the rung is the selected memory strategy
@@ -1254,8 +1344,8 @@ fn anchor_derived_phase_peaks<'a>(
         identity.model_id,
         backend,
         crate::mlx_fit_gate::plan_tier_key(identity.tier),
-        identity.transformer_variant?,
-        identity.decoder?,
+        identity.transformer_variant,
+        identity.decoder,
         AnchorDeriveRequest {
             width: geometry.width,
             height: geometry.height,
@@ -1269,12 +1359,18 @@ fn anchor_derived_phase_peaks<'a>(
     // The identity conjuncts are graded on the anchor the derivation actually priced from — the
     // exact anchor, or the sibling the delta path crossed to — so a sibling can no more launder a
     // foreign provider/route/currency than the exact anchor could.
+    //
+    // The conditioning surface is an identity conjunct graded against the ANCHOR'S OWN record
+    // (sc-22736), not a blanket refusal of every conditioned request: a Wan 2.2 I2V or SCAIL-2
+    // anchor is measured WITH its one reference and prices exactly that surface, while the
+    // overlay-free, zero-reference LTX anchors still refuse every other surface as before.
     let anchor = derivation.anchor;
     if anchor.model_family != identity.model_family
         || anchor.mode != identity.mode
         || anchor.route != identity.route
         || anchor.provider != selector.contract.provider_id
-        || !anchor_currency_matches(anchor)
+        || anchor.overlay.as_deref() != identity.overlay
+        || anchor.reference_count != identity.reference_count
     {
         return None;
     }
@@ -1304,7 +1400,6 @@ fn fitted_or_floor_phase_peaks<'a>(
 ) -> (
     PhasePeaks,
     CandidateBasis,
-    &'a str,
     Option<&'a str>,
     Option<&'static str>,
 ) {
@@ -1334,7 +1429,6 @@ fn fitted_or_floor_phase_peaks<'a>(
                 overlay: curve_overlay.as_deref(),
                 rung: rung_of(strategy),
                 load_shape: curve_load_shape(selector.contract.load_shape),
-                closure_digest: selector.identity.expected_closure_digest,
                 calibration_abi: selector.identity.calibration_abi,
                 calibration_fingerprint: &calibration.fingerprint,
                 decode_pass: curve_decode_pass(geometry.decode_pass),
@@ -1357,7 +1451,6 @@ fn fitted_or_floor_phase_peaks<'a>(
                 decode_bytes: evaluation.phases.decode,
             },
             CandidateBasis::EstimateFittedCurve,
-            evaluation.closure_digest,
             Some(evaluation.curve_id),
             None,
         );
@@ -1369,8 +1462,9 @@ fn fitted_or_floor_phase_peaks<'a>(
     if let Some((derived, anchor_id)) = anchor_derived_phase_peaks(selector, geometry, engaged) {
         return (
             derived,
-            CandidateBasis::EstimateAnchorDerived,
-            selector.identity.expected_closure_digest,
+            CandidateBasis::EstimateAnchorDerived {
+                lane: AnchorDerivationLane::Video,
+            },
             Some(anchor_id),
             None,
         );
@@ -1386,13 +1480,7 @@ fn fitted_or_floor_phase_peaks<'a>(
     };
     let (floor, profile_revision) =
         profiled_floor_phase_peaks(selector, geometry, selection, engaged);
-    (
-        floor,
-        CandidateBasis::EstimateFloor,
-        selector.identity.expected_closure_digest,
-        None,
-        profile_revision,
-    )
+    (floor, CandidateBasis::EstimateFloor, None, profile_revision)
 }
 
 /// The gen-core geometry for one video admission cell.
@@ -1454,7 +1542,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             };
             // Phase-resolved for as long as possible: the scalar is taken only here, where
             // gen-core's evidence type forces one.
-            let (phase_peaks, basis, closure_digest, curve_id, profile_revision) =
+            let (phase_peaks, basis, curve_id, profile_revision) =
                 fitted_or_floor_phase_peaks(self, geometry, strategy, &engaged);
             if self.profile_error.borrow().is_some() {
                 return VideoRungSelection::Undecidable;
@@ -1490,9 +1578,16 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
             // floor). Fitted-curve and anchor-derived peaks are phase-resolved and carry no split.
             let unmodeled_activation_bytes =
                 matches!(basis, CandidateBasis::EstimateFloor).then(|| {
-                    let counted_weights =
+                    let weights = if backend == MemoryBackend::Mlx {
+                        crate::mlx_fit_gate::mlx_fallback_weights_bytes(
+                            self.contract,
+                            &engaged,
+                            parameters,
+                        )
+                    } else {
                         crate::mlx_fit_gate::estimate_floor_weights_bytes(self.contract, &engaged)
-                            .saturating_sub(self.attributable_resident_bytes);
+                    };
+                    let counted_weights = weights.saturating_sub(self.attributable_resident_bytes);
                     predicted_peak_bytes.saturating_sub(counted_weights)
                 });
             if strategy == MemoryStrategy::Resident {
@@ -1518,7 +1613,6 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 evidence,
                 phase_peaks,
                 basis,
-                closure_digest,
                 curve_id,
                 profile_revision,
                 unmodeled_activation_bytes,
@@ -1531,10 +1625,9 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
         let candidates = synthesized
             .iter()
             .map(
-                |(selection, evidence, _, basis, closure_digest, _, _, activation)| Candidate {
+                |(selection, evidence, _, basis, _, _, activation)| Candidate {
                     selection: *selection,
                     evidence,
-                    closure_digest,
                     basis: *basis,
                     // sc-22508: derived at the peak's construction site above, for BOTH lanes.
                     //
@@ -1560,7 +1653,6 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                 mode: self.identity.mode,
                 overlay: self.identity.overlay,
                 geometry: memory_geometry,
-                expected_closure_digest: self.identity.expected_closure_digest,
             },
             self.contract,
             self.budget,
@@ -1590,7 +1682,7 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     curve_id = synthesized
                         .iter()
                         .find(|(candidate, ..)| candidate.strategy == selection.strategy)
-                        .and_then(|(_, _, _, _, _, curve_id, _, _)| *curve_id)
+                        .and_then(|(_, _, _, _, curve_id, _, _)| *curve_id)
                         .unwrap_or("none"),
                     needed_gb,
                     available_gb,
@@ -1604,8 +1696,8 @@ impl VideoStrategySelector for LadderVideoSelector<'_> {
                     selection,
                     predicted_peak_bytes: selected.1.predicted_peak_bytes,
                     evidence_revision: selected
-                        .5
-                        .or(selected.6)
+                        .4
+                        .or(selected.5)
                         .unwrap_or("video-estimate-floor-v1")
                         .to_owned(),
                 });
@@ -1674,6 +1766,51 @@ pub(crate) fn admit_video_generation(
     )
 }
 
+/// Why the loaded provider refuses this advisory run context, or `None` when it accepts it
+/// (sc-22738).
+///
+/// # The hazard this closes
+///
+/// A `Resident` context modifies nothing about the render: it carries the selected contract and
+/// evidence receipt so provider safety and telemetry can name what was admitted. But
+/// [`crate::memory_strategy::generate_with_scope`] turns any
+/// [`gen_core::MemorySafetyDecision::Reject`] into a hard `Error::Unsupported` before the engine
+/// generates anything, so attaching a context a provider refuses converts a shipped, working render
+/// into a job failure. Several pinned MLX video providers refuse whole request shapes by name —
+/// Krea Realtime admits only `image_to_video`/`video_to_video` at one reference under its sealed
+/// `provider-resident-video-request-v3` receipt, Bernini only its five provider video routes,
+/// SCAIL-2 only `animation`/`replacement` at one reference — and until this epic packaged no video
+/// evidence for them, so admission never built a context and the refusal was unreachable. Landing
+/// anchors and bounds makes it reachable on `text_to_video`.
+///
+/// # Why the provider's own declaration is the source
+///
+/// [`gen_core::Generator::memory_strategy_safety_check`] is the exact declaration
+/// `generate_with_scope` already consults, resolved through each provider's registered strategy, so
+/// asking it here can never disagree with the gate that would refuse the render. There is no
+/// hard-coded model list, and a provider that widens its accepted shapes at a future pin widens
+/// this guard with it.
+///
+/// # Why the rung knobs go with it
+///
+/// The caller drops `memory` together with the context, so a refused shape reaches the engine with
+/// the input it received before the video gate existed. Keeping an optimized `GenerationMemory`
+/// block without its request scope is the exact state `generate_with_scope` already refuses, and a
+/// provider that will not accept a shape's context has not promised that shape an optimized rung
+/// either — so declining the rung is the conservative reading of its own declaration, not a
+/// weakening of it. The residual risk is a request that only fit at the optimized rung now running
+/// resident; the pre-load fit gate still governs that load, and a runtime refusal is strictly
+/// better than the unconditional `Unsupported` this path returns today.
+fn engine_declines_advisory_context(
+    generator: &dyn gen_core::Generator,
+    context: &MemoryRunContext,
+) -> Option<String> {
+    match generator.memory_strategy_safety_check(context) {
+        gen_core::MemorySafetyDecision::Accept => None,
+        gen_core::MemorySafetyDecision::Reject { reason } => Some(reason),
+    }
+}
+
 /// Whether a request has sealed packaged evidence before the worker pays for a live-memory probe.
 /// This is deliberately independent of the post-load budget: an unsupported mode/shape/rate must
 /// preserve direct generation even when that platform's budget probe would itself fail.
@@ -1698,16 +1835,180 @@ pub(crate) fn packaged_video_evidence_covers_request(
         contract,
         request,
     )
+    // A MEASURED LOWER BOUND is sealed packaged evidence too (sc-22738). It prices nothing, so it
+    // adds no candidate to the ladder — but it is the reason the worker must pay for the live
+    // budget probe, and the reason this gate must not abstain. Bernini bf16 MLX is the case that
+    // forced it: `bernini:bf16:mlx` carries no anchor and no curve, so this predicate answered
+    // false, the caller never probed the budget, admission returned `default()` — abstain — and an
+    // 848x480x49 request the host had already been unable to finish was admitted again. With the
+    // bound packaged, the request reaches [`exceeded_bound_refusal`] with a real budget in hand.
+    //
+    // THE SIDE EFFECT, NAMED: on a host the bound does NOT refuse, the request now also reaches the
+    // ladder instead of abstaining, so the weights-plus-headroom floor gets a say where it
+    // previously had none. That is the correct posture for a cell known to run large — and it is
+    // bounded in practice, because a host big enough to carry the bound clears that floor with room
+    // to spare, and `refusal_is_a_margin_artifact` still suppresses a floor refusal inside the
+    // estimate band. It applies ONLY to a coordinate at or above a stopped geometry on the stopped
+    // identity: every other request on the same model is untouched, including the reference-carrying
+    // Bernini surfaces, whose reference count no reference-free bound matches.
+    || binding_exceeded_bound(contract, request).is_some()
+}
+
+/// The anchor store the bound lookup reads: the packaged one, or a fixture a focused test has
+/// injected. Same shape as `vram_gate::tests::with_injected_anchor_store`, and the reason is the
+/// same: the refusal must be graded through its PRODUCTION path, on a store whose contents the
+/// test states, rather than through a parallel copy of the predicate.
+fn exceeded_bound_store() -> Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore> {
+    #[cfg(test)]
+    if let Some(store) = INJECTED_EXCEEDED_BOUND_STORE.with(std::cell::Cell::get) {
+        return Some(store);
+    }
+    sceneworks_core::memory_anchor::packaged_memory_anchors()
+}
+
+#[cfg(test)]
+thread_local! {
+    static INJECTED_EXCEEDED_BOUND_STORE: std::cell::Cell<
+        Option<&'static sceneworks_core::memory_anchor::MemoryAnchorStore>,
+    > = const { std::cell::Cell::new(None) };
+}
+
+/// Test seam (sc-22738): run `body` with `store` standing in for the packaged anchor store
+/// wherever the measured-lower-bound lookup reads it.
+#[cfg(test)]
+pub(crate) fn with_injected_exceeded_bound_store<T>(
+    store: sceneworks_core::memory_anchor::MemoryAnchorStore,
+    body: impl FnOnce() -> T,
+) -> T {
+    let leaked: &'static _ = Box::leak(Box::new(store));
+    INJECTED_EXCEEDED_BOUND_STORE.with(|cell| cell.set(Some(leaked)));
+    let outcome = body();
+    INJECTED_EXCEEDED_BOUND_STORE.with(|cell| cell.set(None));
+    outcome
+}
+
+/// The binding measured lower bound for this request, or `None` (sc-22738).
+///
+/// GENERIC BY CONSTRUCTION. Nothing here names a model: the identity is the same conjunction every
+/// anchor lookup uses, so any cell a footprint hard stop has ever bounded refuses through this one
+/// path. Bernini is the first occupant, not a special case.
+fn binding_exceeded_bound<'a>(
+    contract: &MemoryProviderContract,
+    request: &VideoAdmissionInputs<'a>,
+) -> Option<&'static sceneworks_core::memory_anchor::ExceededBound> {
+    use sceneworks_core::memory_anchor::ExceededBoundQuery;
+
+    let backend = match request.lane {
+        VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
+        VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
+    };
+    exceeded_bound_store()?.binding_exceeded_bound(ExceededBoundQuery {
+        model_id: request.model_id,
+        // Production has resolved both, so it states both: see `ExceededBoundQuery`.
+        model_family: Some(request.model_family),
+        route: Some(request.route),
+        provider: contract.provider_id.as_str(),
+        backend,
+        tier: crate::mlx_fit_gate::plan_tier_key(request.tier),
+        transformer_variant: request.transformer_variant,
+        decoder: request.decoder,
+        mode: request.mode,
+        overlay: request.overlay,
+        reference_count: request.reference_count,
+        width: request.width,
+        height: request.height,
+        frames: request.frames,
+    })
+}
+
+/// The pre-load refusal a measured lower bound owns (sc-22738, epic 22723 E4), or `None` when the
+/// host can carry the bound.
+///
+/// WHY THIS RUNS AHEAD OF THE LADDER, AND WHY IT IS NOT A LADDER CANDIDATE. Every other candidate
+/// in this module is an ESTIMATE — a fitted curve, an anchor derivation, a weights-plus-headroom
+/// floor — graded behind an estimate margin and subject to
+/// [`refusal_is_a_margin_artifact`]'s suppression, which exists precisely so an estimate cannot
+/// manufacture a refusal inside its own error band. A bound is not an estimate: it is a footprint
+/// a process on a real host actually reached before it had to be killed. There is no error band to
+/// forgive and no margin artifact to suppress, so it decides on its own terms, before any of that
+/// machinery runs, and an ANALYTIC estimate for the same cell is simply outranked — the derivation
+/// never gets to price a request the measurement has already ruled out.
+///
+/// It is also, deliberately, the ONLY thing a bound does. It widens no envelope, feeds no
+/// derivation and publishes no peak: an inequality is not a decomposition, and pretending otherwise
+/// would put a number the measurement never produced into the estimate path.
+fn exceeded_bound_refusal(
+    contract: &MemoryProviderContract,
+    request: &VideoAdmissionInputs<'_>,
+    runtime: VideoRuntimeMemoryState,
+) -> Option<String> {
+    let bound = binding_exceeded_bound(contract, request)?;
+    let budget = runtime.budget;
+    // The byte-exact form of `Budget::effective_gb`: the live pool plus what is reclaimable, less
+    // the operational reserve, capped by the physical ceiling less that same reserve. Stated in
+    // bytes rather than routed through the f64 GiB form because the comparison below is against a
+    // measured byte count, and a bound must not be forgiven by a rounding step.
+    let available = budget.total_bytes.saturating_sub(budget.committed_bytes);
+    let effective_bytes = available
+        .saturating_add(budget.reclaimable_bytes)
+        .saturating_sub(budget.reserved_headroom_bytes)
+        .min(
+            budget
+                .total_bytes
+                .saturating_sub(budget.reserved_headroom_bytes),
+        );
+    let required_bytes = bound.required_bytes(request.headroom_bytes);
+    if !bound.refuses_host(budget.total_bytes, effective_bytes, request.headroom_bytes) {
+        return None;
+    }
+    tracing::warn!(
+        event = "video_memory_exceeded_bound_refusal",
+        route = request.route,
+        backend = request.lane.as_key(),
+        bound = %bound.id,
+        observed_footprint_bytes = bound.observed_footprint_bytes,
+        headroom_bytes = request.headroom_bytes,
+        required_bytes,
+        effective_bytes,
+        width = request.width,
+        height = request.height,
+        frames = request.frames,
+        "refusing before load: this coordinate has a measured lower bound this host cannot carry"
+    );
+    let gib = |bytes: u64| bytes as f64 / sceneworks_core::memory_anchor::BYTES_PER_GIB;
+    Some(format!(
+        "{} at {}x{}x{} has already been measured as too large for a machine this size. A run of \
+         this exact model, tier and clip shape reached {:.1} GiB of memory at {}x{}x{} on a \
+         {:.0} GiB host without finishing, and had to be stopped to keep that machine alive ({}); \
+         it needs at least {:.1} GiB, and this host has {:.0} GiB with {:.1} GiB free. That is a \
+         measurement rather than an estimate, so the render is refused before it loads instead of \
+         after it has taken the machine down. Reduce the resolution or the clip length, or run it \
+         on a larger machine.",
+        request.route,
+        request.width,
+        request.height,
+        request.frames,
+        gib(bound.observed_footprint_bytes),
+        bound.geometry.width,
+        bound.geometry.height,
+        bound.geometry.frames,
+        gib(bound.host_memory_bytes),
+        bound.id,
+        gib(required_bytes),
+        gib(budget.total_bytes),
+        gib(effective_bytes),
+    ))
 }
 
 /// Whether the packaged anchor store carries the measured anchor this request's
-/// `(model, tier, lane, transformer variant, decoder)` coordinate derives from (sc-22507).
+/// `(model, tier, lane, transformer variant, decoder)` coordinate derives from (sc-22507) — the
+/// axes optional, so an axis-free video route resolves its axis-free anchor (sc-22736).
 /// Coverage is identity-only — no geometry hull — so a never-measured `(geometry, frames)` request
 /// still reaches the ladder and its anchor-derived candidate instead of bypassing the gate.
 ///
-/// This mirrors [`anchor_derived_phase_peaks`]'s identity and currency guards exactly. A gate that
-/// admitted a request the derivation then refuses would only push it to the floor, but a gate that
-/// stayed open across a moved loader closure would state the wrong thing about the evidence.
+/// This mirrors [`anchor_derived_phase_peaks`]'s identity guards exactly — and, like it, asks no
+/// currency question (sc-22738): a gate that closed across a moved loader closure would abstain
+/// from a request the derivation still prices.
 fn anchor_evidence_covers_request(
     anchors: Option<&sceneworks_core::memory_anchor::MemoryAnchorStore>,
     contract: &MemoryProviderContract,
@@ -1716,31 +2017,27 @@ fn anchor_evidence_covers_request(
     let Some(anchors) = anchors else {
         return false;
     };
-    if request.overlay.is_some() || request.reference_count != 0 {
-        return false;
-    }
-    let (Some(transformer_variant), Some(decoder)) = (request.transformer_variant, request.decoder)
-    else {
-        return false;
-    };
     let backend = match request.lane {
         VideoLane::Mlx => sceneworks_core::memory_anchor::AnchorBackend::Mlx,
         VideoLane::Candle => sceneworks_core::memory_anchor::AnchorBackend::Candle,
     };
+    // Same identity conjuncts as `anchor_derived_phase_peaks`, including the conditioning surface
+    // graded against the anchor's own record (sc-22736) and the optional pipeline axes.
     anchors
-        .anchor_for(
+        .video_anchor_for(
             request.model_id,
             backend,
             crate::mlx_fit_gate::plan_tier_key(request.tier),
-            transformer_variant,
-            decoder,
+            request.transformer_variant,
+            request.decoder,
         )
         .is_some_and(|anchor| {
             anchor.model_family == request.model_family
                 && anchor.mode == request.mode
                 && anchor.route == request.route
                 && anchor.provider == contract.provider_id
-                && anchor_currency_matches(anchor)
+                && anchor.overlay.as_deref() == request.overlay
+                && anchor.reference_count == request.reference_count
         })
 }
 
@@ -1818,6 +2115,17 @@ fn admit_video_generation_with_curves_and_profiles(
     let Some(contract) = contract else {
         return VideoAdmissionOutcome::default();
     };
+    // sc-22738: a measured lower bound this host cannot carry refuses HERE — with the contract and
+    // the live budget resolved, and before a single estimate is priced. See
+    // [`exceeded_bound_refusal`] for why a measurement decides ahead of the ladder rather than
+    // inside it.
+    if let Some(refusal) = exceeded_bound_refusal(contract, &request, runtime) {
+        return VideoAdmissionOutcome {
+            memory: None,
+            context: None,
+            refusal: Some(refusal),
+        };
+    }
     // The request must have one fully matching fitted curve before any estimate/floor candidate is
     // allowed into the selector. This replaces the historical exact-T2V predicate: a future mode
     // is admitted by adding its own sealed curve, not by weakening a mode/reference/FPS `if`.
@@ -1842,7 +2150,6 @@ fn admit_video_generation_with_curves_and_profiles(
             transformer_variant: request.transformer_variant,
             decoder: request.decoder,
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-            expected_closure_digest: request.expected_closure_digest,
         },
         contract,
         runtime.selector_budget(),
@@ -1944,6 +2251,22 @@ fn admit_video_generation_with_curves_and_profiles(
                 binding_frames = selected.binding_geometry.estimate_frames(),
                 request_frames = request.frames,
             );
+            if let Some(reason) = engine_declines_advisory_context(generator, &context) {
+                tracing::info!(
+                    event = "video_memory_context_declined_by_provider",
+                    route = request.route,
+                    mode = request.mode,
+                    reference_count = request.reference_count,
+                    reason,
+                    "the loaded provider's declared strategy does not accept this request shape; \
+                     handing the engine its own load-time defaults instead of a context it refuses"
+                );
+                return VideoAdmissionOutcome {
+                    memory: None,
+                    context: None,
+                    refusal: None,
+                };
+            }
             VideoAdmissionOutcome {
                 memory: contract.generation_memory(&selected.selection),
                 context: Some(context),
@@ -2363,7 +2686,6 @@ fn curve_evidence_covers_request(
                         overlay: curve_overlay.as_deref(),
                         rung: curve.rung,
                         load_shape: curve_load_shape(contract.load_shape),
-                        closure_digest: request.expected_closure_digest,
                         calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
                         calibration_fingerprint: &calibration.fingerprint,
                         decode_pass: curve_decode_pass(geometry.decode_pass),
@@ -2444,7 +2766,6 @@ pub(crate) struct VideoAdmissionInputs<'a> {
     pub(crate) fps: u32,
     pub(crate) runtime: Option<VideoRuntimeMemoryState>,
     pub(crate) headroom_bytes: u64,
-    pub(crate) expected_closure_digest: &'a str,
 }
 
 #[derive(Clone, Copy, Debug)]

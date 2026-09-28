@@ -21,8 +21,8 @@
 //! unsupported combinations remain queued. There is no Python/torch training fallback.
 
 use super::*;
-use fs2::FileExt as _;
 use sceneworks_core::contracts::ExtraFields;
+use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -216,7 +216,7 @@ const PREPARED_BUNDLE_COORDINATOR_LOCK: &str = ".prepared-bundles.lock";
 #[derive(Default)]
 struct PreparedTrainingInputs {
     directory: Option<tempfile::TempDir>,
-    ownership_lock: Option<std::fs::File>,
+    ownership_lock: Option<FileLock>,
     snapshots: BTreeMap<PreparedBundleKey, PathBuf>,
     #[cfg(test)]
     materialization_count: usize,
@@ -319,10 +319,11 @@ fn reclaim_abandoned_prepared_bundle_sets(parent: &Path) -> WorkerResult<()> {
             Err(WorkerError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => return Err(error),
         };
-        match lock.try_lock_exclusive() {
-            Ok(()) => {
+        match FileLock::try_exclusive(lock) {
+            Ok(lock) => {
                 // Windows will not remove a directory containing this open handle. Dropping the
-                // acquired stale-set lock before deletion is therefore part of the contract.
+                // acquired stale-set lock before deletion is therefore part of the contract; the
+                // guard also releases with an explicit `LOCK_UN` (sc-22738).
                 drop(lock);
                 std::fs::remove_dir_all(&path).map_err(|error| {
                     WorkerError::Io(std::io::Error::new(
@@ -351,7 +352,7 @@ fn reclaim_abandoned_prepared_bundle_sets(parent: &Path) -> WorkerResult<()> {
 
 fn create_prepared_bundle_directory(
     settings: &Settings,
-) -> WorkerResult<(tempfile::TempDir, std::fs::File)> {
+) -> WorkerResult<(tempfile::TempDir, FileLock)> {
     let parent = settings.data_dir.join("cache").join("training-inputs");
     std::fs::create_dir_all(&parent).map_err(|error| {
         WorkerError::Io(std::io::Error::new(
@@ -365,7 +366,7 @@ fn create_prepared_bundle_directory(
     enforce_owner_only_directory(&parent)?;
 
     let coordinator = owner_only_lock_file(&parent.join(PREPARED_BUNDLE_COORDINATOR_LOCK))?;
-    coordinator.lock_exclusive().map_err(|error| {
+    let coordinator = FileLock::exclusive(coordinator).map_err(|error| {
         WorkerError::Io(std::io::Error::new(
             error.kind(),
             format!(
@@ -403,23 +404,25 @@ fn create_prepared_bundle_directory(
                 );
             }
         };
-    if let Err(error) = ownership_lock.try_lock_exclusive() {
-        let error = WorkerError::Io(std::io::Error::new(
-            error.kind(),
-            format!(
-                "Could not claim training input snapshot {}: {error}",
-                directory.path().display()
-            ),
-        ));
-        return finish_prepared_input_operation(
-            Err(error),
-            PreparedTrainingInputs {
-                directory: Some(directory),
-                ownership_lock: Some(ownership_lock),
-                ..PreparedTrainingInputs::default()
-            },
-        );
-    }
+    let ownership_lock = match FileLock::try_exclusive(ownership_lock) {
+        Ok(lock) => lock,
+        Err(error) => {
+            let error = WorkerError::Io(std::io::Error::new(
+                error.kind(),
+                format!(
+                    "Could not claim training input snapshot {}: {error}",
+                    directory.path().display()
+                ),
+            ));
+            return finish_prepared_input_operation(
+                Err(error),
+                PreparedTrainingInputs {
+                    directory: Some(directory),
+                    ..PreparedTrainingInputs::default()
+                },
+            );
+        }
+    };
     drop(coordinator);
     Ok((directory, ownership_lock))
 }
@@ -507,7 +510,7 @@ impl PreparedTrainingInputs {
                 .join(PREPARED_BUNDLE_COORDINATOR_LOCK),
         )
         .and_then(|lock| {
-            lock.lock_exclusive().map_err(|error| {
+            FileLock::exclusive(lock).map_err(|error| {
                 WorkerError::Io(std::io::Error::new(
                     error.kind(),
                     format!(
@@ -515,8 +518,7 @@ impl PreparedTrainingInputs {
                         path.display()
                     ),
                 ))
-            })?;
-            Ok(lock)
+            })
         });
         // The request/trainer is dropped by the caller; release our own lock handle as well before
         // attempting directory removal so Windows cannot reject deletion because of an open file.
@@ -2740,6 +2742,35 @@ mod tests {
         std::fs::create_dir_all(&bare).unwrap();
         assert!(training_text_encoder("ltx_2_3", &bare).is_none());
         assert!(training_text_encoder("ltx_2_5", &tier).is_none());
+    }
+
+    /// sc-22738: a released snapshot ownership lock must be free IMMEDIATELY, even while a
+    /// descriptor this process handed to a child still references the same open file description.
+    /// `flock(2)` locks live on the open file description, so a close-only release only takes
+    /// effect once every such reference is gone — and training forks trainers and converters
+    /// constantly, which would make reclamation read a finished set as still owned and leave it on
+    /// disk.
+    #[test]
+    fn a_released_ownership_lock_is_free_even_while_an_inherited_descriptor_survives() {
+        use fs2::FileExt as _;
+
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let settings = test_settings(data_dir.path());
+        let (directory, ownership_lock) =
+            create_prepared_bundle_directory(&settings).expect("create snapshot set");
+        let lock_path = directory.path().join(PREPARED_BUNDLE_OWNER_LOCK);
+
+        let inherited = ownership_lock
+            .inherited_descriptor()
+            .expect("descriptor duplicates");
+        drop(ownership_lock);
+
+        let probe = owner_only_lock_file(&lock_path).expect("probe opens lock file");
+        assert!(
+            probe.try_lock_exclusive().is_ok(),
+            "an ownership lock released by its owner must not stay held by an inherited descriptor"
+        );
+        drop(inherited);
     }
 
     fn test_settings(data_dir: &Path) -> Settings {

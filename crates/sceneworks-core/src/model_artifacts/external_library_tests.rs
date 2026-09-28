@@ -8,6 +8,30 @@ use tempfile::TempDir;
 
 const REVISION: &str = "0123456789abcdef0123456789abcdef01234567";
 
+/// A released ledger lock must be free IMMEDIATELY, even while a descriptor this process handed to
+/// a child still references the same open file description. `flock(2)` locks live on the open file
+/// description, and `fork(2)` gives the child a reference to it, so releasing by `close(2)` alone
+/// only takes effect once every such reference is gone. `inherited_descriptor` reproduces that
+/// sharing without a child process, so the interleaving is injected rather than waited for. Before
+/// sc-22738 the next ledger read or write blocked behind an already-released lock for as long as
+/// an unrelated `Command` sat between `fork` and `exec`.
+#[test]
+fn a_released_ledger_lock_is_free_even_while_an_inherited_descriptor_survives() {
+    let temp = TempDir::new().unwrap();
+    let store = ExternalLibraryBindingStore::new(&temp.path().join("data")).unwrap();
+
+    let guard = store.lock_exclusive().unwrap();
+    let inherited = guard.inherited_descriptor().expect("descriptor duplicates");
+    drop(guard);
+
+    let probe = crate::file_lock::FileLock::try_exclusive(store.open_lock().unwrap());
+    assert!(
+        probe.is_ok(),
+        "a ledger lock released by its owner must not stay held by an inherited descriptor"
+    );
+    drop(inherited);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_volume_uuid_parser_is_exact_and_fail_closed() {
@@ -617,6 +641,75 @@ fn write_download_receipt(data_dir: &Path, repo: &str, file: &str) {
         .unwrap(),
     )
     .unwrap();
+}
+
+fn copy_test_tree(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        let target = destination.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_test_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The terminal campaign copies both app-data and HF_HOME into an isolated tuple root. The copied
+/// receipt and closure ledgers still name the source library's physical directory by design: byte
+/// copying must not silently make a different path/volume trusted. The public relocation producer
+/// is the only transition that can adopt the already-complete copy without weakening that guard.
+#[test]
+fn copied_receipts_require_validated_relocation_before_the_copied_library_is_ready() {
+    let temp = TempDir::new().unwrap();
+    let source_data = temp.path().join("source-data");
+    let source_library = temp.path().join("source-hf").join("hub");
+    seed_snapshot(&source_library, "owner/model", "model.safetensors");
+    write_download_receipt(&source_data, "owner/model", "model.safetensors");
+    let requirements = vec![requirement("owner/model", "model.safetensors")];
+    assert_eq!(
+        resolve_model_availability(&source_data, &source_library, &requirements, true, &[])
+            .availability,
+        ModelAvailability::ExternalReady
+    );
+
+    let copied_data = temp.path().join("tuple-data");
+    let copied_library = temp.path().join("tuple-hf").join("hub");
+    copy_test_tree(&source_data, &copied_data);
+    copy_test_tree(&source_library, &copied_library);
+    let mismatched =
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[]);
+    assert_eq!(
+        mismatched.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        mismatched.library_present,
+        "the copied library exists but its path/physical identity is not the receipted source"
+    );
+
+    let copied_store = ExternalLibraryBindingStore::new(&copied_data).unwrap();
+    copied_store.relocate_binding(&copied_library).unwrap();
+    assert_eq!(
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[])
+            .availability,
+        ModelAvailability::ExternalReady
+    );
+
+    let mut tampered = copied_store.load().unwrap().unwrap();
+    tampered.physical_identity.volume_id = "tampered-volume".to_owned();
+    copied_store.write_unlocked(&tampered).unwrap();
+    let refused =
+        resolve_model_availability(&copied_data, &copied_library, &requirements, true, &[]);
+    assert_eq!(
+        refused.availability,
+        ModelAvailability::InstalledExternalUnavailable
+    );
+    assert!(
+        refused.library_present,
+        "a present library with a tampered volume identity must fail closed"
+    );
 }
 
 /// Nothing installed means nothing can be orphaned and nothing to check a candidate against: an

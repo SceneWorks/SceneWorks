@@ -1,0 +1,70 @@
+{
+  "action": "run",
+  "hardware": {
+    "chip": "Apple M5 Max",
+    "memoryBytes": 137438953472,
+    "metalDevice": "Apple M5 Max",
+    "mlxMemoryLimitBytes": 130567005798,
+    "model": "Mac17,6",
+    "osVersion": "26.6.1",
+    "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+    "wiredLimitBytes": 87044670532
+  },
+  "planned": {
+    "backend": "mlx",
+    "calibrationFingerprint": "sc-18797-ltx-2-5-mlx-ladder-v1",
+    "evidenceScope": "authoritative",
+    "expectedResult": "passed",
+    "fixture": "ltx-2-5-mlx-q4-dev-conv-512x768-f145-fps24-seed18755",
+    "loadShape": "eager_materialization",
+    "logicalCaseId": "implan-30b589bd2da40d22dfd2",
+    "modelLoadGroup": null,
+    "modelLoadPolicy": "fresh_per_case",
+    "negative": false,
+    "strategy": {
+      "engagedRungs": [
+        "resident",
+        "staged_residency",
+        "bounded_decode",
+        "bounded_attention"
+      ],
+      "parameters": {
+        "attentionChunkSize": 16777216,
+        "decodeOverlap": 64,
+        "decodeTileEdge": 192
+      },
+      "rung": "bounded_attention"
+    },
+    "target": {
+      "decoder": "conv",
+      "geometry": {
+        "batch": 1,
+        "frames": 145,
+        "height": 768,
+        "width": 512
+      },
+      "mode": "text_to_video",
+      "modelId": "ltx_2_5",
+      "overlay": "none",
+      "provider": "ltx_2_5",
+      "tier": "q4",
+      "transformerVariant": "dev"
+    }
+  },
+  "repositories": {
+    "inference": {
+      "closureDigest": "38081f80fb72b7fa09230c49c86e4ac131d59a584131b3572c584f4942e07fd0",
+      "dirty": false,
+      "revision": "21d17666f691a59358f2147517ac11cb34aa6f0b"
+    },
+    "sceneWorks": {
+      "dirty": false,
+      "matrixSourceRevision": "source-tree:7b15fe28783aeeb7af8705286c3f629571ad327ebf048845847079d21447d803",
+      "revision": "e75ab6e2fc431c5495b395ffb67118279c1682a6"
+    }
+  },
+  "repositoryPaths": {
+    "inference": "/Volumes/Data/calibration/sc-18791/inference",
+    "sceneWorks": "/Volumes/Data/calibration/sc-18791/diagnostic/SceneWorks"
+  }
+}

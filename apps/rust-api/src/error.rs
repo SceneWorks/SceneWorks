@@ -202,7 +202,18 @@ impl From<JobsStoreError> for ApiError {
 impl From<ProjectStoreError> for ApiError {
     fn from(error: ProjectStoreError) -> Self {
         match error {
+            ProjectStoreError::BadRequest(detail)
+                if detail.starts_with("Film draft revision conflict:") =>
+            {
+                Self::conflict(detail)
+            }
             ProjectStoreError::BadRequest(detail) => Self::bad_request(detail),
+            ProjectStoreError::TimelineConflict { code, context } => Self {
+                status: StatusCode::CONFLICT,
+                detail: "The timeline changed. Review and resolve the conflicting edit.".into(),
+                code: Some(code),
+                context: Some(context),
+            },
             ProjectStoreError::NotFound(detail) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail,
@@ -270,6 +281,15 @@ impl From<CatalogError> for ApiError {
                 code: Some("catalog_operation_failed"),
             },
         }
+    }
+}
+
+/// So a handler whose error type is a raw [`Response`] — one that must also be able to answer with
+/// the body shape the JSON extractor's own rejection uses — can still `?` on an [`ApiError`]
+/// (sc-24029).
+impl From<ApiError> for Response {
+    fn from(error: ApiError) -> Self {
+        error.into_response()
     }
 }
 

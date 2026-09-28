@@ -1,0 +1,19 @@
+diff --git a/mlx-sys/build.rs b/mlx-sys/build.rs
+index 2ea60676..f73fa491 100644
+--- a/mlx-sys/build.rs
++++ b/mlx-sys/build.rs
+@@ -699,6 +699,14 @@ fn prepare_mlx_c_source() -> PathBuf {
+     let patch_files = [
+         ("patches/metallib-search-path.patch", true, None),
+         ("patches/command-buffer-recoverable.patch", true, None),
++        // sc-22414: Load::eval_cpu must re-raise a failed file read (fut.get(), not wait()) and
++        // ParallelFileReader must retry EINTR and advance the offset on short preads. Probe on the
++        // wait->get change; the reader fix lives in the same patch.
++        (
++            "patches/load-read-error-propagation.patch",
++            true,
++            Some("test -f mlx/stream_error.h && grep -Fq 'set_stream_error' mlx/backend/common/load.cpp && grep -Fq 'std::memcpy(buffer, staging.data(), size);' mlx/io/load.cpp"),
++        ),
+         ("patches/pad-copy-int64.patch", true, None),
+         ("patches/thread-shared-streams.patch", true, None),
+         ("patches/thread-safe-eval.patch", true, None),

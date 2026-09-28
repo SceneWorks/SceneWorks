@@ -475,3 +475,62 @@ fn a_manifest_entry_promotes_and_is_then_recognized_as_the_local_tier() {
     // was opened explicitly by this test, never as a side effect of resolving a candidate.
     assert!(!ResolvedCachePolicy::default().enabled);
 }
+
+#[test]
+fn repaired_legacy_receipt_promotes_and_loads_with_external_library_disconnected() {
+    let temp = tempfile::tempdir().unwrap();
+    let data = temp.path().join("data");
+    let library = temp.path().join("library");
+    install_snapshot_file(
+        &library,
+        "owner/model",
+        PRIMARY_REVISION,
+        "q4/model.safetensors",
+        b"local weights",
+    );
+    let mut receipt = json!({"repo":"owner/model", "modelId":"demo", "variant":"q4",
+        "resolvedFiles":["q4/model.safetensors"], "snapshotRevision":null});
+    let model = json!({"id":"demo", "downloads":[{"provider":"huggingface", "repo":"owner/model",
+        "variant":"q4", "default":true, "files":["q4/*"]}]});
+    write_receipts(&data, "owner/model", json!([receipt]));
+    let before = selected_requirements_for_model(&model, "macos", Some("q4"), &data);
+    assert!(before.requirements[0].revision.is_none());
+    let revision =
+        crate::download_receipt::recover_revision(&receipt, &library.join("models--owner--model"))
+            .unwrap();
+    receipt["snapshotRevision"] = json!(revision);
+    write_receipts(&data, "owner/model", json!([receipt]));
+    let selected = selected_requirements_for_model(&model, "macos", Some("q4"), &data);
+    let candidate =
+        promotion_candidate_for_requirements(&resolver_for(&library), &selected.requirements)
+            .unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let outcome = ResolvedCacheMaterializer::new(store)
+        .materialize(
+            &candidate,
+            &library,
+            "demo",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap();
+    let MaterializationOutcome::Published(metadata) = outcome else {
+        panic!("promotion did not publish");
+    };
+    std::fs::rename(&library, temp.path().join("disconnected-library")).unwrap();
+    let local = local_artifact_for_requirements(
+        std::slice::from_ref(&metadata.artifact),
+        &selected.requirements,
+    )
+    .unwrap();
+    let ArtifactLocation::ResolvedLocal { root } = local.location else {
+        panic!("not local");
+    };
+    let (_, snapshot) = ArtifactSourceLibrary::new(root)
+        .unwrap()
+        .discover_snapshot("owner/model", Some(PRIMARY_REVISION))
+        .unwrap();
+    assert_eq!(
+        std::fs::read(snapshot.join("q4/model.safetensors")).unwrap(),
+        b"local weights"
+    );
+}

@@ -1509,6 +1509,7 @@ fn krea_imported_memory_inputs(
         reference_count,
         use_pid: false,
         has_phases: false,
+        conditioning_windows: None,
     }
 }
 
