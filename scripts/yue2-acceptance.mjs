@@ -902,6 +902,46 @@ export function insideRepository(target, root = ROOT) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Completion commits before the API persists assetWrites; wait for the published library id. */
+export async function waitForAssetPublication({ jobId, initialSnapshot, readJob, timeoutMs = 30_000, pollMs = 250, now = Date.now, delay = sleep }) {
+  const startedAt = now();
+  const deadline = startedAt + timeoutMs;
+  let snapshot = initialSnapshot;
+  const observations = [];
+  const observe = () => observations.push({
+    at: now(), status: snapshot.status, assetIds: snapshot.result?.assetIds ?? null,
+    pendingAssetWrites: Array.isArray(snapshot.result?.assetWrites) ? snapshot.result.assetWrites.length : null,
+  });
+  observe();
+  while (snapshot.status === "completed" && !snapshot.result?.assetIds?.[0] && now() < deadline) {
+    await delay(Math.min(pollMs, deadline - now()));
+    if (now() >= deadline) break;
+    snapshot = await readJob(jobId, deadline - now());
+    observe();
+  }
+  return { snapshot, observations, waitedMs: now() - startedAt, timedOut: !snapshot.result?.assetIds?.[0] && now() >= deadline };
+}
+
+/** A canceled job can become terminal before its worker has removed the run's .partial directory. */
+export async function waitForPartialRemoval({ partialPath, exists = existsSync, readWorker, timeoutMs = 120_000, pollMs = 250, now = Date.now, delay = sleep }) {
+  const startedAt = now();
+  const deadline = startedAt + timeoutMs;
+  const firstPresent = exists(partialPath);
+  let present = firstPresent;
+  let polls = 0;
+  while (present && now() < deadline) {
+    await delay(Math.min(pollMs, deadline - now()));
+    present = exists(partialPath);
+    polls += 1;
+  }
+  const outcome = { partialPath, firstPresent, removed: !present, polls, waitedMs: now() - startedAt };
+  if (present && readWorker) {
+    try { outcome.worker = await readWorker(); }
+    catch (error) { outcome.workerReadError = String(error); }
+  }
+  return outcome;
+}
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const nowIso = () => new Date().toISOString();
 
@@ -1246,8 +1286,8 @@ class Context {
     return response.body;
   }
 
-  async job(jobId) {
-    const response = await this.service.request("GET", `/api/v1/jobs/${jobId}`);
+  async job(jobId, { timeoutMs = 120_000 } = {}) {
+    const response = await this.service.request("GET", `/api/v1/jobs/${jobId}`, undefined, { timeoutMs });
     if (response.status !== 200) fail(`GET job ${jobId} → HTTP ${response.status}`);
     return response.body;
   }
@@ -1293,7 +1333,9 @@ class Context {
   /** Follow a job to its end and collect its evidence from the API and the run it published. */
   async evidence(rec, jobId, { expectStatus = "completed", followed = null } = {}) {
     const started = Date.now();
-    const { snapshot, observations } = followed ?? await this.follow(jobId);
+    const followedJob = followed ?? await this.follow(jobId);
+    let { snapshot } = followedJob;
+    const { observations } = followedJob;
     const entry = {
       jobId,
       kind: snapshot.payload?.yue2?.kind ?? null,
@@ -1315,7 +1357,6 @@ class Context {
     rec.record.jobs.push(entry);
     rec.require(`job ${jobId} ${expectStatus}`, snapshot.status === expectStatus, `status ${snapshot.status}: ${snapshot.error ?? snapshot.message ?? ""}`);
     if (snapshot.status !== "completed") return { snapshot, entry };
-    const y2 = snapshot.result?.yue2 ?? {};
     const runDir = this.runDir(snapshot);
     const runResult = JSON.parse(await readFile(path.join(runDir, "result.json"), "utf8"));
     entry.runDir = path.relative(this.paths.dataDir, runDir);
@@ -1324,6 +1365,13 @@ class Context {
     entry.truncated = runResult.truncated ?? null;
     entry.stageTimings.engine = runResult.timing ?? null;
     entry.stages = runResult.stages ?? null;
+    if (runResult.kind !== "plan") {
+      const publication = await waitForAssetPublication({ jobId, initialSnapshot: snapshot, readJob: (id, timeoutMs) => this.job(id, { timeoutMs }) });
+      entry.publication = { firstTerminal: publication.observations[0], observations: publication.observations, waitedMs: publication.waitedMs, timedOut: publication.timedOut };
+      snapshot = publication.snapshot;
+      rec.require(`${jobId}: remains completed through asset publication`, snapshot.status === "completed", `status ${snapshot.status}: ${snapshot.error ?? snapshot.message ?? ""}`);
+    }
+    const y2 = snapshot.result?.yue2 ?? {};
     entry.usagePolicy = y2.usagePolicy ?? null;
     entry.warnings = y2.warnings ?? [];
     entry.effectiveSettings = y2.effectiveSettings ?? null;
@@ -1356,7 +1404,7 @@ class Context {
     // The API persists assetWrites, then removes them from the job result. Read back the
     // library asset by its server-persisted id and verify the file it serves to users.
     const assetId = snapshot.result?.assetIds?.[0] ?? null;
-    rec.require(`${jobId}: the result names a library asset`, Boolean(assetId), JSON.stringify(snapshot.result?.assetIds ?? null));
+    rec.require(`${jobId}: the result names a library asset`, Boolean(assetId), JSON.stringify({ assetIds: snapshot.result?.assetIds ?? null, publication: entry.publication }));
     const asset = (await this.call(rec, "GET", `/api/v1/projects/${this.project.id}/assets/${assetId}`, undefined, 200)).body;
     const persisted = persistedAudioAsset(snapshot.result, asset);
     const assetPath = persisted.mediaPath;
@@ -2165,11 +2213,15 @@ async function cancelCase(ctx, rec, body, target) {
   rec.require(`the job reached ${target}`, reached.reached, `${reached.snapshot.status}: ${reached.snapshot.message}`);
   await ctx.call(rec, "POST", `/api/v1/jobs/${jobId}/cancel`, undefined, 200);
   const done = await ctx.follow(jobId);
-  const { snapshot } = await ctx.evidence(rec, jobId, { expectStatus: "canceled", followed: { snapshot: done.snapshot, observations: [...reached.observations, ...done.observations] } });
+  const { snapshot, entry } = await ctx.evidence(rec, jobId, { expectStatus: "canceled", followed: { snapshot: done.snapshot, observations: [...reached.observations, ...done.observations] } });
   const lastWorking = [...reached.observations, ...done.observations].filter((observation) => !["canceled", "cancel-requested"].includes(observation.stage)).at(-1);
   rec.check(`the cancel landed during ${target}`, lastWorking?.stage === target, `last working stage ${lastWorking?.stage} (${lastWorking?.message})`);
   rec.check("canceled by the user, cleanly", snapshot.message === "YuE2 job canceled by user.", snapshot.message);
-  rec.check("the run's .partial working directory is removed", !existsSync(path.join(runsDir, `${runId}.partial`)), "");
+  const cleanup = await waitForPartialRemoval({
+    partialPath: path.join(runsDir, `${runId}.partial`), readWorker: () => ctx.service.workerRow(),
+  });
+  entry.cleanup = { ...cleanup, partialPath: path.relative(ctx.project.path, cleanup.partialPath) };
+  rec.check("the run's .partial working directory is removed", cleanup.removed, JSON.stringify(entry.cleanup));
   rec.check("nothing was published for the canceled run", !existsSync(path.join(runsDir, runId)), "");
   const after = await otherRuns(ctx.project, runId);
   rec.check("every other run is untouched", JSON.stringify(after) === JSON.stringify(others), `${Object.keys(others).length} runs compared`);

@@ -37,6 +37,8 @@ import {
   serviceDeviations,
   stopWorkerSafely,
   tierAssertions,
+  waitForAssetPublication,
+  waitForPartialRemoval,
   workerBusy,
   dependencySkip,
   deviceMatches,
@@ -294,6 +296,70 @@ test("library audio is resolved from the API's persisted asset id after assetWri
   assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], id: "asset_2" }), /not persisted audio/);
   assert.throws(() => persistedAudioAsset(result, { ...result.assets[0], file: {} }), /not persisted audio/);
   assert.throws(() => persistedAudioAsset({ assetWrites: [{ mediaPath: "assets/audios/one.wav" }] }, result.assets[0]), /no asset id/);
+});
+
+test("a completed render waits through the API's assetWrites handoff and keeps both snapshots", async () => {
+  const raw = { status: "completed", result: { assetWrites: [{ assetId: "asset_1" }] } };
+  const published = { status: "completed", result: { assetIds: ["asset_1"], assets: [{ id: "asset_1" }] } };
+  let clock = 0;
+  let reads = 0;
+  const requestTimeouts = [];
+  const outcome = await waitForAssetPublication({
+    jobId: "job_1", initialSnapshot: raw,
+    readJob: async (id, timeoutMs) => { assert.equal(id, "job_1"); requestTimeouts.push(timeoutMs); return ++reads === 1 ? raw : published; },
+    timeoutMs: 300, pollMs: 100, now: () => clock, delay: async (ms) => { clock += ms; },
+  });
+  assert.equal(outcome.snapshot, published);
+  assert.equal(outcome.timedOut, false);
+  assert.equal(outcome.waitedMs, 200);
+  assert.deepEqual(requestTimeouts, [200, 100], "each GET is bounded by the remaining publication deadline");
+  assert.deepEqual(outcome.observations.map((row) => [row.assetIds, row.pendingAssetWrites]), [
+    [null, 1], [null, 1], [["asset_1"], null],
+  ]);
+});
+
+test("a completed render with no published asset id reaches its deadline and remains a failure", async () => {
+  const raw = { status: "completed", result: { assetWrites: [{ assetId: "asset_1" }] } };
+  let clock = 0;
+  let reads = 0;
+  const outcome = await waitForAssetPublication({
+    jobId: "job_1", initialSnapshot: raw, readJob: async () => { reads += 1; return raw; },
+    timeoutMs: 300, pollMs: 100, now: () => clock, delay: async (ms) => { clock += ms; },
+  });
+  assert.equal(outcome.timedOut, true);
+  assert.equal(outcome.snapshot.result.assetIds?.[0], undefined);
+  assert.equal(outcome.waitedMs, 300);
+  assert.equal(reads, 2);
+});
+
+test("cancel cleanup waits for this run's partial directory even when the job is terminal", async () => {
+  let clock = 0;
+  let checks = 0;
+  const outcome = await waitForPartialRemoval({
+    partialPath: "/runs/run_1.partial",
+    exists: () => ++checks < 3,
+    readWorker: async () => { throw new Error("an early worker read is not a cleanup barrier"); },
+    timeoutMs: 300, pollMs: 100, now: () => clock, delay: async (ms) => { clock += ms; },
+  });
+  assert.equal(outcome.firstPresent, true);
+  assert.equal(outcome.removed, true);
+  assert.equal(outcome.polls, 2);
+  assert.equal(outcome.waitedMs, 200);
+  assert.equal(outcome.worker, undefined);
+});
+
+test("a partial directory that never disappears fails after a bound with worker state recorded", async () => {
+  let clock = 0;
+  const worker = { status: "idle", currentJobId: null };
+  const outcome = await waitForPartialRemoval({
+    partialPath: "/runs/run_1.partial", exists: () => true, readWorker: async () => worker,
+    timeoutMs: 300, pollMs: 100, now: () => clock, delay: async (ms) => { clock += ms; },
+  });
+  assert.equal(outcome.removed, false, "idle is not proof that the run's scratch was cleaned");
+  assert.equal(outcome.polls, 3);
+  assert.equal(outcome.waitedMs, 300);
+  assert.deepEqual(outcome.worker, worker);
+  assert.equal(outcome.partialPath, "/runs/run_1.partial");
 });
 
 test("refusal matchers name the specific failure, not any error mentioning a record", () => {
