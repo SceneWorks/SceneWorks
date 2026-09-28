@@ -1564,6 +1564,8 @@ jobs:
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/case.json
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/admission.json
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/stages.jsonl
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/cuda-samples.jsonl
+            ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/boundary/*.json
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/outcome.json
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/record.json
             !**/*.wav
