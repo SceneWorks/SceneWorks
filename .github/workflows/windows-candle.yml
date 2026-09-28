@@ -211,6 +211,11 @@ on:
         required: false
         type: boolean
         default: false
+      yue2_acceptance_only:
+        description: "Rerun YuE2 acceptance without repeating the profile; requires run_yue2_terminal_cuda=true"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -376,7 +381,12 @@ jobs:
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
           PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+          RUN_YUE2_TERMINAL_CUDA: ${{ inputs.run_yue2_terminal_cuda }}
+          YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
         run: |
+          if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
+            throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'
+          }
           if ($env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -and ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true')) {
             throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
           }
@@ -1429,7 +1439,7 @@ jobs:
 
   # SC-23002 (epic 22988) terminal evidence for YuE2 on CUDA: the acceptance matrix through the real
   # app (the release API built with backend-candle, a worker from the same binary, the registered
-  # `yue2` provider on this card) and, once, the memory-profile campaign through the job path.
+  # `yue2` provider on this card) and, by default, the memory-profile campaign through the job path.
   # Dispatch only, at the frozen feature head:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_yue2_terminal_cuda=true -f inference_revision=<Cargo pin>
   # The app state (a FRESH per-run Hugging Face home for the ~11 GB cold YuE2 install and the
@@ -1446,8 +1456,8 @@ jobs:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    # One release build, the acceptance matrix (a cold install with q8/q4 derivation and a few dozen
-    # short renders) and five profile captures, strictly serial on one card.
+    # One release build and the acceptance matrix (a cold install with q8/q4 derivation and a few
+    # dozen short renders); the default full dispatch adds five serial profile captures.
     timeout-minutes: 720
     env:
       CUDA_COMPUTE_CAP: "120"
@@ -1498,6 +1508,7 @@ jobs:
         run: cargo fetch --locked
       # The profile harness derives the `candle:yue2` closure digest from this exact source.
       - name: Check out the exact YuE2 terminal inference source
+        if: ${{ !inputs.yue2_acceptance_only }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -1532,6 +1543,7 @@ jobs:
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)
+        if: ${{ !inputs.yue2_acceptance_only }}
         id: yue2_profile
         continue-on-error: true
         shell: cmd
@@ -1546,7 +1558,7 @@ jobs:
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-23002-yue2-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sc-23002-yue2-cuda${{ inputs.yue2_acceptance_only && '-acceptance-only' || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/acceptance/evidence/
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/case.json
@@ -1562,7 +1574,11 @@ jobs:
         env:
           ACCEPTANCE_OUTCOME: ${{ steps.yue2_acceptance.outcome }}
           PROFILE_OUTCOME: ${{ steps.yue2_profile.outcome }}
+          YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
         run: |
-          if ($env:ACCEPTANCE_OUTCOME -ne 'success' -or $env:PROFILE_OUTCOME -ne 'success') {
+          if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true') {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'YuE2 CUDA acceptance-only rerun. The memory profile was intentionally skipped; use separately retained profile evidence from an earlier run. This run supplies no new profile verdict.'
+          }
+          if ($env:ACCEPTANCE_OUTCOME -ne 'success' -or ($env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and $env:PROFILE_OUTCOME -ne 'success')) {
             throw "YuE2 terminal evidence failed after upload: acceptance $env:ACCEPTANCE_OUTCOME, profile $env:PROFILE_OUTCOME"
           }
