@@ -9,7 +9,7 @@ as a reusable cache opportunity.
 
 | Family | Route | K/V creation and position handling | Reuse boundary |
 | --- | --- | --- | --- |
-| FLUX.2 Klein | `flux2_klein_9b_edit` reference edit | `candle-gen-flux2/src/transformer.rs:365-381` creates image/text K/V for `DoubleAttention`; `sc20686_observer.rs:620-621` isolates the exact reference slice | `transformer.rs:393` consumes the dense joint context on every denoise evaluation. No persistent reference-K/V reader exists, so this route is a measured no-go rather than a promotable cache. |
+| FLUX.2 Klein | `flux2_klein_9b_edit` reference edit | `candle-gen-flux2/src/transformer.rs:365-381` creates image/text K/V for `DoubleAttention`; `sc20686_observer.rs:620-621` isolates the exact reference slice | `transformer.rs:393` consumes the dense joint context on every denoise evaluation. No persistent reference-K/V reader exists, so this route is a source-backed no-go candidate rather than a promotable cache. |
 | Wan | TI2V-5B, T2V-14B, I2V-14B, `wan_vace`, and VACE-Fun 14B | `candle-gen-wan/src/transformer.rs:347` registers each prepared cross-K/V cache and `:413` records its reads | Each request-scoped cache is reused across denoise steps and released by its owning prepared-cache lifetime; latent self-attention remains excluded. |
 
 The paired inference reducer is `scripts/sc20686_cache_attribution.py`. It accepts injected runtime
@@ -19,11 +19,31 @@ produces separate family decisions. No real-weight claim or Go/No-go is emitted 
 ## Campaign producer boundary
 
 The paired producer is `inference/scripts/sc20686_campaign_adapter.py`. It deliberately does not
-pin a fixed inference commit in this document: every run requires
-`--inference-revision <40-hex-commit>`, verifies that value against the inference checkout's
-`git rev-parse HEAD`, and seals it into the resolved inputs, command transcript, observer metadata,
-and row receipt. The adapter rechecks the checkout around every child run. It is inert unless called
-with `--campaign`; normal generation has no observer or receipt overhead.
+pin a fixed inference commit in this document. Initial capture requires
+`--inference-revision <40-hex-commit>` and verifies it against the inference checkout; the captured
+revision is sealed into the resolved inputs, command transcript, observer metadata, and row receipt.
+Resume instead reads that captured revision and rechecks the sealed executable, snapshot, route
+inputs, coverage, source map, adapter, and safety policy. Moving Git HEAD alone does not invalidate
+an identical completed arm. The adapter is inert unless called with `--campaign`; normal generation
+has no observer or receipt overhead.
+
+Both single and matrix campaigns require `--safety-policy` and an absolute external `--resume-dir`.
+The strict schema-version-1 policy requires backend `linux-cuda`, positive process deadlines and
+polling/grace periods, host-free reserve and child-footprint cap, stdout/stderr/event caps, a selected
+CUDA GPU UUID, GPU-free reserve, and child GPU cap. The resume identity binds the canonical resolved
+inputs, policy, coverage, source map, and adapter hashes. Each successful normal or cancel arm is
+preserved as a sealed unit with observer events, bounded logs, media or verified absence, process
+samples, and clean supervisor exit/reap. Corrupt, incomplete, or identity-mismatched units cannot be
+reused. A watchdog failure is an incomplete campaign, not a product cancellation or terminal No-go.
+The final `sc-20686-campaign-bundle-v5` seals `safety-policy.json`, `resume-identity.json`, resolved
+inputs, coverage/source map, per-arm artifacts, rows, and media through `campaign.json` and its
+sidecar. The inference reducer verifies the complete bundle before publication.
+
+The current adapter refuses an arm before model spawn because a source-backed transient peak bound
+for these routes has not been established. Host/GPU polling and operator-entered caps cannot prove
+an instantaneous allocation safe. The configured SceneWorks CUDA real-weight runners are Windows;
+the `linux-cuda` policy requires a qualified Linux CUDA execution host or a separately reviewed
+supervisor backend before this campaign can run there. Neither constraint reduces the fixed coverage.
 
 For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
 directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
@@ -87,9 +107,10 @@ The supported reference-image route enters `Flux2Edit::generate_inner` at
 attention at `:393`. The observer isolates the reference portion at
 `sc20686_observer.rs:620-621`. It does not create a persistent reference-image K/V cache or packed
 reader. Caption-upsample `ContiguousKvCache` self-attention is outside this route and is never
-campaign evidence. This is the evidence-based SC-20686 no-go boundary: no persistent reference-K/V
-productization or promotable FLUX cache is claimed unless a product-owned persistent cross-attention
-K/V boundary and reader are actually introduced and measured.
+campaign evidence. This is the source-backed SC-20686 no-go boundary; a terminal decision still
+requires the sealed campaign. No persistent reference-K/V productization or promotable FLUX cache is
+claimed unless a product-owned persistent cross-attention K/V boundary and reader are actually
+introduced and measured.
 
 ### Wan variant closure
 
@@ -105,8 +126,9 @@ cancellation arm.
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
-Real-weight generation receipts remain blocked until the appropriate FLUX.2 Klein and Wan assets are
-available on an uncontended runner. No measurement is fabricated by this source-only lane.
+Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets, a qualified
+uncontended CUDA host, and a defensible source-backed peak bound. No measurement is fabricated by
+this source-only lane.
 
 ### Wan producer context is wired
 
