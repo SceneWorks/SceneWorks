@@ -168,7 +168,7 @@ Inference records the extension as `lane_extensions.mlx-metal` in
 | Route | MLX entrypoint | Cache kind on MLX |
 | --- | --- | --- |
 | `flux2_klein_9b_edit` | `sc20686_flux2_edit` | recomputed reference slice (no persistent boundary) |
-| `flux2_klein_9b_kv_edit` | `sc20686_flux2_edit` | persistent reference K/V per double/single layer; the CFG negative extract is a rebuild |
+| `flux2_klein_9b_kv_edit` | `sc20686_flux2_edit` | persistent reference K/V per double/single layer, one cache per CFG branch |
 | `wan2_2_ti2v_5b`, `wan2_2_t2v_14b`, `wan2_2_i2v_14b` | `sc20686_wan` | persistent cross-K/V per block, CFG cond+uncond stacked on the batch axis |
 | `wan_vace`, `wan2_2_vace_fun_14b` | `sc20686_wan` | recomputed text K/V: MLX Wan-VACE projects it in every block on every CFG forward |
 
@@ -181,4 +181,13 @@ peak (reset per window) and Darwin `phys_footprint`. Every event carries `"backe
 the adapter and reducer reject a Metal row without it, without denoise/decode windows, or whose
 persistent bytes disagree with the live CFG batch. The one-command launch is documented in
 `inference/docs/architecture/SC_20686_PERSISTENT_KV_CAMPAIGN.md` (`### One-command Metal campaign`).
-No Metal real-weight run is claimed by this document.
+The decision arms' run/phase peaks and durations are campaign-schedule numbers (the per-read
+evaluation windows cut the lazy graph); the Metal-only `--schedule-control` arm re-runs every
+coordinate with phase windows but no read windows and seals product-schedule peaks in a separate
+`sc-20686-schedule-control-v1` bundle.
+
+This lane also fixed a pre-existing Mac product defect: under guidance > 1 the FLUX.2 Klein kv-edit
+route shared one reference-K/V cache between the CFG branches, so the negative extract overwrote the
+positive slots and the positive cached steps attended over negative-prompt reference K/V. Each branch
+now owns its cache; a CFG parity test pins kv-edit to the non-kv forward. No Metal real-weight run is
+claimed by this document.
