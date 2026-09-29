@@ -1197,6 +1197,32 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   return receipt;
 }
 
+// The inference packed reader's kernels and selection tokens (`packed_metal.rs`
+// `packed_kernel_path_valid`): the NAX kernel appears exactly with the NAX selection and 16-bit
+// queries, the fp32 tiled kernel only with a NAX rejection its dtype allows, and the per-row kernel
+// only below the multi-row threshold (qualified family) or on the conservative family.
+const PER_ROW_KERNEL = "sc20676_split_kv_simdgroup";
+const TILED_KERNEL = "sc20676_tiled_multi_row_simdgroup_matrix";
+const NAX_KERNEL = "sc20676_nax_tiled_matmul2d";
+const QUALIFIED_FAMILY = "apple7-or-newer";
+const CONSERVATIVE_FAMILY = "conservative-unknown-apple";
+
+export function kernelPathValid(gpuFamily, kernel, selection, queryDtype) {
+  const sixteenBit = queryDtype === "float16" || queryDtype === "bfloat16";
+  if (!sixteenBit && queryDtype !== "float32") return false;
+  const qualified = gpuFamily === QUALIFIED_FAMILY;
+  const conservative = gpuFamily === CONSERVATIVE_FAMILY;
+  switch (`${kernel}|${selection}`) {
+    case `${NAX_KERNEL}|nax-selected`: return qualified && sixteenBit;
+    case `${TILED_KERNEL}|nax-unavailable`: return qualified;
+    case `${TILED_KERNEL}|f32-query`: return qualified && queryDtype === "float32";
+    case `${TILED_KERNEL}|nax-head-dimension`: return qualified && sixteenBit;
+    case `${PER_ROW_KERNEL}|below-multi-row-threshold`: return qualified;
+    case `${PER_ROW_KERNEL}|conservative-family`: return conservative;
+    default: return false;
+  }
+}
+
 /**
  * Mirrors the inference producer's SC-20676 compressed-row rules: fused execution happened, every
  * dense fallback is reasoned and counted, physical bytes are the sum of their measured
@@ -1210,7 +1236,7 @@ function validateCompression(receipt) {
   const compression = receipt.compression;
   exactKeys(compression, [
     "method", "representationIdentity", "representationVersion", "bits", "quantizationGroupSize",
-    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
+    "kernelGpuFamily", "kernelPaths", "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
     "persistentKvRepresentation", "fusedCalls", "fallbackCalls", "fallbacks",
     "fullCacheDequantizations", "failedDispatches",
   ], "compression");
@@ -1231,6 +1257,29 @@ function validateCompression(receipt) {
   }
   if (compression.fusedCalls === 0) {
     fail("compressed row never executed the fused compressed-domain reader");
+  }
+  // Every fused call is attributed to the kernel path it actually ran, so NAX and non-NAX runs
+  // can never produce the same receipt.
+  if (!Array.isArray(compression.kernelPaths)) fail("compression.kernelPaths must be an array");
+  let pathCalls = 0n;
+  compression.kernelPaths.forEach((path, index) => {
+    exactKeys(path, ["kernel", "selection", "reason", "queryDtype", "calls"], `compression.kernelPaths[${index}]`);
+    const prior = compression.kernelPaths[index - 1];
+    const key = (p) => [p.kernel, p.selection, p.queryDtype];
+    const ordered = !prior || (() => {
+      const [a, b] = [key(prior), key(path)];
+      for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] < b[i];
+      return false;
+    })();
+    if (!kernelPathValid(compression.kernelGpuFamily, path.kernel, path.selection, path.queryDtype)
+      || typeof path.reason !== "string" || path.reason.trim() === ""
+      || !Number.isSafeInteger(path.calls) || path.calls <= 0 || !ordered) {
+      fail("compressed kernel path disagrees with its selection or is unordered");
+    }
+    pathCalls += BigInt(path.calls);
+  });
+  if (pathCalls !== BigInt(compression.fusedCalls)) {
+    fail("compressed fused calls are not all attributed to a kernel path");
   }
   if (!Array.isArray(compression.fallbacks)) fail("compression.fallbacks must be an array");
   let calls = 0n;

@@ -201,6 +201,18 @@ compressed-arm dispatch of the row (warmups, fixtures, and each coordinate's
 prompt-cache-reuse and cancellation probes); `fullCacheDequantizations`; and
 the classification and storage of the **coordinate operation alone**.
 
+The block also names the fused reader's `kernelGpuFamily` and its `kernelPaths`:
+every kernel the reader actually dispatched (`sc20676_split_kv_simdgroup`
+per-row, `sc20676_tiled_multi_row_simdgroup_matrix` fp32 tiled, or
+`sc20676_nax_tiled_matmul2d` Neural Accelerator), with its selection token, the
+reason, the dispatched `queryDtype`, and the accepted calls, sorted by (kernel,
+selection, dtype). The calls sum to `fusedCalls`; the NAX kernel appears exactly
+with the `nax-selected` selection and 16-bit queries, the fp32 tiled kernel only
+with `nax-unavailable`, `f32-query` (f32 queries), or `nax-head-dimension`, and
+the per-row kernel only with `below-multi-row-threshold` (qualified family) or
+`conservative-family`. A NAX and a non-NAX run therefore never produce the same
+receipt.
+
 `persistentKvRepresentation` is decided only from evidence recorded during the
 coordinate operation (its setup and measured dispatch); the producer closes
 that scope before the lifecycle probes run, so their reasoned fallbacks never

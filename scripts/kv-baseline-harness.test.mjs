@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -32,6 +32,10 @@ const compressionFixture = ({ persistent, kvLength }) => {
   const deviceMetadataBytes = Math.floor(persistent / 4), hostPayloadBytes = Math.floor(persistent / 2);
   return {
     method:"group-affine",representationIdentity:"sc-20676-packed-group-affine-v1",representationVersion:2,bits:2,quantizationGroupSize:32,
+    kernelGpuFamily:"apple7-or-newer",kernelPaths:[
+      {kernel:"sc20676_nax_tiled_matmul2d",selection:"nax-selected",reason:"mlx::core::metal::is_nax_available() and 16-bit queries at D 64/128",queryDtype:"bfloat16",calls:2},
+      {kernel:"sc20676_split_kv_simdgroup",selection:"below-multi-row-threshold",reason:"fewer query rows than packed_tiled_min_query_tokens",queryDtype:"bfloat16",calls:8},
+    ],
     deviceCodeBytes:persistent-deviceMetadataBytes,deviceMetadataBytes,hostPayloadBytes,physicalKvBytes:persistent+hostPayloadBytes,storageTokens:kvLength,
     persistentKvRepresentation:"compressed",
     fusedCalls:10,fallbackCalls:1,fallbacks:[{operation:"prompt-cache-reuse",reason:"the provider prefix cache stores dense contiguous K/V",calls:1}],
@@ -739,6 +743,32 @@ test("SC-20676 compressed receipts carry reasoned fused/fallback evidence and no
     c.fallbackCalls = 2;
   }), /unordered/);
   assert.throws(withCompression((c) => { c.fusedCalls = 0; }), /never executed the fused/);
+  // Kernel paths: the NAX kernel exactly with the NAX selection, every fused call attributed.
+  const pathRejected = /disagrees with its selection or is unordered|schema validation/;
+  assert.throws(withCompression((c) => { c.kernelPaths[0].selection = "nax-unavailable"; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths[0].kernel = "sc20676_tiled_multi_row_simdgroup_matrix"; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths[1].selection = "nax-selected"; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths[0].queryDtype = "float32"; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths[0].reason = " "; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths.reverse(); }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelGpuFamily = "conservative-unknown-apple"; }), pathRejected);
+  assert.throws(withCompression((c) => { c.kernelPaths[1].calls -= 1; }), /not all attributed to a kernel path/);
+  assert.throws(withCompression((c) => { c.kernelPaths = []; }), /not all attributed|schema validation/);
+  assert.throws(withCompression((c) => { delete c.kernelPaths; }), /schema validation|kernelPaths/);
+  for (const [family, kernel, selection, dtype, valid] of [
+    ["apple7-or-newer", "sc20676_nax_tiled_matmul2d", "nax-selected", "float16", true],
+    ["apple7-or-newer", "sc20676_tiled_multi_row_simdgroup_matrix", "f32-query", "float32", true],
+    ["apple7-or-newer", "sc20676_tiled_multi_row_simdgroup_matrix", "nax-head-dimension", "bfloat16", true],
+    ["apple7-or-newer", "sc20676_tiled_multi_row_simdgroup_matrix", "nax-unavailable", "float32", true],
+    ["conservative-unknown-apple", "sc20676_split_kv_simdgroup", "conservative-family", "bfloat16", true],
+    ["apple7-or-newer", "sc20676_nax_tiled_matmul2d", "nax-selected", "float32", false],
+    ["apple7-or-newer", "sc20676_tiled_multi_row_simdgroup_matrix", "f32-query", "bfloat16", false],
+    ["apple7-or-newer", "sc20676_tiled_multi_row_simdgroup_matrix", "nax-head-dimension", "float32", false],
+    ["apple7-or-newer", "sc20676_split_kv_simdgroup", "conservative-family", "bfloat16", false],
+    ["conservative-unknown-apple", "sc20676_split_kv_simdgroup", "below-multi-row-threshold", "bfloat16", false],
+  ]) {
+    assert.equal(kernelPathValid(family, kernel, selection, dtype), valid, `${family} ${kernel} ${selection} ${dtype}`);
+  }
   assert.throws(withCompression((c) => {
     c.persistentKvRepresentation = "dense-fallback"; c.fallbacks = []; c.fallbackCalls = 0;
   }), /persistent KV representation/);
