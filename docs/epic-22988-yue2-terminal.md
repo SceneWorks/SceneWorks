@@ -207,3 +207,28 @@ Only `pass` is a Done claim for sc-23002 on that platform.
 the transcription-closure refusal checks, including upload of the generated recording. It does
 not install the closure, transcribe, or load weights. Use it to check a host before the GPU window;
 it exits 0 when none of those checks failed.
+
+## Captured evidence (2026-09-29)
+
+The frozen inference source is M2 `99a60541a73706fb67b4e78f44458774423ffb8e`. The ten
+source-owned records in `docs/calibration/yue2/` are all **current completed** under
+`node scripts/yue2-memory-profile.mjs plan`: five Metal and five CUDA cases, including both
+long-context captures. They retain the SceneWorks revision and admission estimate of their own
+capture. The four original Metal records contain eleven `UNDER-PRICED` stage observations; the
+later admission correction does not rewrite those measurements. The resumed Metal q4-default
+record has real external samples in all five stages (load 6, plan 6, semantic 16, acoustic 39,
+decode 4), with a 6,864,981,976-byte peak.
+
+| Evidence | Result and qualification |
+|---|---|
+| [CUDA app acceptance-only run 36367954494](https://github.com/SceneWorks/SceneWorks/actions/runs/36367954494) | 27 passed, zero failed or skipped at SceneWorks `b934d5dc` / M2. It intentionally did not rerun the already valid five-case CUDA profile from [run 36357082332](https://github.com/SceneWorks/SceneWorks/actions/runs/36357082332); that earlier run's app acceptance failed and remains red. |
+| [Metal app run 36565987342](https://github.com/SceneWorks/inference/actions/runs/36565987342) | At SceneWorks `44dc4119` / M2, 26 cases passed; the owner-approved `worker-kill-resume` safety skip leaves acceptance **incomplete**, exit 1. Its 754-event watchdog chain includes a durable final sample and completion acknowledgement, then returned the child status after the owned process group emptied. The before-profile preflight stopped the profile; the overall workflow is red. An earlier local Metal run also remains red after watchdog exit 97, despite writing the same 26/1 case counts. |
+| [Metal q4-default profile resume 36570798539](https://github.com/SceneWorks/inference/actions/runs/36570798539) | Successful targeted capture in the original app state at SceneWorks `44dc4119` / M2. It rehashed the original acceptance summary and watchdog file before measuring. Its 75-event guard chain verifies; the guarded test exited 0 after process-group cleanup. The original acceptance verdict remains incomplete. |
+| [CUDA engine real-weight run 36361386863](https://github.com/SceneWorks/inference/actions/runs/36361386863) | Exact M2 registered render and fidelity checks passed for the declared CUDA configurations. |
+| [Metal quality runtime 36559069894](https://github.com/SceneWorks/inference/actions/runs/36559069894) and [artifact-only recovery 36560050786](https://github.com/SceneWorks/inference/actions/runs/36560050786) | Exact M2 f32dev, bf16, q8 and q4 Metal fidelity checks passed against the regenerated CPU reference. The runtime workflow stayed red because its artifact upload path was rejected; the separate upload-only run retained the unchanged receipts without rerunning inference. These metrics use previously characterized bounds and are not a listening verdict. |
+
+The owner still needs to listen to the retained on-host audio for musical coherence, English and
+Mandarin output, reviewed covers and score edits, and standard/legacy decodes. Hashes, RMS,
+stage peaks and fidelity metrics cannot decide those questions. Preserve the Metal safety skip,
+the earlier red runs and the separate run identities in the final evidence; no sc-23002 Done or
+feature-to-main delivery claim follows from this table alone.

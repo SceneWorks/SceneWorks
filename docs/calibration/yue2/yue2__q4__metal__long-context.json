@@ -1,0 +1,171 @@
+{
+  "schema": "sceneworks-yue2-memory-profile-record-v2",
+  "caseId": "yue2:q4:metal:long-context",
+  "lane": "candle:yue2",
+  "backend": "metal",
+  "identity": {
+    "model": {
+      "id": "yue2",
+      "repo": "m-a-p/YuE2-3B",
+      "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+      "tier": "q4",
+      "weightsSha256": "df443371ec5b39b3b53525bf4cb8fc36e78c3597899e35d2aef585415fb4a9a6",
+      "weightsBytes": 2658814800,
+      "conversion": "yue2-ggml-tier-v1"
+    },
+    "decoder": {
+      "choice": "standard",
+      "componentId": "vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8"
+    },
+    "engine": {
+      "lane": "candle:yue2",
+      "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+      "closureDigest": "927461189947deb4323538d30c42c62c5cad6f4a788f095fa18039fda7c0b688",
+      "digestVersion": "inference-closure-digest v4"
+    },
+    "sceneworks": {
+      "revision": "b934d5dc41fdf48e7fd975892345948301a7fa36",
+      "dirty": false
+    }
+  },
+  "hardware": {
+    "memoryBytes": 137438953472,
+    "chip": "Apple M5 Max",
+    "os": "Darwin 25.6.0"
+  },
+  "request": {
+    "name": "long-context",
+    "planning": "off",
+    "style": "cinematic orchestral rock, male vocal, strings, piano, big drums",
+    "lyrics": "[verse]\nOver the ridge where the old roads end\nI carried the fire, I carried my friend\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside\n\n[bridge]\nAnd the night is long but the night will turn\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside",
+    "seed": 831002,
+    "cfgScale": 1.01,
+    "semanticSampling": {
+      "minTokens": 16000,
+      "maxTokens": 16000
+    }
+  },
+  "admission": {
+    "caseId": "yue2:q4:metal:long-context",
+    "outcome": "admitted",
+    "estimate": {
+      "tier": "q4",
+      "backend": "metal",
+      "evidence": "estimate_pending_terminal_calibration",
+      "controls": {
+        "stageResidency": false,
+        "attentionChunkSize": 100663296,
+        "decodeTileEdge": 224
+      },
+      "weights": {
+        "deviceBytes": 2658742400,
+        "hostBytes": 0
+      },
+      "stages": {
+        "acoustic": {
+          "deviceBytes": 6745993344,
+          "hostBytes": 0,
+          "totalBytes": 6745993344
+        },
+        "decode": {
+          "deviceBytes": 11990052992,
+          "hostBytes": 0,
+          "totalBytes": 11990052992
+        },
+        "load": {
+          "deviceBytes": 2658742400,
+          "hostBytes": 0,
+          "totalBytes": 2658742400
+        },
+        "semantic": {
+          "deviceBytes": 6915483776,
+          "hostBytes": 0,
+          "totalBytes": 6915483776
+        }
+      }
+    }
+  },
+  "measured": {
+    "sampler": "memory-calibration-watchdog phys_footprint",
+    "stages": {
+      "load": {
+        "peakBytes": 1324601544,
+        "samples": 1
+      },
+      "semantic": {
+        "peakBytes": 11194242400,
+        "samples": 284
+      },
+      "acoustic": {
+        "peakBytes": 11222783352,
+        "samples": 502
+      },
+      "decode": {
+        "peakBytes": 10150532184,
+        "samples": 15
+      }
+    },
+    "peakBytes": 11222783352
+  },
+  "outcome": {
+    "status": "completed",
+    "caseId": "yue2:q4:metal:long-context",
+    "outcome": "completed",
+    "audioSeconds": 639.9986666666666,
+    "rms": 0.43031084537506104,
+    "truncated": {
+      "abc": false,
+      "semantic": true
+    },
+    "stageSeconds": {
+      "acoustic": 1058.9436531066895,
+      "decode": 33.54973912239075,
+      "load": 1.5039758682250977,
+      "semantic": 597.6006569862366
+    },
+    "engineTiming": {
+      "abc": {},
+      "semantic": {
+        "seconds": 565.491735417,
+        "prefill_seconds": 0.151874834,
+        "output_tokens": 16000,
+        "content_tokens": 16000,
+        "prefix_tokens": 119,
+        "cfg_branches": 2,
+        "execution": "candle"
+      },
+      "nar_seconds": 1090.849016208,
+      "vae_seconds": 33.54279025,
+      "load": {
+        "resolve_verify_and_load_seconds": 1.291384708
+      },
+      "e2e_seconds": 1690.102967167
+    },
+    "runIdentity": "d476b5c317a227b1488fcff4175f4cb178f39e17e4240e3b171d704b841ab64f",
+    "planIdentity": "a8eb1b83539d19d503fab2f740099e52f872caea7f94ba17715e34115848cedd",
+    "decoder": {
+      "component": "yue2_vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+      "decoder_release": "standard",
+      "config_sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970",
+      "weights_sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    "latent": {
+      "schema": 1,
+      "sha256": "a311667326b86709df8b2bdb25074b70f0d999de62b687599f71823e8edb14e9",
+      "shape": [
+        16000,
+        64
+      ],
+      "dtype": "F32",
+      "source": {
+        "kind": "synthesis",
+        "stage_identity": "2ced61b379f331e560a34f786a46081fc3fcc59a138b9430793bef8099b85907"
+      }
+    }
+  },
+  "capturedAt": "2026-09-28T09:39:22.439Z"
+}
