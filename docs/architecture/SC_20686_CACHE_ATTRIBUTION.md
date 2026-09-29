@@ -2,7 +2,10 @@
 
 This source-only lane records where a future real-weight receipt must measure persistent/reused
 cross-attention state, transient read/dequant/workspace, process/allocator peak, and generation
-timing. Changing self-attention is explicitly excluded: it is request-dependent and is never counted
+timing. The campaign has two measurement lanes selected by the safety policy's backend: the
+**Metal lane** (`darwin-mlx`) measures the MLX providers the SceneWorks Mac product runs, and the
+**CUDA lane** (`linux-cuda`/`windows-cuda`) measures the Candle providers. The route map below is the
+CUDA lane; the [Metal lane](#metal-mlx-lane) section maps the MLX product path. Changing self-attention is explicitly excluded: it is request-dependent and is never counted
 as a reusable cache opportunity.
 
 ## Supported route map
@@ -28,15 +31,16 @@ an identical completed arm. The adapter is inert unless called with `--campaign`
 has no observer or receipt overhead.
 
 Both single and matrix campaigns require `--safety-policy` and an absolute external `--resume-dir`.
-The strict schema-version-1 policy requires a host-matched `linux-cuda` or `windows-cuda` backend,
-positive process deadlines and polling/grace periods, host-free reserve and child-footprint cap,
-stdout/stderr/event caps, a selected CUDA GPU UUID, GPU-free reserve, and child GPU cap. The resume
+The strict schema-version-1 policy requires a host-matched `darwin-mlx`, `linux-cuda` or
+`windows-cuda` backend, positive process deadlines and polling/grace periods, host-free reserve and
+child-footprint cap, stdout/stderr/event caps and, for CUDA, a selected CUDA GPU UUID, GPU-free
+reserve, and child GPU cap. The backend selects the lane, and a resume directory is bound to it. The resume
 identity binds the canonical resolved inputs, policy, coverage, source map, and adapter hashes.
 Each successful normal or cancel arm is
 preserved as a sealed unit with observer events, bounded logs, media or verified absence, process
 samples, and clean supervisor exit/reap. Corrupt, incomplete, or identity-mismatched units cannot be
 reused. A watchdog failure is an incomplete campaign, not a product cancellation or terminal No-go.
-The final `sc-20686-campaign-bundle-v5` seals `safety-policy.json`, `resume-identity.json`, resolved
+The final `sc-20686-campaign-bundle-v6` (one lane per bundle) seals `safety-policy.json`, `resume-identity.json`, resolved
 inputs, coverage/source map, per-arm artifacts, rows, and media through `campaign.json` and its
 sidecar. The inference reducer verifies the complete bundle before publication.
 
@@ -136,8 +140,9 @@ cancellation arm.
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
-Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets and a qualified
-uncontended CUDA host whose free memory covers the policy caps plus reserves at spawn. No
+Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets and, per lane, a
+qualified uncontended CUDA host (Candle) or Apple Silicon host (MLX) whose free memory covers the
+policy caps plus reserves at spawn. No
 measurement is fabricated by this source-only lane.
 
 ### Wan producer context is wired
@@ -149,3 +154,31 @@ product-owned cross-K/V geometry into the observer before it emits metadata. The
 routes therefore emit lifecycle, allocator, model identity, source identity, and residency facts
 from their real producer context; caller-authored JSON remains non-evidence and is rejected by the
 adapter and reducer.
+
+## Metal (MLX) lane
+
+The Metal lane is the Mac product-path lane. It runs the CUDA matrix unchanged — the same six routes,
+native coordinates and normal/cancel arms — through the MLX provider loaders the SceneWorks worker
+uses, with the frozen residency applied as `LoadSpec::offload_policy`, plus one MLX-only route the
+Mac product ships: `flux2_klein_9b_kv_edit` (the `flux2_klein_9b_kv` model's reference-K/V cache).
+Inference records the extension as `lane_extensions.mlx-metal` in
+`scripts/sc20686_coverage_manifest.json` and the lane's anchors under `lanes.mlx-metal` in
+`scripts/sc20686_source_map.json`; dropping a route blocks its family decision.
+
+| Route | MLX entrypoint | Cache kind on MLX |
+| --- | --- | --- |
+| `flux2_klein_9b_edit` | `sc20686_flux2_edit` | recomputed reference slice (no persistent boundary) |
+| `flux2_klein_9b_kv_edit` | `sc20686_flux2_edit` | persistent reference K/V per double/single layer; the CFG negative extract is a rebuild |
+| `wan2_2_ti2v_5b`, `wan2_2_t2v_14b`, `wan2_2_i2v_14b` | `sc20686_wan` | persistent cross-K/V per block, CFG cond+uncond stacked on the batch axis |
+| `wan_vace`, `wan2_2_vace_fun_14b` | `sc20686_wan` | recomputed text K/V: MLX Wan-VACE projects it in every block on every CFG forward |
+
+The observer (`inference/crates/media/mlx-gen/src/sc20686.rs`) is inert unless a campaign
+entrypoint arms it. It attributes persistent bytes as the exact `nbytes` of the retained K/V arrays,
+transient reads as MLX active-allocator high-water above each read window (inputs evaluated first,
+output evaluated inside — campaign-only evaluation boundaries), and every generation phase
+(`encode`, `load`, `prepare-cache`, `denoise-step`, `decode`) as a `phase-window` event with its own
+peak (reset per window) and Darwin `phys_footprint`. Every event carries `"backend": "mlx-metal"`;
+the adapter and reducer reject a Metal row without it, without denoise/decode windows, or whose
+persistent bytes disagree with the live CFG batch. The one-command launch is documented in
+`inference/docs/architecture/SC_20686_PERSISTENT_KV_CAMPAIGN.md` (`### One-command Metal campaign`).
+No Metal real-weight run is claimed by this document.
