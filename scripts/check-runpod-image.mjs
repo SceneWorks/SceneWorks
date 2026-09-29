@@ -22,6 +22,12 @@ function stage(name) {
   };
 }
 
+const webBuilder = stage("web-builder");
+assert.ok(
+  webBuilder.body.includes("COPY docs/film-script-writing.md docs/film-editor.md ./docs/"),
+  "web builder must include both documents bundled by the editor-guides plugin",
+);
+
 const ortBuilder = stage("ort-builder");
 const candleBase = stage("rust-worker-candle-base");
 const candleRuntime = stage("rust-worker-candle");

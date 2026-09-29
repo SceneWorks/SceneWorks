@@ -19,6 +19,8 @@ COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix apps/web
 COPY apps/web ./apps/web
 COPY apps/desktop/licenses ./apps/desktop/licenses
+# The editor-guides Vite plugin bundles these first-party documents.
+COPY docs/film-script-writing.md docs/film-editor.md ./docs/
 # Explicit empty (not unset): apps/web/src/api.js maps this to window.location.origin.
 ENV VITE_API_BASE_URL=""
 # Guard the built artifact, not just the Dockerfile environment declaration:
