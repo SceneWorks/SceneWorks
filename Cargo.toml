@@ -170,3 +170,8 @@ opt-level = 3
 
 [profile.dev.package.block-buffer]
 opt-level = 3
+
+# GTK3 requires glib ^0.18; retain its ABI and backport the upstream safety fix.
+# Provenance and removal criteria: vendor/glib-0.18.5/VENDORED.md.
+[patch.crates-io]
+glib = { path = "vendor/glib-0.18.5" }

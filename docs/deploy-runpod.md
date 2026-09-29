@@ -286,7 +286,7 @@ the persisted SceneWorks projects, generated assets, and downloaded models.
 | Startup refuses a public bind | `SCENEWORKS_ACCESS_TOKEN` is missing or blank. Confirm the environment variable uses the RunPod secret reference. |
 | Login is rejected | Enter the SceneWorks access-token value, not the RunPod API key. If you rotated the secret, restart or replace the Pod. |
 | Only the CPU worker appears | Wait for GPU initialization, then inspect logs and RunPod GPU telemetry. Confirm an NVIDIA GPU is actually attached. |
-| A managed directory is not writable | Confirm the network volume is mounted at `/workspace` and permits writes by the container's root user. |
+| A managed directory is not writable | Confirm the mount permits root to initialize POSIX ACLs and the configured service UID to traverse/write the managed paths. Check the exact startup error; services never fall back to root. |
 | A model remains gated | Accept its license, provide a read-only `HF_TOKEN` through a RunPod secret, and restart the Pod. |
 | A generation reports insufficient memory | Choose a smaller quantization tier or workload, reduce video frames/resolution, or use a GPU with more VRAM. |
 | Model Manager returns `524` | A large cache scan can outlast the proxy request. Wait, refresh, and check Queue/worker health. |
@@ -437,3 +437,91 @@ The live proxy validation on 2026-07-24 also established a reference result:
 
 This is a measured envelope, not a promise that RunPod has no higher
 undocumented limit.
+
+
+## Privilege separation acceptance
+
+The privileged entrypoint now grants a named-user ACL to dedicated managed
+storage trees before dropping the supervisor and services to UID/GID 1000
+(overridable with `SCENEWORKS_SERVICE_UID`/`SCENEWORKS_SERVICE_GID`). Existing
+owners remain unchanged. This requires writable POSIX ACLs on the provider
+volume. NVIDIA device nodes keep their provider ownership/modes; only required
+device groups are retained, including group 0 if a device requires it. Other
+supplementary groups and all capabilities are dropped, with `no_new_privs` set.
+ACL mask changes preserve unrelated principals' existing effective access and
+default permissions. Before privilege drop, driver enumeration and GPU/control/UVM
+nodes must become ready within `SCENEWORKS_DEVICE_READINESS_TIMEOUT_SECONDS`
+(default 63 seconds), retrying at `SCENEWORKS_DEVICE_READINESS_INTERVAL_SECONDS`
+(default 1 second). Driver probes and sleeps cannot outlast that deadline; a
+missing device fails before any service starts. Existing API readiness settings
+remain unchanged. `SCENEWORKS_CANDLE_REQUIRED=0` explicitly allows CPU-only
+diagnostics to skip this GPU requirement.
+Do not use managed-path overrides for unrelated/shared mount roots. Legacy
+managed content gets ACL access recursively; unrelated sibling trees do not.
+
+Local permission and lifecycle proof:
+
+```bash
+bash scripts/check-runpod-supervisor.sh
+bash scripts/check-runpod-privileges.sh
+node scripts/check-runpod-image.mjs
+```
+
+The Docker smoke uses an actual Linux root-owned volume and a restrictive
+character device backed by `/dev/null`. It is permission evidence, not CUDA or
+provider acceptance. The checked-in deployment template still refers to its
+previously accepted image; it is not changed by this candidate.
+
+Provider acceptance requires an approved candidate build/publication and one
+NVIDIA Pod with a dedicated, root-owned network volume supporting POSIX ACLs.
+Use an existing authorized Pod/volume if available; otherwise request approval
+for one 32 GB RTX PRO 4500 or 48 GB A40, 50 GB container disk, 100 GB network
+volume, and a 60-minute acceptance window after image download. No automatic
+relaunches or unbounded retries. Retain the volume and stop the Pod when the
+window ends. A failed ACL initialization is a measured provider constraint,
+not an accepted mitigation or permission to run services as root.
+
+Candidate build and publication use the existing manual workflow (heavy CUDA
+compilation; dispatch only after candidate publication is authorized):
+
+```bash
+candidate_ref="$(git symbolic-ref --short HEAD)"
+candidate_sha="$(git rev-parse HEAD)"
+test "$(git ls-remote origin "refs/heads/$candidate_ref" | cut -f1)" = "$candidate_sha"
+candidate_tag="manual-sc24258-${candidate_sha:0:12}"
+gh workflow run publish-runpod.yml --ref "$candidate_ref" -f "image_tag=$candidate_tag"
+# After the workflow succeeds, record its run URL/head SHA and immutable digest:
+docker buildx imagetools inspect "ghcr.io/sceneworks/sceneworks-runpod:$candidate_tag"
+```
+
+The workflow publishes the `linux/amd64` RunPod target and leaves release/latest
+tags unchanged. It has no nonpublishing mode. The same candidate build includes
+the shared CUDA runtime underlying the standalone candle stage; full image
+startup/device acceptance still requires the provider run below.
+
+Record the source revision and registry digest and deploy that exact candidate
+with the normal token secret, `/workspace` network mount, and port `8010/http`.
+Do not overwrite the accepted template or a release/latest tag. Authentication
+for read-only resource inventory can use the configured `RUNPOD_API_KEY` against
+`GET https://rest.runpod.io/v1/pods` and `/v1/networkvolumes` (see the
+[provider OpenAPI schema](https://rest.runpod.io/v1/openapi.json)); keep credentials
+in the environment or existing credential manager, never in logs or chat.
+
+Before startup, seed the dedicated test volume with a root-owned `0600` file
+under `config/legacy`, a root-owned nested cache fixture, and an unrelated
+root-only sibling directory. Record their owners/modes. After startup, run:
+
+```bash
+bash scripts/check-runpod-provider-identity.sh
+```
+
+Run that script inside the candidate Pod (copy it from the recorded source
+revision). It checks actual process identities, dropped capabilities, service
+writes, and `nvidia-smi` under the running service's exact groups. Then use the
+normal authenticated UI to download RealVisXL Q4, run one 512 x 512 image at
+seed 1 with prompt `a red ceramic cup on a wooden table`, and verify successful
+GPU job completion plus the saved output. Confirm Queue shows both the GPU and
+utility workers. Restart the same Pod once and verify model reuse, configuration
+and credential persistence, a second generation, and unchanged legacy ownership
+and unrelated-directory permissions. Save job IDs, output paths, device/identity
+results, and startup logs without tokens. Stop the Pod after the bounded run.

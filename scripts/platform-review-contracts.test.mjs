@@ -1426,6 +1426,36 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   assert.match(script, /SCENEWORKS_UID/);
 });
 
+test("standard server and web development images default to nonroot users", async () => {
+  const [rustDockerfile, webDockerfile] = await Promise.all([
+    source("docker/rust.Dockerfile"),
+    source("docker/web.Dockerfile"),
+  ]);
+  const stage = (dockerfile, name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(dockerfile);
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+
+  for (const name of ["rust-api", "rust-worker", "rust-worker-candle"]) {
+    const body = stage(rustDockerfile, name);
+    assert.match(body, /^ENV HOME=\/home\/sceneworks$/m, `${name} must set a writable home`);
+    assert.match(body, /^USER sceneworks$/m, `${name} must default to the sceneworks user`);
+  }
+  assert.match(webDockerfile, /^ENV HOME=\/home\/node$/m);
+  assert.match(webDockerfile, /^USER node$/m);
+
+  for (const dockerfile of [rustDockerfile, webDockerfile]) {
+    assert.doesNotMatch(
+      dockerfile,
+      /\bchmod\s+(?:-R\s+)?(?:777|a\+w|o\+w)\b/,
+      "container hardening must not introduce broad writable permissions",
+    );
+  }
+});
+
 test("Rust Docker dependency layers include every memory-strategy adapter target", async () => {
   const dockerfile = await source("docker/rust.Dockerfile");
   assert.equal(

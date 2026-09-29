@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
-const [dockerfile, entrypoint, supervisor, gpuSource, engineSource, readme] = await Promise.all([
+const [dockerfile, entrypoint, supervisor, gpuSource, engineSource, readme, privileges] = await Promise.all([
   readFile("docker/rust.Dockerfile", "utf8"),
   readFile("docker/runpod-entrypoint.sh", "utf8"),
   readFile("crates/sceneworks-worker/src/supervisor.rs", "utf8"),
   readFile("crates/sceneworks-worker/src/gpu.rs", "utf8"),
   readFile("crates/sceneworks-worker/src/engines.rs", "utf8"),
   readFile("README.md", "utf8"),
+  readFile("docker/runpod-privileges.sh", "utf8"),
 ]);
 
 function stage(name) {
@@ -22,22 +23,24 @@ function stage(name) {
 }
 
 const ortBuilder = stage("ort-builder");
+const candleBase = stage("rust-worker-candle-base");
 const candleRuntime = stage("rust-worker-candle");
 const runpod = stage("runpod");
 
 assert.equal(
-  candleRuntime.base,
+  candleBase.base,
   "nvidia/cuda:12.9.1-runtime-ubuntu24.04",
   "combined image must retain the validated CUDA 12.9.1 / Ubuntu 24.04 runtime",
 );
-assert.equal(runpod.base, "rust-worker-candle", "combined image must inherit candle runtime");
+assert.equal(candleRuntime.base, "rust-worker-candle-base", "standalone candle image must inherit the shared CUDA runtime");
+assert.equal(runpod.base, "rust-worker-candle-base", "combined image must inherit the shared CUDA runtime");
 
 for (const contract of [
   "ffmpeg",
   "COPY --from=candle-builder /out/sceneworks-rust-worker",
   "COPY --from=ort-builder ${ORT_PY_SITE} ${ORT_PY_SITE}",
 ]) {
-  assert.ok(candleRuntime.body.includes(contract), `candle runtime is missing ${contract}`);
+  assert.ok(candleBase.body.includes(contract), `candle runtime base is missing ${contract}`);
 }
 assert.ok(
   ortBuilder.body.includes("onnxruntime-gpu==${ONNXRUNTIME_GPU_VERSION}"),
@@ -59,7 +62,7 @@ function instructionsOnly(body) {
     .join("\n");
 }
 assert.ok(
-  !runtimePython.test(instructionsOnly(candleRuntime.body)),
+  !runtimePython.test(instructionsOnly(candleBase.body)),
   "candle runtime must stay Python-free — stage onnxruntime in ort-builder instead",
 );
 assert.ok(
@@ -79,6 +82,16 @@ for (const contract of [
 ]) {
   assert.ok(runpod.body.includes(contract), `runpod stage is missing ${contract}`);
 }
+
+assert.ok(!/^USER\s/m.test(runpod.body), "provider initialization must retain root entrypoint access");
+for (const contract of ["COPY docker/runpod-privileges.sh", "acl util-linux", "SCENEWORKS_SERVICE_UID=1000"]) {
+  assert.ok(runpod.body.includes(contract), `RunPod privilege setup is missing ${contract}`);
+}
+for (const contract of ["exec setpriv", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", "--no-new-privs"]) {
+  assert.ok(entrypoint.includes(contract), `RunPod privilege drop is missing ${contract}`);
+}
+assert.ok(privileges.includes('find -P') && privileges.includes('setfacl --no-mask --set-file=-'), "legacy managed files need ownership-preserving, physical ACL migration");
+assert.ok(!/\bchown\s+-R|\bchmod\s+(?:777|a\+w)/.test(privileges), "RunPod must not recursively change ownership or grant world writes");
 
 assert.ok(
   entrypoint.includes("SCENEWORKS_GPU_ID=auto"),

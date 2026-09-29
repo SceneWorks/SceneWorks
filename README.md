@@ -385,14 +385,38 @@ another absolute container path for a custom mount. Explicit
 download-credential store is kept out of the config dir (sc-16540) because that
 directory is a repo checkout in development and the store is plaintext tokens.
 
-The image intentionally runs as root, matching RunPod's default volume owner.
-At startup it creates and write-probes only the exact managed directories; it
-does not recursively `chown` a potentially large model volume. This also handles
-directories carrying a different numeric UID on ordinary pod mounts. If an NFS
-export uses root-squash or ACLs that deny even a bounded write probe, startup
-fails before the API launches with the exact path and an actionable permissions
-error; fix the export/ACL or use writable per-path overrides. No existing data
-is removed.
+The image starts as root only to initialize provider mounts. Before launching
+any service it grants the configured service UID access to the managed trees,
+then executes the supervisor, API, and workers with a nonzero UID/GID, no Linux
+capabilities, and `no_new_privs`. `SCENEWORKS_SERVICE_UID` and
+`SCENEWORKS_SERVICE_GID` default to `1000`; set both to match an existing volume
+identity when needed. NVIDIA device groups are retained only when required by
+attached device permissions (this can include GID 0 for root-group devices).
+Device ownership and modes remain unchanged. Before dropping privileges, CUDA
+startup waits up to `SCENEWORKS_DEVICE_READINESS_TIMEOUT_SECONDS` (default 63)
+for driver-enumerated GPU nodes plus control/UVM nodes; each driver probe and
+retry sleep is bounded by that deadline. `SCENEWORKS_DEVICE_READINESS_INTERVAL_SECONDS`
+defaults to 1. A missing/late device beyond the deadline fails startup before any
+service starts. CPU-only diagnostics can explicitly set `SCENEWORKS_CANDLE_REQUIRED=0`.
+
+Initialization preserves file owners and existing content. It applies a named
+user ACL and inheritable directory ACL within the explicit data, configuration,
+credentials, Hugging Face cache, jobs-database parent, and runtime-home trees.
+Existing effective rights of unrelated ACL users/groups are preserved when
+access or default masks widen. This includes legacy nested files created by older root-running images; it
+walks metadata, without reading model contents or recursively changing owners.
+Do not point managed-directory overrides at a shared mount root or unrelated
+system directory: these paths must be dedicated application trees. Only needed
+traversal permission is added to their ancestors; unrelated sibling trees are
+untouched. Symlinked managed roots are rejected; internal model-cache symlinks
+are preserved without following them during permission initialization.
+
+The network filesystem must support POSIX ACL updates by container root.
+Root-squashed, read-only, or ACL-incompatible exports fail with the affected
+path before services start. Fix the export/ACL or select compatible per-path
+overrides; startup never falls back to root services. Local Linux permission
+coverage is `bash scripts/check-runpod-privileges.sh`; actual provider/CUDA
+acceptance is described in [the deployment guide](docs/deploy-runpod.md#privilege-separation-acceptance).
 
 Release tags matching `vX.Y.Z` publish the combined `linux/amd64` image to
 `ghcr.io/sceneworks/sceneworks-runpod:X.Y.Z` and `:latest`. The same workflow can

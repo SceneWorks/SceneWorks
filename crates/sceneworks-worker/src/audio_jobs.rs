@@ -3443,6 +3443,142 @@ mod tests {
         ])
     }
 
+    /// Exercise the Audio Studio manifest resolver and the pinned runtime's real audio preparer
+    /// together. The malformed index must win over a corrupt earlier shard: the provider validates
+    /// the complete selection before reading any safetensors header. A normal HF blob link must
+    /// still prepare as a same-repository cache artifact.
+    #[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+    #[test]
+    fn staged_audio_shard_indexes_fail_closed_and_keep_hf_blob_access() {
+        use std::os::unix::fs::symlink;
+
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..Settings::from_env()
+        };
+        let tiny = {
+            let header = br#"{"w":{"dtype":"F32","shape":[0],"data_offsets":[0,0]}}"#;
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(header);
+            bytes
+        };
+
+        for (model, repo, class, index_dir, index_stem) in [
+            (
+                "acestep_v15_turbo",
+                "ACE-Step/acestep-v15-xl-turbo-diffusers",
+                "AceStepPipeline",
+                "transformer",
+                "diffusion_pytorch_model",
+            ),
+            (
+                "moss_sfx_v2",
+                "OpenMOSS-Team/MOSS-SoundEffect-v2.0",
+                "MossSoundEffectPipeline",
+                "text_encoder",
+                "model",
+            ),
+        ] {
+            let repo_dir =
+                sceneworks_core::hf_home::huggingface_repo_cache_path(data.path(), repo).unwrap();
+            let snapshot = repo_dir.join("snapshots/0123456789abcdef0123456789abcdef01234567");
+            let component = snapshot.join(index_dir);
+            std::fs::create_dir_all(&component).unwrap();
+            std::fs::write(
+                snapshot.join("model_index.json"),
+                json!({"_class_name": class}).to_string(),
+            )
+            .unwrap();
+            // MOSS's preparer probe also requires the DiT file before selecting the audio lane.
+            if model == "moss_sfx_v2" {
+                std::fs::create_dir_all(snapshot.join("transformer")).unwrap();
+                std::fs::write(
+                    snapshot.join("transformer/diffusion_pytorch_model.safetensors"),
+                    &tiny,
+                )
+                .unwrap();
+            }
+            let index = component.join(format!("{index_stem}.safetensors.index.json"));
+            std::fs::write(component.join("a-corrupt.safetensors"), b"not safetensors").unwrap();
+            std::fs::write(
+                &index,
+                json!({"weight_map": {
+                    "first": "a-corrupt.safetensors",
+                    "second": "../outside.safetensors"
+                }})
+                .to_string(),
+            )
+            .unwrap();
+            let request = AudioRequest::from_payload(&payload(json!({
+                "model": model,
+                "modelManifestEntry": {
+                    "id": model,
+                    "downloads": [{"provider": "huggingface", "repo": repo}]
+                }
+            })));
+            let resolved = resolve_audio_model_dir(&settings, &request).unwrap();
+            assert_eq!(
+                resolved, snapshot,
+                "Audio Studio must select the staged snapshot"
+            );
+            let spec = gen_core::core_llm::PrepareSpec::dense(
+                resolved.clone(),
+                data.path().join("prepared"),
+            );
+            let error = crate::inference_runtime::audio_preparers()
+                .prepare_snapshot(&spec)
+                .expect_err("a selected traversal shard must fail before header reads");
+            assert!(
+                error.to_string().contains("invalid shard path"),
+                "{model}: expected the full-set boundary, got {error}"
+            );
+            assert!(
+                !spec.out_dir.exists(),
+                "an invalid index must not prepare output"
+            );
+
+            if model == "acestep_v15_turbo" {
+                let blob = repo_dir.join("blobs/accepted");
+                std::fs::create_dir_all(blob.parent().unwrap()).unwrap();
+                std::fs::write(&blob, &tiny).unwrap();
+                std::fs::create_dir_all(component.join("nested")).unwrap();
+                symlink(&blob, component.join("nested/accepted.safetensors")).unwrap();
+                std::fs::write(
+                    &index,
+                    json!({"weight_map": {"w": "nested/accepted.safetensors"}}).to_string(),
+                )
+                .unwrap();
+                let report = crate::inference_runtime::audio_preparers()
+                    .prepare_snapshot(&spec)
+                    .expect("a staged ACE-Step shard may resolve to its own HF blob root");
+                assert_eq!(report.out_dir, resolved);
+                assert!(report.passthrough);
+                assert_eq!(report.num_tensors, 1);
+
+                let other_repo = sceneworks_core::hf_home::huggingface_repo_cache_path(
+                    data.path(),
+                    "other-owner/other-model",
+                )
+                .unwrap();
+                std::fs::create_dir_all(other_repo.join("blobs")).unwrap();
+                let foreign_blob = other_repo.join("blobs/foreign");
+                std::fs::write(&foreign_blob, &tiny).unwrap();
+                symlink(&foreign_blob, component.join("nested/foreign.safetensors")).unwrap();
+                std::fs::write(
+                    &index,
+                    json!({"weight_map": {"w": "nested/foreign.safetensors"}}).to_string(),
+                )
+                .unwrap();
+                let error = crate::inference_runtime::audio_preparers()
+                    .prepare_snapshot(&spec)
+                    .expect_err("another HF repository's blob is not a supported cache root");
+                assert!(error.to_string().contains("outside authorized shard roots"));
+            }
+        }
+    }
+
     /// Stage a co-requisite component file at `models--<repo>/snapshots/<revision>/<file>` under
     /// `data_dir`, mirroring the model_jobs seam tests' `stage_snapshot_file`.
     fn stage_snapshot_file(data_dir: &Path, repo: &str, revision: &str, file: &str) {
