@@ -37,7 +37,8 @@ const CANCEL_MESSAGE: &str = "Dataset face analysis canceled by user.";
 
 // MLX face stack (macOS): the same SCRFD + ArcFace the InstantID/kps paths use, loaded directly (not
 // through a registry — the `FaceEmbedder` contract has no gen-core registration).
-#[cfg(target_os = "macos")]
+// Production loads go through `crate::image_jobs::read_weights`; the tests still load directly.
+#[cfg(all(target_os = "macos", test))]
 use runtime_macos::media::weights::Weights;
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::face::FaceAnalysis;
@@ -110,12 +111,14 @@ impl CatalogFaceDetector {
     pub(crate) fn load(weights_dir: &Path) -> WorkerResult<Self> {
         #[cfg(target_os = "macos")]
         {
-            let scrfd =
-                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
-                    .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
-            let arcface =
-                Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
-                    .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+            let scrfd = crate::image_jobs::read_weights(
+                weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE),
+            )
+            .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+            let arcface = crate::image_jobs::read_weights(
+                weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
+            )
+            .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
             let analysis = FaceAnalysis::load(&scrfd, &arcface)
                 .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
             Ok(Self {
@@ -247,10 +250,13 @@ fn analyze_faces(
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
 ) -> WorkerResult<Vec<FaceAnalysisRecord>> {
-    let scrfd = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
-        .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
-    let arcface = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
-        .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+    let scrfd =
+        crate::image_jobs::read_weights(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
+            .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+    let arcface = crate::image_jobs::read_weights(
+        weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
+    )
+    .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
     let analysis = FaceAnalysis::load(&scrfd, &arcface)
         .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
     embed_largest_faces(

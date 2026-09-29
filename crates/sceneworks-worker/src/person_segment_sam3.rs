@@ -107,7 +107,7 @@ fn propagate_person_concept(
         guard
     });
     if guard.is_none() {
-        let weights = Weights::from_file(model_path)
+        let weights = crate::image_jobs::read_weights(model_path)
             .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
         *guard = Some(weights);
     }
@@ -330,7 +330,7 @@ fn with_cached_weights<T>(
         guard
     });
     if guard.is_none() {
-        let weights = Weights::from_file(model_path)
+        let weights = crate::image_jobs::read_weights(model_path)
             .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
         *guard = Some(weights);
     }

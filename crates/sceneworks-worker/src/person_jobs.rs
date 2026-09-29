@@ -418,7 +418,7 @@ struct Yolo {
 #[cfg(target_os = "macos")]
 impl Yolo {
     fn load(path: &Path) -> WorkerResult<Self> {
-        let weights = Weights::from_file(path)
+        let weights = crate::image_jobs::read_weights(path)
             .map_err(|e| WorkerError::Engine(format!("yolo11m weights load: {e}")))?;
         let (ax, ay, st) = Self::build_anchors();
         Ok(Self {

@@ -241,7 +241,7 @@ fn detect_largest_kps(scrfd_path: &Path, image: &Image) -> WorkerResult<KpsExtra
                     guard
                 });
                 if !cached_path_matches(guard.as_ref(), scrfd_path) {
-                    let weights = Weights::from_file(scrfd_path).map_err(|error| {
+                    let weights = crate::image_jobs::read_weights(scrfd_path).map_err(|error| {
                         WorkerError::Engine(format!("SCRFD weights {scrfd_path:?}: {error}"))
                     })?;
                     *guard = Some((scrfd_path.to_path_buf(), weights));

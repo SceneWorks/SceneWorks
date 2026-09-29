@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference revision 99a60541: 735 provenance candidates and 103 production-Rust crate prefixes. This merged main revision includes the reviewed YuE2 SheetSage2 noncommercial owner-basis authorization, bundle exposure and native ABC parity changes alongside main-side source changes. SheetSage2 port use follows the owner decision recorded on epic 22988; weight redistribution remains gated. Generated inventories and digests describe this exact source. Existing compliance classifications and open items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
-  "auditDigest": "2c46c9b4811690fc48b972c3afc8a525c6fa46130462f1c37eef449e2832222e",
+  "_comment": "Audit inventory rescanned at inference revision 65bc5d8b (inference main, merge of PR #1099): 735 provenance candidates and 103 production-Rust crate prefixes. The advance from the previously pinned 1744de6e takes in the YuE2 epic's inference merges (PR #1090, #1094; new production crates crates/audio/candle-audio-yue2 and crates/audio/candle-audio-sheetsage2, left unclassified here as open advisory items for that epic's compliance pass), the sc-24247 semgrep remediation, and sc-24245's materialize-weights-at-load sweep across the MLX engine loaders (PR #1091) and its follow-up that reads pending safetensors loads on the CPU before materializing (PR #1098) and the restoration of lazy per-block reads in the block streams (PR #1099), with the mlx-rs fork pin at 48ff5e78. The sc-24245 changes are loader, residency and MLX error-propagation plumbing only and add no provenance candidate. Generated inventories and digests describe this exact source. Existing compliance classifications and open items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "65bc5d8b82d9dd06fd901cfd8f722ae335530c85",
+  "auditDigest": "e1397b2469bceb4988a46a8cbfa6360f6d2a06a97fad2ff0164fec49b8dc502c",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+    "revision": "65bc5d8b82d9dd06fd901cfd8f722ae335530c85",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 735,
-    "populationSha256": "11c9b45fd8f29a5c915e9ab6a5912728286753e34c3edf343a81a3734008752d"
+    "populationSha256": "ad504023c878796ad6c375ec7a04292a673d716259db2dd3169ab7082f0e5afc"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+    "revision": "65bc5d8b82d9dd06fd901cfd8f722ae335530c85",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 103,
     "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"
