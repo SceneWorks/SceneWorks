@@ -2582,16 +2582,62 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .get("downloads")
         .and_then(Value::as_array)
         .expect("wan TI2V-5B downloads");
-    // The macOS tiers, in order, from the SceneWorks quant-matrix repo.
+    // The macOS tiers, in order, from the SceneWorks quant-matrix repo (co-requisite rows ride along).
+    let on_macos = |d: &&Value| {
+        d.get("platforms")
+            .and_then(Value::as_array)
+            .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+            .unwrap_or(false)
+    };
+    let co_requisite = |d: &&Value| d.get("coRequisite").and_then(Value::as_bool) == Some(true);
     let macos: Vec<&Value> = downloads
         .iter()
-        .filter(|d| {
-            d.get("platforms")
-                .and_then(Value::as_array)
-                .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
-                .unwrap_or(false)
+        .filter(on_macos)
+        .filter(|d| !co_requisite(d))
+        .collect();
+    // sc-20686: the macOS `wan_vace` engine (replace_person + the tier-C extend/bridge) needs the
+    // Wan2.1-VACE-1.3B transformer, fetched alongside as a pinned soft co-requisite — only its
+    // `transformer/` (the shared UMT5/VAE/tokenizer come from a base-Wan 14B tier).
+    let vace: Vec<&Value> = downloads
+        .iter()
+        .filter(on_macos)
+        .filter(co_requisite)
+        .collect();
+    // The shared UMT5/z16-VAE/tokenizer it is assembled with come from the T2V-A14B q4 tier — only
+    // those three files, so a TI2V-5B-only install can serve `wan_vace`.
+    let co_requisites: Vec<(&str, &str, &str, Value)> = vace
+        .iter()
+        .map(|d| {
+            (
+                d.get("repo").and_then(Value::as_str).unwrap_or_default(),
+                d.get("revision").and_then(Value::as_str).unwrap_or_default(),
+                d.get("required").and_then(Value::as_str).unwrap_or_default(),
+                d.get("files").cloned().unwrap_or_default(),
+            )
         })
         .collect();
+    assert_eq!(
+        co_requisites,
+        vec![
+            (
+                "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "ec4d2cb062b548996b179d493fdd05340de702a1",
+                "soft",
+                serde_json::json!(["transformer/*"]),
+            ),
+            (
+                "SceneWorks/wan2.2-t2v-a14b-mlx",
+                "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+                "soft",
+                serde_json::json!([
+                    "q4/t5_encoder.safetensors",
+                    "q4/vae.safetensors",
+                    "q4/tokenizer.json"
+                ]),
+            ),
+        ],
+        "wan TI2V-5B's macOS co-requisites are exactly the wan_vace transformer + its base components"
+    );
     let variants: Vec<&str> = macos
         .iter()
         .filter_map(|d| d.get("variant").and_then(Value::as_str))
