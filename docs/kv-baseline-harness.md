@@ -145,6 +145,57 @@ synthetic zero-error or caller-authored quality result merely to publish a
 matrix. The kernel fixture is a real MLX dense-attention dispatch checked
 against a separately accumulated host-fp32 reference; 4-bit-versus-bf16 model
 perplexity and agreement are recorded as raw dense-baseline characterization,
-not mislabeled as kernel error. Frozen quality thresholds gate compressed
-receipts, where a regression is actionable; the dense campaign remains the
-immutable comparison baseline.
+not mislabeled as kernel error. A dense row is never rejected on model
+behaviour: the structured-tool and needle artifacts record, for both the
+candidate and the bf16 reference, tool validity, needle recovery, and output
+agreement as booleans (with output hashes in the binding), and
+`quality.needleDiscriminating` states whether the dense run itself recovered the
+needle. Missing weights, identity drift, incomplete runs, and non-nominal
+thermal state still fail closed.
+
+Frozen quality thresholds gate only compressed receipts, and only against the
+dense-KV run on the **same weights** (every fixture's `independentReference` is
+`dense-kv-same-weights:<model inventory>`; a bf16 reference is refused as a
+compressed denominator, and a dense receipt may not claim one). This isolates
+the effect of KV compression from weight quantization. When the same-weights
+dense run missed the needle, the compressed needle check requires exact
+agreement with the dense output and the receipt carries
+`needleDiscriminating: false`; `compare` reports that row as
+non-discriminating instead of counting a shared miss as retrieval.
+
+Every row, including memory-material and fit-boundary, is admitted by its
+runtime guards rather than a static whole-process MLX peak proof, which lazy
+long-context graphs cannot supply. The mandatory policy must configure the
+supervised worker's deadline, sampling, termination grace, host free-RAM
+reserve, and `phys_footprint` watchdog cap; the supervisor refuses before spawn
+unless host free RAM covers cap plus reserve, and a conservative static
+load-plus-KV floor above the cap still refuses. Each receipt records
+`memory.admission` (`runtime-guarded`, the stated cap, reserve, and the static
+estimate). A pre-spawn refusal, watchdog abort, or failed worker is written as
+a sealed `logs/<row>.attempt-<n>.unaccepted.json` record with its reason and is
+never an accepted row.
+
+## Contract v3 change record
+
+Contract v3 (`config/kv-baseline-quality-contract.json`) replaced v2 before any
+compressed-row result existed, so it is not post-hoc threshold tuning; every
+threshold number is unchanged.
+
+- The v2 needle fixture asked the model to remember a "harmless passphrase".
+  The dense Q4 Llama baseline answered with a safety refusal about recovering
+  passwords while the bf16 reference answered; an independent MLX-LM run
+  reproduced the identical refusal, so it was model behaviour triggered by
+  credential-like wording. A needle check the dense baseline fails cannot
+  detect KV-induced retrieval loss. v3 uses neutral RULER/NIAH-style wording
+  ("The special magic identifier is {needle}." / "What is the special magic
+  identifier mentioned in the text above? Reply with only the identifier.") and
+  keeps the exact-match needle token.
+- The v2 compressed gate compared the Q4 candidate with the bf16 reference, so
+  it measured weight quantization rather than the KV cache and would reject
+  every compressed candidate by construction. v3 gates compressed rows against
+  the dense-KV run on the same weights; the bf16 model remains dense-row
+  characterization only.
+
+The v3 contract hash is the compatibility fence: receipts bound to v2 are
+refused, and v4 receipts produced under v3 carry the required
+`quality.needleDiscriminating` and `memory.admission` fields.

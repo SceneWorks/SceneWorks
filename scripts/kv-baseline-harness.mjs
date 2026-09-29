@@ -122,6 +122,15 @@ const FIXTURES = [
   "multi-turn-prompt-cache",
 ];
 const FIXTURE_SOURCES = Symbol("fixtureSources");
+// Quality contract v3: the only denominator of a compressed receipt's quality gate.
+const COMPRESSED_QUALITY_REFERENCE = "dense-kv-same-weights";
+const RUNTIME_GUARDED_ADMISSION = "runtime-guarded";
+
+/** Mirrors the inference producer's fixture reference for a same-weights dense-KV denominator. */
+export function sameWeightsFixtureReference(fixture, modelInventorySha256) {
+  const model = `${COMPRESSED_QUALITY_REFERENCE}:${modelInventorySha256}`;
+  return fixture === "kernel-fp32-reference" ? `host-fp32-dense-attention-v1;${model}` : model;
+}
 
 function fail(message) {
   throw new Error(`KV baseline receipt: ${message}`);
@@ -301,9 +310,31 @@ function parseSidecar(sidecar, expectedName) {
   return fields[0];
 }
 
-function checkContract(contract) {
-  exactKeys(contract, ["version", "thresholds", "statistics", "fixtures"], "contract");
-  if (contract.version !== 2) fail("unsupported quality contract version");
+export function checkContract(contract) {
+  exactKeys(
+    contract,
+    ["version", "thresholds", "gate", "needleFixture", "statistics", "fixtures"],
+    "contract",
+  );
+  if (contract.version !== 3) fail("unsupported quality contract version");
+  exactKeys(
+    contract.gate,
+    ["denseRows", "compressedReference", "compressedRows", "kernelParity", "nonDiscriminatingNeedle"],
+    "contract.gate",
+  );
+  for (const field of ["denseRows", "compressedRows", "kernelParity", "nonDiscriminatingNeedle"]) {
+    text(contract.gate[field], `contract.gate.${field}`);
+  }
+  if (contract.gate.compressedReference !== COMPRESSED_QUALITY_REFERENCE) {
+    fail("contract compressed quality reference must be the same-weights dense-KV run");
+  }
+  exactKeys(contract.needleFixture, ["statement", "question", "match"], "contract.needleFixture");
+  for (const field of ["statement", "question", "match"]) {
+    text(contract.needleFixture[field], `contract.needleFixture.${field}`);
+  }
+  if (!contract.needleFixture.statement.includes("{needle}")) {
+    fail("contract needle statement must place the exact needle token");
+  }
   exactKeys(
     contract.thresholds,
     [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS],
@@ -603,6 +634,24 @@ function validateCompileAttribution(attribution, matrix) {
   }
 }
 
+// Every row is admitted by its runtime guards (supervised worker, phys_footprint watchdog cap,
+// host reserve, deadline, sampling); the receipt records the stated cap and the static estimate.
+function validateAdmission(admission) {
+  exactKeys(
+    admission,
+    ["mode", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes"],
+    "memory.admission",
+  );
+  if (admission.mode !== RUNTIME_GUARDED_ADMISSION) fail("memory.admission must be runtime-guarded");
+  for (const field of ["childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes"]) {
+    positiveInteger(admission[field], `memory.admission.${field}`);
+  }
+  if (!Number.isSafeInteger(admission.childFootprintCapBytes + admission.hostFreeReserveBytes)
+    || admission.staticFootprintFloorBytes > admission.childFootprintCapBytes) {
+    fail("memory.admission estimate exceeds the stated child cap");
+  }
+}
+
 function validateFixtureEvidence(evidence) {
   exactKeys(evidence, FIXTURES, "quality.fixtureEvidence");
   for (const fixture of FIXTURES) {
@@ -753,10 +802,11 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "modelWeightsBytes", "persistentKvBytes", "transientWorkspaceBytes",
       "denseTheoreticalKvBytes", "phaseSamples", "prefillPeakWindow", "allocationEvents",
-      "reconciliation", "release",
+      "reconciliation", "release", "admission",
     ],
     "memory",
   );
+  validateAdmission(receipt.memory.admission);
   positiveInteger(receipt.memory.modelWeightsBytes, "memory.modelWeightsBytes");
   positiveInteger(receipt.memory.persistentKvBytes, "memory.persistentKvBytes");
   nonnegativeInteger(receipt.memory.transientWorkspaceBytes, "memory.transientWorkspaceBytes");
@@ -1034,9 +1084,15 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
 
   exactKeys(
     receipt.quality,
-    [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, "statistics", "fixtureEvidence"],
+    [
+      ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, "needleDiscriminating", "statistics",
+      "fixtureEvidence",
+    ],
     "quality",
   );
+  if (typeof receipt.quality.needleDiscriminating !== "boolean") {
+    fail("quality.needleDiscriminating must be boolean");
+  }
   for (const field of ERROR_QUALITY_FIELDS) finite(receipt.quality[field], `quality.${field}`);
   if (receipt.quality.parityMaxError < 0) fail("quality.parityMaxError must be non-negative");
   for (const field of AGREEMENT_QUALITY_FIELDS) {
@@ -1067,6 +1123,19 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     }
   }
   validateFixtureEvidence(receipt.quality.fixtureEvidence);
+  // Contract v3: compressed quality is gated against the same-weights dense-KV run, never the
+  // bf16 model; dense fixtures are characterization and must not claim to be that denominator.
+  for (const fixture of FIXTURES) {
+    const sameWeights = receipt.quality.fixtureEvidence[fixture].independentReference
+      === sameWeightsFixtureReference(fixture, receipt.provenance.modelFileSha256);
+    if ((receipt.mode === "compressed") !== sameWeights) {
+      fail(`quality fixture ${fixture} reference is not the contract v3 denominator for a ${receipt.mode} receipt`);
+    }
+  }
+  if (receipt.mode === "dense"
+    && receipt.quality.needleDiscriminating !== (receipt.quality.needleRetrieval === 1)) {
+    fail("dense needle discrimination must equal the dense run's own needle recovery");
+  }
 
   const allowedLifecycleKeys = [...LIFECYCLE, ...LIFECYCLE.map((field) => `${field}FallbackReason`)];
   exactKeys(receipt.lifecycle, allowedLifecycleKeys, "lifecycle");
@@ -1296,13 +1365,23 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
       fail(`fixture artifact ${fixture}.metrics.${field} must be finite`);
     }
   }
+  const outcomeEvidence = {
+    "structured-tool-call": ["candidateValid", "referenceValid", "outputsMatch"],
+    "long-context-needle": ["candidateRecovered", "referenceRecovered", "outputsMatch", "discriminating"],
+  }[fixture] ?? [];
   const requiredEvidence = {
     "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal"],
-    "structured-tool-call": ["matches", "total"],
-    "long-context-needle": ["matches", "total"],
+    "structured-tool-call": ["matches", "total", ...outcomeEvidence],
+    "long-context-needle": ["matches", "total", ...outcomeEvidence],
     "multi-turn-prompt-cache": ["matches", "total"],
   }[fixture];
   exactKeys(artifact.evidence, requiredEvidence, `fixture artifact ${fixture}.evidence`);
+  // Both arms' tool/needle behaviour is recorded as raw observation, never as a pass flag.
+  for (const field of outcomeEvidence) {
+    if (typeof artifact.evidence[field] !== "boolean") {
+      fail(`fixture artifact ${fixture}.${field} must be boolean`);
+    }
+  }
   if (fixture === "kernel-fp32-reference") {
     for (const field of ["candidatePerplexity", "referencePerplexity", "greedyMatches", "greedyTotal"]) {
       if (typeof artifact.evidence[field] !== "number" || !Number.isFinite(artifact.evidence[field])) fail(`fixture artifact ${fixture}.${field} must be finite`);
@@ -1420,6 +1499,9 @@ export function renderComparisonMarkdown(comparison) {
     + `- Decode MLX live/cache deltas: ${comparison.decodeSteadyMlxActiveDeltaBytes} / ${comparison.decodeSteadyMlxCacheDeltaBytes} bytes\n`
     + `- MLX peak delta: ${comparison.mlxPeakDeltaBytes} bytes\n`
     + `- Decode throughput ratio: ${comparison.decodeThroughputRatio.toFixed(6)}\n`
+    + (comparison.quality.needleDiscriminating === false
+      ? "- Needle check: NON-DISCRIMINATING (same-weights dense run missed the needle; compressed matched dense output only)\n"
+      : "")
     + `- Quality contract: ${comparison.contractHash}\n`;
 }
 
@@ -1598,7 +1680,7 @@ export function compareReceipts(dense, compressed) {
     decodeThroughputRatio:
       compressed.timings.decodeTokensPerSecond / dense.timings.decodeTokensPerSecond,
     quality: Object.fromEntries(
-      [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS]
+      [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, "needleDiscriminating"]
         .map((field) => [field, compressed.quality[field]]),
     ),
   };

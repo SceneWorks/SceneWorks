@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -48,19 +49,23 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     provenance:{sceneWorksRepository:"github.com/SceneWorks/SceneWorks",inferenceRepository:"github.com/SceneWorks/inference",sceneWorksRevision:"a".repeat(40),inferenceRevision:"b".repeat(40),mlxVersion:"0.25.8",mlxSource:"git+https://github.com/michaeltrefry/mlx-rs?rev="+"1".repeat(40)+"#"+"1".repeat(40),mlxRevision:"1".repeat(40),dependencyLockSha256:"e".repeat(64),os:"macOS",xcode:"Xcode",hardware:"Apple",modelId:sealedModelId(family,"candidate","d".repeat(64)),modelFileSha256:"d".repeat(64),modelFileBytes:1000,referenceModelId:sealedModelId(family,"reference","9".repeat(64)),referenceModelSha256:"9".repeat(64),referenceModelBytes:2000,powerMode:"AC",thermalState:"nominal",commandTemplate:"runner --mode {mode}",command:"runner --mode "+mode,campaignSessionId, campaignCacheStateVersion:2,coordinateOperationSha256:"f".repeat(64)},
     matrix,
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
-  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0}},
+  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20}},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...extra});
+    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...extra});
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
   const evidence = name === "kernel-fp32-reference"
     ? {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1}
-    : {matches:1,total:1};
+    : name === "structured-tool-call"
+      ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true}
+      : name === "long-context-needle"
+        ? {matches:1,total:1,candidateRecovered:true,referenceRecovered:true,outputsMatch:true,discriminating:true}
+        : {matches:1,total:1};
   const probe = raw.timings.compileAttribution.probeEvidence[Math.min(repeat,raw.timings.compileAttribution.probeEvidence.length-1)];
   return {
     fixture:name,
-    independentReference:"ref",
+    independentReference:raw.quality.fixtureEvidence[name].independentReference,
     binding:{
       coordinate:probe.matrixCoordinate,
       repeat,
@@ -108,6 +113,12 @@ async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceSha
     modelFileSha256: sha256("weights"),
     modelId: sealedModelId(raw.matrix.family, "candidate", sha256("weights")),
   };
+  if (mode === "compressed") {
+    for (const name of qualityFixtures) {
+      raw.quality.fixtureEvidence[name].independentReference =
+        sameWeightsFixtureReference(name, raw.provenance.modelFileSha256);
+    }
+  }
   for (const name of qualityFixtures) {
     const artifactPath = path.join(root, `${name}.json`);
     const artifact = artifactFixture(raw,name,0,{includeModel:inferenceShaped});
@@ -363,6 +374,47 @@ test("verified record hashes model and fixture artifacts and publishes one recei
   for(const file of [path.join(out,"receipt.json"),path.join(out,"receipt.md")]){const bytes=await readFile(file,"utf8");assert.equal(await readFile(file+".sha256","utf8"),`${sha256(bytes)}  ${path.basename(file)}\n`);}
   await assert.rejects(buildVerifiedReceipt({...raw,provenance:{...raw.provenance,modelFilePath:path.join(dir,"missing")}}),/unavailable/);
   await rm(dir,{recursive:true,force:true});
+});
+test("contract v3 gates compressed quality only against the same-weights dense-KV run",()=>{
+  const contract=JSON.parse(readFileSync("config/kv-baseline-quality-contract.json","utf8"));
+  assert.equal(contract.version,3);
+  assert.equal(contract.gate.compressedReference,"dense-kv-same-weights");
+  assert.deepEqual(contract.thresholds,{parityMaxError:0.0001,perplexityDelta:0.01,greedyTokenAgreement:0.999,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:1});
+  assert.doesNotMatch(JSON.stringify(contract.needleFixture),/passphrase/i);
+  assert.doesNotThrow(()=>checkContract(contract));
+  assert.throws(()=>checkContract({...contract,gate:{...contract.gate,compressedReference:"bf16-model"}}),/same-weights dense-KV/);
+  assert.throws(()=>checkContract({...contract,needleFixture:{...contract.needleFixture,statement:"The special magic identifier."}}),/exact needle token/);
+  assert.throws(()=>checkContract({...contract,version:2}),/unsupported quality contract version/);
+  // A compressed receipt whose denominator is not the same-weights dense-KV run is refused.
+  assert.throws(()=>fixture("compressed",{}, {quality:{...fixture().quality,needleDiscriminating:true}}),/contract v3 denominator/);
+  assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,needleRetrieval:0}}),/below the frozen minimum/);
+  // A shared dense miss is accepted only when flagged non-discriminating, and the comparison says so.
+  const sharedMiss=fixture("compressed",{}, {quality:{...fixture("compressed").quality,needleDiscriminating:false}});
+  const comparison=compareReceipts(fixture(),sharedMiss);
+  assert.equal(comparison.quality.needleDiscriminating,false);
+  assert.match(renderComparisonMarkdown(comparison),/NON-DISCRIMINATING/);
+  assert.doesNotMatch(renderComparisonMarkdown(compareReceipts(fixture(),fixture("compressed"))),/NON-DISCRIMINATING/);
+  // Dense rows are characterization: a needle/tool miss is recorded, never rejected, but not hidden.
+  assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0,needleDiscriminating:false,structuredToolAgreement:0}}));
+  assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0}}),/needle discrimination/);
+  assert.throws(()=>fixture("dense",{}, {quality:{...fixture("compressed").quality}}),/contract v3 denominator/);
+});
+test("rows record runtime-guarded admission with the stated cap and estimate",()=>{
+  const memory=fixture().memory;
+  assert.equal(memory.admission.mode,"runtime-guarded");
+  assert.throws(()=>fixture("dense",{}, {memory:{...memory,admission:{...memory.admission,mode:"static-proof"}}}),/schema validation|runtime-guarded/);
+  assert.throws(()=>fixture("dense",{}, {memory:{...memory,admission:{...memory.admission,staticFootprintFloorBytes:memory.admission.childFootprintCapBytes+1}}}),/exceeds the stated child cap/);
+  const {admission,...unadmitted}=memory;
+  assert.ok(admission);
+  assert.throws(()=>fixture("dense",{}, {memory:unadmitted}),/schema validation|memory/);
+});
+test("fixture artifacts record both arms' tool and needle outcomes as booleans",()=>{
+  const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:1,structuredToolAgreement:0,needleRetrieval:0,multiTurnPromptCache:1};
+  const needle={matches:0,total:1,candidateRecovered:false,referenceRecovered:true,outputsMatch:false,discriminating:false};
+  assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:needle,metrics},"long-context-needle",row));
+  assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:{matches:0,total:1},metrics},"long-context-needle",row),/must be boolean/);
+  assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:{...needle,referenceRecovered:1},metrics},"long-context-needle",row),/must be boolean/);
+  assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:0,total:1,candidateValid:false,referenceValid:true,outputsMatch:false},metrics},"structured-tool-call",row));
 });
 test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
 test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp("/tmp/kv20671-snapshot-"),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});

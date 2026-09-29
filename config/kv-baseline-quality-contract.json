@@ -1,5 +1,5 @@
 {
-  "version": 2,
+  "version": 3,
   "thresholds": {
     "parityMaxError": 0.0001,
     "perplexityDelta": 0.01,
@@ -7,6 +7,18 @@
     "structuredToolAgreement": 1,
     "needleRetrieval": 1,
     "multiTurnPromptCache": 1
+  },
+  "gate": {
+    "denseRows": "raw characterization: candidate and bf16-reference fixture outcomes are recorded as observations and never reject a dense row",
+    "compressedReference": "dense-kv-same-weights",
+    "compressedRows": "every threshold compares the compressed-KV run with the dense-KV run on the same weights; the bf16 reference model is weight-quantization characterization only and never the gate denominator",
+    "kernelParity": "independent host-fp32 dequantize-then-attend reference",
+    "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle check requires exact agreement with the dense output and the receipt records needleDiscriminating=false"
+  },
+  "needleFixture": {
+    "statement": "The special magic identifier is {needle}.",
+    "question": "What is the special magic identifier mentioned in the text above? Reply with only the identifier.",
+    "match": "exact needle token"
   },
   "statistics": {
     "repeats": 5,
