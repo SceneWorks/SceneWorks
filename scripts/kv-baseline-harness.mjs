@@ -9,8 +9,15 @@ import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } fro
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const SCHEMA_VERSION = 4;
-export const HARNESS_VERSION = "sc-20671-kv-baseline-v4";
+// v5 (sc-20671): per-repeat decode throughput is a dedicated fixed-length steady decode recorded
+// beside each timing sample, and provenance records power mode and thermal state at row start/end.
+export const SCHEMA_VERSION = 5;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v5";
+// Fixed decode length of every steady-decode sample (paired with the inference producer's
+// `STEADY_DECODE_TOKENS`): the first token is untimed, so 255 tokens are timed.
+export const STEADY_DECODE_TOKENS = 256;
+export const HOST_STATE_BOUNDARIES = Object.freeze(["row-start", "row-end"]);
+export const POWER_MODES = Object.freeze(["automatic", "low-power", "high-power"]);
 export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
 export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
 
@@ -88,6 +95,13 @@ const TIMING_FIELDS = [
   "ttftMs",
   "firstTokenMs",
   "decodeTokensPerSecond",
+];
+const STEADY_DECODE_FIELDS = [
+  "steadyDecodePromptTokens",
+  "steadyDecodeGeneratedTokens",
+  "steadyDecodeTimedTokens",
+  "steadyDecodeMs",
+  "steadyDecodeForcedStopTokens",
 ];
 const COMPILE_ATTRIBUTION_FIELDS = [
   "method",
@@ -562,10 +576,57 @@ function nearlyEqual(actual, expected) {
   return Math.abs(actual - expected) <= Math.max(1e-9, Math.abs(expected) * 1e-9);
 }
 
-function validateTimingSample(sample, index) {
+function validateTimingSample(sample, index, contextWindowTokens) {
   const name = `timings.samples[${index}]`;
-  exactKeys(sample, TIMING_FIELDS, name);
+  exactKeys(sample, [...TIMING_FIELDS, ...STEADY_DECODE_FIELDS], name);
   for (const field of TIMING_FIELDS) positiveNumber(sample[field], `${name}.${field}`);
+  // Decode throughput is exactly the repeat's fixed-length steady decode: STEADY_DECODE_TOKENS
+  // greedy tokens after the row context, stop tokens forced through, first token untimed.
+  positiveInteger(sample.steadyDecodePromptTokens, `${name}.steadyDecodePromptTokens`);
+  positiveInteger(sample.steadyDecodeGeneratedTokens, `${name}.steadyDecodeGeneratedTokens`);
+  positiveInteger(sample.steadyDecodeTimedTokens, `${name}.steadyDecodeTimedTokens`);
+  positiveNumber(sample.steadyDecodeMs, `${name}.steadyDecodeMs`);
+  nonnegativeInteger(sample.steadyDecodeForcedStopTokens, `${name}.steadyDecodeForcedStopTokens`);
+  if (sample.steadyDecodeGeneratedTokens !== STEADY_DECODE_TOKENS
+    || sample.steadyDecodeTimedTokens !== STEADY_DECODE_TOKENS - 1
+    || sample.steadyDecodeForcedStopTokens > sample.steadyDecodeGeneratedTokens) {
+    fail(`${name} is not a ${STEADY_DECODE_TOKENS}-token fixed-length steady decode`);
+  }
+  if (sample.steadyDecodePromptTokens + sample.steadyDecodeGeneratedTokens > contextWindowTokens) {
+    fail(`${name} steady decode exceeds the native context window`);
+  }
+  if (!nearlyEqual(
+    sample.decodeTokensPerSecond,
+    (sample.steadyDecodeTimedTokens * 1000) / sample.steadyDecodeMs,
+  )) {
+    fail(`${name}.decodeTokensPerSecond does not derive from its steady decode`);
+  }
+}
+
+// Power mode and thermal state observed at row start and end: nominal throughout, one power
+// mode, bracketing every measured phase sample.
+function validateHostStates(receipt) {
+  const { provenance } = receipt;
+  if (!POWER_MODES.includes(provenance.powerMode)) {
+    fail("provenance.powerMode is not a normalized energy mode");
+  }
+  if (!Array.isArray(provenance.hostStates)
+    || provenance.hostStates.length !== HOST_STATE_BOUNDARIES.length) {
+    fail("provenance.hostStates must record row start and row end");
+  }
+  provenance.hostStates.forEach((state, index) => {
+    const name = `provenance.hostStates[${index}]`;
+    exactKeys(state, ["boundary", "capturedAt", "powerMode", "thermalState"], name);
+    isoTimestamp(state.capturedAt, `${name}.capturedAt`);
+    if (state.boundary !== HOST_STATE_BOUNDARIES[index]) fail(`${name}.boundary is out of order`);
+    if (state.thermalState !== "nominal") fail(`${name} thermal state is not nominal`);
+    if (state.powerMode !== provenance.powerMode) fail(`${name} power mode differs from the row's`);
+  });
+  const phases = receipt.memory.phaseSamples;
+  if (compareUtcTimestamps(provenance.hostStates[0].capturedAt, phases[0].timestamp) >= 0
+    || compareUtcTimestamps(phases[phases.length - 1].timestamp, provenance.hostStates[1].capturedAt) >= 0) {
+    fail("provenance.hostStates do not bracket the row's measured phases");
+  }
 }
 
 function compileOperation(matrix) {
@@ -769,7 +830,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
       "referenceModelId", "referenceModelSha256", "referenceModelBytes",
-      "thermalState", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
+      "thermalState", "hostStates", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
     ],
     "provenance",
   );
@@ -883,6 +944,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     priorFootprintPeak = sample.physFootprintPeakBytes;
     priorMlxPeak = sample.mlx.peakBytes;
   });
+  validateHostStates(receipt);
   if (!Array.isArray(receipt.memory.allocationEvents) || receipt.memory.allocationEvents.length === 0) {
     fail("memory allocation events are required");
   }
@@ -1082,7 +1144,9 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     || receipt.timings.samples.length !== CONTRACT.statistics.repeats) {
     fail("raw timing sample count differs from the frozen repeat policy");
   }
-  receipt.timings.samples.forEach(validateTimingSample);
+  receipt.timings.samples.forEach((sample, index) => {
+    validateTimingSample(sample, index, receipt.geometry.contextWindowTokens);
+  });
   for (const field of TIMING_FIELDS) {
     const mean = timingMean(receipt.timings.samples, field);
     if (!nearlyEqual(receipt.timings[field], mean)) fail(`timings.${field} does not derive from raw samples`);

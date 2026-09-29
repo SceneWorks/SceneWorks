@@ -62,7 +62,31 @@ without a universal rounding formula. Dense persistent bytes must equal
 `batch × layers × kvHeads × capacity × headDimension × elementBytes × 2`
 exactly, with zero reconciliation tolerance. Fit-boundary occupancy uses live
 `kvLength`, so allocation beyond the native context does not masquerade as
-additional usable context. Existing exact-length v4 receipts remain readable.
+additional usable context.
+
+Schema v5 (sc-20671) changes what decode throughput means. Each of the five
+timing samples carries a dedicated **fixed-length steady decode**: after the
+repeat's four fixtures, the candidate arm prefills the row context (the kernel
+fixture's raw prompt) into a fresh cache of the row's KV representation and
+greedily decodes exactly 256 tokens with stop tokens forced through
+(`steadyDecodeForcedStopTokens` counts them). The first token is untimed (TTFT
+is separate); the other 255 are timed from GPU completion to GPU completion, so
+`decodeTokensPerSecond` is exactly `steadyDecodeTimedTokens × 1000 /
+steadyDecodeMs`. 256 is the longest fixed length every frozen band admits (the
+fit-boundary prompt is refused above `native context − 256`). Under v4 the
+value was a phase delta of the coordinate's own EOS/budget-terminated
+generation — one token for chunked rows — and measured mostly the
+`footprint -p` sampling at the `decode-steady` boundary; phase stamps now also
+exclude the observer's own memory sampling. The steady decode runs outside every
+coordinate observer on a cache released before the next repeat, and its
+`prompt + 256` live tokens are admitted by the producer's preflight bound.
+Batch rows are timed as one sequence, since the compressed arm has no batch
+route. `provenance.powerMode` is the active energy mode (`automatic`,
+`low-power`, or `high-power` from `pmset -g`), and `provenance.hostStates`
+records it with the thermal state at `row-start` and `row-end`, bracketing the
+row's phase samples; a non-nominal `pmset -g therm` or
+`NSProcessInfo.thermalState` at either boundary, or a mid-row power-mode change,
+refuses the row.
 
 `compare` refuses mismatched source/model/toolchain/hardware/power/thermal
 identity, matrix, contract, or geometry and reports KV reduction (only for a
@@ -287,7 +311,7 @@ threshold number is unchanged.
   characterization only.
 
 The v3 contract hash is the compatibility fence: receipts bound to v2 are
-refused, and v4 receipts produced under v3 carry the required
+refused, and v5 receipts produced under v3 carry the required
 `quality.needleDiscriminating`, `quality.toolDiscriminating`, and
 `memory.admission` fields. The inference producer keeps a byte-exact copy of the
 contract (`crates/llm/mlx-llm/testdata/`) whose hash and needle wording its tests
