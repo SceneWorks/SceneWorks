@@ -494,10 +494,15 @@ gh workflow run publish-runpod.yml --ref "$candidate_ref" -f "image_tag=$candida
 docker buildx imagetools inspect "ghcr.io/sceneworks/sceneworks-runpod:$candidate_tag"
 ```
 
-The workflow publishes the `linux/amd64` RunPod target and leaves release/latest
-tags unchanged. It has no nonpublishing mode. The same candidate build includes
-the shared CUDA runtime underlying the standalone candle stage; full image
-startup/device acceptance still requires the provider run below.
+The workflow builds and loads both the `linux/amd64` RunPod candidate and exact
+`rust-worker-candle` stage into the hosted runner. One Buildx builder shares the
+compiled CUDA dependency stages. Before any publication, the real API and
+standalone worker pass CPU-only registration, bind-write, and clean-shutdown
+checks for both the image default identity and an explicit UID/GID override.
+The final RunPod publication reuses those cached stages; manual runs leave
+release/latest tags unchanged. The workflow has no nonpublishing mode. These
+hosted checks make no GPU claim; actual CUDA/provider acceptance still requires
+the run below.
 
 Record the source revision and registry digest and deploy that exact candidate
 with the normal token secret, `/workspace` network mount, and port `8010/http`.

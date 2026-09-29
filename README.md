@@ -403,7 +403,9 @@ Initialization preserves file owners and existing content. It applies a named
 user ACL and inheritable directory ACL within the explicit data, configuration,
 credentials, Hugging Face cache, jobs-database parent, and runtime-home trees.
 Existing effective rights of unrelated ACL users/groups are preserved when
-access or default masks widen. This includes legacy nested files created by older root-running images; it
+access or default masks widen. New descendants retain creator-owner write
+permissions (filtered by the creation mode), so a root-owned read-only parent
+does not cause the service to create unwritable children. This includes legacy nested files created by older root-running images; it
 walks metadata, without reading model contents or recursively changing owners.
 Do not point managed-directory overrides at a shared mount root or unrelated
 system directory: these paths must be dedicated application trees. Only needed

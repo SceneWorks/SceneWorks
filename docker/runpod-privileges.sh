@@ -51,6 +51,11 @@ grant_service_acl() (
           key="user:" uid
           existing=((scope SUBSEP key) in acl?acl[scope,key]:"---")
           acl[scope,key]=unite(existing,required)
+          # A newly created inode belongs to its creator. Its owner entry wins
+          # over the named service entry, so descendants need usable owner
+          # rights; their creation mode still filters these defaults. Existing
+          # inode owners and unrelated named/group effective rights stay intact.
+          if(scope=="d") acl[scope,"user:"]="rwx"
           if(scope=="a" && owner==uid) acl[scope,"user:"]=unite(acl[scope,"user:"],required)
           mask="---"
           for(entry in acl) {

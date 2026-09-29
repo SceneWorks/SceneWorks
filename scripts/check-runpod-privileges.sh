@@ -43,6 +43,11 @@ mkdir -p "${HOME}/.nv/ComputeCache"
 printf kernel > "${HOME}/.nv/ComputeCache/fixture"
 printf device > /dev/nvidia0
 if [[ -n "${SCENEWORKS_TEST_DELAYED:-}" ]]; then printf device > /dev/nvidia1; fi
+for parent in /workspace/data/readonly /workspace/data/restricted-default; do
+  mkdir -p "$parent/child-${SCENEWORKS_GPU_ID:-api}/grandchild"
+  printf nested > "$parent/child-${SCENEWORKS_GPU_ID:-api}/grandchild/file"
+  printf reopened >> "$parent/child-${SCENEWORKS_GPU_ID:-api}/grandchild/file"
+done
 mkdir -p /workspace/config/masked/inherited
 printf inherited > /workspace/config/masked/inherited/file
 chmod 660 /workspace/config/masked/inherited/file
@@ -69,6 +74,9 @@ chmod 600 /workspace/config/legacy/config /workspace/credentials/legacy-token
 chmod 660 /dev/nvidia0
 mknod -m 660 /dev/nvidiactl c 1 3
 mknod -m 660 /dev/nvidia-uvm c 1 3
+mkdir -p /workspace/data/readonly /workspace/data/restricted-default
+chmod 0555 /workspace/data/readonly /workspace/data/restricted-default
+setfacl -m d:u::r-x,d:u:2501:rwx,d:g::rwx,d:g:2502:rwx,d:m::r-x,d:o::--- /workspace/data/restricted-default
 # Real masked owning-group and named-user/group entries, both access/default.
 mkdir -p /workspace/config/masked
 setfacl -m u:2501:rwx,g::rwx,g:2502:rwx,m::r-x /workspace/config/masked
@@ -131,6 +139,17 @@ for scenario in default override delayed; do
         grep -Fxq "$entry" <<<"$acl"
       done
     done
+    test "$(stat -c %u /workspace/data/readonly)" = 0
+    test "$(getfacl -cpEn /workspace/data/readonly | sed -n /^user::/p)" = user::r-x
+    test "$(getfacl -cpEn /workspace/data/restricted-default | sed -n /^user::/p)" = user::r-x
+    for parent in /workspace/data/readonly /workspace/data/restricted-default; do
+      for child in child-api child-auto; do
+        test "$(cat "$parent/$child/grandchild/file")" = nestedreopened
+        test "$(stat -c %u "$parent/$child/grandchild/file")" = "$SCENEWORKS_SERVICE_UID"
+      done
+    done
+    acl="$(getfacl -cpEn /workspace/data/restricted-default/child-api)"
+    for entry in user:2501:r-x group::r-x group:2502:r-x default:user:2501:r-x default:group::r-x default:group:2502:r-x; do grep -Fxq "$entry" <<<"$acl"; done
     acl="$(getfacl -cpEn /workspace/cache)"
     for entry in user:2501:--- group::--- group:2502:---; do grep -Fxq "$entry" <<<"$acl"; done
     # Unrelated users/groups can still traverse/read their granted tree, but

@@ -63,6 +63,43 @@ for (const contract of [
   requireText(workflow, contract);
 }
 
+function validateCandleRuntimeGate(candidate) {
+  const steps = candidate.split(/(?=^      - name: )/m);
+  const byId = (id) => {
+    const matches = steps.filter((step) => new RegExp(`^        id: ${id}$`, "m").test(step));
+    assert.equal(matches.length, 1, `expected one ${id} step`);
+    return matches[0];
+  };
+  const combined = byId("build_candidate");
+  const candle = byId("build_candle_runtime");
+  const smoke = byId("smoke_candle_runtime");
+  const publish = byId("build");
+  for (const [step, target] of [[combined, "runpod"], [candle, "rust-worker-candle"]]) {
+    requireText(step, `target: ${target}`);
+    requireText(step, "platforms: linux/amd64");
+    requireText(step, "push: false");
+    requireText(step, "load: true");
+    assert.ok(!step.includes("no-cache: true"), "acceptance builds must share cached CUDA stages");
+  }
+  requireText(smoke, "bash scripts/check-docker-candle-runtime.sh");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: sceneworks-runpod-smoke:ci");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci");
+  requireText(smoke, "timeout-minutes: 5");
+  requireText(publish, "push: true");
+  assert.ok(steps.indexOf(combined) < steps.indexOf(candle));
+  assert.ok(steps.indexOf(candle) < steps.indexOf(smoke));
+  assert.ok(steps.indexOf(smoke) < steps.indexOf(publish), "runtime checks must pass before registry publication");
+  assert.equal(candidate.match(/uses: docker\/setup-buildx-action@/g)?.length, 1,
+    "one builder must reuse the already compiled CUDA dependency stages");
+}
+validateCandleRuntimeGate(workflow);
+for (const mutated of [
+  workflow.replace("target: rust-worker-candle", "target: rust-worker"),
+  workflow.replace("id: smoke_candle_runtime", "id: skipped_smoke"),
+  workflow.replace("load: true", "load: false"),
+  workflow.replace("push: false", "push: true"),
+]) assert.throws(() => validateCandleRuntimeGate(mutated));
+
 // Pin *shape* is enforced repo-wide by scripts/check-action-pins.mjs, which stays
 // true across Dependabot bumps. Naming exact SHAs here only re-broke this check
 // every time Dependabot rewrote the workflow it was guarding.

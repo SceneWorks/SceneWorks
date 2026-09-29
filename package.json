@@ -43,6 +43,7 @@
     "check:runpod:image-contract": "node scripts/check-runpod-image.mjs",
     "check:runpod:entrypoint": "bash scripts/check-runpod-supervisor.sh",
     "check:runpod:privileges": "bash scripts/check-runpod-privileges.sh",
+    "check:docker:candle-runtime": "bash scripts/check-docker-candle-runtime.sh",
     "bump:inference": "node scripts/bump-inference.mjs",
     "bump:inference:self-test": "node scripts/bump-inference.mjs --self-test",
     "rust:fmt": "cargo fmt --all -- --check",
