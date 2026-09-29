@@ -48,10 +48,6 @@
     {
       "what": "the experimental FP8 AR mode (CUDA sm_89+, bf16 tier)",
       "why": "candle-audio-yue2 owner decision `fp8_not_on_the_load_spec`: LoadSpec has no FP8 value, so the registered provider cannot request it. Admission prices its layout (the retained BF16 originals in host memory) and refuses it off CUDA sm_89+; there is nothing to capture until a load path exists."
-    },
-    {
-      "what": "the recording transcription step of a cover (SheetSage2 + MERT-v2-FullSong)",
-      "why": "blocked: the native transcriber's port code has no recorded licence basis (the catalog's conditionalComponents[].blocked), so it is gated out of every runtime bundle. Admission prices it as its own stage (it unloads before the MoT loads); capture it once it is unblocked."
     }
   ]
 }
