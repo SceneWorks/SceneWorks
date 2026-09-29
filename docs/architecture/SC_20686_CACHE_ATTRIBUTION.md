@@ -46,10 +46,14 @@ resumes it. It checks host memory and selected-GPU UUID telemetry and fails clos
 termination smoke passed on the Windows runner in
 [CI run 36431524700](https://github.com/SceneWorks/inference/actions/runs/36431524700/job/108958837629)
 at inference `5115cf7f4c5e7ca868a7caf312423f728889a99e`, without GPU execution. Actual GPU
-telemetry and model admission remain unverified. The current adapter refuses an arm before
-model spawn because a source-backed transient peak bound for
-these routes has not been established. Host/GPU polling and operator-entered caps cannot prove an
-instantaneous allocation safe. These constraints do not reduce the fixed coverage.
+telemetry remains unverified on real weights. No static whole-process transient peak bound is
+required: each arm is admitted by the supervisor's runtime guards (deadline, sampling, termination
+grace, host reserve, child footprint cap, selected-GPU reserve and cap) when pre-spawn host and GPU
+free memory cover cap plus reserve, and the watchdogs terminate the owned tree on a breach. Each
+sealed unit records that admission with `wholeProcessPeakBoundBytes: null` plus its unknown-peak
+reason. A pre-spawn refusal, watchdog abort, or failed child is sealed as an `accepted: false`
+record under the resume directory's `failed/` diagnostics, never as an accepted arm. These
+constraints do not reduce the fixed coverage.
 
 For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
 directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
@@ -132,9 +136,9 @@ cancellation arm.
 Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
 peak without replacement transient; runtime-only opportunity ≥5% generation time.
 
-Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets, a qualified
-uncontended CUDA host, and a defensible source-backed peak bound. No measurement is fabricated by
-this source-only lane.
+Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets and a qualified
+uncontended CUDA host whose free memory covers the policy caps plus reserves at spawn. No
+measurement is fabricated by this source-only lane.
 
 ### Wan producer context is wired
 
