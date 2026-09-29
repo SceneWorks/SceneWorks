@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "65bc5d8b82d9dd06fd901cfd8f722ae335530c85",
+  "inferenceRevision": "eac60a770030aef0630ca418d85ffd169be9748a",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -6796,7 +6796,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "0841632a66d85a8f3c050c8da399c7bcaa9413463b78682991d61bbdabdb85d0",
+      "digest": "15ef70bdd9bc2e0741329973c9144e68d5fad87e9e357b1c3e108b7d2d9f7487",
       "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -7207,7 +7207,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "10177d23b72fde94d9ff992902ef1a16b058a5896015b885326716bcb244fae0",
+      "digest": "b98a2aa66a0404bee392aa83522e34a2142cc83154d5b332f63b6e9c41bd3b99",
       "closureFileCount": 182,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
@@ -11051,7 +11051,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "5ce8f83bc0b4d2324207a89baabfbfaea5f085c7dac274d2d1cc14ca1937d7e1",
+      "digest": "569c8e9e980450150e4c93903ce2716e9617177f829de8fcf2c387f678e71bde",
       "closureFileCount": 159,
       "closureFiles": [
         "crates/contracts/core-llm/src/cancel.rs",
