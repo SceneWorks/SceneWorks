@@ -49,6 +49,11 @@ test("RunPod validation provisions the same inference fixtures as PR scaffold ch
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
+  const terminalFetchName = "Fetch the exact public inference terminal contract";
+  const terminalFetch = workflowStep(publish, terminalFetchName);
+  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
+  assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
   assert.ok(dependencies.includes("npm ci --ignore-scripts"));
   assert.ok(publish.indexOf(dependencies) < publish.indexOf(fetch));

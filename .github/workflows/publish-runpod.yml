@@ -78,6 +78,17 @@ jobs:
 
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
+      - name: Fetch the exact public inference terminal contract
+        run: |
+          set -euo pipefail
+          inference_root="$RUNNER_TEMP/starvector-pinned-inference"
+          echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
+          git init "$inference_root"
+          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
+          git -C "$inference_root" fetch --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+          git -C "$inference_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$inference_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+
       # The scaffold suite reads real inference source at both the current pin
       # and the packaged anchor revisions, just as check.yml's parity-scaffold does.
       - name: Fetch the pinned inference source for the anchor-closure suite
