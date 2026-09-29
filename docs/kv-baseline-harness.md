@@ -174,11 +174,19 @@ runtime guards rather than a static whole-process MLX peak proof, which lazy
 long-context graphs cannot supply. The mandatory policy must configure the
 supervised worker's deadline, sampling, termination grace, host free-RAM
 reserve, and `phys_footprint` watchdog cap; the supervisor refuses before spawn
-unless host free RAM covers cap plus reserve, and a conservative static
-load-plus-KV floor above the cap still refuses. Each receipt records
-`memory.admission` (`runtime-guarded`, the stated cap, reserve, and the static
-estimate); the campaign reader requires that cap and reserve to equal the
-captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as
+unless host available RAM covers cap plus reserve, and a conservative static
+load-plus-KV floor above the cap still refuses. Host available RAM is the
+`vm_stat` measure `(free + speculative + purgeable + min(inactive - purgeable,
+file-backed - speculative)) * page size` (each difference floored at zero): clean
+inactive file cache, such as the model bytes the parent just hashed, is
+reclaimable without the compressor or swap, while anonymous inactive pages and
+mapped active file pages are not credited. The live watchdog still compares
+free plus speculative pages with the reserve. Each receipt records
+`memory.admission` (`runtime-guarded`, the stated cap, reserve, the static
+estimate, and `hostMemoryComponents`: every `vm_stat` component and the derived
+file-cache credit and available bytes); the reader recomputes the measure and
+requires it to cover cap plus reserve, and requires that cap and reserve to equal
+the captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as
 a sealed `logs/<row>.attempt-<n>.unaccepted.json` record with its reason and is
 never an accepted row.
 

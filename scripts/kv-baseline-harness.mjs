@@ -645,12 +645,40 @@ function validateCompileAttribution(attribution, matrix) {
   }
 }
 
+const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v1";
+const HOST_MEMORY_COUNTERS = ["freePages", "speculativePages", "purgeablePages", "inactivePages", "fileBackedPages"];
+
+// The inference supervisor's pre-spawn macOS host measurement (campaign_supervisor::HostMemory):
+// availableBytes = (free + speculative + purgeable + reclaimable file cache) * page size, with the
+// file-cache credit min(inactive - purgeable, file-backed - speculative) floored at zero: clean
+// inactive file cache the kernel frees without the compressor or swap. The receipt must recompute
+// exactly and cover cap plus reserve, since the row ran.
+function validateHostMemoryComponents(host, requiredBytes) {
+  const name = "memory.admission.hostMemoryComponents";
+  exactKeys(host, ["metric", "pageSizeBytes", ...HOST_MEMORY_COUNTERS, "reclaimableFilePages", "availableBytes"], name);
+  if (host.metric !== DARWIN_AVAILABLE_METRIC) fail(`${name}.metric must be ${DARWIN_AVAILABLE_METRIC}`);
+  const page = positiveInteger(host.pageSizeBytes, `${name}.pageSizeBytes`);
+  if (page < 4096 || !Number.isInteger(Math.log2(page))) fail(`${name}.pageSizeBytes must be a power of two >= 4096`);
+  const pages = Object.fromEntries(HOST_MEMORY_COUNTERS.map((key) => [key, nonnegativeInteger(host[key], `${name}.${key}`)]));
+  const reclaimable = Math.min(
+    Math.max(0, pages.inactivePages - pages.purgeablePages),
+    Math.max(0, pages.fileBackedPages - pages.speculativePages),
+  );
+  const available = (pages.freePages + pages.speculativePages + pages.purgeablePages + reclaimable) * page;
+  if (!Number.isSafeInteger(available)
+    || host.reclaimableFilePages !== reclaimable || host.availableBytes !== available) {
+    fail(`${name} do not recompute the admission measure`);
+  }
+  if (available < requiredBytes) fail(`${name}.availableBytes is below reserve plus child cap`);
+}
+
 // Every row is admitted by its runtime guards (supervised worker, phys_footprint watchdog cap,
-// host reserve, deadline, sampling); the receipt records the stated cap and the static estimate.
+// host reserve, deadline, sampling); the receipt records the stated cap, the static estimate, and
+// every component of the host measurement the row was admitted on.
 function validateAdmission(admission) {
   exactKeys(
     admission,
-    ["mode", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes"],
+    ["mode", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes", "hostMemoryComponents"],
     "memory.admission",
   );
   if (admission.mode !== RUNTIME_GUARDED_ADMISSION) fail("memory.admission must be runtime-guarded");
@@ -661,6 +689,10 @@ function validateAdmission(admission) {
     || admission.staticFootprintFloorBytes > admission.childFootprintCapBytes) {
     fail("memory.admission estimate exceeds the stated child cap");
   }
+  validateHostMemoryComponents(
+    admission.hostMemoryComponents,
+    admission.childFootprintCapBytes + admission.hostFreeReserveBytes,
+  );
 }
 
 function validateFixtureEvidence(evidence) {
