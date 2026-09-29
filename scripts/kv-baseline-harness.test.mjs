@@ -23,7 +23,7 @@ function memoryPhases(persistent) {
     if(phase==="prefill-peak")mlxPeak=active[i]+100;
     const physFootprintBytes=active[i]+1000;
     footprintPeak=Math.max(footprintPeak,physFootprintBytes);
-    return {phase,pid:9,source:"footprint -p",timestamp:"2026-08-29T12:00:0"+i+".000Z",physFootprintBytes,physFootprintPeakBytes:footprintPeak,mlx:{source:"mlx_rs::memory",activeBytes:active[i],cacheBytes:10,peakBytes:mlxPeak}};
+    return {phase,pid:9,source:"proc_pid_rusage",timestamp:"2026-08-29T12:00:0"+i+".000Z",physFootprintBytes,physFootprintPeakBytes:footprintPeak,mlx:{source:"mlx_rs::memory",activeBytes:active[i],cacheBytes:10,peakBytes:mlxPeak}};
   });
 }
 // The coordinate's measured storage: its device share is the receipt's persistent KV and its host
@@ -75,7 +75,9 @@ function fixture(mode="dense", coordinate={}, extra={}) {
   const source = matrix.processTemperature === "cold" ? "measured-repeats" : "warmup-suites";
   const matrixCoordinate = [matrix.family,matrix.contextBand,matrix.requestMode,matrix.prefillMode,matrix.processTemperature].join("-");
   const probeEvidence = probeDurationsMs.map((dispatchMs,index)=>({index,operation,source,matrixCoordinate,setupMs:operation === "chunked-prefix-reuse" ? 1 : 0,dispatchMs,operationEvidenceSha256:sha256(`${matrixCoordinate}:${index}:${dispatchMs}`)}));
-  const compileAttribution = {method:"first-dispatch-minus-steady-v1",operation,source,probeDurationsMs,probeEvidence,firstDispatchMs:probeDurationsMs[0],steadyDispatchMs,firstDispatchExcessMs:probeDurationsMs[0]-steadyDispatchMs};
+  const noiseSamplesMs = matrix.processTemperature === "cold" ? probeDurationsMs.slice(1) : [7,7.5,7.2,7.1,7.4];
+  const noiseBandMs = Math.max(...noiseSamplesMs)-Math.min(...noiseSamplesMs);
+  const compileAttribution = {method:"first-dispatch-minus-steady-v2",operation,source,probeDurationsMs,probeEvidence,firstDispatchMs:probeDurationsMs[0],steadyDispatchMs,firstDispatchExcessMs:probeDurationsMs[0]-steadyDispatchMs,noiseSamplesMs,noiseBandMs,compileCostResolved:true,compileCostMs:probeDurationsMs[0]-steadyDispatchMs};
   const campaignSessionId = "c".repeat(64);
   const warmupSuiteSha256 = matrix.processTemperature === "warm" ? numericSemanticSha256({probeEvidence,sessionId:campaignSessionId,workerPid:9}) : "";
   return buildReceipt({runId: mode+"-"+(coordinate.family||"llama")+"-"+Math.random(),capturedAt:"2026-08-29T12:00:00.000Z",mode,status:"complete",
@@ -312,13 +314,17 @@ test("compile attribution v4 accepts cold repeats and warmup suites",()=>{
   assert.equal(cold.harnessVersion,"sc-20671-kv-baseline-v5");
   const {probeEvidence,...coldAttribution}=cold.timings.compileAttribution;
   assert.deepEqual(coldAttribution,{
-    method:"first-dispatch-minus-steady-v1",
+    method:"first-dispatch-minus-steady-v2",
     operation:"single-shot-generation",
     source:"measured-repeats",
     probeDurationsMs:[50,6,8,7,5],
     firstDispatchMs:50,
     steadyDispatchMs:6.5,
     firstDispatchExcessMs:43.5,
+    noiseSamplesMs:[6,8,7,5],
+    noiseBandMs:3,
+    compileCostResolved:true,
+    compileCostMs:43.5,
   });
   assert.equal(probeEvidence.length,5);
   assert.deepEqual(probeEvidence.map(({index,operation,source,matrixCoordinate,setupMs,dispatchMs})=>({index,operation,source,matrixCoordinate,setupMs,dispatchMs})),[
@@ -343,10 +349,44 @@ test("compile attribution v4 accepts cold repeats and warmup suites",()=>{
   assert.doesNotThrow(()=>validateReceipt(warmChunked));
   assert.equal(fixture("dense",{requestMode:"supported-batch",prefillMode:"chunked"}).timings.compileAttribution.operation,"supported-batch");
   assert.ok(cold.timings.samples.every((sample)=>!("coldCompileMs" in sample)&&!("warmCompileMs" in sample)));
-  assert.match(renderReceiptMarkdown(cold),/Compile attribution: first-dispatch-minus-steady-v1 \/ single-shot-generation \/ measured-repeats/);
+  assert.match(renderReceiptMarkdown(cold),/Compile attribution: first-dispatch-minus-steady-v2 \/ single-shot-generation \/ measured-repeats/);
+  assert.match(renderReceiptMarkdown(cold),/Compile cost: 43.5 ms \(noise band 3 ms\)/);
+});
+test("compile cost below the steady noise band is recorded, not refused (W1 row 3)",()=>{
+  // W1 row 3 (llama memory-material 32k warm): first 9017 ms, steady 10585 ms.
+  const row3=rebuildReceipt(fixture("dense",{processTemperature:"warm"}),(raw)=>{
+    const a=raw.timings.compileAttribution;
+    a.probeDurationsMs=[9017.437917,10585.460208];
+    a.probeEvidence.forEach((evidence,index)=>{evidence.dispatchMs=a.probeDurationsMs[index];});
+    a.firstDispatchMs=9017.437917;a.steadyDispatchMs=10585.460208;a.firstDispatchExcessMs=9017.437917-10585.460208;
+    a.noiseSamplesMs=[10510,10590,10555,10620,10575];a.noiseBandMs=110;
+    a.compileCostResolved=false;delete a.compileCostMs;a.compileCostUnresolvedReason="first-dispatch-not-slower-than-steady";
+    raw.timings.coldCompileMs=null;raw.timings.warmCompileMs=10585.460208;
+    raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:a.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});
+  });
+  assert.doesNotThrow(()=>validateReceipt(row3));
+  assert.equal(row3.timings.coldCompileMs,null);
+  assert.match(renderReceiptMarkdown(row3),/Compile cost: unresolved: first-dispatch-not-slower-than-steady \(noise band 110 ms\)/);
+  const within=rebuildReceipt(fixture("dense"),(raw)=>{
+    const a=raw.timings.compileAttribution;
+    a.probeDurationsMs=[8,6,8,7,5];a.probeEvidence[0].dispatchMs=8;a.firstDispatchMs=8;a.firstDispatchExcessMs=1.5;
+    a.compileCostResolved=false;delete a.compileCostMs;a.compileCostUnresolvedReason="excess-within-steady-noise-band";
+    raw.timings.coldCompileMs=null;
+  });
+  assert.doesNotThrow(()=>validateReceipt(within));
+  assert.throws(()=>rebuildReceipt(within,(raw)=>{raw.timings.coldCompileMs=1.5;}),/timing aliases/);
+  // Receipts accepted before the band existed stay valid only as a positive band-free excess.
+  const legacy=rebuildReceipt(fixture("dense"),(raw)=>{
+    const a=raw.timings.compileAttribution;
+    a.method="first-dispatch-minus-steady-v1";
+    for (const key of ["noiseSamplesMs","noiseBandMs","compileCostResolved","compileCostMs"]) delete a[key];
+    for (const sample of raw.memory.phaseSamples) sample.source="footprint -p";
+  });
+  assert.doesNotThrow(()=>validateReceipt(legacy));
+  assert.throws(()=>rebuildReceipt(legacy,(raw)=>{raw.timings.compileAttribution.noiseBandMs=3;}),/schema validation|unexpected fields/);
 });
 test("compile attribution v4 fails closed on malformed or tampered evidence",()=>{
-  const rejects=(coordinate,edit,pattern=/schema validation|compile attribution|probe durations|probeEvidence|matrix coordinate|process temperature|timing aliases|derived values|not sequential|not bound/)=>assert.throws(()=>rebuildReceipt(fixture("dense",coordinate),(raw)=>edit(raw.timings)),pattern);
+  const rejects=(coordinate,edit,pattern=/schema validation|compile attribution|compile cost|noiseSamplesMs|probe durations|probeEvidence|matrix coordinate|process temperature|timing aliases|derived values|not sequential|not bound/)=>assert.throws(()=>rebuildReceipt(fixture("dense",coordinate),(raw)=>edit(raw.timings)),pattern);
   rejects({},(timings)=>{delete timings.compileAttribution.method;});
   rejects({},(timings)=>{timings.compileAttribution.probeDurationsMs[0]=Number.NaN;});
   rejects({},(timings)=>{timings.compileAttribution.firstDispatchMs=Number.POSITIVE_INFINITY;});
@@ -361,8 +401,16 @@ test("compile attribution v4 fails closed on malformed or tampered evidence",()=
   rejects({},(timings)=>{timings.compileAttribution.firstDispatchExcessMs+=1;});
   rejects({},(timings)=>{timings.coldCompileMs+=1;});
   rejects({},(timings)=>{timings.warmCompileMs+=1;});
-  rejects({},(timings)=>{timings.compileAttribution.probeDurationsMs=[6.5,6,8,7,5];timings.compileAttribution.firstDispatchMs=6.5;timings.compileAttribution.steadyDispatchMs=6.5;timings.compileAttribution.firstDispatchExcessMs=0;timings.coldCompileMs=0;timings.warmCompileMs=6.5;});
-  rejects({processTemperature:"warm"},(timings)=>{timings.compileAttribution.probeDurationsMs=[6,7];timings.compileAttribution.firstDispatchMs=6;timings.compileAttribution.steadyDispatchMs=7;timings.compileAttribution.firstDispatchExcessMs=-1;timings.coldCompileMs=-1;timings.warmCompileMs=7;});
+  // An unresolved compile cost must be recorded as unresolved, never claimed or aliased.
+  rejects({},(timings)=>{timings.compileAttribution.probeDurationsMs=[8,6,8,7,5];timings.compileAttribution.probeEvidence[0].dispatchMs=8;timings.compileAttribution.firstDispatchMs=8;timings.compileAttribution.firstDispatchExcessMs=1.5;timings.compileAttribution.compileCostMs=1.5;timings.coldCompileMs=1.5;});
+  rejects({processTemperature:"warm"},(timings)=>{Object.assign(timings.compileAttribution,{compileCostResolved:false,compileCostUnresolvedReason:"first-dispatch-not-slower-than-steady"});delete timings.compileAttribution.compileCostMs;timings.coldCompileMs=null;});
+  rejects({},(timings)=>{timings.coldCompileMs=null;});
+  rejects({},(timings)=>{timings.compileAttribution.noiseBandMs+=1;});
+  rejects({},(timings)=>{timings.compileAttribution.noiseSamplesMs[0]+=1;});
+  rejects({},(timings)=>{delete timings.compileAttribution.noiseSamplesMs;});
+  rejects({processTemperature:"warm"},(timings)=>{timings.compileAttribution.noiseSamplesMs.pop();});
+  rejects({},(timings)=>{delete timings.compileAttribution.compileCostMs;});
+  rejects({},(timings)=>{timings.compileAttribution.compileCostResolved=false;});
   rejects({},(timings)=>{timings.samples[0].coldCompileMs=1;});
   rejects({},(timings)=>{delete timings.compileAttribution.probeEvidence;});
   rejects({},(timings)=>{timings.compileAttribution.probeEvidence.pop();});

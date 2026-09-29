@@ -41,7 +41,9 @@ before the module accepts any receipt.
 
 `readDarwinMemory()` is the only platform-specific reader: it obtains the
 kernel-maintained current and lifetime-peak physical footprints through
-`footprint -p`. MLX values are
+`footprint -p`. The inference producer reads the same ledger with one
+`proc_pid_rusage` syscall (phase `source: "proc_pid_rusage"`; `footprint -p`
+receipts stay valid). MLX values are
 inputs because the producer owns the MLX session and must sample active,
 cached, and peak allocator counters at the defined phase boundaries. The
 typed event stream uses high-water snapshots, not additive phase totals:
@@ -77,7 +79,20 @@ fit-boundary prompt is refused above `native context − 256`). Under v4 the
 value was a phase delta of the coordinate's own EOS/budget-terminated
 generation — one token for chunked rows — and measured mostly the
 `footprint -p` sampling at the `decode-steady` boundary; phase stamps now also
-exclude the observer's own memory sampling. The steady decode runs outside every
+exclude the observer's own memory sampling.
+
+Compile attribution `first-dispatch-minus-steady-v2` (sc-20671) records compile
+cost instead of asserting it. `noiseSamplesMs` are the steady dispatches of the
+same operation: the four post-first repeats of a cold row, or the five measured
+repeats after a warm row's warmups. `noiseBandMs` is their `max − min`.
+`compileCostResolved` is true only when `firstDispatchExcessMs` exceeds the
+band, and then `compileCostMs` (and `timings.coldCompileMs`) carry the excess.
+Otherwise both are omitted/null, and `compileCostUnresolvedReason` is
+`first-dispatch-not-slower-than-steady` or `excess-within-steady-noise-band`.
+At large geometries compute dominates and kernel compile cost is below
+run-to-run noise, so a non-positive excess is a measurement, never a refused
+row. Missing or non-finite probes still fail closed. `-v1` receipts (positive,
+band-free excess) stay valid. The steady decode runs outside every
 coordinate observer on a cache released before the next repeat, and its
 `prompt + 256` live tokens are admitted by the producer's preflight bound.
 Batch rows are timed as one sequence, since the compressed arm has no batch

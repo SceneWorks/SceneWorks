@@ -113,6 +113,19 @@ const COMPILE_ATTRIBUTION_FIELDS = [
   "steadyDispatchMs",
   "firstDispatchExcessMs",
 ];
+// sc-20671: -v2 records the first-dispatch excess against the steady-state noise band instead of
+// requiring it to be positive; -v1 receipts (band-free, positive excess) stay valid.
+const COMPILE_ATTRIBUTION_METHOD = "first-dispatch-minus-steady-v2";
+const LEGACY_COMPILE_ATTRIBUTION_METHOD = "first-dispatch-minus-steady-v1";
+const COMPILE_NOISE_FIELDS = [
+  "noiseSamplesMs",
+  "noiseBandMs",
+  "compileCostResolved",
+];
+const COMPILE_COST_NOT_SLOWER = "first-dispatch-not-slower-than-steady";
+const COMPILE_COST_WITHIN_NOISE = "excess-within-steady-noise-band";
+// Phase samples: proc_pid_rusage since sc-20671; `footprint -p` receipts stay valid.
+const PHYS_FOOTPRINT_SOURCES = new Set(["proc_pid_rusage", "footprint -p"]);
 const COMPILE_PROBE_EVIDENCE_FIELDS = [
   "index",
   "operation",
@@ -548,7 +561,9 @@ function validatePhaseSample(sample, index, expectedPid) {
   if (sample.phase !== PHASES[index]) fail(`${name}.phase must be ${PHASES[index]}`);
   positiveInteger(sample.pid, `${name}.pid`);
   if (expectedPid !== undefined && sample.pid !== expectedPid) fail("phase samples span multiple PIDs");
-  if (sample.source !== "footprint -p") fail(`${name}.source must be footprint -p`);
+  if (!PHYS_FOOTPRINT_SOURCES.has(sample.source)) {
+    fail(`${name}.source must be proc_pid_rusage or footprint -p`);
+  }
   isoTimestamp(sample.timestamp, `${name}.timestamp`);
   nonnegativeInteger(sample.physFootprintBytes, `${name}.physFootprintBytes`);
   nonnegativeInteger(sample.physFootprintPeakBytes, `${name}.physFootprintPeakBytes`);
@@ -646,10 +661,20 @@ function matrixCoordinate(matrix) {
 }
 
 function validateCompileAttribution(attribution, matrix) {
-  exactKeys(attribution, COMPILE_ATTRIBUTION_FIELDS, "timings.compileAttribution");
-  if (attribution.method !== "first-dispatch-minus-steady-v1") {
+  const legacy = attribution?.method === LEGACY_COMPILE_ATTRIBUTION_METHOD;
+  if (!legacy && attribution?.method !== COMPILE_ATTRIBUTION_METHOD) {
     fail("timings.compileAttribution.method is not the frozen attribution method");
   }
+  const resolvedKey = attribution?.compileCostResolved === true
+    ? "compileCostMs"
+    : "compileCostUnresolvedReason";
+  exactKeys(
+    attribution,
+    legacy
+      ? COMPILE_ATTRIBUTION_FIELDS
+      : [...COMPILE_ATTRIBUTION_FIELDS, ...COMPILE_NOISE_FIELDS, resolvedKey],
+    "timings.compileAttribution",
+  );
   const expectedOperation = compileOperation(matrix);
   if (attribution.operation !== expectedOperation) {
     fail("timings.compileAttribution.operation disagrees with the matrix coordinate");
@@ -696,14 +721,59 @@ function validateCompileAttribution(attribution, matrix) {
     steadyDispatchMs = attribution.probeDurationsMs[1];
   }
   const firstDispatchExcessMs = firstDispatchMs - steadyDispatchMs;
-  for (const field of ["firstDispatchMs", "steadyDispatchMs", "firstDispatchExcessMs"]) {
+  for (const field of ["firstDispatchMs", "steadyDispatchMs"]) {
     positiveNumber(attribution[field], `timings.compileAttribution.${field}`);
+  }
+  if (legacy) {
+    positiveNumber(attribution.firstDispatchExcessMs, "timings.compileAttribution.firstDispatchExcessMs");
+  } else if (typeof attribution.firstDispatchExcessMs !== "number"
+    || !Number.isFinite(attribution.firstDispatchExcessMs)) {
+    fail("timings.compileAttribution.firstDispatchExcessMs must be a finite number");
   }
   if (Math.abs(attribution.firstDispatchMs - firstDispatchMs) > 1e-9
     || Math.abs(attribution.steadyDispatchMs - steadyDispatchMs) > 1e-9
     || Math.abs(attribution.firstDispatchExcessMs - firstDispatchExcessMs) > 1e-9) {
     fail("timings.compileAttribution derived values do not match the raw probes");
   }
+  if (legacy) return;
+  // The steady noise samples: a cold row's four post-first repeats, or the five measured repeats
+  // after a warm row's warmups. Compile cost is resolved only when the excess clears their spread.
+  const samples = attribution.noiseSamplesMs;
+  if (!Array.isArray(samples) || samples.length !== (cold ? 4 : 5)) {
+    fail("timings.compileAttribution.noiseSamplesMs has the wrong sample count");
+  }
+  samples.forEach((sample, index) => {
+    positiveNumber(sample, `timings.compileAttribution.noiseSamplesMs[${index}]`);
+  });
+  if (cold && samples.some((sample, index) => sample !== attribution.probeDurationsMs[index + 1])) {
+    fail("timings.compileAttribution.noiseSamplesMs are not the cold steady probes");
+  }
+  const noiseBandMs = Math.max(...samples) - Math.min(...samples);
+  const resolved = firstDispatchExcessMs > noiseBandMs;
+  const expectedReason = resolved
+    ? undefined
+    : firstDispatchExcessMs <= 0 ? COMPILE_COST_NOT_SLOWER : COMPILE_COST_WITHIN_NOISE;
+  if (typeof attribution.noiseBandMs !== "number"
+    || Math.abs(attribution.noiseBandMs - noiseBandMs) > 1e-9
+    || attribution.compileCostResolved !== resolved
+    || (resolved && !(Math.abs(attribution.compileCostMs - firstDispatchExcessMs) <= 1e-9))
+    || (!resolved && attribution.compileCostUnresolvedReason !== expectedReason)) {
+    fail("timings.compileAttribution compile cost does not recompute from its noise band");
+  }
+}
+
+function coldCompileAlias(attribution) {
+  if (attribution.method === LEGACY_COMPILE_ATTRIBUTION_METHOD) return attribution.firstDispatchExcessMs;
+  return attribution.compileCostResolved ? attribution.compileCostMs : null;
+}
+
+function compileCostSummary(attribution) {
+  if (attribution.method === LEGACY_COMPILE_ATTRIBUTION_METHOD) {
+    return `${attribution.firstDispatchExcessMs} ms (legacy)`;
+  }
+  return attribution.compileCostResolved
+    ? `${attribution.compileCostMs} ms (noise band ${attribution.noiseBandMs} ms)`
+    : `unresolved: ${attribution.compileCostUnresolvedReason} (noise band ${attribution.noiseBandMs} ms)`;
 }
 
 const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v3";
@@ -1137,8 +1207,12 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [...TIMING_FIELDS, "coldCompileMs", "warmCompileMs", "compileAttribution", "samples", "summary"],
     "timings",
   );
-  for (const field of [...TIMING_FIELDS, "coldCompileMs", "warmCompileMs"]) {
+  for (const field of [...TIMING_FIELDS, "warmCompileMs"]) {
     positiveNumber(receipt.timings[field], `timings.${field}`);
+  }
+  // Null when the compile cost is below the steady noise band (sc-20671).
+  if (receipt.timings.coldCompileMs !== null) {
+    positiveNumber(receipt.timings.coldCompileMs, "timings.coldCompileMs");
   }
   if (!Array.isArray(receipt.timings.samples)
     || receipt.timings.samples.length !== CONTRACT.statistics.repeats) {
@@ -1152,8 +1226,9 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     if (!nearlyEqual(receipt.timings[field], mean)) fail(`timings.${field} does not derive from raw samples`);
   }
   validateCompileAttribution(receipt.timings.compileAttribution, receipt.matrix);
-  if (Math.abs(receipt.timings.coldCompileMs
-      - receipt.timings.compileAttribution.firstDispatchExcessMs) > 1e-9
+  const coldAlias = coldCompileAlias(receipt.timings.compileAttribution);
+  if ((coldAlias === null) !== (receipt.timings.coldCompileMs === null)
+    || (coldAlias !== null && Math.abs(receipt.timings.coldCompileMs - coldAlias) > 1e-9)
     || Math.abs(receipt.timings.warmCompileMs
       - receipt.timings.compileAttribution.steadyDispatchMs) > 1e-9) {
     fail("top-level compile timing aliases do not match compile attribution");
@@ -1768,7 +1843,8 @@ export function renderReceiptMarkdown(receipt) {
     + `- TTFT: ${receipt.timings.ttftMs} ms\n`
     + `- Compile attribution: ${receipt.timings.compileAttribution.method} / ${receipt.timings.compileAttribution.operation} / ${receipt.timings.compileAttribution.source}\n`
     + `- Compile probes: ${receipt.timings.compileAttribution.probeDurationsMs.join(", ")} ms\n`
-    + `- First dispatch excess: ${receipt.timings.coldCompileMs} ms\n`
+    + `- First dispatch excess: ${receipt.timings.compileAttribution.firstDispatchExcessMs} ms\n`
+    + `- Compile cost: ${compileCostSummary(receipt.timings.compileAttribution)}\n`
     + `- Steady dispatch: ${receipt.timings.warmCompileMs} ms\n`
     + `- Quality contract: ${receipt.contractHash}\n`
     + `- Receipt hash: ${receipt.receiptSha256}\n`
