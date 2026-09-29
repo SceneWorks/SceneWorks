@@ -1200,26 +1200,33 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
 /**
  * Mirrors the inference producer's SC-20676 compressed-row rules: fused execution happened, every
  * dense fallback is reasoned and counted, physical bytes are the sum of their measured
- * components, and no dense full-cache reconstruction survived.
+ * components, and no dense full-cache reconstruction survived. The representation describes the
+ * coordinate operation only: a `compressed` coordinate's persistent KV is exactly its storage's
+ * device share at the receipt's KV length and its whole physical representation (device + host
+ * copy + staged tail) is below the dense geometry; a `dense-fallback` coordinate claims no
+ * compressed storage.
  */
 function validateCompression(receipt) {
   const compression = receipt.compression;
   exactKeys(compression, [
     "method", "representationIdentity", "representationVersion", "bits", "quantizationGroupSize",
-    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes",
+    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
     "persistentKvRepresentation", "fusedCalls", "fallbackCalls", "fallbacks",
     "fullCacheDequantizations", "failedDispatches",
   ], "compression");
   if (!/^[a-z0-9-]+$/.test(compression.method)) fail("compression.method must be a method identifier");
   text(compression.representationIdentity, "compression.representationIdentity");
-  for (const field of ["representationVersion", "bits", "quantizationGroupSize", "deviceCodeBytes", "physicalKvBytes"]) {
+  for (const field of ["representationVersion", "bits", "quantizationGroupSize"]) {
     positiveInteger(compression[field], `compression.${field}`);
   }
-  for (const field of ["deviceMetadataBytes", "hostPayloadBytes", "fusedCalls", "fallbackCalls", "fullCacheDequantizations", "failedDispatches"]) {
+  for (const field of [
+    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
+    "fusedCalls", "fallbackCalls", "fullCacheDequantizations", "failedDispatches",
+  ]) {
     nonnegativeInteger(compression[field], `compression.${field}`);
   }
-  if (BigInt(compression.deviceCodeBytes) + BigInt(compression.deviceMetadataBytes)
-      + BigInt(compression.hostPayloadBytes) !== BigInt(compression.physicalKvBytes)) {
+  const deviceBytes = BigInt(compression.deviceCodeBytes) + BigInt(compression.deviceMetadataBytes);
+  if (deviceBytes + BigInt(compression.hostPayloadBytes) !== BigInt(compression.physicalKvBytes)) {
     fail("compressed physical KV bytes do not reconcile with measured storage");
   }
   if (compression.fusedCalls === 0) {
@@ -1244,10 +1251,19 @@ function validateCompression(receipt) {
     || (compression.fallbackCalls !== 0 && receipt.lifecycle.denseFallback !== true)) {
     fail("compressed fallback calls are not fully reasoned");
   }
-  const representationAgrees = compression.persistentKvRepresentation === "compressed"
-    ? receipt.memory.persistentKvBytes < receipt.memory.denseTheoreticalKvBytes
-    : compression.persistentKvRepresentation === "dense-fallback" && compression.fallbackCalls !== 0;
-  if (!representationAgrees) {
+  if (compression.persistentKvRepresentation === "compressed") {
+    if (compression.deviceCodeBytes === 0
+      || deviceBytes !== BigInt(receipt.memory.persistentKvBytes)
+      || compression.storageTokens !== receipt.geometry.kvLength) {
+      fail("compressed persistent KV does not reconcile with the coordinate's measured storage");
+    }
+    if (compression.physicalKvBytes >= receipt.memory.denseTheoreticalKvBytes) {
+      fail("compressed persistent KV representation disagrees with its evidence");
+    }
+  } else if (compression.persistentKvRepresentation !== "dense-fallback"
+    || compression.fallbackCalls === 0
+    || compression.physicalKvBytes !== 0
+    || compression.storageTokens !== 0) {
     fail("compressed persistent KV representation disagrees with its evidence");
   }
   if (compression.fullCacheDequantizations !== 0) {
@@ -1623,7 +1639,9 @@ export function renderComparisonMarkdown(comparison) {
   return `# Dense/compressed KV comparison\n\n`
     + `- Dense run: ${comparison.denseRunId}\n`
     + `- Compressed run: ${comparison.compressedRunId}\n`
-    + `- Persistent KV reduction: ${(comparison.persistentKvReduction * 100).toFixed(2)}%\n`
+    + (comparison.persistentKvReductionEligible
+      ? `- Persistent KV reduction: ${(comparison.persistentKvReduction * 100).toFixed(2)}%\n`
+      : `- Persistent KV reduction: not claimed (${comparison.persistentKvReductionIneligibleReason})\n`)
     + `- Decode steady footprint delta: ${comparison.decodeSteadyPhysFootprintDeltaBytes} bytes\n`
     + `- Process footprint peak delta: ${comparison.peakPhysFootprintDeltaBytes} bytes\n`
     + `- Decode MLX live/cache deltas: ${comparison.decodeSteadyMlxActiveDeltaBytes} / ${comparison.decodeSteadyMlxCacheDeltaBytes} bytes\n`
@@ -1790,6 +1808,11 @@ export function compareReceipts(dense, compressed) {
     || canonicalJson(dense.geometry) !== canonicalJson(compressed.geometry)) {
     fail("comparison matrix, geometry, or contract differs");
   }
+  // Only a coordinate that itself ran on the compressed representation may claim a reduction, and
+  // the claim is the whole physical representation (device arrays + host copy + staged tail),
+  // never the MLX device share alone.
+  const representation = compressed.compression.persistentKvRepresentation;
+  const reductionEligible = representation === "compressed";
   const denseDecode = phaseByName(dense, "decode-steady");
   const compressedDecode = phaseByName(compressed, "decode-steady");
   const densePeak = Math.max(...dense.memory.phaseSamples.map((sample) => sample.physFootprintPeakBytes));
@@ -1800,9 +1823,15 @@ export function compareReceipts(dense, compressed) {
     denseRunId: dense.runId,
     compressedRunId: compressed.runId,
     contractHash: dense.contractHash,
-    persistentKvReduction:
-      (dense.memory.persistentKvBytes - compressed.memory.persistentKvBytes)
-      / dense.memory.persistentKvBytes,
+    persistentKvRepresentation: representation,
+    persistentKvReductionEligible: reductionEligible,
+    persistentKvReductionIneligibleReason: reductionEligible
+      ? null
+      : `coordinate operation ran on a ${representation} representation`,
+    persistentKvReduction: reductionEligible
+      ? (dense.memory.persistentKvBytes - compressed.compression.physicalKvBytes)
+        / dense.memory.persistentKvBytes
+      : null,
     decodeSteadyPhysFootprintDeltaBytes:
       compressedDecode.physFootprintBytes - denseDecode.physFootprintBytes,
     peakPhysFootprintDeltaBytes: compressedPeak - densePeak,

@@ -26,11 +26,26 @@ function memoryPhases(persistent) {
     return {phase,pid:9,source:"footprint -p",timestamp:"2026-08-29T12:00:0"+i+".000Z",physFootprintBytes,physFootprintPeakBytes:footprintPeak,mlx:{source:"mlx_rs::memory",activeBytes:active[i],cacheBytes:10,peakBytes:mlxPeak}};
   });
 }
-const compressionFixture = () => ({
-  method:"group-affine",representationIdentity:"sc-20676-packed-group-affine-v1",representationVersion:2,bits:2,quantizationGroupSize:32,
-  deviceCodeBytes:64,deviceMetadataBytes:32,hostPayloadBytes:96,physicalKvBytes:192,persistentKvRepresentation:"compressed",
-  fusedCalls:10,fallbackCalls:1,fallbacks:[{operation:"prompt-cache-reuse",reason:"the provider prefix cache stores dense contiguous K/V",calls:1}],
-  fullCacheDequantizations:0,failedDispatches:0,
+// The coordinate's measured storage: its device share is the receipt's persistent KV and its host
+// copy/staged tail (half the device share here) is counted into the physical bytes.
+const compressionFixture = ({ persistent, kvLength }) => {
+  const deviceMetadataBytes = Math.floor(persistent / 4), hostPayloadBytes = Math.floor(persistent / 2);
+  return {
+    method:"group-affine",representationIdentity:"sc-20676-packed-group-affine-v1",representationVersion:2,bits:2,quantizationGroupSize:32,
+    deviceCodeBytes:persistent-deviceMetadataBytes,deviceMetadataBytes,hostPayloadBytes,physicalKvBytes:persistent+hostPayloadBytes,storageTokens:kvLength,
+    persistentKvRepresentation:"compressed",
+    fusedCalls:10,fallbackCalls:1,fallbacks:[{operation:"prompt-cache-reuse",reason:"the provider prefix cache stores dense contiguous K/V",calls:1}],
+    fullCacheDequantizations:0,failedDispatches:0,
+  };
+};
+// A coordinate that itself ran on the explicit dense path (batch / prefix reuse) claims no storage.
+const denseFallbackCompression = () => ({
+  ...compressionFixture({ persistent: 0, kvLength: 0 }),
+  persistentKvRepresentation:"dense-fallback",
+  fallbackCalls:2,fallbacks:[
+    {operation:"prompt-cache-reuse",reason:"the provider prefix cache stores dense contiguous K/V",calls:1},
+    {operation:"supported-batch",reason:"batched prefill attends through additive padding masks",calls:1},
+  ],
 });
 function fixture(mode="dense", coordinate={}, extra={}) {
   const family = coordinate.family || "llama";
@@ -57,7 +72,7 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
   memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20}},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture()}:{}),...extra});
+    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra});
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
@@ -268,7 +283,7 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
   await writeCampaignManifest(directory, manifest);
   return { directory, manifest, resumeIdentity };
 }
-test("contract sidecar and valid comparison",async()=>{const raw=await readFile("config/kv-baseline-quality-contract.json");assert.equal(await readFile("config/kv-baseline-quality-contract.json.sha256","utf8"),`${sha256(raw)}  kv-baseline-quality-contract.json\n`);assert.equal(compareReceipts(fixture(),fixture("compressed")).persistentKvReduction,.5);});
+test("contract sidecar and valid comparison",async()=>{const raw=await readFile("config/kv-baseline-quality-contract.json");assert.equal(await readFile("config/kv-baseline-quality-contract.json.sha256","utf8"),`${sha256(raw)}  kv-baseline-quality-contract.json\n`);assert.equal(compareReceipts(fixture(),fixture("compressed")).persistentKvReduction,.25);});
 test("numeric semantic seals normalize exact f64 bits and object order",()=>{
   const first={z:91.014,a:{workerPid:9,values:[91.01400000000001,1]}};
   const reordered={a:{values:[91.01400000000001,1],workerPid:9},z:91.014};
@@ -478,7 +493,7 @@ test("fixture artifacts record both arms' tool and needle outcomes as booleans",
 });
 test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
 test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp("/tmp/kv20671-snapshot-"),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});
-test("receipt sets reject mixed generations and CLI comparison preserves inputs",async()=>{const dir=await mkdtemp("/tmp/kv20671-"),dense=path.join(dir,"dense"),compressed=path.join(dir,"compressed"),out=path.join(dir,"comparison.json");const denseReceipt=await verifiedFixture(path.join(dir,"dense-source")),compressedReceipt=await verifiedFixture(path.join(dir,"compressed-source"),"compressed");await writeReceiptSet(dense,denseReceipt);await writeReceiptSet(compressed,compressedReceipt);const before=await readFile(path.join(compressed,"receipt.json"),"utf8");await run(process.execPath,["scripts/kv-baseline-harness.mjs","compare",dense,compressed,out]);assert.equal(await readFile(path.join(compressed,"receipt.json"),"utf8"),before);assert.match(await readFile(path.join(dir,"comparison.md"),"utf8"),/Persistent KV reduction: 50.00%/);await writeFile(path.join(dense,"receipt.md"),"# forged\n");await assert.rejects(readReceiptSet(dense),/sidecar hash mismatch|not bound/);await rm(dir,{recursive:true,force:true});});
+test("receipt sets reject mixed generations and CLI comparison preserves inputs",async()=>{const dir=await mkdtemp("/tmp/kv20671-"),dense=path.join(dir,"dense"),compressed=path.join(dir,"compressed"),out=path.join(dir,"comparison.json");const denseReceipt=await verifiedFixture(path.join(dir,"dense-source")),compressedReceipt=await verifiedFixture(path.join(dir,"compressed-source"),"compressed");await writeReceiptSet(dense,denseReceipt);await writeReceiptSet(compressed,compressedReceipt);const before=await readFile(path.join(compressed,"receipt.json"),"utf8");await run(process.execPath,["scripts/kv-baseline-harness.mjs","compare",dense,compressed,out]);assert.equal(await readFile(path.join(compressed,"receipt.json"),"utf8"),before);assert.match(await readFile(path.join(dir,"comparison.md"),"utf8"),/Persistent KV reduction: 25.00%/);await writeFile(path.join(dense,"receipt.md"),"# forged\n");await assert.rejects(readReceiptSet(dense),/sidecar hash mismatch|not bound/);await rm(dir,{recursive:true,force:true});});
 test("published inference fixture bundles are required and bind cold probe evidence exactly",async()=>{
   const dir=await mkdtemp("/tmp/kv20671-fixtures-"),published=path.join(dir,"published"),receipt=await verifiedFixture(path.join(dir,"source"),"dense",{}, {inferenceShaped:true});
   await writeReceiptSet(published,receipt);
@@ -501,7 +516,7 @@ test("published inference fixture bundles are required and bind cold probe evide
   await assert.rejects(readReceiptSet(published),/ENOENT/);
   await rm(dir,{recursive:true,force:true});
 });
-test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.5);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift, { scheduleVersion: 1 }),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift, { scheduleVersion: 1 }),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
+test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.25);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift, { scheduleVersion: 1 }),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift, { scheduleVersion: 1 }),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
 test("measured context bands reject zero, non-material, and non-boundary receipts",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.contextWindowTokens=0;}),/must be >= 1|positive integer/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{raw.memory.phaseSamples=raw.memory.phaseSamples.map((sample)=>({...sample,physFootprintBytes:10_000_000_000,physFootprintPeakBytes:10_000_000_000}));}),/memory-material/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"fit-boundary"}),(raw)=>{raw.geometry.contextWindowTokens=8192;raw.geometry.contextTargetTokens=7680;raw.geometry.contextPayloadTokens=7680;}),/fit-boundary|sealed llama contract/);});
 test("dense receipts distinguish live KV length from observed allocated capacity", () => {
   const padded = denseWithAllocatedCapacity(fixture(), 256, 32);
@@ -708,13 +723,13 @@ test("SC-20676 compressed receipts carry reasoned fused/fallback evidence and no
   const accepted = fixture("compressed");
   assert.equal(accepted.compression.method, "group-affine");
   assert.equal(validateReceipt(accepted), accepted);
-  const withCompression = (edit) => {
-    const compression = compressionFixture();
+  const withCompression = (edit, base = accepted.compression) => {
+    const compression = structuredClone(base);
     edit(compression);
     return () => fixture("compressed", {}, { compression });
   };
   // The block belongs exactly to compressed rows.
-  assert.throws(() => fixture("dense", {}, { compression: compressionFixture() }), /schema validation|present exactly/);
+  assert.throws(() => fixture("dense", {}, { compression: accepted.compression }), /schema validation|present exactly/);
   assert.throws(() => rebuildReceipt(accepted, (raw) => { delete raw.compression; }), /schema validation|present exactly/);
   // Silent fallback: uncounted, unreasoned, or unordered dense execution, or no fused execution.
   assert.throws(withCompression((c) => { c.fallbackCalls = 2; }), /not fully reasoned/);
@@ -735,6 +750,55 @@ test("SC-20676 compressed receipts carry reasoned fused/fallback evidence and no
   }), /full-cache temporary/);
   // Physical bytes are the measured components, not bit accounting.
   assert.throws(withCompression((c) => { c.hostPayloadBytes += 1; }), /do not reconcile with measured storage/);
+  // A compressed coordinate: persistent KV is exactly its device share at the receipt's KV length,
+  // and the whole physical representation (host copy + staged tail included) is below dense.
+  assert.throws(withCompression((c) => { c.deviceCodeBytes += 1; c.hostPayloadBytes -= 1; }), /coordinate's measured storage/);
+  assert.throws(withCompression((c) => { c.storageTokens += 1; }), /coordinate's measured storage/);
+  const dense = accepted.memory.denseTheoreticalKvBytes;
+  assert.throws(withCompression((c) => {
+    c.hostPayloadBytes = dense - c.deviceCodeBytes - c.deviceMetadataBytes; c.physicalKvBytes = dense;
+  }), /persistent KV representation/);
+  // A dense-fallback coordinate is a valid row that claims no compressed storage.
+  const denseRow = fixture("compressed", {}, { compression: denseFallbackCompression() });
+  assert.equal(validateReceipt(denseRow), denseRow);
+  assert.throws(withCompression((c) => { c.persistentKvRepresentation = "dense-fallback"; }), /persistent KV representation/);
+  assert.throws(withCompression((c) => { c.storageTokens = 1; }, denseFallbackCompression()), /persistent KV representation/);
+  assert.throws(withCompression((c) => {
+    c.deviceCodeBytes = 1; c.physicalKvBytes = 1;
+  }, denseFallbackCompression()), /persistent KV representation/);
+});
+
+test("SC-20676 reductions are claimed only for coordinates that ran compressed, from physical bytes", () => {
+  const compressed = fixture("compressed");
+  const eligible = compareReceipts(fixture(), compressed);
+  assert.equal(eligible.persistentKvRepresentation, "compressed");
+  assert.equal(eligible.persistentKvReductionEligible, true);
+  assert.equal(eligible.persistentKvReductionIneligibleReason, null);
+  // Device share alone would read 50%; the host copy and staged tail make the honest claim 25%.
+  assert.equal(
+    eligible.persistentKvReduction,
+    1 - compressed.compression.physicalKvBytes / fixture().memory.persistentKvBytes,
+  );
+  assert.equal(eligible.persistentKvReduction, .25);
+  assert.match(renderComparisonMarkdown(eligible), /Persistent KV reduction: 25\.00%/);
+  for (const coordinate of [
+    { requestMode: "supported-batch" },
+    { prefillMode: "chunked" },
+    { contextBand: "fit-boundary", requestMode: "supported-batch", prefillMode: "chunked" },
+  ]) {
+    const ineligible = compareReceipts(
+      fixture("dense", coordinate),
+      fixture("compressed", coordinate, { compression: denseFallbackCompression() }),
+    );
+    assert.equal(ineligible.persistentKvReductionEligible, false);
+    assert.equal(ineligible.persistentKvReduction, null);
+    assert.match(ineligible.persistentKvReductionIneligibleReason, /dense-fallback/);
+    assert.match(renderComparisonMarkdown(ineligible), /Persistent KV reduction: not claimed \(.*dense-fallback/);
+  }
+  // Eligibility keys off the recorded representation, not the row name: a chunked row whose
+  // coordinate ran compressed is eligible.
+  const chunked = { prefillMode: "chunked" };
+  assert.equal(compareReceipts(fixture("dense", chunked), fixture("compressed", chunked)).persistentKvReductionEligible, true);
 });
 
 test("SC-20676 compressed campaigns are uniform and bound to their resume identity mode", () => {

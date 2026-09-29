@@ -65,7 +65,8 @@ exactly, with zero reconciliation tolerance. Fit-boundary occupancy uses live
 additional usable context. Existing exact-length v4 receipts remain readable.
 
 `compare` refuses mismatched source/model/toolchain/hardware/power/thermal
-identity, matrix, contract, or geometry and reports KV reduction,
+identity, matrix, contract, or geometry and reports KV reduction (only for a
+coordinate that ran compressed; see *Compressed rows*),
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.
 The current `campaign` reader requires a producer-published v2 aggregate with
 exactly eight sealed receipts: short, medium, memory-material, and fit-boundary
@@ -194,15 +195,39 @@ rows can never resume into each other, and a published campaign is uniformly
 one mode (`validateCampaign` reports `mode`/`kvMethod`).
 
 A compressed receipt carries a `compression` block (dense receipts never do):
-the method and cache-reported representation identity; the peak live
-compressed storage measured from the cache's retained device arrays plus its
-allocated host staging payload (`physicalKvBytes` must equal their sum);
-whether `memory.persistentKvBytes` measured the compressed representation or an
-explicit dense fallback of the coordinate operation; fused call and dense
-fallback counts with every fallback's operation and reason (prefix-cache reuse
-and the synchronous batch decoder are dense by construction and are always
-listed); and `fullCacheDequantizations`. Readers reject a compressed receipt
-with no fused calls, an unreasoned or uncounted fallback, a dense full-cache
+the method and cache-reported representation identity; fused call and dense
+fallback counts with every fallback's operation and reason, summed over every
+compressed-arm dispatch of the row (warmups, fixtures, and each coordinate's
+prompt-cache-reuse and cancellation probes); `fullCacheDequantizations`; and
+the classification and storage of the **coordinate operation alone**.
+
+`persistentKvRepresentation` is decided only from evidence recorded during the
+coordinate operation (its setup and measured dispatch); the producer closes
+that scope before the lifecycle probes run, so their reasoned fallbacks never
+reclassify the row. It is `compressed` only when the coordinate's own cache
+stayed on the fused path with no fallback, and `dense-fallback` otherwise (the
+supported-batch decoder and the prefix-cache reuse path are dense today).
+
+For a `compressed` coordinate the block records that cache's storage at its
+persistent-KV peak: `deviceCodeBytes` and `deviceMetadataBytes` (the retained
+MLX arrays), `hostPayloadBytes` (the allocated host copy of codes/metadata plus
+the staged dense key tail), `physicalKvBytes` (exactly their sum: the whole
+physical representation), and `storageTokens`. Readers require
+`memory.persistentKvBytes` (the MLX device share, which the memory-containment
+checks use) to equal `deviceCodeBytes + deviceMetadataBytes`, `storageTokens`
+to equal `geometry.kvLength`, and `physicalKvBytes` to be below
+`memory.denseTheoreticalKvBytes`. A `dense-fallback` coordinate claims no
+compressed storage: all byte fields and `storageTokens` are zero and it must
+list at least one fallback.
+
+`compare` claims a persistent-KV reduction only for a `compressed` coordinate,
+as `(dense persistentKvBytes - compressed physicalKvBytes) / dense
+persistentKvBytes`, so the host copy and staged tail count against the claim.
+A `dense-fallback` row reports `persistentKvReductionEligible: false`, a
+`persistentKvReductionIneligibleReason`, and `persistentKvReduction: null`;
+eligibility is read from the recorded representation, never from the row's
+request or prefill mode. Readers also reject a compressed receipt with no
+fused calls, an unreasoned or uncounted fallback, a dense full-cache
 reconstruction (counted by the cache or witnessed by a
 `full_cache_materialization`/`dense_cache_temporary` allocation event), or
 physical bytes that do not reconcile. One-command GPU-window launch, from the
