@@ -1546,8 +1546,9 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "VACE shared helpers must import only their shared Wan contract on the Candle cfg"
     );
     assert!(
-        VACE.contains("generate_video, resolve_wan_model_dir, resolve_wan_quant,")
-            && VACE.contains("VideoGenInput,"),
+        VACE.contains(
+            "generate_video, resolve_wan_model_dir, resolve_wan_vace_adapters, wan_load_quant,"
+        ) && VACE.contains("VideoGenInput,"),
         "VACE macOS implementation must import generation and MLX-only Wan resolvers separately"
     );
     assert!(
@@ -9593,6 +9594,27 @@ fn wan_engine_id_maps_the_three_models() {
     // it must stay out of `wan_engine_id` so a replace_person job routes to `generate_wan_vace_fun`
     // (the dual-expert `wan2_2_vace_fun_14b` engine), never the base txt/img→video path.
     assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
+}
+
+/// sc-20686: the MLX Wan-family load quantization is the provider crate's `product_load` decision
+/// (the single source the Metal campaign loads through): VACE-Fun defaults to Q4, `wan_vace` stays
+/// dense, and a packed Wan tier never requantizes while a flat root takes the pick.
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_load_quant_is_the_product_decision() {
+    let absent = request(json!({ "projectId": "p" }));
+    let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+    let quant = |engine_id, request, packed| wan_load_quant(engine_id, request, packed).unwrap();
+    assert_eq!(
+        quant("wan2_2_vace_fun_14b", &absent, false),
+        Some(Quant::Q4)
+    );
+    assert_eq!(quant("wan2_2_vace_fun_14b", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan_vace", &absent, false), None);
+    assert_eq!(quant("wan_vace", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, true), None);
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, false), Some(Quant::Q8));
+    assert!(wan_load_quant("ltx_2_3", &absent, false).is_err());
 }
 
 /// Per-model sampling (sc-4997 / sc-10047): with the Lightning toggle on (the default) both A14B

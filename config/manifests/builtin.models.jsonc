@@ -21674,6 +21674,23 @@
           "estimatedSizeBytes": 24197122980,
           "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // macOS Wan-VACE (sc-20686): the dense Wan2.1-VACE-1.3B transformer the native `wan_vace`
+        // engine serves `replace_person` and the tier-C extend_clip/video_bridge path with. Nothing
+        // else downloaded it, so `wan_vace` was unreachable from a clean install. Only `transformer/`
+        // is fetched: the worker assembles it with a base-Wan 14B tier's UMT5/z16-VAE/tokenizer
+        // (`resolve_wan_vace_model_dir`). Soft: extend/bridge falls back to the TI2V-5B keyframe
+        // path without it, so TI2V-5B stays usable when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+          "revision": "ec4d2cb062b548996b179d493fdd05340de702a1",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7146182696,
+          "footprint": { "diskSizeBytes": 7146182696, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
         // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
         // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.

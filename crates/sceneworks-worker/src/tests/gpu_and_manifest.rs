@@ -2582,16 +2582,38 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .get("downloads")
         .and_then(Value::as_array)
         .expect("wan TI2V-5B downloads");
-    // The macOS tiers, in order, from the SceneWorks quant-matrix repo.
+    // The macOS tiers, in order, from the SceneWorks quant-matrix repo (co-requisite rows ride along).
+    let on_macos = |d: &&Value| {
+        d.get("platforms")
+            .and_then(Value::as_array)
+            .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
+            .unwrap_or(false)
+    };
+    let co_requisite = |d: &&Value| d.get("coRequisite").and_then(Value::as_bool) == Some(true);
     let macos: Vec<&Value> = downloads
         .iter()
-        .filter(|d| {
-            d.get("platforms")
-                .and_then(Value::as_array)
-                .map(|p| p.iter().any(|x| x.as_str() == Some("macos")))
-                .unwrap_or(false)
-        })
+        .filter(on_macos)
+        .filter(|d| !co_requisite(d))
         .collect();
+    // sc-20686: the macOS `wan_vace` engine (replace_person + the tier-C extend/bridge) needs the
+    // Wan2.1-VACE-1.3B transformer, fetched alongside as a pinned soft co-requisite — only its
+    // `transformer/` (the shared UMT5/VAE/tokenizer come from a base-Wan 14B tier).
+    let vace: Vec<&Value> = downloads
+        .iter()
+        .filter(on_macos)
+        .filter(co_requisite)
+        .collect();
+    assert_eq!(vace.len(), 1, "wan TI2V-5B declares exactly one macOS co-requisite");
+    assert_eq!(
+        vace[0].get("repo").and_then(Value::as_str),
+        Some("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
+    );
+    assert_eq!(
+        vace[0].get("revision").and_then(Value::as_str),
+        Some("ec4d2cb062b548996b179d493fdd05340de702a1")
+    );
+    assert_eq!(vace[0].get("required").and_then(Value::as_str), Some("soft"));
+    assert_eq!(vace[0].get("files"), Some(&serde_json::json!(["transformer/*"])));
     let variants: Vec<&str> = macos
         .iter()
         .filter_map(|d| d.get("variant").and_then(Value::as_str))
