@@ -113,11 +113,20 @@ python3 scripts/memory-calibration-watchdog.py \
   --min-memory-free-bytes 2147483648 \
   --max-runtime-seconds 21600 \
   --sample-interval 2 --telemetry-timeout 10 --term-grace 1 \
+  --require-completion-handshake \
   --event-file "$OUT/watchdog-acceptance.jsonl" -- \
   node scripts/yue2-acceptance.mjs --platform metal \
     --out "$OUT/acceptance" --data-dir "$STATE/app-data" --hf-home "$STATE/hf-home" \
     --api-bin target/release/sceneworks-rust-api --ffmpeg-bin "$FFMPEG_BIN"
 ```
+
+The completion handshake is separate from preallocation child attestation: it does not apply the
+2× initial-free-memory policy. After service teardown and durable evidence writes, the driver
+sends nonce-bound DONE and remains alive until the guard commits a successful final group/host
+sample and acknowledges it. Descendants remain monitored until sentinel cleanup finishes; the
+sentinel's actual status is preserved (including status 1 for the owner-skipped case). Missing
+or invalid DONE, unacknowledged root telemetry loss, and failed final sampling remain red. This
+protocol does not change or reconstruct the verdict of any previously captured run.
 
 **Metal safety.** The driver never sends a signal to a Metal worker that is (or may be) mid-render.
 Before any restart or teardown it cancels the active jobs through the API and waits for the worker

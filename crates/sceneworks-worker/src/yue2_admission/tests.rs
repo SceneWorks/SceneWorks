@@ -1,6 +1,6 @@
 //! sc-23001: YuE2 residency model, admission choice/refusal, and residency leases.
 //!
-//! Every budget below is DERIVED from the estimator itself (a stage's own bytes, ± 1), never a
+//! Except for the saved Metal stage fixtures, every budget below is DERIVED from the estimator itself (a stage's own bytes, ± 1), never a
 //! machine's number, so these assert the model's structure and the decision's logic rather than
 //! any measurement. The one set of absolute figures asserted — sc-22995's recorded weight
 //! residencies — is content-derived (tensor shapes × storage), identical on every machine.
@@ -900,20 +900,27 @@ fn cuda_offloads_the_ar_path_when_the_solve_needs_it() {
         est.weights.ar_only_bytes
     );
 
-    let unified = production
-        .stage(Yue2Stage::AcousticPrefill)
-        .unwrap()
-        .total_bytes();
-    let load = production.stage(Yue2Stage::Load).unwrap().total_bytes();
-    assert!(
-        load <= unified,
-        "precondition: the load fits the unified pool"
+    // Metal has its own allocator costs and one memory pool. Derive its budget from its
+    // own estimate: copying AR weights to the host cannot lower that floor as it can on CUDA.
+    let smallest = Yue2Controls {
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        decode_core_frames: 1,
+        ..Yue2Controls::production()
+    };
+    let resident = priced(&s, Yue2Backend::Metal, smallest);
+    let offloaded = priced(
+        &s,
+        Yue2Backend::Metal,
+        Yue2Controls {
+            offload_ar: true,
+            ..smallest
+        },
     );
-    let message = refused(decide("yue2", &s, Some(&metal(unified)), 0));
-    assert!(
-        message.contains("acoustic flow-matching solve"),
-        "{message}"
-    );
+    assert_eq!(resident.stages, offloaded.stages);
+    let floor = resident.unified_floor().1;
+    refused(decide("yue2", &s, Some(&metal(floor - 1)), 0));
+    let fits = admitted(decide("yue2", &s, Some(&metal(floor)), 0));
+    assert!(!fits.controls.offload_ar);
 }
 
 /// Over budget: refused BEFORE anything loads, naming the binding stage, the shortfall and a lighter
@@ -929,14 +936,22 @@ fn an_over_budget_render_is_refused_with_stage_shortfall_and_alternatives() {
         ..Yue2Controls::production()
     };
     // One byte below bf16's smallest-controls floor: bf16 cannot fit at any control, q4 can.
-    let (binding, bf16_min) = priced(&bf16, Yue2Backend::Metal, smallest).unified_floor();
+    let smallest_estimate = priced(&bf16, Yue2Backend::Metal, smallest);
+    let (_, bf16_min) = smallest_estimate.unified_floor();
+    // The Metal high-water floor may tie later stages; the first short stage binds admission.
+    let binding = smallest_estimate
+        .stages
+        .iter()
+        .find(|stage| stage.total_bytes() == bf16_min)
+        .unwrap()
+        .stage;
     let message = refused(decide("yue2", &bf16, Some(&metal(bf16_min - 1)), 0));
     for needle in [
         "yue2:",
         "bf16",
         "short",
         "q4",
-        "estimate pending",
+        "terminal calibration remains pending",
         "sc-23002",
         binding.label(),
     ] {
@@ -1413,7 +1428,7 @@ fn the_catalog_floors_are_the_estimators_smallest_admissible_default_render() {
     assert_eq!(
         candle["measured"],
         json!(false),
-        "no YuE2 memory is measured yet"
+        "saved stage lower bounds do not complete terminal calibration"
     );
     let smallest = |offload_ar| Yue2Controls {
         offload_ar,
@@ -1684,7 +1699,7 @@ fn the_decode_tile_matches_the_hand_computed_bytes() {
         term_bytes(&est, Yue2Stage::Decode, "FP32 VAE decoder + decode reserve"),
         1_073_741_824
     );
-    assert_eq!(est.stage(Yue2Stage::Decode).unwrap().terms.len(), 4);
+    assert_eq!(est.stage(Yue2Stage::Decode).unwrap().terms.len(), 5);
 }
 
 /// The acoustic chunk is sized with the SHORTEST prefix (a shorter real plan makes a longer chunk):
@@ -1715,14 +1730,17 @@ fn the_acoustic_chunk_is_sized_for_the_shortest_prefix() {
 }
 
 /// Mapped weights pages are clean file-backed pages, not Metal buffers: on Metal (and CPU) the load
-/// holds only the resident weights; on CUDA the mapped file is charged to host RAM. Mutation: charge
+/// charges its separate process reserve; on CUDA the mapped file is charged to host RAM. Mutation: charge
 /// `stored_bytes` on every backend.
 #[test]
 fn the_mapped_weights_file_costs_host_ram_on_cuda_only() {
     let s = shape(Yue2Tier::Bf16, &default_request());
     let metal = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
     let load = metal.stage(Yue2Stage::Load).unwrap();
-    assert_eq!(load.total_bytes(), 7_261_368_448, "bf16 weights alone");
+    assert_eq!(
+        load.total_bytes(),
+        7_261_368_448 + METAL_PROCESS_RESERVE_BYTES
+    );
     let cpu = priced(&s, Yue2Backend::Cpu, Yue2Controls::production());
     assert_eq!(cpu.stage(Yue2Stage::Load).unwrap().host_bytes(), 0);
     let cuda = priced(&s, Yue2Backend::Cuda, Yue2Controls::production());
@@ -1886,4 +1904,234 @@ fn check_evicts_the_cached_generator_when_the_render_needs_its_memory() {
         .expect("fits once evicted");
         assert_eq!(evictions(), before + 1);
     });
+}
+
+// ---- Saved Metal observations (sc-23002) ----------------------------------------------------------
+
+fn metal_profile_fixtures() -> Value {
+    serde_json::from_str(include_str!("fixtures/metal-stage-peaks.json")).unwrap()
+}
+
+fn fixture_shape(fixture: &Value) -> Yue2Shape {
+    // Use the platform-independent production job builder, including its CFG defaults.
+    // The GPU profile harness is not compiled in Linux's default-feature test configuration.
+    let case = &fixture["case"];
+    let mut body = case["request"].clone();
+    body["kind"] = json!("create");
+    body["tier"] = case["tier"].clone();
+    body["decoder"] = case["decoder"].clone();
+    let spec = serde_json::from_value(body).unwrap();
+    sceneworks_core::yue2_score::jobs::validate_request(&spec).unwrap();
+    let request = crate::yue2_jobs::build_request(
+        &spec,
+        &crate::yue2_jobs::Inputs::default(),
+        std::path::Path::new("unused"),
+        gen_core::CancelFlag::new(),
+    );
+    shape(
+        Yue2Tier::from_key(fixture["case"]["tier"].as_str().unwrap()).unwrap(),
+        &request,
+    )
+}
+
+#[test]
+fn metal_estimates_cover_every_saved_stage_peak() {
+    let fixtures = metal_profile_fixtures();
+    let mut checked = 0;
+    for fixture in fixtures["cases"].as_array().unwrap() {
+        let est = priced(
+            &fixture_shape(fixture),
+            Yue2Backend::Metal,
+            Yue2Controls::production(),
+        );
+        for (stage, observed) in fixture["measuredStages"].as_object().unwrap() {
+            let peak = observed["peakBytes"].as_u64().unwrap();
+            // Metal has one pool; the measured acoustic span covers both alternating phases.
+            let reserved = est
+                .stages
+                .iter()
+                .filter(|entry| match entry.stage {
+                    Yue2Stage::AcousticPrefill | Yue2Stage::AcousticSolve => stage == "acoustic",
+                    other => stage == other.key(),
+                })
+                .map(Yue2StageResidency::total_bytes)
+                .max()
+                .expect("measured stage is priced");
+            assert!(observed["samples"].as_u64().unwrap() > 0);
+            assert!(
+                reserved >= peak,
+                "{} {stage}: {reserved} < saved {peak}",
+                fixture["case"]["id"]
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(
+        checked, 23,
+        "four valid records plus four raw q4-default stages; its load is still missing"
+    );
+}
+
+#[test]
+fn metal_kv_padding_matches_each_buffer_bucket_boundary() {
+    // Each BF16 K or V tensor is 8 heads × 128 dimensions × 2 bytes × positions.
+    // Candle's pinned allocator has no further minimum/alignment in buf_size: next_power_of_two.
+    for (positions, buffer_bytes) in [(1023, 2 << 20), (1024, 2 << 20), (1025, 4 << 20)] {
+        assert_eq!(
+            kv_cache_bytes(positions, 2) + metal_kv_padding_bytes(positions, 2),
+            28 * 2 * buffer_bytes
+        );
+        for cfg in [false, true] {
+            let s = bare_shape(Yue2Work::Generate {
+                planning: Yue2Planning::Off,
+                semantic_max_tokens: positions - 3,
+                cfg,
+            });
+            let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+            let branches = if cfg { 2 } else { 1 };
+            assert_eq!(
+                kv_term(&est, Yue2Stage::Semantic)
+                    + term_bytes(
+                        &est,
+                        Yue2Stage::Semantic,
+                        "Metal KV buffer allocation padding"
+                    ),
+                branches * 28 * 2 * buffer_bytes
+            );
+        }
+    }
+    // Acoustic capacity is prefix + chunk + MUSIC_END + chunk + two latent slots = 2*frames+6.
+    for (frames, buffer_bytes) in [(508, 2 << 20), (509, 2 << 20), (510, 4 << 20)] {
+        let s = bare_shape(Yue2Work::Generate {
+            planning: Yue2Planning::Off,
+            semantic_max_tokens: frames,
+            cfg: false,
+        });
+        let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        for stage in [Yue2Stage::AcousticPrefill, Yue2Stage::AcousticSolve] {
+            assert_eq!(
+                kv_term(&est, stage)
+                    + term_bytes(&est, stage, "Metal KV buffer allocation padding"),
+                28 * 2 * buffer_bytes
+            );
+        }
+    }
+    let s = bare_shape(Yue2Work::Generate {
+        planning: Yue2Planning::Off,
+        semantic_max_tokens: 1025,
+        cfg: true,
+    });
+    for backend in [Yue2Backend::Cpu, Yue2Backend::Cuda] {
+        let est = priced(&s, backend, Yue2Controls::production());
+        assert!(est
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.terms)
+            .all(|term| !term.what.starts_with("Metal")));
+    }
+    assert_eq!(
+        dedicated_reserve_bytes(),
+        2 << 30,
+        "CUDA reserve is independent"
+    );
+}
+
+#[test]
+fn metal_lease_retains_high_water_through_acoustic_and_small_tile_decode() {
+    let _serial = lease_test_serial();
+    let fixtures = metal_profile_fixtures();
+    let fixture = fixtures["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["case"]["id"] == "yue2:q4:metal:long-context")
+        .unwrap();
+    let s = fixture_shape(fixture);
+    let controls = Yue2Controls {
+        decode_core_frames: 1,
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        ..Yue2Controls::production()
+    };
+    let est = priced(&s, Yue2Backend::Metal, controls);
+    let semantic = est.stage(Yue2Stage::Semantic).unwrap().total_bytes();
+    let mut lease = Yue2Lease::open(est, s.work);
+    for stage in [
+        Yue2Stage::Semantic,
+        Yue2Stage::AcousticSolve,
+        Yue2Stage::Decode,
+    ] {
+        lease.enter(stage);
+        let (d, h) = lease.held_bytes();
+        assert!(
+            d + h >= semantic,
+            "{stage:?} must retain the semantic high-water"
+        );
+        assert_eq!(live_residency_bytes(), (d, h));
+    }
+    assert!(
+        term_bytes(
+            lease.estimate(),
+            Yue2Stage::Decode,
+            "Metal retained stage high-water"
+        ) > 0
+    );
+}
+
+#[test]
+fn corrected_metal_lease_blocks_concurrent_admission_below_observed_usage() {
+    let _serial = lease_test_serial();
+    let fixtures = metal_profile_fixtures();
+    let next = shape(Yue2Tier::Q4, &default_request());
+    let smallest = Yue2Controls {
+        decode_core_frames: 1,
+        attention_elements: ATTENTION_ELEMENTS_MIN,
+        ..Yue2Controls::production()
+    };
+    let next_floor = priced(&next, Yue2Backend::Metal, smallest)
+        .unified_floor()
+        .1;
+    for fixture in fixtures["cases"].as_array().unwrap() {
+        let s = fixture_shape(fixture);
+        let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        let mut lease = Yue2Lease::open(est, s.work);
+        for (stage, key) in [
+            (Yue2Stage::Load, "load"),
+            (Yue2Stage::Plan, "plan"),
+            (Yue2Stage::Semantic, "semantic"),
+            (Yue2Stage::AcousticSolve, "acoustic"),
+            (Yue2Stage::Decode, "decode"),
+        ] {
+            let Some(observed) = fixture["measuredStages"][key]["peakBytes"].as_u64() else {
+                continue;
+            };
+            lease.enter(stage);
+            let (d, h) = live_residency_bytes();
+            // One byte less than the next render plus the already observed current usage.
+            let budget = metal(next_floor + observed - 1);
+            let old_held = fixture["originalStages"][key]["totalBytes"]
+                .as_u64()
+                .unwrap();
+            if old_held < observed {
+                assert!(
+                    matches!(
+                        decide("yue2", &next, Some(&budget), old_held),
+                        Yue2Admission::Admit(_)
+                    ),
+                    "old underpriced lease incorrectly allowed another render"
+                );
+            }
+            assert!(matches!(
+                decide("yue2", &next, Some(&budget), 0),
+                Yue2Admission::Admit(_)
+            ));
+            assert!(
+                matches!(
+                    decide("yue2", &next, Some(&budget), d + h),
+                    Yue2Admission::Refuse(_)
+                ),
+                "{} {key}: second render cannot fit beside the observed footprint",
+                fixture["case"]["id"]
+            );
+        }
+    }
 }

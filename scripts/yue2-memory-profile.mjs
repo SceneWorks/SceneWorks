@@ -37,7 +37,8 @@
 //
 // `--out` must be OUTSIDE the repository (a capture from a dirty checkout is not evidence).
 import { spawn, execFileSync } from "node:child_process";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
+import { mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -262,7 +263,8 @@ export function buildRecord({
     hardware,
     request: { name: item.requestName, ...item.request },
     admission,
-    measured: { sampler, stages: measured, peakBytes: peak || null },
+    measured: { sampler, stages: measured, peakBytes: peak || null,
+      timingNote: "Stage wall times include external sample waits; observed peaks may miss transient maxima." },
     outcome,
     capturedAt,
   };
@@ -289,6 +291,11 @@ export function validateRecord(record) {
     }
     if (!record.measured.stages.load) fail(`${record.caseId}: a completed record measured no load`);
     validateRunOutcome(record);
+    if (!LEGACY_RECORD_SCHEMAS.includes(record.schema)) {
+      for (const stage of Object.keys(record.outcome.stageSeconds)) {
+        if (!record.measured.stages[stage]?.samples) fail(`${record.caseId}: completed ${stage} stage has no external sample`);
+      }
+    }
   }
   return record;
 }
@@ -476,12 +483,14 @@ export function cargoTestArgv(backend, { noRun = false } = {}) {
   ];
 }
 
-export function captureEnv({ caseFilePath, outDir, dataDir, gpuId, base = process.env }) {
+export function captureEnv({ caseFilePath, outDir, dataDir, gpuId, backend, base = process.env }) {
   return {
     ...base,
     SCENEWORKS_ENABLE_YUE2_MEMORY_PROFILE: "1",
     SCENEWORKS_YUE2_PROFILE_CASE: caseFilePath,
     SCENEWORKS_YUE2_PROFILE_OUT: outDir,
+    SCENEWORKS_YUE2_PROFILE_BOUNDARY: path.join(outDir, "boundary"),
+    SCENEWORKS_YUE2_PROFILE_SAMPLER: backend === "metal" ? "metal-watchdog" : "cuda-nvidia-smi",
     ...(dataDir ? { SCENEWORKS_DATA_DIR: dataDir } : {}),
     ...(gpuId !== undefined ? { SCENEWORKS_GPU_ID: String(gpuId) } : {}),
   };
@@ -503,19 +512,147 @@ function probeHardware(backend, gpuId) {
 }
 
 /** Sample the card's used memory every `intervalMs` until stopped (CUDA). */
-function startNvidiaSampler(gpuId, intervalMs = 250) {
+function startNvidiaSampler(gpuId, journalFile, intervalMs = 250) {
   const samples = [];
+  const journal = openSync(journalFile, "ax");
+  let error = null;
   const timer = setInterval(() => {
+    if (error) return;
     try {
+      const startedAt = Date.now() / 1000;
       const used = Number(run("nvidia-smi", [
         "--query-gpu=memory.used", "--format=csv,noheader,nounits", "-i", String(gpuId),
       ]));
-      if (Number.isFinite(used)) samples.push({ at: Date.now() / 1000, bytes: used * 1024 * 1024 });
-    } catch {
-      // A missed tick is a gap in the series, never a failed capture.
+      if (Number.isFinite(used) && used > 0) {
+        const sample = { at: Date.now() / 1000, startedAt, bytes: used * 1024 * 1024 };
+        const line = `${JSON.stringify(sample)}\n`;
+        if (writeSync(journal, line) !== Buffer.byteLength(line)) {
+          error = new Error("short CUDA sample journal write");
+          return;
+        }
+        fsyncSync(journal);
+        samples.push(sample);
+      }
+    } catch (cause) {
+      if (cause?.code && cause.code !== "ENOENT") error = cause;
+      // A failed nvidia-smi tick is a gap; the boundary waits for a later real sample.
     }
   }, intervalMs);
-  return { samples, stop: () => clearInterval(timer) };
+  return { samples, get error() { return error; }, stop: () => { clearInterval(timer); closeSync(journal); } };
+}
+
+/** Select a reading that was certainly begun after the controller saw this boundary request. */
+export function boundaryAcknowledgment(request, state, observations, backend) {
+  if (!Number.isSafeInteger(request?.sequence) || request.sequence < 1 || !STAGES.includes(request.stage) ||
+      !Number.isFinite(request.requestedAt)) fail("invalid stage boundary request");
+  if (state.sequence !== request.sequence) {
+    if (state.sequence === undefined && request.sequence !== 1) fail("first stage boundary sequence is not one");
+    if (state.sequence !== undefined && (request.sequence !== state.sequence + 1 || !state.acknowledged)) {
+      fail("stage boundary sequence skipped, regressed or advanced without an ack");
+    }
+    state.sequence = request.sequence;
+    state.stage = request.stage;
+    state.requestedAt = request.requestedAt;
+    state.baseline = backend === "metal"
+      ? Math.max(0, ...observations.map((event) => event.eventSequence ?? 0))
+      : observations.length;
+    state.acknowledged = false;
+    return null;
+  }
+  if (state.stage !== request.stage || state.requestedAt !== request.requestedAt) fail("stage boundary request changed at the same sequence");
+  if (state.acknowledged) return null;
+  let sample;
+  if (backend === "metal") {
+    // Watchdog probes are serial. The first newly logged sample could have begun before the
+    // request; the second must have begun after that first probe ended.
+    const fresh = observations.filter((event) => event.event === "sample" && event.eventSequence > state.baseline &&
+      Number.isFinite(event.at) && Number.isSafeInteger(event.physicalFootprintBytes) && event.physicalFootprintBytes > 0);
+    if (fresh.length < 2) return null;
+    sample = { at: fresh[1].at, bytes: fresh[1].physicalFootprintBytes, serial: fresh[1].eventSequence };
+  } else if (backend === "cuda") {
+    const fresh = observations.slice(state.baseline).find((entry) => entry.startedAt >= request.requestedAt &&
+      Number.isFinite(entry.at) && Number.isSafeInteger(entry.bytes) && entry.bytes > 0);
+    if (!fresh) return null;
+    sample = { at: fresh.at, bytes: fresh.bytes, serial: observations.indexOf(fresh) + 1 };
+  } else fail(`unknown boundary sampler ${backend}`);
+  if (sample.at < request.requestedAt) return null;
+  state.acknowledged = true;
+  return { sequence: request.sequence, stage: request.stage, sampleAt: sample.at,
+    sampleBytes: sample.bytes, sampleSerial: sample.serial,
+    sampler: backend === "metal" ? "metal-watchdog" : "cuda-nvidia-smi" };
+}
+
+async function atomicJson(file, value) {
+  const temp = `${file}.tmp`;
+  const handle = await open(temp, "w");
+  try {
+    await handle.writeFile(`${JSON.stringify(value)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await rename(temp, file);
+}
+
+/** The watchdog flushes a line before its fsync; commit the bytes we read before using them. */
+export async function readDurableWatchdogEvents(file, sync = (handle) => handle.sync()) {
+  let handle;
+  try {
+    handle = await open(file, "r");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+  try {
+    const body = await handle.readFile("utf8");
+    await sync(handle, body);
+    return body;
+  } finally {
+    await handle.close();
+  }
+}
+
+export function startBoundaryWatcher(dir, backend, observations, readEvents = readDurableWatchdogEvents) {
+  const state = {};
+  let busy = false;
+  let error = null;
+  let pending = Promise.resolve();
+  const tick = async () => {
+    if (busy || error) return;
+    busy = true;
+    try {
+      const body = await readOptional(path.join(dir, "request.json"));
+      if (!body) return;
+      const request = JSON.parse(body);
+      const sampleBody = backend === "metal" ? await readOptional(observations) : null;
+      // The writer appends whole JSONL events. Ignore an unfinished final line while it writes.
+      const entries = backend === "metal"
+        ? (sampleBody ?? "").split("\n").slice(0, -1).filter(Boolean).map(JSON.parse)
+        : observations.samples;
+      if (backend === "cuda" && observations.error) throw observations.error;
+      const ack = boundaryAcknowledgment(request, state, entries, backend);
+      if (ack) {
+        if (backend === "metal") {
+          const durable = await readEvents(observations);
+          const committed = (durable ?? "").split("\n").slice(0, -1).filter(Boolean).map(JSON.parse)
+            .some((event) => event.event === "sample" && event.eventSequence === ack.sampleSerial &&
+              event.at === ack.sampleAt && event.physicalFootprintBytes === ack.sampleBytes);
+          if (!committed) fail("watchdog sample changed before durable acknowledgment");
+        }
+        await atomicJson(path.join(dir, "ack.json"), ack);
+      }
+    } catch (cause) {
+      error = cause;
+    } finally {
+      busy = false;
+    }
+  };
+  const timer = setInterval(() => { if (!busy) pending = tick(); }, 25);
+  return {
+    get sequence() { return state.sequence; },
+    get failure() { return error; },
+    stop: async () => { clearInterval(timer); await pending; return error; },
+  };
 }
 
 function spawnAndWait(command, args, options) {
@@ -546,7 +683,7 @@ export async function planCapture({ caseId, outDir, dataDir, gpuId, budgetMinute
     fail("--out must be outside the repository: a capture from a dirty checkout is not evidence");
   }
   const caseFilePath = path.join(resolvedOut, "case.json");
-  const env = captureEnv({ caseFilePath, outDir: resolvedOut, dataDir, gpuId });
+  const env = captureEnv({ caseFilePath, outDir: resolvedOut, dataDir, gpuId, backend: item.backend });
   const test = ["cargo", ...cargoTestArgv(item.backend)];
   const guarded = item.backend === "metal"
     ? { eventFile: path.join(resolvedOut, "watchdog.jsonl"), budgetMinutes }
@@ -569,6 +706,8 @@ export async function captureCase(options) {
   const planned = await planCapture({ ...options, sources });
   const { item } = planned;
   await mkdir(planned.outDir, { recursive: true });
+  // Requests are single-capture evidence; an old ack must never serve a new render.
+  await mkdir(path.join(planned.outDir, "boundary"));
   await writeFile(planned.caseFilePath, `${JSON.stringify(caseFile(item), null, 2)}\n`);
   const sceneworks = repositoryIdentity();
   if (sceneworks.dirty) fail("the SceneWorks checkout is dirty; commit before capturing");
@@ -590,14 +729,29 @@ export async function captureCase(options) {
       budgetMinutes: planned.guarded.budgetMinutes,
     });
     sampler = "memory-calibration-watchdog phys_footprint";
-    result = await spawnAndWait("python3", [...guard, "--", ...planned.test], { cwd: ROOT, env: planned.env });
+    const boundary = startBoundaryWatcher(path.join(planned.outDir, "boundary"), "metal", planned.guarded.eventFile);
+    let boundaryError;
+    try {
+      result = await spawnAndWait("python3", [...guard, "--", ...planned.test], { cwd: ROOT, env: planned.env });
+    } finally {
+      boundaryError = await boundary.stop();
+    }
+    if (boundaryError) fail(`${item.id}: stage boundary watcher failed: ${boundaryError.message}`);
     samples = parseWatchdogSamples((await readOptional(planned.guarded.eventFile)) ?? "");
   } else {
     sampler = "nvidia-smi memory.used";
-    const nvidia = startNvidiaSampler(options.gpuId ?? 0);
-    result = await spawnAndWait(planned.test[0], planned.test.slice(1), { cwd: ROOT, env: planned.env });
-    nvidia.stop();
-    samples = nvidia.samples;
+    const journalFile = path.join(planned.outDir, "cuda-samples.jsonl");
+    const nvidia = startNvidiaSampler(options.gpuId ?? 0, journalFile);
+    const boundary = startBoundaryWatcher(path.join(planned.outDir, "boundary"), "cuda", nvidia);
+    let boundaryError;
+    try {
+      result = await spawnAndWait(planned.test[0], planned.test.slice(1), { cwd: ROOT, env: planned.env });
+    } finally {
+      nvidia.stop();
+      boundaryError = await boundary.stop();
+    }
+    if (boundaryError) fail(`${item.id}: stage boundary watcher failed: ${boundaryError.message}`);
+    samples = (await readFile(journalFile, "utf8")).split("\n").filter(Boolean).map(JSON.parse);
   }
   const admissionBody = await readOptional(path.join(planned.outDir, "admission.json"));
   const admission = admissionBody ? JSON.parse(admissionBody) : { outcome: "unknown" };

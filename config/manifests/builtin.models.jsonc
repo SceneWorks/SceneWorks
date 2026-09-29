@@ -27576,14 +27576,15 @@
       // Advisory floors (sc-23001): DERIVED, not measured. crates/sceneworks-worker/src/yue2_admission.rs
       // prices the default song at the smallest memory controls its admission can choose (1-frame VAE
       // decode core, one-row NAR score chunks, AR offload on CUDA); each tier's row is the larger of the
-      // Metal working set and the CUDA card (device + 2 GB allocator reserve) that needs, in whole GiB
+      // Metal working set (KV allocator padding, process reserve and retained high-water) and the
+      // CUDA card (device + its separate 2 GiB allocator reserve), in whole GiB
       // rounded up. The runtime gate is that admission itself, per request against the live budget —
       // never these numbers; `yue2_admission::tests::the_catalog_floors_are_the_estimators_*` keeps them
-      // equal to its derivation. `measured: false` until the terminal campaign (sc-23002,
-      // config/yue2-memory-profile-plan.json) captures the tiers.
+      // equal to its derivation. Saved sc-23002 observations bound the Metal reserve; `measured`
+      // remains false while terminal calibration (config/yue2-memory-profile-plan.json) is incomplete.
       "candle": {
-        "minMemoryGb": 12,
-        "minMemoryGbByTier": { "bf16": 12, "q8": 9, "q4": 8 },
+        "minMemoryGb": 13,
+        "minMemoryGbByTier": { "bf16": 13, "q8": 11, "q4": 9 },
         "measured": false
       },
       "ui": {

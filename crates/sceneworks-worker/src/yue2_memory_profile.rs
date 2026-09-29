@@ -18,7 +18,8 @@
 //!   render moves through load → plan → semantic → acoustic → decode, driven by the admission lease
 //!   from the engine's own progress, so the controller attributes each memory sample to a stage;
 //! * `outcome.json` — completed, with the audio's length and RMS, the run's truncation flags, the
-//!   per-stage wall times (from the stage marks, [`stage_seconds`]), the engine's own timings and the
+//!   per-stage wall times (from the stage marks, [`stage_seconds`], including time waiting for each
+//!   boundary sample), the engine's own timings and the
 //!   run / plan / decoder / latent identities read back from the published run's `result.json`
 //!   ([`outcome_json`]) — so a record states which exact latent and decoder it measured.
 //!
@@ -31,7 +32,7 @@
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use gen_core::{CancelFlag, GenerationOutput, GenerationRequest, Progress};
 use sceneworks_core::yue2_score::jobs::{self as contract, Yue2JobSpec};
@@ -45,6 +46,8 @@ use crate::Settings;
 const ENABLE_ENV: &str = "SCENEWORKS_ENABLE_YUE2_MEMORY_PROFILE";
 const CASE_ENV: &str = "SCENEWORKS_YUE2_PROFILE_CASE";
 const OUT_ENV: &str = "SCENEWORKS_YUE2_PROFILE_OUT";
+const BOUNDARY_ENV: &str = "SCENEWORKS_YUE2_PROFILE_BOUNDARY";
+const SAMPLER_ENV: &str = "SCENEWORKS_YUE2_PROFILE_SAMPLER";
 
 /// One AR phase's sampling overrides, as the plan spells them.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -184,18 +187,20 @@ fn write_json(path: &Path, value: &Value) {
 
 struct StageMarks {
     file: std::fs::File,
+    boundary: StageBoundary,
     /// Every mark written, in order: `(stage, at)`.
     marks: Vec<(&'static str, f64)>,
 }
 
 impl StageMarks {
-    fn open(path: &Path) -> Self {
+    fn open(path: &Path, boundary_dir: &Path, sampler: &'static str) -> Self {
         Self {
             file: std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(path)
                 .expect("open stage marks"),
+            boundary: StageBoundary::new(boundary_dir, sampler),
             marks: Vec::new(),
         }
     }
@@ -204,15 +209,106 @@ impl StageMarks {
         if self.marks.last().map(|(last, _)| *last) == Some(stage) {
             return;
         }
+        if let Some((previous, _)) = self.marks.last() {
+            self.boundary.wait_for_sample(previous);
+        }
         let at = now_secs();
         self.marks.push((stage, at));
         let line = json!({ "stage": stage, "at": at });
         writeln!(self.file, "{line}").expect("write stage mark");
         self.file.flush().expect("flush stage mark");
+        self.file.sync_data().expect("sync stage mark");
     }
 }
 
-/// The wall time each stage held, in seconds: from its mark to the next mark. A stage the render
+/// The controller alone can acknowledge a reading from its external sampler. A boundary holds
+/// the old stage (and, for decode, the loaded generator) until that reading is committed.
+struct StageBoundary {
+    dir: PathBuf,
+    sequence: u64,
+    sampler: &'static str,
+    last_serial: u64,
+}
+
+impl StageBoundary {
+    fn new(dir: &Path, sampler: &'static str) -> Self {
+        Self {
+            dir: dir.to_owned(),
+            sequence: 0,
+            sampler,
+            last_serial: 0,
+        }
+    }
+
+    fn wait_for_sample(&mut self, stage: &str) {
+        self.wait_for_sample_until(stage, Duration::from_secs(60));
+    }
+
+    fn wait_for_sample_until(&mut self, stage: &str, timeout: Duration) {
+        self.sequence += 1;
+        let request = self.dir.join("request.json");
+        let ack = self.dir.join("ack.json");
+        match std::fs::remove_file(&ack) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => panic!("remove previous stage ack: {error}"),
+        }
+        let requested_at = now_secs();
+        let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at});
+        let temp = self.dir.join("request.tmp");
+        let mut file = std::fs::File::create(&temp).expect("create stage request");
+        writeln!(file, "{value}").expect("write stage request");
+        file.sync_all().expect("sync stage request");
+        drop(file);
+        match std::fs::remove_file(&request) {
+            Ok(()) => (),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => panic!("remove previous stage request: {error}"),
+        }
+        std::fs::rename(temp, request).expect("publish stage request");
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(bytes) = std::fs::read(&ack) {
+                let value: Value = serde_json::from_slice(&bytes).expect("invalid stage ack");
+                assert_eq!(
+                    value["sequence"].as_u64(),
+                    Some(self.sequence),
+                    "stale stage ack"
+                );
+                assert_eq!(value["stage"].as_str(), Some(stage), "mismatched stage ack");
+                assert!(
+                    value["sampleAt"]
+                        .as_f64()
+                        .is_some_and(|at| at >= requested_at),
+                    "stage ack predates request"
+                );
+                assert!(
+                    value["sampleBytes"].as_u64().is_some_and(|bytes| bytes > 0),
+                    "stage ack has no external reading"
+                );
+                let serial = value["sampleSerial"]
+                    .as_u64()
+                    .expect("stage ack has no external serial");
+                assert!(serial > self.last_serial, "stale stage sample serial");
+                assert_eq!(
+                    value["sampler"].as_str(),
+                    Some(self.sampler),
+                    "wrong stage sampler"
+                );
+                self.last_serial = serial;
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "stage {stage} sample acknowledgment timed out"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+}
+
+/// The wall time each stage held, including the wait for its external boundary sample, in seconds:
+/// from its mark to the next mark. A stage the render
 /// entered more than once (it cannot today — the lease only moves forward) sums its spans. The last
 /// mark (`done`) closes the final stage and holds no time of its own.
 pub(crate) fn stage_seconds(marks: &[(&'static str, f64)]) -> serde_json::Map<String, Value> {
@@ -345,7 +441,18 @@ fn capture_case() {
     );
     request.memory = Some(admitted.memory);
     let mut lease = admitted.lease;
-    let mut marks = StageMarks::open(&out.join("stages.jsonl"));
+    let boundary = PathBuf::from(std::env::var(BOUNDARY_ENV).expect(BOUNDARY_ENV));
+    assert_eq!(
+        boundary,
+        out.join("boundary"),
+        "stage boundary path must belong to this case"
+    );
+    let sampler = match std::env::var(SAMPLER_ENV).as_deref() {
+        Ok("metal-watchdog") => "metal-watchdog",
+        Ok("cuda-nvidia-smi") => "cuda-nvidia-smi",
+        _ => panic!("{SAMPLER_ENV} must name the external sampler"),
+    };
+    let mut marks = StageMarks::open(&out.join("stages.jsonl"), &boundary, sampler);
     marks.mark("load");
     let generator =
         crate::inference_runtime::load_audio(contract::MODEL_ID, &load.spec).expect("load yue2");
@@ -358,10 +465,11 @@ fn capture_case() {
             .generate_with_report(&request, &mut on_progress)
             .expect("render")
     };
+    // Observe the final decode stage while the generator and lease still hold their residency.
+    marks.mark("done");
     // The generator's memory goes first, then the lease that held it (the job's drop order).
     drop(generator);
     drop(lease);
-    marks.mark("done");
     let published = report
         .artifacts
         .as_ref()
@@ -398,6 +506,91 @@ fn capture_case() {
 mod tests {
     use super::*;
     use gen_core::{SongDecoder, SongPlanning};
+
+    fn wait_request(dir: &Path) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Ok(body) = std::fs::read(dir.join("request.json")) {
+                return serde_json::from_slice(&body).unwrap();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "native stage request did not appear"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn test_ack(dir: &Path, request: &Value, sequence: u64) {
+        let ack = json!({
+            "sequence": sequence, "stage": request["stage"],
+            "sampleAt": request["requestedAt"].as_f64().unwrap() + 1.0,
+            "sampleBytes": 42, "sampleSerial": 2, "sampler": "metal-watchdog",
+        });
+        let temp = dir.join("ack.tmp");
+        std::fs::write(&temp, serde_json::to_vec(&ack).unwrap()).unwrap();
+        std::fs::rename(temp, dir.join("ack.json")).unwrap();
+    }
+
+    #[test]
+    fn a_stage_cannot_advance_until_the_external_sample_is_acknowledged() {
+        let fixture = tempfile::tempdir().unwrap();
+        let dir = fixture.path().to_owned();
+        let marks_path = dir.join("stages.jsonl");
+        let mut marks = StageMarks::open(&marks_path, &dir, "metal-watchdog");
+        marks.mark("load");
+        let worker = std::thread::spawn(move || {
+            marks.mark("plan");
+            marks
+        });
+        let request = wait_request(&dir);
+        assert_eq!(request["stage"], "load");
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(
+            std::fs::read_to_string(&marks_path)
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        test_ack(&dir, &request, 1);
+        let marks = worker.join().unwrap();
+        assert_eq!(
+            marks.marks.iter().map(|mark| mark.0).collect::<Vec<_>>(),
+            ["load", "plan"]
+        );
+    }
+
+    #[test]
+    fn missing_or_stale_stage_ack_fails_closed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let dir = fixture.path().to_owned();
+        let mut boundary = StageBoundary::new(&dir, "metal-watchdog");
+        let timed_out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            boundary.wait_for_sample_until("load", Duration::from_millis(40));
+        }));
+        assert!(timed_out.is_err());
+        let request = wait_request(&dir);
+        let writer_dir = dir.clone();
+        let writer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let next = loop {
+                let value = wait_request(&writer_dir);
+                if value["sequence"] == 2 {
+                    break value;
+                }
+                assert!(Instant::now() < deadline, "second request did not appear");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            test_ack(&writer_dir, &next, 1);
+        });
+        assert_eq!(request["sequence"], 1);
+        let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            boundary.wait_for_sample_until("load", Duration::from_secs(2));
+        }));
+        writer.join().unwrap();
+        assert!(stale.is_err());
+    }
 
     fn case(json: Value) -> Result<ProfileCase, serde_json::Error> {
         serde_json::from_value(json)

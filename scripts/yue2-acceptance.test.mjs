@@ -765,3 +765,102 @@ test("cover evidence binds both reviewed modes to the recording and unloaded tra
     assert.ok(failures(coverFromTranscriptionAssertions({ ...input, snapshot: { ...snapshot, result: { yue2: { ...y2, transcriberResidency: { liveSheetsage2ModelsAtLoad: 1 } } } } })).includes("the transcriber was unloaded before YuE2 loaded"));
   }
 });
+
+// The acceptance completion client is exercised against a real local socket. The fake guard
+// controls protocol transitions explicitly; no timer is used to guess whether DONE was sent.
+async function completionServer(t, { helloProtocol = "sceneworks-memory-watchdog-completion-v1" } = {}) {
+  const { createServer } = await import("node:net");
+  const { connectWatchdogCompletion } = await import("./lib/watchdog-completion.mjs");
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-done-"));
+  const socketPath = path.join(dir, "guard.sock");
+  const nonce = "c".repeat(64);
+  let connection, resolveDone, resolveConnected;
+  const done = new Promise((resolve) => { resolveDone = resolve; });
+  const connected = new Promise((resolve) => { resolveConnected = resolve; });
+  const messages = [];
+  const server = createServer((socket) => {
+    connection = socket;
+    socket.on("error", () => {});
+    socket.setEncoding("utf8");
+    let buffer = "";
+    socket.on("data", (chunk) => {
+      buffer += chunk;
+      while (buffer.includes("\n")) {
+        const end = buffer.indexOf("\n");
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        messages.push(line);
+        if (line === `ACK ${nonce}`) socket.write(`GO ${nonce}\n`);
+        if (line.startsWith("DONE ")) resolveDone(line);
+      }
+    });
+    socket.write(`${JSON.stringify({ protocol: helloProtocol, nonce })}\n`);
+    resolveConnected();
+  });
+  await new Promise((resolve) => server.listen(socketPath, resolve));
+  const ready = connectWatchdogCompletion({ socketPath, timeoutMs: 5000 });
+  t.after(async () => {
+    connection?.destroy();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(dir, { recursive: true, force: true });
+  });
+  await connected;
+  return { dir, nonce, connection, ready, done, messages };
+}
+
+test("acceptance completion syncs evidence and waits for the matching final-sample ack", async (t) => {
+  const { syncEvidence } = await import("./lib/watchdog-completion.mjs");
+  const fixture = await completionServer(t);
+  const client = await fixture.ready;
+  const evidence = path.join(fixture.dir, "evidence");
+  await mkdir(path.join(evidence, "records"), { recursive: true });
+  await writeFile(path.join(evidence, "summary.json"), '{"verdict":"incomplete"}\n');
+  await writeFile(path.join(evidence, "records", "case.json"), '{"status":"skipped"}\n');
+  let released = false;
+  const completion = client.complete(evidence).then(() => { released = true; });
+  const line = await fixture.done;
+  assert.equal(line, `DONE ${fixture.nonce} ${await syncEvidence(evidence)}`);
+  assert.equal(released, false, "DONE cannot release the driver before final sampling");
+  fixture.connection.write(`PING ${fixture.nonce}\nBYE ${fixture.nonce}\n`);
+  await completion;
+  assert.equal(released, true);
+  await assert.rejects(client.complete(evidence), /only be requested once/);
+  client.close();
+});
+
+test("acceptance completion refuses unreadable evidence without sending DONE", async (t) => {
+  const fixture = await completionServer(t);
+  const client = await fixture.ready;
+  await assert.rejects(client.complete(path.join(fixture.dir, "missing")), /ENOENT/);
+  assert.ok(!fixture.messages.some((line) => line.startsWith("DONE ")));
+  client.close();
+});
+
+for (const outcome of ["foreign-ack", "lost-guard"]) {
+  test(`acceptance completion fails closed for ${outcome}`, async (t) => {
+    const fixture = await completionServer(t);
+    const client = await fixture.ready;
+    const evidence = path.join(fixture.dir, "evidence");
+    await mkdir(evidence);
+    await writeFile(path.join(evidence, "summary.json"), "{}\n");
+    const completion = client.complete(evidence);
+    const rejected = assert.rejects(completion, /unexpected|closed before acknowledgement/);
+    await fixture.done;
+    if (outcome === "foreign-ack") fixture.connection.write(`BYE ${"d".repeat(64)}\n`);
+    else fixture.connection.destroy();
+    await rejected;
+    client.close();
+  });
+}
+
+test("acceptance refuses the allocation-attestation protocol in completion mode", async (t) => {
+  const fixture = await completionServer(t, { helloProtocol: "sceneworks-memory-watchdog-v1" });
+  await assert.rejects(fixture.ready, /invalid watchdog completion greeting/);
+});
+
+test("unguarded acceptance completion remains optional", async () => {
+  const { connectWatchdogCompletion } = await import("./lib/watchdog-completion.mjs");
+  const client = await connectWatchdogCompletion({ socketPath: "" });
+  await client.complete("unused");
+  client.close();
+});

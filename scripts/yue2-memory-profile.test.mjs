@@ -1,12 +1,14 @@
 // sc-23001: the YuE2 memory-profile harness — plan, identity keying, stage attribution, currency.
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { appendFile, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
   BACKENDS,
+  boundaryAcknowledgment,
   CUDA_RESERVE_BYTES,
   REQUEST_KEYS,
   ROOT,
@@ -24,7 +26,9 @@ import {
   parseStageMarks,
   parseWatchdogSamples,
   planCapture,
+  readDurableWatchdogEvents,
   readSources,
+  startBoundaryWatcher,
   stagePeaks,
   validatePlan,
   validateRecord,
@@ -33,6 +37,14 @@ import {
 const sources = await readSources();
 const clone = (value) => JSON.parse(JSON.stringify(value));
 const GIB = 1024 ** 3;
+
+async function waitUntil(check) {
+  const deadline = Date.now() + 2000;
+  while (!check()) {
+    if (Date.now() >= deadline) assert.fail("timed out waiting for boundary test state");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
 
 // What a current (v2) capture's outcome.json states about its run (`outcome_json`).
 const RUN_FIELDS = Object.freeze({
@@ -175,6 +187,113 @@ test("samples are attributed to the stage in force; start-up and teardown belong
   });
 });
 
+test("Metal boundary needs two new serial watchdog samples after the request is observed", () => {
+  const state = {};
+  const request = { sequence: 1, stage: "load", requestedAt: 100 };
+  const event = (eventSequence, at) => ({ event: "sample", eventSequence, at, physicalFootprintBytes: 42 });
+  assert.equal(boundaryAcknowledgment(request, state, [event(5, 99)], "metal"), null);
+  assert.equal(boundaryAcknowledgment(request, state, [event(5, 99), event(6, 101)], "metal"), null,
+    "the first event might have started before the request");
+  assert.deepEqual(boundaryAcknowledgment(request, state, [event(5, 99), event(6, 101), event(7, 103)], "metal"), {
+    sequence: 1, stage: "load", sampleAt: 103, sampleBytes: 42, sampleSerial: 7, sampler: "metal-watchdog",
+  });
+  assert.equal(boundaryAcknowledgment(request, state, [event(5, 99), event(6, 101), event(7, 103)], "metal"), null);
+  assert.throws(() => boundaryAcknowledgment({ ...request, sequence: 3 }, state, [], "metal"), /skipped, regressed/);
+  assert.throws(() => boundaryAcknowledgment({ ...request, stage: "semantic" }, state, [], "metal"), /changed at the same sequence/);
+  assert.throws(() => boundaryAcknowledgment({ ...request, requestedAt: 101 }, state, [], "metal"), /changed at the same sequence/);
+  assert.throws(() => boundaryAcknowledgment({ ...request, sequence: 2 }, {}, [], "metal"), /not one/);
+});
+
+test("Metal watcher does not ack flushed watchdog events before journal fsync, and fails closed on sync error", async () => {
+  const event = (eventSequence, at) => `${JSON.stringify({
+    event: "sample", eventSequence, at, physicalFootprintBytes: 42,
+  })}\n`;
+  for (const failSync of [false, true]) {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-watchdog-durability-"));
+    const journal = path.join(dir, "watchdog.jsonl");
+    await writeFile(path.join(dir, "request.json"), JSON.stringify({ sequence: 1, stage: "load", requestedAt: 100 }));
+    await writeFile(journal, event(1, 99));
+    let releaseSync;
+    let blocked = false;
+    const gate = new Promise((resolve) => { releaseSync = resolve; });
+    const reader = (file) => readDurableWatchdogEvents(file, async (handle, body) => {
+      if (body.includes('"eventSequence":3')) {
+        blocked = true;
+        await gate;
+        if (failSync) throw new Error("journal fsync failed");
+      }
+      await handle.sync();
+    });
+    const watcher = startBoundaryWatcher(dir, "metal", journal, reader);
+    try {
+      await waitUntil(() => watcher.sequence === 1);
+      await appendFile(journal, event(2, 101) + event(3, 102));
+      await waitUntil(() => blocked || watcher.failure !== null);
+      assert.equal(watcher.failure, null);
+      await assert.rejects(readFile(path.join(dir, "ack.json")), { code: "ENOENT" });
+      releaseSync();
+      if (failSync) {
+        await waitUntil(() => watcher.failure !== null);
+        assert.match((await watcher.stop()).message, /journal fsync failed/);
+        await assert.rejects(readFile(path.join(dir, "ack.json")), { code: "ENOENT" });
+      } else {
+        await waitUntil(() => existsSync(path.join(dir, "ack.json")) || watcher.failure !== null);
+        assert.equal(watcher.failure, null);
+        assert.equal(JSON.parse(await readFile(path.join(dir, "ack.json"), "utf8")).sampleSerial, 3);
+      }
+    } finally {
+      releaseSync();
+      await watcher.stop();
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("CUDA boundary accepts only a fresh successful nvidia-smi call after observation", () => {
+  const state = {};
+  const request = { sequence: 1, stage: "decode", requestedAt: 100 };
+  const before = { startedAt: 99, at: 101, bytes: 42 };
+  assert.equal(boundaryAcknowledgment(request, state, [before], "cuda"), null);
+  assert.equal(boundaryAcknowledgment(request, state, [before], "cuda"), null,
+    "a dropped tick leaves the stage blocked");
+  assert.equal(boundaryAcknowledgment(request, state, [before, { startedAt: 101, at: 102, bytes: 0 }], "cuda"), null);
+  assert.deepEqual(boundaryAcknowledgment(request, state, [before, { startedAt: 101, at: 102, bytes: 0 },
+    { startedAt: 102, at: 103, bytes: 43 }], "cuda"), {
+    sequence: 1, stage: "decode", sampleAt: 103, sampleBytes: 43, sampleSerial: 3, sampler: "cuda-nvidia-smi",
+  });
+});
+
+test("completed records require every actual stage, including a short load and no-plan run", () => {
+  const item = expandCases(sources.plan)[0];
+  const noPlan = record(item, {
+    marks: [
+      { stage: "load", at: 10 }, { stage: "semantic", at: 11.389314 },
+      { stage: "acoustic", at: 20 }, { stage: "decode", at: 30 }, { stage: "done", at: 40 },
+    ],
+    samples: [
+      { at: 9.44723, bytes: 1 }, { at: 11.847188, bytes: 2 },
+      { at: 15, bytes: 3 }, { at: 25, bytes: 4 }, { at: 35, bytes: 5 },
+    ],
+    outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...RUN_FIELDS,
+      stageSeconds: { load: 1.389314, semantic: 8, acoustic: 10, decode: 10 } },
+  });
+  assert.throws(() => validateRecord(noPlan), /completed record measured no load/);
+  const covered = record(item, {
+    marks: [
+      { stage: "load", at: 10 }, { stage: "semantic", at: 12 },
+      { stage: "acoustic", at: 20 }, { stage: "decode", at: 30 }, { stage: "done", at: 40 },
+    ],
+    samples: [{ at: 11, bytes: 2 }, { at: 15, bytes: 3 }, { at: 25, bytes: 4 }, { at: 35, bytes: 5 }],
+    outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...RUN_FIELDS,
+      stageSeconds: { load: 2, semantic: 8, acoustic: 10, decode: 10 } },
+  });
+  validateRecord(covered);
+  assert.equal(covered.measured.stages.plan, undefined);
+  const missingAcoustic = clone(covered);
+  delete missingAcoustic.measured.stages.acoustic;
+  assert.throws(() => validateRecord(missingAcoustic), /completed acoustic stage has no external sample/);
+});
+
 test("a record is current only under the declared closure, the catalog identity and a clean tree", () => {
   const item = expandCases(sources.plan).find((candidate) => candidate.tier === "q8");
   const current = record(item);
@@ -269,9 +388,11 @@ test("capture planning: CUDA builds the candle feature, Metal runs under the foo
   const metal = await planCapture({ caseId: "yue2:q4:metal:default", outDir: out, sources });
   assert.equal(metal.guarded.eventFile, path.join(out, "yue2__q4__metal__default", "watchdog.jsonl"));
   assert.equal(metal.env.SCENEWORKS_ENABLE_YUE2_MEMORY_PROFILE, "1");
+  assert.equal(metal.env.SCENEWORKS_YUE2_PROFILE_SAMPLER, "metal-watchdog");
   const cuda = await planCapture({ caseId: "yue2:q4:cuda:default", outDir: out, gpuId: 1, sources });
   assert.equal(cuda.guarded, null);
   assert.equal(cuda.env.SCENEWORKS_GPU_ID, "1");
+  assert.equal(cuda.env.SCENEWORKS_YUE2_PROFILE_SAMPLER, "cuda-nvidia-smi");
   await assert.rejects(
     planCapture({ caseId: "yue2:q4:metal:default", outDir: path.join(ROOT, ".tmp"), sources }),
     /outside the repository/,
