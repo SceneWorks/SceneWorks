@@ -2603,17 +2603,41 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .filter(on_macos)
         .filter(co_requisite)
         .collect();
-    assert_eq!(vace.len(), 1, "wan TI2V-5B declares exactly one macOS co-requisite");
+    // The shared UMT5/z16-VAE/tokenizer it is assembled with come from the T2V-A14B q4 tier — only
+    // those three files, so a TI2V-5B-only install can serve `wan_vace`.
+    let co_requisites: Vec<(&str, &str, &str, Value)> = vace
+        .iter()
+        .map(|d| {
+            (
+                d.get("repo").and_then(Value::as_str).unwrap_or_default(),
+                d.get("revision").and_then(Value::as_str).unwrap_or_default(),
+                d.get("required").and_then(Value::as_str).unwrap_or_default(),
+                d.get("files").cloned().unwrap_or_default(),
+            )
+        })
+        .collect();
     assert_eq!(
-        vace[0].get("repo").and_then(Value::as_str),
-        Some("Wan-AI/Wan2.1-VACE-1.3B-diffusers")
+        co_requisites,
+        vec![
+            (
+                "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+                "ec4d2cb062b548996b179d493fdd05340de702a1",
+                "soft",
+                serde_json::json!(["transformer/*"]),
+            ),
+            (
+                "SceneWorks/wan2.2-t2v-a14b-mlx",
+                "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+                "soft",
+                serde_json::json!([
+                    "q4/t5_encoder.safetensors",
+                    "q4/vae.safetensors",
+                    "q4/tokenizer.json"
+                ]),
+            ),
+        ],
+        "wan TI2V-5B's macOS co-requisites are exactly the wan_vace transformer + its base components"
     );
-    assert_eq!(
-        vace[0].get("revision").and_then(Value::as_str),
-        Some("ec4d2cb062b548996b179d493fdd05340de702a1")
-    );
-    assert_eq!(vace[0].get("required").and_then(Value::as_str), Some("soft"));
-    assert_eq!(vace[0].get("files"), Some(&serde_json::json!(["transformer/*"])));
     let variants: Vec<&str> = macos
         .iter()
         .filter_map(|d| d.get("variant").and_then(Value::as_str))

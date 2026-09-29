@@ -10151,6 +10151,47 @@ fn wan_vace_adapters_are_single_dense() {
     ));
 }
 
+/// sc-20686: a TI2V-5B-only install carries just the `wan_2_2` soft co-requisite files from the
+/// T2V-A14B repo — its `q4/` UMT5/VAE/tokenizer, no experts, no config — and the VACE base resolver
+/// must find them there (the assembly needs nothing else from the 14B snapshot).
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_vace_base_resolves_from_a_ti2v_5b_only_install() {
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wan_vace_base_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+    let _env = EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
+    )]);
+    let settings = Settings {
+        data_dir: dir.to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert_eq!(
+        resolve_wan_vace_base_dir(&settings),
+        None,
+        "nothing installed yet"
+    );
+    let q4 = fake_hf_hub_dir(dir)
+        .join("models--SceneWorks--wan2.2-t2v-a14b-mlx")
+        .join("snapshots")
+        .join("991eb255c544bbb2e1f1e07da4355c2f0a5337b7")
+        .join("q4");
+    std::fs::create_dir_all(&q4).unwrap();
+    for name in [
+        "t5_encoder.safetensors",
+        "vae.safetensors",
+        "tokenizer.json",
+    ] {
+        std::fs::write(q4.join(name), name).unwrap();
+    }
+    let base = resolve_wan_vace_base_dir(&settings).expect("the co-requisite tier files resolve");
+    assert_eq!(base.canonicalize().unwrap(), q4.canonicalize().unwrap());
+}
+
 /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the
 /// per-architecture high/low pair, so [`resolve_lightning_loras`] resolves the Lightning
 /// distill in a hermetic test (mirrors `write_complete_wan_tier`). Returns the two file paths.

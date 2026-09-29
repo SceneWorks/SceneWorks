@@ -171,7 +171,7 @@ fn wan_vace_base_dir_from(roots: impl IntoIterator<Item = PathBuf>) -> Option<Pa
 
 /// The base-Wan 14B component dir for a VACE assembly: T2V-A14B first, then I2V-A14B.
 #[cfg(target_os = "macos")]
-fn resolve_wan_vace_base_dir(settings: &Settings) -> Option<PathBuf> {
+pub(super) fn resolve_wan_vace_base_dir(settings: &Settings) -> Option<PathBuf> {
     wan_vace_base_dir_from(
         ["wan_2_2_t2v_14b", "wan_2_2_i2v_14b"]
             .into_iter()
