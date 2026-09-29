@@ -368,6 +368,10 @@ RUN rm -rf "${ORT_PY_SITE}"/pip "${ORT_PY_SITE}"/pip-*.dist-info \
 # ubuntu24.04 base. The candle builder stays on 22.04 — its older-glibc binary runs fine
 # on 24.04 (glibc is backward-compatible).
 FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle-base
+
+# Ubuntu may already own UID/GID 1000. Keep its accounts intact and provision
+# only our dedicated home; both leaves use numeric IDs, without inherited groups.
+RUN install -d -m 0755 -o 1000 -g 1000 /home/sceneworks
 ENV DEBIAN_FRONTEND=noninteractive
 # ffmpeg: candle video lanes encode mp4. libgomp1: onnxruntime's OpenMP runtime.
 # No Python: the onnxruntime libraries arrive pre-staged from ort-builder, and model
@@ -400,10 +404,8 @@ COPY --from=candle-builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks
 # RunPod uses the root base for mount initialization before dropping privileges.
 # The standalone candle worker and its Compose UID/GID override use this leaf.
 FROM rust-worker-candle-base AS rust-worker-candle
-RUN groupadd --gid 1000 sceneworks \
-    && useradd --uid 1000 --gid sceneworks --create-home --shell /usr/sbin/nologin sceneworks
 ENV HOME=/home/sceneworks
-USER sceneworks
+USER 1000:1000
 CMD ["sceneworks-rust-worker"]
 
 # --- Combined RunPod GPU runtime ---------------------------------------------
@@ -429,8 +431,6 @@ COPY docker/runpod-privileges.sh /usr/local/bin/runpod-privileges.sh
 RUN apt-get update \
     && apt-get install -y --no-install-recommends acl util-linux \
     && rm -rf /var/lib/apt/lists/* \
-    && groupadd --gid 1000 sceneworks \
-    && useradd --uid 1000 --gid sceneworks --create-home --shell /usr/sbin/nologin sceneworks \
     && chmod 0755 /usr/local/bin/sceneworks-runpod-entrypoint
 ENV SCENEWORKS_SERVICE_UID=1000 SCENEWORKS_SERVICE_GID=1000 HOME=/home/sceneworks
 

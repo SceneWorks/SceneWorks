@@ -1447,7 +1447,8 @@ test("standard server and web development images default to nonroot users", asyn
   for (const name of ["rust-api", "rust-worker", "rust-worker-candle"]) {
     const body = stage(rustDockerfile, name);
     assert.match(body, /^ENV HOME=\/home\/sceneworks$/m, `${name} must set a writable home`);
-    assert.match(body, /^USER sceneworks$/m, `${name} must default to the sceneworks user`);
+    const identity = name === "rust-worker-candle" ? /^USER 1000:1000$/m : /^USER sceneworks$/m;
+    assert.match(body, identity, `${name} must default to its nonroot service identity`);
   }
   assert.match(webDockerfile, /^ENV HOME=\/home\/node$/m);
   assert.match(webDockerfile, /^USER node$/m);

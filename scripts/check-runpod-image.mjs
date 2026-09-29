@@ -40,6 +40,11 @@ assert.equal(
 );
 assert.equal(candleRuntime.base, "rust-worker-candle-base", "standalone candle image must inherit the shared CUDA runtime");
 assert.equal(runpod.base, "rust-worker-candle-base", "combined image must inherit the shared CUDA runtime");
+assert.ok(candleBase.body.includes("install -d -m 0755 -o 1000 -g 1000 /home/sceneworks"));
+assert.match(candleRuntime.body, /^USER 1000:1000$/m, "explicit primary GID must exclude the base user's supplementary groups");
+for (const body of [candleBase.body, candleRuntime.body, runpod.body]) {
+  assert.doesNotMatch(body, /\b(?:useradd|groupadd|userdel|groupdel|usermod|groupmod)\b/, "CUDA leaves must preserve existing base accounts");
+}
 
 for (const contract of [
   "ffmpeg",
