@@ -171,6 +171,7 @@ jobs:
         env:
           SCENEWORKS_CANDLE_SMOKE_API_IMAGE: sceneworks-runpod-smoke:ci
           SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci
+          SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
         run: bash scripts/check-docker-candle-runtime.sh
       - name: Build and publish combined RunPod image
         id: build

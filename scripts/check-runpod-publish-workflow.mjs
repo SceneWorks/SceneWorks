@@ -84,6 +84,7 @@ function validateCandleRuntimeGate(candidate) {
   requireText(smoke, "bash scripts/check-docker-candle-runtime.sh");
   requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: sceneworks-runpod-smoke:ci");
   requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat");
   requireText(smoke, "timeout-minutes: 5");
   requireText(publish, "push: true");
   assert.ok(steps.indexOf(combined) < steps.indexOf(candle));
@@ -98,6 +99,7 @@ for (const mutated of [
   workflow.replace("id: smoke_candle_runtime", "id: skipped_smoke"),
   workflow.replace("load: true", "load: false"),
   workflow.replace("push: false", "push: true"),
+  workflow.replace("SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat", "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /missing-driver"),
 ]) assert.throws(() => validateCandleRuntimeGate(mutated));
 
 // Pin *shape* is enforced repo-wide by scripts/check-action-pins.mjs, which stays

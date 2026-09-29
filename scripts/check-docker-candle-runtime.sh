@@ -4,6 +4,28 @@
 set -euo pipefail
 api_image="${SCENEWORKS_CANDLE_SMOKE_API_IMAGE:-sceneworks-runpod-smoke:ci}"
 worker_image="${SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE:-sceneworks-candle-smoke:ci}"
+# GPU-less CI must resolve the CUDA-linked executable before it can select CPU
+# mode. Use NVIDIA's real compatibility library only for this smoke; deployed
+# GPU containers still receive their driver through the NVIDIA runtime.
+driver_args=()
+if [[ -n "${SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR:-}" ]]; then
+  docker run --rm --entrypoint sh "${worker_image}" -ec '
+    library="$1/libcuda.so.1"
+    test -r "$library"
+    test "$(od -An -tx1 -N4 "$library" | tr -d " \n")" = 7f454c46
+  ' sh "${SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR}"
+  image_library_path="$(docker image inspect --format '{{json .Config.Env}}' "${worker_image}" |
+    node -e 'const fs=require("node:fs");const env=JSON.parse(fs.readFileSync(0,"utf8"));process.stdout.write((env.find(v=>v.startsWith("LD_LIBRARY_PATH="))??"LD_LIBRARY_PATH=").slice(16))')"
+  driver_args=(-e "LD_LIBRARY_PATH=${SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR}${image_library_path:+:${image_library_path}}")
+fi
+# Report every unresolved dependency before starting services, instead of hiding
+# a loader failure behind the registration deadline.
+docker run --rm ${driver_args[@]+"${driver_args[@]}"} --entrypoint sh "${worker_image}" -ec '
+  dependencies="$(ldd "$(command -v sceneworks-rust-worker)")"
+  if printf "%s\n" "$dependencies" | grep -q "not found"; then
+    printf "%s\n" "$dependencies" >&2; exit 1
+  fi
+'
 smoke_root="$(mktemp -d)"
 network="sceneworks-candle-smoke-$$"
 api="${network}-api"
@@ -56,7 +78,7 @@ for identity in default override; do
   # No entrypoint/command or --user override for the default case: exercise the
   # Dockerfile's actual default USER and CMD. Explicit CPU selection needs no GPU.
   docker run -d --name "${worker}" --network "${network}" \
-    ${user_args[@]+"${user_args[@]}"} ${home_args[@]+"${home_args[@]}"} "${common_args[@]}" \
+    ${user_args[@]+"${user_args[@]}"} ${home_args[@]+"${home_args[@]}"} ${driver_args[@]+"${driver_args[@]}"} "${common_args[@]}" \
     -e SCENEWORKS_API_URL=http://api:8010 -e SCENEWORKS_GPU_ID=cpu \
     -e SCENEWORKS_UTILITY_WORKERS=1 -e "SCENEWORKS_WORKER_ID=smoke-${identity}" \
     "${worker_image}" >/dev/null
