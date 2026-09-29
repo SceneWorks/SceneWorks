@@ -180,8 +180,8 @@ load-plus-KV floor above the cap still refuses. Host available RAM is the
 file-backed - speculative)) * page size` (each difference floored at zero): clean
 inactive file cache, such as the model bytes the parent just hashed, is
 reclaimable without the compressor or swap, while anonymous inactive pages and
-mapped active file pages are not credited. The live watchdog still compares
-free plus speculative pages with the reserve. Each receipt records
+mapped active file pages are not credited. The live watchdog compares the same
+available measure with the reserve, so page cache alone never aborts a row. Each receipt records
 `memory.admission` (`runtime-guarded`, the stated cap, reserve, the static
 estimate, and `hostMemoryComponents`: every `vm_stat` component and the derived
 file-cache credit and available bytes); the reader recomputes the measure and
