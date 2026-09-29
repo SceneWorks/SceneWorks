@@ -176,16 +176,16 @@ supervised worker's deadline, sampling, termination grace, host free-RAM
 reserve, and `phys_footprint` watchdog cap; the supervisor refuses before spawn
 unless host available RAM covers cap plus reserve, and a conservative static
 load-plus-KV floor above the cap still refuses. Host available RAM is the
-`vm_stat` measure `darwin-vm-stat-available-v2`: `(free + speculative + purgeable
-+ min(inactive - purgeable, file-backed - speculative, inactive + throttled -
-anonymous)) * page size` (each difference floored at zero). Because File-backed +
-Anonymous = active + inactive + speculative + throttled and throttled pages are
-anonymous, the last bound credits only inactive pages that are provably
-file-backed, such as the model bytes the parent just hashed, which the kernel
-reclaims without the compressor or swap. The live watchdog compares the same
+`vm_stat` measure `darwin-vm-stat-available-v3`, Activity Monitor's "Cached
+Files" model: `(free + speculative + purgeable + max(0, file-backed -
+speculative)) * page size`. File-backed page cache, such as the model bytes the
+parent just hashed, is reclaimable without the compressor or swap; anonymous
+pages are never credited. Known limitation: file pages another process has
+mapped count as available; the child's own mapped weights are bounded by its
+`phys_footprint` cap. The live watchdog compares the same
 available measure with the reserve, so page cache alone never aborts a row. Each receipt records
 `memory.admission` (`runtime-guarded`, the stated cap, reserve, the static
-estimate, and `hostMemoryComponents`: every `vm_stat` component (including anonymous and throttled pages) and the derived
+estimate, and `hostMemoryComponents`: every `vm_stat` component (including the audit-only inactive, anonymous, throttled and active pages) and the derived
 file-cache credit and available bytes); the reader recomputes the measure and
 requires it to cover cap plus reserve, and requires that cap and reserve to equal
 the captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as

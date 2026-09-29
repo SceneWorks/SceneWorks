@@ -645,19 +645,20 @@ function validateCompileAttribution(attribution, matrix) {
   }
 }
 
-const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v2";
+const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v3";
 const HOST_MEMORY_COUNTERS = [
   "freePages", "speculativePages", "purgeablePages", "inactivePages", "fileBackedPages",
-  "anonymousPages", "throttledPages",
+  "anonymousPages", "throttledPages", "activePages",
 ];
 
 // The inference supervisor's pre-spawn macOS host measurement (campaign_supervisor::HostMemory):
 // availableBytes = (free + speculative + purgeable + R) * page size, with
-// R = min(inactive - purgeable, file-backed - speculative, inactive + throttled - anonymous), each
-// floored at zero: a provable lower bound on inactive file-backed pages (File-backed + Anonymous =
-// active + inactive + speculative + throttled, and throttled pages are anonymous), which the
-// kernel reclaims without the compressor or swap. The receipt must recompute exactly and cover
-// cap plus reserve, since the row ran.
+// R = max(0, file-backed - speculative) -- Activity Monitor's "Cached Files": file-backed page
+// cache the kernel reclaims without the compressor or swap; anonymous pages are never credited
+// (inactive, anonymous, throttled and active pages are recorded for audit only). File pages
+// another process has mapped count as available; the child's own mapped weights are bounded by its
+// phys_footprint cap. The receipt must recompute exactly and cover cap plus reserve, since the
+// row ran.
 function validateHostMemoryComponents(host, requiredBytes) {
   const name = "memory.admission.hostMemoryComponents";
   exactKeys(host, ["metric", "pageSizeBytes", ...HOST_MEMORY_COUNTERS, "reclaimableFilePages", "availableBytes"], name);
@@ -665,11 +666,7 @@ function validateHostMemoryComponents(host, requiredBytes) {
   const page = positiveInteger(host.pageSizeBytes, `${name}.pageSizeBytes`);
   if (page < 4096 || !Number.isInteger(Math.log2(page))) fail(`${name}.pageSizeBytes must be a power of two >= 4096`);
   const pages = Object.fromEntries(HOST_MEMORY_COUNTERS.map((key) => [key, nonnegativeInteger(host[key], `${name}.${key}`)]));
-  const reclaimable = Math.min(
-    Math.max(0, pages.inactivePages - pages.purgeablePages),
-    Math.max(0, pages.fileBackedPages - pages.speculativePages),
-    Math.max(0, pages.inactivePages + pages.throttledPages - pages.anonymousPages),
-  );
+  const reclaimable = Math.max(0, pages.fileBackedPages - pages.speculativePages);
   const available = (pages.freePages + pages.speculativePages + pages.purgeablePages + reclaimable) * page;
   if (!Number.isSafeInteger(available)
     || host.reclaimableFilePages !== reclaimable || host.availableBytes !== available) {
