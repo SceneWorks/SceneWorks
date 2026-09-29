@@ -54,10 +54,10 @@ const denseFallbackCompression = () => ({
 // The inference supervisor's macOS admission measurement (campaign_supervisor::HostMemory).
 function hostMemoryFor(requiredBytes, counters) {
   const pageSizeBytes=16384;
-  const pages=counters ?? {freePages:Math.ceil(requiredBytes/pageSizeBytes),speculativePages:0,purgeablePages:0,inactivePages:0,fileBackedPages:0};
-  const reclaimableFilePages=Math.min(Math.max(0,pages.inactivePages-pages.purgeablePages),Math.max(0,pages.fileBackedPages-pages.speculativePages));
+  const pages=counters ?? {freePages:Math.ceil(requiredBytes/pageSizeBytes),speculativePages:0,purgeablePages:0,inactivePages:0,fileBackedPages:0,anonymousPages:0,throttledPages:0};
+  const reclaimableFilePages=Math.min(Math.max(0,pages.inactivePages-pages.purgeablePages),Math.max(0,pages.fileBackedPages-pages.speculativePages),Math.max(0,pages.inactivePages+pages.throttledPages-pages.anonymousPages));
   const availableBytes=(pages.freePages+pages.speculativePages+pages.purgeablePages+reclaimableFilePages)*pageSizeBytes;
-  return {metric:"darwin-vm-stat-available-v1",pageSizeBytes,...pages,reclaimableFilePages,availableBytes};
+  return {metric:"darwin-vm-stat-available-v2",pageSizeBytes,...pages,reclaimableFilePages,availableBytes};
 }
 function fixture(mode="dense", coordinate={}, extra={}) {
   const family = coordinate.family || "llama";
@@ -455,11 +455,11 @@ test("rows record runtime-guarded admission with the stated cap and estimate",()
 });
 test("admission records the macOS host measurement, which must recompute and cover cap plus reserve",()=>{
   const memory=fixture().memory,host=memory.admission.hostMemoryComponents;
-  assert.equal(host.metric,"darwin-vm-stat-available-v1");
+  assert.equal(host.metric,"darwin-vm-stat-available-v2");
   const withHost=(changes)=>({memory:{...memory,admission:{...memory.admission,hostMemoryComponents:{...host,...changes}}}});
   // Heavy clean file cache: inactive file-backed pages are credited.
-  const cached=hostMemoryFor(2**31,{freePages:1000,speculativePages:500,purgeablePages:0,inactivePages:200000,fileBackedPages:200500});
-  assert.equal(cached.reclaimableFilePages,200000);
+  const cached=hostMemoryFor(2**31,{freePages:1000,speculativePages:500,purgeablePages:0,inactivePages:200000,fileBackedPages:200500,anonymousPages:2000,throttledPages:0});
+  assert.equal(cached.reclaimableFilePages,198000);
   assert.ok((cached.freePages+cached.speculativePages)*cached.pageSizeBytes<2**31);
   fixture("dense",{}, {memory:{...memory,admission:{...memory.admission,hostMemoryComponents:cached}}});
   const {hostMemoryComponents:_omitted,...unmeasured}=memory.admission;
@@ -467,14 +467,16 @@ test("admission records the macOS host measurement, which must recompute and cov
   // Tampered derived values, a foreign metric, and the plausible wrong definitions all fail.
   for (const changes of [
     {availableBytes:host.availableBytes+host.pageSizeBytes},
-    {metric:"free-plus-speculative"},
+    {metric:"darwin-vm-stat-available-v1"},
+    // inactive anonymous pages beside active file cache credited (drop the anonymous bound)
+    {inactivePages:40000,fileBackedPages:40000,anonymousPages:40000,reclaimableFilePages:40000,availableBytes:host.availableBytes+40000*host.pageSizeBytes},
     {pageSizeBytes:12288},
     // count all inactive / drop the min / drop file-backed: anonymous inactive credited as cache
     {inactivePages:host.inactivePages+10,reclaimableFilePages:host.reclaimableFilePages+10,availableBytes:host.availableBytes+10*host.pageSizeBytes},
     // speculative counted twice: file-backed not reduced by the speculative pages inside it
     {speculativePages:40,inactivePages:100,fileBackedPages:100,reclaimableFilePages:100,availableBytes:host.availableBytes+140*host.pageSizeBytes},
     // purgeable counted twice: inactive not reduced by the purgeable pages on it
-    {purgeablePages:40,inactivePages:100,fileBackedPages:100,reclaimableFilePages:100,availableBytes:host.availableBytes+140*host.pageSizeBytes},
+    {purgeablePages:40,inactivePages:100,fileBackedPages:100,anonymousPages:40,throttledPages:40,reclaimableFilePages:100,availableBytes:host.availableBytes+140*host.pageSizeBytes},
   ]) assert.throws(()=>fixture("dense",{}, withHost(changes)),/schema validation|hostMemoryComponents/);
   // A measurement below cap plus reserve is not an admitted row.
   const short=hostMemoryFor(2**31-16384);

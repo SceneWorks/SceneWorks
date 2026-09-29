@@ -645,14 +645,19 @@ function validateCompileAttribution(attribution, matrix) {
   }
 }
 
-const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v1";
-const HOST_MEMORY_COUNTERS = ["freePages", "speculativePages", "purgeablePages", "inactivePages", "fileBackedPages"];
+const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v2";
+const HOST_MEMORY_COUNTERS = [
+  "freePages", "speculativePages", "purgeablePages", "inactivePages", "fileBackedPages",
+  "anonymousPages", "throttledPages",
+];
 
 // The inference supervisor's pre-spawn macOS host measurement (campaign_supervisor::HostMemory):
-// availableBytes = (free + speculative + purgeable + reclaimable file cache) * page size, with the
-// file-cache credit min(inactive - purgeable, file-backed - speculative) floored at zero: clean
-// inactive file cache the kernel frees without the compressor or swap. The receipt must recompute
-// exactly and cover cap plus reserve, since the row ran.
+// availableBytes = (free + speculative + purgeable + R) * page size, with
+// R = min(inactive - purgeable, file-backed - speculative, inactive + throttled - anonymous), each
+// floored at zero: a provable lower bound on inactive file-backed pages (File-backed + Anonymous =
+// active + inactive + speculative + throttled, and throttled pages are anonymous), which the
+// kernel reclaims without the compressor or swap. The receipt must recompute exactly and cover
+// cap plus reserve, since the row ran.
 function validateHostMemoryComponents(host, requiredBytes) {
   const name = "memory.admission.hostMemoryComponents";
   exactKeys(host, ["metric", "pageSizeBytes", ...HOST_MEMORY_COUNTERS, "reclaimableFilePages", "availableBytes"], name);
@@ -663,6 +668,7 @@ function validateHostMemoryComponents(host, requiredBytes) {
   const reclaimable = Math.min(
     Math.max(0, pages.inactivePages - pages.purgeablePages),
     Math.max(0, pages.fileBackedPages - pages.speculativePages),
+    Math.max(0, pages.inactivePages + pages.throttledPages - pages.anonymousPages),
   );
   const available = (pages.freePages + pages.speculativePages + pages.purgeablePages + reclaimable) * page;
   if (!Number.isSafeInteger(available)
