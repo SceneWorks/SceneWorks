@@ -13,7 +13,9 @@
     "compressedReference": "dense-kv-same-weights",
     "compressedRows": "every threshold compares the compressed-KV run with the dense-KV run on the same weights; the bf16 reference model is weight-quantization characterization only and never the gate denominator",
     "kernelParity": "independent host-fp32 dequantize-then-attend reference",
-    "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle check requires exact agreement with the dense output and the receipt records needleDiscriminating=false"
+    "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle check requires exact agreement with the dense output and the receipt records needleDiscriminating=false",
+    "nonDiscriminatingTool": "when the same-weights dense-KV run does not emit the valid structured tool call, compressed tool agreement is exact equality with that dense output and the receipt records toolDiscriminating=false",
+    "repeats": "discrimination flags are the AND over all sealed repeats; each repeat records its own flag, and compressed rows must pass every repeat"
   },
   "needleFixture": {
     "statement": "The special magic identifier is {needle}.",

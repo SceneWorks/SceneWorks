@@ -125,6 +125,11 @@ const FIXTURE_SOURCES = Symbol("fixtureSources");
 // Quality contract v3: the only denominator of a compressed receipt's quality gate.
 const COMPRESSED_QUALITY_REFERENCE = "dense-kv-same-weights";
 const RUNTIME_GUARDED_ADMISSION = "runtime-guarded";
+const DISCRIMINATION_FIELDS = ["needleDiscriminating", "toolDiscriminating"];
+const DISCRIMINATION_FIXTURES = {
+  "long-context-needle": "needleDiscriminating",
+  "structured-tool-call": "toolDiscriminating",
+};
 
 /** Mirrors the inference producer's fixture reference for a same-weights dense-KV denominator. */
 export function sameWeightsFixtureReference(fixture, modelInventorySha256) {
@@ -319,10 +324,16 @@ export function checkContract(contract) {
   if (contract.version !== 3) fail("unsupported quality contract version");
   exactKeys(
     contract.gate,
-    ["denseRows", "compressedReference", "compressedRows", "kernelParity", "nonDiscriminatingNeedle"],
+    [
+      "denseRows", "compressedReference", "compressedRows", "kernelParity",
+      "nonDiscriminatingNeedle", "nonDiscriminatingTool", "repeats",
+    ],
     "contract.gate",
   );
-  for (const field of ["denseRows", "compressedRows", "kernelParity", "nonDiscriminatingNeedle"]) {
+  for (const field of [
+    "denseRows", "compressedRows", "kernelParity", "nonDiscriminatingNeedle",
+    "nonDiscriminatingTool", "repeats",
+  ]) {
     text(contract.gate[field], `contract.gate.${field}`);
   }
   if (contract.gate.compressedReference !== COMPRESSED_QUALITY_REFERENCE) {
@@ -1085,13 +1096,13 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   exactKeys(
     receipt.quality,
     [
-      ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, "needleDiscriminating", "statistics",
-      "fixtureEvidence",
+      ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
+      "statistics", "fixtureEvidence",
     ],
     "quality",
   );
-  if (typeof receipt.quality.needleDiscriminating !== "boolean") {
-    fail("quality.needleDiscriminating must be boolean");
+  for (const field of DISCRIMINATION_FIELDS) {
+    if (typeof receipt.quality[field] !== "boolean") fail(`quality.${field} must be boolean`);
   }
   for (const field of ERROR_QUALITY_FIELDS) finite(receipt.quality[field], `quality.${field}`);
   if (receipt.quality.parityMaxError < 0) fail("quality.parityMaxError must be non-negative");
@@ -1132,9 +1143,11 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       fail(`quality fixture ${fixture} reference is not the contract v3 denominator for a ${receipt.mode} receipt`);
     }
   }
-  if (receipt.mode === "dense"
-    && receipt.quality.needleDiscriminating !== (receipt.quality.needleRetrieval === 1)) {
-    fail("dense needle discrimination must equal the dense run's own needle recovery");
+  // Discrimination is the AND over all repeats: a dense row whose primary repeat missed the
+  // needle cannot claim that every repeat recovered it.
+  if (receipt.mode === "dense" && receipt.quality.needleDiscriminating
+    && receipt.quality.needleRetrieval !== 1) {
+    fail("dense needle discrimination claims recovery the dense run did not show");
   }
 
   const allowedLifecycleKeys = [...LIFECYCLE, ...LIFECYCLE.map((field) => `${field}FallbackReason`)];
@@ -1267,6 +1280,7 @@ export async function buildVerifiedReceipt(input) {
   const verifiedInput = structuredClone(input);
   delete verifiedInput.provenance.modelFilePath;
   const fixtureSources = {};
+  const primaryArtifacts = {};
   object(verifiedInput.quality?.fixtureEvidence, "quality.fixtureEvidence");
   for (const fixture of FIXTURES) {
     const sourceRow = object(input.quality?.fixtureEvidence?.[fixture], `quality.fixtureEvidence.${fixture}`);
@@ -1294,6 +1308,7 @@ export async function buildVerifiedReceipt(input) {
       fail(`quality fixture ${fixture} artifact is not valid JSON: ${error.message}`);
     }
     validateFixtureArtifact(artifact, fixture, sourceRow);
+    primaryArtifacts[fixture] = artifact;
     const artifactName = `fixtures/${fixture}.json`;
     fixtureSources[artifactName] = artifactPath;
     verifiedInput.quality.fixtureEvidence[fixture] = {
@@ -1342,6 +1357,7 @@ export async function buildVerifiedReceipt(input) {
     }
   }
   const receipt = buildReceipt(verifiedInput);
+  validatePrimaryDiscrimination(receipt, primaryArtifacts);
   Object.defineProperty(receipt, FIXTURE_SOURCES, {
     value: fixtureSources,
     enumerable: false,
@@ -1366,7 +1382,7 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     }
   }
   const outcomeEvidence = {
-    "structured-tool-call": ["candidateValid", "referenceValid", "outputsMatch"],
+    "structured-tool-call": ["candidateValid", "referenceValid", "outputsMatch", "discriminating"],
     "long-context-needle": ["candidateRecovered", "referenceRecovered", "outputsMatch", "discriminating"],
   }[fixture] ?? [];
   const requiredEvidence = {
@@ -1398,6 +1414,58 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     nonnegativeInteger(artifact.evidence.matches, `fixture artifact ${fixture}.matches`);
     positiveInteger(artifact.evidence.total, `fixture artifact ${fixture}.total`);
     if (artifact.evidence.matches > artifact.evidence.total) fail(`fixture artifact ${fixture} matches exceed total`);
+  }
+}
+
+/**
+ * Bind one fixture artifact to its receipt beyond the label: a compressed row's reference arm must
+ * be the candidate's own weights, and tool/needle metrics and discrimination flags are re-derived
+ * from the raw outcomes. Compressed rows must pass every repeat. Returns the artifact's flag.
+ */
+export function validateFixtureOutcomes(artifact, fixture, receipt) {
+  const compressed = receipt.mode === "compressed";
+  if (compressed) {
+    const reference = object(object(artifact.binding, `fixture ${fixture} binding`).reference,
+      `fixture ${fixture} reference binding`);
+    if (reference.coordinateInventorySha256 !== receipt.provenance.modelFileSha256
+      || reference.qualityInventorySha256 !== receipt.provenance.modelFileSha256) {
+      fail(`fixture ${fixture} compressed reference is not bound to the same weights`);
+    }
+  }
+  if (!Object.hasOwn(DISCRIMINATION_FIXTURES, fixture)) return undefined;
+  const evidence = artifact.evidence;
+  const needle = fixture === "long-context-needle";
+  const candidate = needle ? evidence.candidateRecovered : evidence.candidateValid;
+  const reference = needle ? evidence.referenceRecovered : evidence.referenceValid;
+  const sameWeightsDense = compressed ? reference : candidate;
+  const expectedMatch = needle && !(compressed && !sameWeightsDense) ? candidate : evidence.outputsMatch;
+  if (evidence.total !== 1 || evidence.discriminating !== sameWeightsDense
+    || evidence.matches !== (expectedMatch ? 1 : 0)
+    || (compressed && evidence.matches !== evidence.total)) {
+    fail(`fixture ${fixture} outcome evidence does not derive its metric and discrimination`);
+  }
+  return evidence.discriminating;
+}
+
+/**
+ * A receipt set publishes only the primary repeat: validate its outcomes, and a receipt may claim
+ * discrimination (the AND over all repeats) only if that repeat discriminates.
+ */
+export function validatePrimaryDiscrimination(receipt, artifacts) {
+  for (const fixture of FIXTURES) {
+    if (validateFixtureOutcomes(artifacts[fixture], fixture, receipt) === false
+      && receipt.quality[DISCRIMINATION_FIXTURES[fixture]]) {
+      fail(`quality.${DISCRIMINATION_FIXTURES[fixture]} is not the AND of its sealed repeats`);
+    }
+  }
+}
+
+/** Receipt discrimination flags must be exactly the AND over every sealed repeat's flag. */
+export function validateRepeatDiscrimination(receipt, flags) {
+  for (const [fixture, field] of Object.entries(DISCRIMINATION_FIXTURES)) {
+    if (receipt.quality[field] !== flags[fixture].every(Boolean)) {
+      fail(`quality.${field} is not the AND of its sealed repeats`);
+    }
   }
 }
 
@@ -1502,6 +1570,9 @@ export function renderComparisonMarkdown(comparison) {
     + (comparison.quality.needleDiscriminating === false
       ? "- Needle check: NON-DISCRIMINATING (same-weights dense run missed the needle; compressed matched dense output only)\n"
       : "")
+    + (comparison.quality.toolDiscriminating === false
+      ? "- Tool check: NON-DISCRIMINATING (same-weights dense run emitted no valid tool call; compressed matched dense output only)\n"
+      : "")
     + `- Quality contract: ${comparison.contractHash}\n`;
 }
 
@@ -1580,6 +1651,7 @@ export async function writeReceiptSet(directory, receipt) {
 export async function readReceiptSet(directory) {
   const receipt = await readSealedJson(path.join(directory, "receipt.json"));
   validateReceipt(receipt);
+  const primaryArtifacts = {};
   const markdown = await readSealedText(path.join(directory, "receipt.md"));
   assertMarkdownBound(markdown, receipt);
   const fixtureDirectory = path.join(directory, "fixtures");
@@ -1600,7 +1672,9 @@ export async function readReceiptSet(directory) {
       fail(`published fixture ${fixture} is not valid JSON: ${error.message}`);
     }
     validateFixtureArtifact(artifact, fixture, row);
+    primaryArtifacts[fixture] = artifact;
   }
+  validatePrimaryDiscrimination(receipt, primaryArtifacts);
   if (receipt.matrix.processTemperature === "cold") {
     for (let index = 0; index < CONTRACT.statistics.repeats; index += 1) {
       const artifactName = index === 0
@@ -1680,7 +1754,7 @@ export function compareReceipts(dense, compressed) {
     decodeThroughputRatio:
       compressed.timings.decodeTokensPerSecond / dense.timings.decodeTokensPerSecond,
     quality: Object.fromEntries(
-      [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, "needleDiscriminating"]
+      [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS]
         .map((field) => [field, compressed.quality[field]]),
     ),
   };
@@ -1851,8 +1925,18 @@ async function campaignFileBindings(directory, receipt, version) {
   }));
 }
 
+/** A row's recorded cap and reserve must be the captured campaign policy's. */
+export function validateAdmissionPolicy(receipt, safetyPolicy) {
+  if (receipt.memory.admission.childFootprintCapBytes !== safetyPolicy.childFootprintCapBytes
+    || receipt.memory.admission.hostFreeReserveBytes !== safetyPolicy.hostFreeReserveBytes) {
+    fail(`campaign row ${campaignCoordinate(receipt, "-")} admission cap/reserve differs from the captured safety policy`);
+  }
+}
+
 async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy) {
   const coordinate = campaignCoordinate(receipt, "-");
+  validateAdmissionPolicy(receipt, safetyPolicy);
+  const flags = Object.fromEntries(Object.keys(DISCRIMINATION_FIXTURES).map((fixture) => [fixture, []]));
   for (let repeat = 0; repeat < CONTRACT.statistics.repeats; repeat += 1) {
     for (const fixture of FIXTURES) {
       const name = repeat === 0
@@ -1860,6 +1944,8 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
         : `fixtures/repeat-${repeat}/${fixture}.json`;
       const artifact = JSON.parse(await readFile(path.join(directory, name), "utf8"));
       validateFixtureArtifact(artifact, fixture, receipt.quality.fixtureEvidence[fixture]);
+      const flag = validateFixtureOutcomes(artifact, fixture, receipt);
+      if (flag !== undefined) flags[fixture].push(flag);
       const binding = object(artifact.binding, `campaign fixture ${name} binding`);
       const candidate = object(binding.candidate, `campaign fixture ${name} candidate`);
       const reference = object(binding.reference, `campaign fixture ${name} reference`);
@@ -1885,6 +1971,7 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
       }
     }
   }
+  validateRepeatDiscrimination(receipt, flags);
 }
 
 /** Read a producer campaign only after binding its manifest to every sealed receipt artifact. */

@@ -149,19 +149,24 @@ not mislabeled as kernel error. A dense row is never rejected on model
 behaviour: the structured-tool and needle artifacts record, for both the
 candidate and the bf16 reference, tool validity, needle recovery, and output
 agreement as booleans (with output hashes in the binding), and
-`quality.needleDiscriminating` states whether the dense run itself recovered the
-needle. Missing weights, identity drift, incomplete runs, and non-nominal
+`quality.needleDiscriminating` / `quality.toolDiscriminating` state whether the
+dense run itself recovered the needle / emitted the valid tool call. Missing weights, identity drift, incomplete runs, and non-nominal
 thermal state still fail closed.
 
 Frozen quality thresholds gate only compressed receipts, and only against the
-dense-KV run on the **same weights** (every fixture's `independentReference` is
-`dense-kv-same-weights:<model inventory>`; a bf16 reference is refused as a
-compressed denominator, and a dense receipt may not claim one). This isolates
+dense-KV run on the **same weights**: every fixture's `independentReference` is
+`dense-kv-same-weights:<model inventory>` and every fixture artifact's
+`binding.reference` coordinate/quality inventory must equal the receipt's
+`modelFileSha256` (a bf16 reference is refused as a compressed denominator, and a
+dense receipt may not claim one). Readers re-derive each tool/needle metric and
+flag from the recorded outcomes, and compressed rows must pass every repeat. This isolates
 the effect of KV compression from weight quantization. When the same-weights
 dense run missed the needle, the compressed needle check requires exact
 agreement with the dense output and the receipt carries
-`needleDiscriminating: false`; `compare` reports that row as
-non-discriminating instead of counting a shared miss as retrieval.
+`needleDiscriminating: false`; likewise identical invalid tool calls record
+`toolDiscriminating: false`. Each repeat's artifact records its own flag and the
+receipt flag is the AND over all five repeats. `compare` reports such a row as
+non-discriminating instead of counting a shared miss as agreement.
 
 Every row, including memory-material and fit-boundary, is admitted by its
 runtime guards rather than a static whole-process MLX peak proof, which lazy
@@ -171,7 +176,8 @@ reserve, and `phys_footprint` watchdog cap; the supervisor refuses before spawn
 unless host free RAM covers cap plus reserve, and a conservative static
 load-plus-KV floor above the cap still refuses. Each receipt records
 `memory.admission` (`runtime-guarded`, the stated cap, reserve, and the static
-estimate). A pre-spawn refusal, watchdog abort, or failed worker is written as
+estimate); the campaign reader requires that cap and reserve to equal the
+captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as
 a sealed `logs/<row>.attempt-<n>.unaccepted.json` record with its reason and is
 never an accepted row.
 
@@ -198,4 +204,7 @@ threshold number is unchanged.
 
 The v3 contract hash is the compatibility fence: receipts bound to v2 are
 refused, and v4 receipts produced under v3 carry the required
-`quality.needleDiscriminating` and `memory.admission` fields.
+`quality.needleDiscriminating`, `quality.toolDiscriminating`, and
+`memory.admission` fields. The inference producer keeps a byte-exact copy of the
+contract (`crates/llm/mlx-llm/testdata/`) whose hash and needle wording its tests
+pin.

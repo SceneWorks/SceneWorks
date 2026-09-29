@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -51,14 +51,14 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
   memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20}},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...extra});
+    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...extra});
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
   const evidence = name === "kernel-fp32-reference"
     ? {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1}
     : name === "structured-tool-call"
-      ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true}
+      ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true,discriminating:true}
       : name === "long-context-needle"
         ? {matches:1,total:1,candidateRecovered:true,referenceRecovered:true,outputsMatch:true,discriminating:true}
         : {matches:1,total:1};
@@ -84,6 +84,9 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
         model:raw.provenance.referenceModelId,
         coordinateInventorySha256:raw.provenance.referenceModelSha256,
         operationPromptTokens:raw.geometry.contextPayloadTokens,
+      }:{}),...(raw.mode==="compressed"?{
+        coordinateInventorySha256:raw.provenance.modelFileSha256,
+        qualityInventorySha256:raw.provenance.modelFileSha256,
       }:{})},
     },
     evidence,
@@ -91,13 +94,21 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
   };
 }
 
-async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false, pid=9 }={}) {
+async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false, pid=9, policy }={}) {
   await mkdir(root, { recursive: true });
   const model = path.join(root, "model.safetensors");
   await writeFile(model, "weights");
   const raw = fixture(mode, coordinate);
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
   raw.memory.phaseSamples = raw.memory.phaseSamples.map((sample) => ({ ...sample, pid }));
+  if (policy) {
+    raw.memory.admission = {
+      ...raw.memory.admission,
+      childFootprintCapBytes: policy.childFootprintCapBytes,
+      hostFreeReserveBytes: policy.hostFreeReserveBytes,
+      staticFootprintFloorBytes: Math.min(raw.memory.admission.staticFootprintFloorBytes, policy.childFootprintCapBytes),
+    };
+  }
   raw.warmup.workerPid = pid;
   if (raw.warmup.required) {
     raw.warmup.suiteSha256 = numericSemanticSha256({
@@ -200,7 +211,7 @@ function sampleResumeIdentity(policy) {
     llamaReference: reference, qwenReference: reference,
   };
 }
-async function writeEightCampaign(root, policy = safetyPolicy) {
+async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = policy } = {}) {
   const directory = path.join(root, "campaign");
   await mkdir(directory);
   const resumeIdentity = sampleResumeIdentity(policy);
@@ -213,7 +224,7 @@ async function writeEightCampaign(root, policy = safetyPolicy) {
     };
     const slug = entry.join("-");
     const receipt = await verifiedFixture(path.join(root, `source-${index}`), "dense", coordinate, {
-      pid: index + 100, inferenceShaped: true,
+      pid: index + 100, inferenceShaped: true, policy: rowPolicy,
     });
     const receiptDirectory = path.join(directory, slug);
     await writeReceiptSet(receiptDirectory, receipt);
@@ -408,13 +419,56 @@ test("rows record runtime-guarded admission with the stated cap and estimate",()
   assert.ok(admission);
   assert.throws(()=>fixture("dense",{}, {memory:unadmitted}),/schema validation|memory/);
 });
+test("fixture outcomes are bound to the same weights and re-derived, and flags AND across repeats",()=>{
+  const dense=fixture(),compressed=fixture("compressed");
+  const needle=(candidateRecovered,referenceRecovered,outputsMatch,matches,discriminating)=>({evidence:{matches,total:1,candidateRecovered,referenceRecovered,outputsMatch,discriminating}});
+  const tool=(candidateValid,referenceValid,outputsMatch,discriminating)=>({evidence:{matches:outputsMatch?1:0,total:1,candidateValid,referenceValid,outputsMatch,discriminating}});
+  const sameWeights={binding:{reference:{coordinateInventorySha256:compressed.provenance.modelFileSha256,qualityInventorySha256:compressed.provenance.modelFileSha256}}};
+  const bf16={binding:{reference:{coordinateInventorySha256:compressed.provenance.referenceModelSha256,qualityInventorySha256:compressed.provenance.referenceModelSha256}}};
+  // Compressed denominators are bound, not labelled.
+  assert.equal(validateFixtureOutcomes({...sameWeights,...needle(true,true,true,1,true)},"long-context-needle",compressed),true);
+  assert.throws(()=>validateFixtureOutcomes({...bf16,...needle(true,true,true,1,true)},"long-context-needle",compressed),/same weights/);
+  for (const key of ["coordinateInventorySha256","qualityInventorySha256"]) {
+    const mixed={binding:{reference:{...sameWeights.binding.reference,[key]:compressed.provenance.referenceModelSha256}}};
+    assert.throws(()=>validateFixtureOutcomes({...mixed,...needle(true,true,true,1,true)},"long-context-needle",compressed),/same weights/,key);
+  }
+  assert.throws(()=>validateFixtureOutcomes({evidence:{}},"multi-turn-prompt-cache",compressed),/binding/);
+  assert.equal(validateFixtureOutcomes({...sameWeights,...needle(false,false,true,1,false)},"long-context-needle",compressed),false);
+  assert.equal(validateFixtureOutcomes({...sameWeights,...tool(false,false,true,false)},"structured-tool-call",compressed),false);
+  for (const [fixture,forged] of [
+    ["long-context-needle",needle(false,false,false,1,false)],
+    ["long-context-needle",needle(true,true,true,1,false)],
+    ["long-context-needle",needle(false,true,false,0,true)],
+    ["structured-tool-call",tool(true,false,true,true)],
+    ["structured-tool-call",tool(true,true,false,true)],
+  ]) assert.throws(()=>validateFixtureOutcomes({...sameWeights,...forged},fixture,compressed),/does not derive/,fixture);
+  // Dense rows derive discrimination from their own run and are never gated on outcomes.
+  assert.equal(validateFixtureOutcomes(needle(false,true,false,0,false),"long-context-needle",dense),false);
+  assert.equal(validateFixtureOutcomes(tool(false,true,false,false),"structured-tool-call",dense),false);
+  assert.throws(()=>validateFixtureOutcomes(needle(false,true,false,0,true),"long-context-needle",dense),/does not derive/);
+  // AND across all repeats in a campaign; primary-only receipt sets may not over-claim.
+  validateRepeatDiscrimination(dense,{"long-context-needle":[true,true],"structured-tool-call":[true]});
+  assert.throws(()=>validateRepeatDiscrimination(dense,{"long-context-needle":[true,false],"structured-tool-call":[true]}),/needleDiscriminating is not the AND/);
+  assert.throws(()=>validateRepeatDiscrimination(dense,{"long-context-needle":[true],"structured-tool-call":[true,false]}),/toolDiscriminating is not the AND/);
+  const primary={"kernel-fp32-reference":{},"multi-turn-prompt-cache":{},"long-context-needle":needle(false,true,false,0,false),"structured-tool-call":tool(true,true,true,true)};
+  assert.throws(()=>validatePrimaryDiscrimination(dense,primary),/needleDiscriminating is not the AND/);
+  validatePrimaryDiscrimination(fixture("dense",{}, {quality:{...dense.quality,needleRetrieval:0,needleDiscriminating:false}}),primary);
+  // Admission must carry the captured policy's cap and reserve.
+  const policy={childFootprintCapBytes:dense.memory.admission.childFootprintCapBytes,hostFreeReserveBytes:dense.memory.admission.hostFreeReserveBytes};
+  validateAdmissionPolicy(dense,policy);
+  assert.throws(()=>validateAdmissionPolicy(dense,{...policy,childFootprintCapBytes:policy.childFootprintCapBytes+1}),/captured safety policy/);
+  assert.throws(()=>validateAdmissionPolicy(dense,{...policy,hostFreeReserveBytes:policy.hostFreeReserveBytes+1}),/captured safety policy/);
+  // The comparison flags a non-discriminating tool check.
+  const sharedTool=fixture("compressed",{}, {quality:{...compressed.quality,toolDiscriminating:false}});
+  assert.match(renderComparisonMarkdown(compareReceipts(dense,sharedTool)),/Tool check: NON-DISCRIMINATING/);
+});
 test("fixture artifacts record both arms' tool and needle outcomes as booleans",()=>{
   const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:1,structuredToolAgreement:0,needleRetrieval:0,multiTurnPromptCache:1};
   const needle={matches:0,total:1,candidateRecovered:false,referenceRecovered:true,outputsMatch:false,discriminating:false};
   assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:needle,metrics},"long-context-needle",row));
   assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:{matches:0,total:1},metrics},"long-context-needle",row),/must be boolean/);
   assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:{...needle,referenceRecovered:1},metrics},"long-context-needle",row),/must be boolean/);
-  assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:0,total:1,candidateValid:false,referenceValid:true,outputsMatch:false},metrics},"structured-tool-call",row));
+  assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:0,total:1,candidateValid:false,referenceValid:true,outputsMatch:false,discriminating:false},metrics},"structured-tool-call",row));
 });
 test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
 test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp("/tmp/kv20671-snapshot-"),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});
@@ -528,6 +582,15 @@ test("v2 campaign reader binds every row and artifact to trusted policy and resu
     const { directory, manifest, resumeIdentity } = await writeEightCampaign(root, safetyPolicy);
     const trusted = { safetyPolicy, resumeIdentity };
     assert.equal((await readCampaignSet(directory, trusted)).summary.coordinates, 8);
+    // Rows that ran under a different cap than the captured policy are refused.
+    await mkdir(path.join(root, "drifted"));
+    const drifted = await writeEightCampaign(path.join(root, "drifted"), safetyPolicy, {
+      rowPolicy: { ...safetyPolicy, childFootprintCapBytes: safetyPolicy.childFootprintCapBytes + 1 },
+    });
+    await assert.rejects(
+      readCampaignSet(drifted.directory, { safetyPolicy, resumeIdentity: drifted.resumeIdentity }),
+      /captured safety policy/,
+    );
     const policyFile = path.join(root, "policy.json");
     const trustedResume = path.join(root, "resume");
     const summaryFile = path.join(root, "summary.json");
