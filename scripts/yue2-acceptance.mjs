@@ -175,10 +175,13 @@ export function caseById(id) {
  * What runs and what is skipped, and why, before anything starts. A skip always carries a reason.
  * Dependency-driven skips are decided at run time (`dependencySkip`), from the dependency's record.
  */
-export function planCases({ platform, skip = [], dryRun = false, allowMetalWorkerKill = false } = {}) {
+export function planCases({ platform, skip = [], dryRun = false, allowMetalWorkerKill = false, profileInstallOnly = false } = {}) {
   if (!PLATFORMS[platform]) fail(`--platform must be metal or cuda, not ${platform}`);
   for (const id of skip) caseById(id);
   return CASES.map((item) => {
+    if (profileInstallOnly && item.id !== "install-cold") {
+      return { id: item.id, action: "skip", reason: "FP8 profile installation preparation only (not an acceptance run)" };
+    }
     if (skip.includes(item.id)) return { id: item.id, action: "skip", reason: "skipped by the operator (--skip)" };
     if (dryRun && !item.dry) {
       return { id: item.id, action: "skip", reason: "dry run: no worker is started, so nothing that loads weights, installs or renders runs" };
@@ -209,7 +212,7 @@ export function dependencySkip(item, records, { dryRun = false } = {}) {
 // ---- Arguments -------------------------------------------------------------------------------------
 
 export function parseArgs(argv) {
-  const options = { skip: [], dryRun: false, allowMetalWorkerKill: false, jobTimeoutMinutes: 90 };
+  const options = { skip: [], dryRun: false, allowMetalWorkerKill: false, profileInstallOnly: false, jobTimeoutMinutes: 90 };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const value = () => {
@@ -229,11 +232,15 @@ export function parseArgs(argv) {
     else if (arg === "--port") options.port = Number(value());
     else if (arg === "--job-timeout-minutes") options.jobTimeoutMinutes = Number(value());
     else if (arg === "--dry-run") options.dryRun = true;
+    else if (arg === "--profile-install-only") options.profileInstallOnly = true;
     else if (arg === "--allow-metal-worker-kill") options.allowMetalWorkerKill = true;
     else fail(`unknown argument ${arg}`);
   }
   if (!PLATFORMS[options.platform]) fail("--platform metal|cuda is required");
   if (!options.out) fail("--out <dir> is required");
+  if (options.profileInstallOnly && (options.platform !== "cuda" || options.dryRun || options.skip.length)) {
+    fail("--profile-install-only requires CUDA and cannot combine with --dry-run or --skip");
+  }
   if (options.port !== undefined && (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)) fail("--port must be a TCP port");
   if (!Number.isFinite(options.jobTimeoutMinutes) || options.jobTimeoutMinutes <= 0) fail("--job-timeout-minutes must be positive");
   for (const id of options.skip) caseById(id);
@@ -657,6 +664,7 @@ export function buildSummary(records, meta) {
     verdict,
     platform: meta.platform,
     dryRun: Boolean(meta.dryRun),
+    profileInstallOnly: Boolean(meta.profileInstallOnly),
     fatal: meta.fatal ?? null,
     counts,
     blockers,
@@ -706,7 +714,8 @@ export function exitCodeFor(summary) {
 
 export function renderMarkdown(summary) {
   const lines = [
-    `# YuE2 terminal acceptance — ${summary.platform}${summary.dryRun ? " (dry run)" : ""}`,
+    summary.profileInstallOnly ? "# YuE2 FP8 profile installation preparation — CUDA (not acceptance)" :
+      `# YuE2 terminal acceptance — ${summary.platform}${summary.dryRun ? " (dry run)" : ""}`,
     "",
     `Verdict: **${summary.verdict}** — ${STATUSES.map((status) => `${summary.counts[status]} ${status}`).join(", ")}${summary.missing.length ? `; not run: ${summary.missing.join(", ")}` : ""}.`,
     "",
@@ -2386,12 +2395,16 @@ async function runAcceptance(options, completion) {
   const ordered = CASES.map((item) => records.get(item.id)).filter(Boolean);
   const summary = buildSummary(ordered, {
     platform: options.platform, dryRun: options.dryRun, identity, startedAt, finishedAt: nowIso(), fatal: fatal?.message,
+    profileInstallOnly: options.profileInstallOnly,
     serviceEnv: service.envs, deviations: serviceDeviations(options.platform),
   });
   await writeJson(path.join(evidence, "summary.json"), summary);
   await writeFile(path.join(evidence, "summary.md"), renderMarkdown(summary));
   console.log(`verdict: ${summary.verdict} → ${path.join(evidence, "summary.md")}`);
   await completion.complete(evidence);
+  // This opt-in mode is successful only when its one installation case passed. Its acceptance
+  // summary remains explicitly incomplete and cannot be mistaken for a 27-case verdict.
+  if (options.profileInstallOnly) return !fatal && records.get("install-cold")?.status === "passed" ? 0 : 1;
   return exitCodeFor(summary);
 }
 

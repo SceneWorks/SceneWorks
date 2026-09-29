@@ -104,8 +104,9 @@ function webJobRequests() {
     // sc-23002: a transcription with and without its window settings.
     ["transcribe", EVERY_CONTROL, { sourceAudioAssetId: "asset_take" }],
     ["transcribe", defaultYue2Settings(), { sourceAudioAssetId: "asset_take" }],
+    ["create", { ...defaultYue2Settings(), lyrics: "[verse]\nhello", tier: "bf16", arMode: "experimentalFp8" }, {}, "0"],
   ];
-  return scenarios.map(([kind, settings, target]) => buildYue2JobRequest(kind, settings, target, "auto"));
+  return scenarios.map(([kind, settings, target, gpu]) => buildYue2JobRequest(kind, settings, target, gpu ?? "auto"));
 }
 
 describe("YuE2 request builder (sc-23000)", () => {
@@ -161,6 +162,26 @@ describe("YuE2 request builder (sc-23000)", () => {
   it("omits every unset control so the model default applies", () => {
     const settings = { ...defaultYue2Settings(), lyrics: "la la" };
     expect(buildYue2JobRequest("create", settings)).toEqual({ kind: "create", lyrics: "la la", planning: "full" });
+  });
+
+  it("carries explicit FP8 AR only on generation and refuses unsupported selections before submit", () => {
+    const settings = { ...defaultYue2Settings(), lyrics: "la la", tier: "bf16", arMode: "experimentalFp8" };
+    expect(buildYue2JobRequest("create", settings, {}, "0").arMode).toBe("experimentalFp8");
+    expect(buildYue2JobRequest("plan", settings).arMode).toBe("experimentalFp8");
+    expect(buildYue2JobRequest("fromPlan", settings).arMode).toBe("experimentalFp8");
+    expect(buildYue2JobRequest("cover", settings).arMode).toBe("experimentalFp8");
+    expect(buildYue2JobRequest("renderVersion", settings).arMode).toBe("experimentalFp8");
+    expect(buildYue2JobRequest("decode", settings, { sourceJobId: "job_src" })).not.toHaveProperty("arMode");
+    expect(buildYue2JobRequest("transcribe", settings, { sourceAudioAssetId: "asset_take" })).not.toHaveProperty("arMode");
+    expect(yue2RequestProblems("create", settings, {}, { requestedGpu: "0", selectedGpuCapabilities: ["gpu", "nvidia", "candle", "int8_convrot"] })).toEqual([]);
+    expect(yue2RequestProblems("create", settings)).toContainEqual(expect.stringMatching(/Auto cannot choose/));
+    expect(yue2RequestProblems("create", settings, {}, { requestedGpu: "0", selectedGpuCapabilities: ["gpu", "nvidia", "candle"] })).toContainEqual(expect.stringMatching(/compute capability 8\.9/));
+    expect(yue2RequestProblems("create", settings, {}, { requestedGpu: "auto" })).toEqual([
+      expect.stringContaining("Select a CUDA GPU"),
+    ]);
+    expect(yue2RequestProblems("create", { ...settings, tier: "q8", precision: "fp32" }, {}, { requestedGpu: "mlx" })).toHaveLength(3);
+    expect(restoreYue2Settings({ arMode: "experimentalFp8" }).arMode).toBe("experimentalFp8");
+    expect(restoreYue2Settings({ arMode: "unrecognized" }).arMode).toBe("");
   });
 
   // Core `validate_common`: a chunk size is read only with chunked attention ON, a tile edge only

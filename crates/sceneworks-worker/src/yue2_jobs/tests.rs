@@ -1947,6 +1947,7 @@ async fn a_job_setting_only_stage_residency_still_gets_a_decode_tile_that_fits()
     let load = Yue2LoadFacts {
         tier: Yue2Tier::Bf16,
         precision: Yue2Precision::Default,
+        ar: Yue2ArMode::Native,
         sequential_offload: false,
     };
     let shape = shape_of(&builtin_yue2(), &request, load, None, Yue2ArMode::Native).unwrap();
@@ -2025,6 +2026,68 @@ async fn a_verified_derived_tier_loads_with_its_quantization() {
     let load = seen.load.as_ref().unwrap();
     assert_eq!(load.quantize, Some(Quant::Q4));
     assert!(matches!(&load.weights, WeightsSource::Dir(d) if *d == dir));
+}
+
+#[tokio::test]
+async fn explicit_fp8_ar_reaches_the_engine_load_and_effective_settings() {
+    let h = Harness::new().await;
+    let native: Yue2JobSpec = serde_json::from_value(json!({
+        "kind": "create", "lyrics": "[verse]\nla", "tier": "bf16"
+    }))
+    .unwrap();
+    let fp8: Yue2JobSpec = serde_json::from_value(json!({
+        "kind": "create", "lyrics": "[verse]\nla", "tier": "bf16", "arMode": "experimentalFp8"
+    }))
+    .unwrap();
+    let native_load = resolve_load(&h.settings, &h.entry, &native).unwrap();
+    let fp8_load = resolve_load(&h.settings, &h.entry, &fp8).unwrap();
+    assert_eq!(native_load.spec.yue2_ar_mode, EngineArMode::Native);
+    assert_eq!(fp8_load.spec.yue2_ar_mode, EngineArMode::ExperimentalFp8);
+    assert_eq!(fp8_load.tier, Tier::Bf16);
+    assert_eq!(
+        fp8_load.spec.quantize, None,
+        "the BF16 originals remain the weight source"
+    );
+    let effective = effective_settings(&fp8, &fp8_load, &Inputs::default(), None);
+    assert_eq!(effective["arMode"], "experimentalFp8");
+    assert_eq!(effective["tier"], "bf16");
+    assert_eq!(
+        effective_settings(&native, &native_load, &Inputs::default(), None)["arMode"],
+        "native"
+    );
+}
+
+#[tokio::test]
+async fn fp8_on_metal_is_refused_by_admission_before_loading_weights() {
+    let h = Harness::new().await;
+    let _budget =
+        crate::yue2_admission::override_budget(Some(crate::yue2_admission::Yue2Budget::Unified {
+            backend: crate::yue2_admission::Yue2Backend::Metal,
+            capacity_bytes: u64::MAX / 4,
+            resident_bytes: 0,
+            reclaimable_bytes: 0,
+        }));
+    let loads = Arc::new(AtomicUsize::new(0));
+    let job = h.job(
+        "fp8-metal-refusal",
+        json!({"kind": "create", "lyrics": "[verse]\nla", "tier": "bf16", "arMode": "experimentalFp8"}),
+    );
+    h.run(
+        &job,
+        loader(complete(vec![]), Default::default(), loads.clone()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(loads.load(Ordering::SeqCst), 0);
+    let terminal = h.terminal();
+    assert_eq!(terminal["status"], "failed");
+    assert!(
+        terminal["error"]
+            .as_str()
+            .unwrap()
+            .contains("runs only on CUDA"),
+        "{terminal}"
+    );
 }
 
 /// The worker's copies of the engine's run-layout names are the linked engine's.

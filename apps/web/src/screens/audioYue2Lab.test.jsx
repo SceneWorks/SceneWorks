@@ -424,6 +424,23 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(map?.project_1?.audio?.songLab).toBe(true);
   });
 
+  it("requires an explicit supported GPU for the experimental FP8 AR control and persists the choice", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await choose(byLabel(lab(), "Tier"), "bf16");
+    await click(buttonStarting(lab(), "Advanced"));
+    await choose(byLabel(lab(), "AR mode"), "experimentalFp8");
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+    expect(buttonWithText(lab(), "Generate song").title).toContain("Select a CUDA GPU");
+    await wait(500);
+    expect(persistMock.mock.calls.at(-1)[0].advancedStudio.project_1.yue2lab.arMode).toBe("experimentalFp8");
+    await render(context({ requestedGpu: "0", visibleWorkers: [{ gpuId: "0", capabilities: ["gpu", "nvidia", "candle", "int8_convrot"] }] }));
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(false);
+    await click(buttonWithText(lab(), "Generate song"));
+    await settle();
+    expect(lastJobBody()).toMatchObject({ kind: "create", tier: "bf16", arMode: "experimentalFp8", requestedGpu: "0" });
+  });
+
   // ---- AC2: every control reaches the request -------------------------------------------------
 
   async function setEveryAdvancedControl() {

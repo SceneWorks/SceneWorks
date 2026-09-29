@@ -262,10 +262,7 @@ pub(crate) enum Yue2ArMode {
     #[default]
     Native,
     /// The experimental FP8 E4M3 AR mode: CUDA sm_89+, the `bf16` tier, BF16 compute only. Not
-    /// reachable through the registered provider at the pin (owner decision
-    /// `fp8_not_on_the_load_spec`: `LoadSpec` has no FP8 value); priced so the retained BF16
-    /// originals are never silently omitted if it becomes reachable.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// original BF16 AR weights are retained in host RAM until restoration.
     Fp8,
 }
 
@@ -719,6 +716,7 @@ impl Yue2Pins {
 pub(crate) struct Yue2LoadFacts {
     pub tier: Yue2Tier,
     pub precision: Yue2Precision,
+    pub ar: Yue2ArMode,
     /// `LoadSpec::offload_policy == Sequential`: the AR weights offload during the acoustic stage
     /// whenever the request does not choose otherwise.
     pub sequential_offload: bool,
@@ -732,6 +730,10 @@ impl Yue2LoadFacts {
             precision: match spec.precision {
                 gen_core::Precision::Fp32 => Yue2Precision::Fp32,
                 _ => Yue2Precision::Default,
+            },
+            ar: match spec.yue2_ar_mode {
+                gen_core::Yue2ArMode::Native => Yue2ArMode::Native,
+                gen_core::Yue2ArMode::ExperimentalFp8 => Yue2ArMode::Fp8,
             },
             sequential_offload: spec.offload_policy == gen_core::OffloadPolicy::Sequential,
         }
@@ -2687,13 +2689,12 @@ pub(crate) async fn check(
     gpu_id: &str,
 ) -> Result<Yue2Admitted, WorkerError> {
     // A request that cannot be priced fails closed BEFORE the hardware is probed.
-    let shape =
-        shape_of(manifest_entry, request, load, pins, Yue2ArMode::Native).map_err(|why| {
-            WorkerError::InvalidPayload(format!(
-                "{model}: YuE2 memory admission cannot price this render ({why}); the installed \
+    let shape = shape_of(manifest_entry, request, load, pins, load.ar).map_err(|why| {
+        WorkerError::InvalidPayload(format!(
+            "{model}: YuE2 memory admission cannot price this render ({why}); the installed \
              catalog entry or saved plan is incomplete."
-            ))
-        })?;
+        ))
+    })?;
     let budget = live_budget(gpu_id).await;
     let (other_device, other_host) = live_residency_bytes();
     let estimate = match decide(model, &shape, budget.as_ref(), other_device + other_host) {

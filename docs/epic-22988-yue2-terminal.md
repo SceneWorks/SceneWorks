@@ -173,18 +173,30 @@ summary that it has no new profile verdict. Retain the earlier profile artifact 
 five captures separately; for the current CUDA campaign, that is run
 [36357082332](https://github.com/SceneWorks/SceneWorks/actions/runs/36357082332).
 
+For the new experimental FP8 AR route, dispatch the same pinned branch with
+`-f yue2_fp8_profile_only=true` (and the required `run_yue2_terminal_cuda=true` and exact
+`inference_revision`). This mutually excludes `yue2_acceptance_only`. It installs YuE2 into a
+fresh per-run state through the app's `install-cold` case, whose acceptance summary remains
+**incomplete by design**; it does not rerun the acceptance matrix or the five native CUDA
+profiles. It then captures only `yue2:bf16:cuda:experimental-fp8-ar`, requiring a completed,
+current record with requested `experimentalFp8`, published engine `config.json` quantization
+`fp8`, and admission pricing of at least 2 GiB of retained BF16 AR originals in host RAM.
+Receipts upload before the targeted verdict. A passing dispatch proves one integrated native
+profile through the product load/admission/generation path; it is not a new HTTP job acceptance
+run. Retain the earlier native-profile and app-acceptance artifacts separately.
+
 The `yue2-terminal-cuda` job does the following:
 - runs on `[self-hosted, Windows, X64, cuda, real-weights]` in `windows-candle-gpu-real-weights`;
 - refuses to share the dispatch with another measurement flag, and refuses an `inference_revision`
   that is not the Cargo pin;
 - clears `RUSTC_WRAPPER`;
 - builds the release API with `backend-candle` under vcvars64 + `NVCC_CCBIN`;
-- runs the acceptance matrix with a fresh per-run app data dir and HF home under
+- runs the acceptance matrix, or the explicit FP8-only install preparation, with a fresh per-run app data dir and HF home under
   `E:\sceneworks-terminal\sc-23002-yue2\<run>` (a cold ~11 GB YuE2 install plus the ~2.76 GB
   conditional cover closure; the shared
   `E:\huggingface\hub` is never used);
-- runs the CUDA profile campaign on that data dir and HF home unless the explicit
-  `yue2_acceptance_only` rerun flag is set;
+- runs the full CUDA profile campaign by default, skips it for `yue2_acceptance_only`, or captures
+  only the FP8 case for `yue2_fp8_profile_only`;
 - uploads the evidence and receipts (never audio) before it enforces the verdict.
 
 The ordinary `candle-worker` lane stands down for this dispatch, because every `cuda` listener
@@ -210,11 +222,13 @@ it exits 0 when none of those checks failed.
 
 ## Captured evidence (2026-09-29)
 
-The frozen inference source is M2 `99a60541a73706fb67b4e78f44458774423ffb8e`. The ten
-source-owned records in `docs/calibration/yue2/` are all **current completed** under
-`node scripts/yue2-memory-profile.mjs plan`: five Metal and five CUDA cases, including both
+The baseline inference source was M2 `99a60541a73706fb67b4e78f44458774423ffb8e`. The ten
+source-owned records in `docs/calibration/yue2/` were **current completed** under that closure:
+five Metal and five CUDA cases, including both
 long-context captures. They retain the SceneWorks revision and admission estimate of their own
-capture. The four original Metal records contain eleven `UNDER-PRICED` stage observations; the
+capture. The new FP8 route changes the source closure, so the checker may mark these records stale
+under a later pin; their measured bytes and historical validity are unchanged, and currency is
+advisory under `FEATURE_DEVELOPMENT.md`. The four original Metal records contain eleven `UNDER-PRICED` stage observations; the
 later admission correction does not rewrite those measurements. The resumed Metal q4-default
 record has real external samples in all five stages (load 6, plan 6, semantic 16, acoustic 39,
 decode 4), with a 6,864,981,976-byte peak.

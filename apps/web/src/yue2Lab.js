@@ -64,6 +64,7 @@ export const YUE2_FIELD_KINDS = Object.freeze({
   decoder: ["create", "fromPlan", "cover", "renderVersion", "decode"],
   tier: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
   precision: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
+  arMode: ["create", "plan", "fromPlan", "cover", "renderVersion"],
   offloadPolicy: ["create", "fromPlan", "cover", "renderVersion"],
   "memory.acoustic": ["create", "fromPlan", "cover", "renderVersion"],
   "memory.decode": ["create", "fromPlan", "cover", "renderVersion", "decode"],
@@ -141,6 +142,7 @@ export function defaultYue2Settings() {
     tier: "",
     decoder: "",
     precision: "",
+    arMode: "",
     offloadPolicy: "",
     stageResidency: "",
     chunkAttention: "",
@@ -181,6 +183,8 @@ export function restoreYue2Settings(saved) {
       out.presets = Array.isArray(restored) ? restored.filter(isPreset) : [];
     } else if (key === "editDraft" || key === "importDraft") {
       out[key] = restored && typeof restored === "object" && !Array.isArray(restored) ? { ...value, ...restored } : value;
+    } else if (key === "arMode") {
+      out.arMode = ["", "native", "experimentalFp8"].includes(restored) ? restored : "";
     } else if (typeof value === typeof restored) {
       out[key] = restored;
     }
@@ -318,6 +322,7 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
     decoder: (target.decoder !== undefined ? target.decoder : s.decoder) || undefined,
     tier: s.tier || undefined,
     precision: s.precision || undefined,
+    arMode: s.arMode || undefined,
     offloadPolicy: s.offloadPolicy || undefined,
     planJobId: trimmed(s.restorePlanJobId),
     sourceJobId: trimmed(target.sourceJobId),
@@ -415,6 +420,15 @@ export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
   const problems = [];
   if (context.hasProject === false) {
     problems.push("Open or create a workspace first.");
+  }
+  if (YUE2_FIELD_KINDS.arMode.includes(kind) && s.arMode === "experimentalFp8") {
+    if (s.tier !== "bf16") problems.push("Experimental FP8 AR needs the bf16 tier selected explicitly.");
+    if (s.precision === "fp32") problems.push("Experimental FP8 AR needs BF16 compute, not FP32.");
+    const capabilities = context.selectedGpuCapabilities ?? [];
+    if (!context.requestedGpu || context.requestedGpu === "auto" ||
+        !["nvidia", "candle", "int8_convrot"].every((capability) => capabilities.includes(capability))) {
+      problems.push("Select a CUDA GPU with compute capability 8.9+ for experimental FP8 AR; Auto cannot choose this mode safely.");
+    }
   }
   if (YUE2_FIELD_KINDS.seed.includes(kind)) {
     const seedProblem = seedValueProblem(s.seed);

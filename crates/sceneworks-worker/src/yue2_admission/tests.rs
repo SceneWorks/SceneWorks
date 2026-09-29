@@ -70,8 +70,32 @@ fn load(tier: Yue2Tier) -> Yue2LoadFacts {
     Yue2LoadFacts {
         tier,
         precision: Yue2Precision::Default,
+        ar: Yue2ArMode::Native,
         sequential_offload: false,
     }
+}
+
+#[test]
+fn production_load_facts_keep_explicit_fp8_for_host_originals() {
+    let load_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
+        std::path::PathBuf::from("/unused-yue2-weights"),
+    ))
+    .with_yue2_ar_mode(gen_core::Yue2ArMode::ExperimentalFp8);
+    let facts = Yue2LoadFacts::of(Yue2Tier::Bf16, &load_spec);
+    assert_eq!(facts.ar, Yue2ArMode::Fp8);
+    let shape = shape_of(
+        &builtin_yue2_entry(),
+        &default_request(),
+        facts,
+        None,
+        facts.ar,
+    )
+    .unwrap();
+    let est = priced(&shape, Yue2Backend::Cuda, Yue2Controls::production());
+    assert!(
+        est.weights.host_bytes > 0,
+        "retained BF16 originals must be charged to host RAM"
+    );
 }
 
 fn default_request() -> GenerationRequest {

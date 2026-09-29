@@ -955,9 +955,10 @@ function jobBlock(workflow, at) {
 test("windows-candle runs the YuE2 terminal acceptance and profile only on dispatch, on the real-weights card", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
-  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision") && names.includes("yue2_acceptance_only"));
+  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision") && names.includes("yue2_acceptance_only") && names.includes("yue2_fp8_profile_only"));
   assert.equal(defaults.run_yue2_terminal_cuda, "false");
   assert.equal(defaults.yue2_acceptance_only, "false");
+  assert.equal(defaults.yue2_fp8_profile_only, "false");
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
@@ -978,6 +979,8 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(ordinaryDispatchGuard, /RUN_YUE2_TERMINAL_CUDA: \$\{\{ inputs\.run_yue2_terminal_cuda \}\}/);
   assert.match(ordinaryDispatchGuard, /if \(\$env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and \$env:RUN_YUE2_TERMINAL_CUDA -ne 'true'\) \{/);
   assert.match(ordinaryDispatchGuard, /throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'/);
+  assert.match(ordinaryDispatchGuard, /throw 'yue2_fp8_profile_only requires run_yue2_terminal_cuda=true'/);
+  assert.match(ordinaryDispatchGuard, /yue2_fp8_profile_only and yue2_acceptance_only are mutually exclusive/);
 
   const step = (name) => {
     const start = job.indexOf(`      - name: ${name}\n`);
@@ -988,6 +991,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const validate = step("Validate the YuE2 terminal dispatch");
   assert.match(validate, /throw 'the YuE2 terminal profile cannot share a dispatch with another measurement flag'/);
   assert.match(validate, /inference_revision must equal the Cargo\.toml inference pin/);
+  assert.match(validate, /YuE2 acceptance-only and FP8-profile-only cannot share a dispatch/);
   assert.match(step("Disable unstable sccache wrapper for the YuE2 terminal build"), /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
   const inference = step("Check out the exact YuE2 terminal inference source");
   assert.match(inference, /if: \$\{\{ !inputs\.yue2_acceptance_only \}\}/);
@@ -999,19 +1003,32 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(build, vcvars);
   assert.match(build, /cargo build --release --locked -p sceneworks-rust-api --features backend-candle/);
   const acceptance = step("Run the YuE2 terminal acceptance matrix (CUDA)");
+  assert.match(acceptance, /if: \$\{\{ !inputs\.yue2_fp8_profile_only \}\}/);
   assert.match(acceptance, vcvars);
   assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-home "%YUE2_TERMINAL_STATE%\\hf-home" --api-bin target\\release\\sceneworks-rust-api\.exe/);
   const profile = step("Run the YuE2 memory profile campaign (CUDA)");
-  assert.match(profile, /if: \$\{\{ !inputs\.yue2_acceptance_only \}\}/);
+  assert.match(profile, /if: \$\{\{ !inputs\.yue2_acceptance_only && !inputs\.yue2_fp8_profile_only \}\}/);
   assert.match(profile, vcvars);
   // The profile resolves the acceptance run's installed weights from the same per-run HF home.
   assert.match(profile, /set HF_HUB_CACHE=\n {10}set HUGGINGFACE_HUB_CACHE=\n {10}set HF_HOME=%YUE2_TERMINAL_STATE%\\hf-home\n/);
   assert.match(profile, /node scripts\\yue2-memory-profile\.mjs run --backend cuda .*--inference-repo "%GITHUB_WORKSPACE%\\\.terminal\\inference" --data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
+  const fp8Install = step("Install YuE2 for the single FP8 profile case (not acceptance)");
+  assert.match(fp8Install, /if: \$\{\{ inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(fp8Install, /--profile-install-only .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
+  const fp8Profile = step("Capture only the experimental FP8 CUDA profile case");
+  assert.match(fp8Profile, /steps\.yue2_fp8_install\.outcome == 'success'/);
+  assert.match(fp8Profile, /node scripts\\yue2-memory-profile\.mjs capture --case yue2:bf16:cuda:experimental-fp8-ar/);
+  const fp8Verify = step("Verify the single FP8 profile record");
+  assert.match(fp8Verify, /outcome\.status -ne 'completed'/);
+  assert.match(fp8Verify, /request\.arMode -ne 'experimentalFp8'/);
+  assert.match(fp8Verify, /outcome\.engineQuantization -ne 'fp8'/);
+  assert.match(fp8Verify, /weights\.hostBytes -lt 2147483648/);
+  assert.match(fp8Verify, /node scripts\\yue2-memory-profile\.mjs check \$recordPath/);
   assert.match(job, /^ {6}YUE2_TERMINAL_STATE: 'E:\\/m);
   // Receipts only: the app state (which holds the audio) is never an upload path, and audio is excluded.
   const upload = step("Upload the YuE2 terminal records and receipts (no audio)");
   assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
-  assert.match(upload, /name: sc-23002-yue2-cuda\$\{\{ inputs\.yue2_acceptance_only && '-acceptance-only' \|\| '' \}\}/);
+  assert.match(upload, /name: sc-23002-yue2-cuda\$\{\{ inputs\.yue2_acceptance_only && '-acceptance-only' \|\| inputs\.yue2_fp8_profile_only && '-fp8-profile-only' \|\| '' \}\}/);
   assert.match(upload, /!\*\*\/\*\.wav/);
   assert.doesNotMatch(upload, /YUE2_TERMINAL_STATE|app-data|E:\\/);
   // The verdict follows receipt upload. The standard run requires both harnesses; an
@@ -1021,6 +1038,11 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   assert.match(verdict, /steps\.yue2_acceptance\.outcome/);
   assert.match(verdict, /steps\.yue2_profile\.outcome/);
   assert.match(verdict, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
+  assert.match(verdict, /YUE2_FP8_PROFILE_ONLY: \$\{\{ inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(verdict, /FP8_INSTALL_OUTCOME: \$\{\{ steps\.yue2_fp8_install\.outcome \}\}/);
+  assert.match(verdict, /FP8_PROFILE_OUTCOME: \$\{\{ steps\.yue2_fp8_profile\.outcome \}\}/);
+  assert.match(verdict, /FP8_VERIFY_OUTCOME: \$\{\{ steps\.yue2_fp8_verify\.outcome \}\}/);
+  assert.match(verdict, /Installation preparation is explicitly incomplete as acceptance/);
   assert.match(verdict, /memory profile was intentionally skipped; use separately retained profile evidence/);
   assert.match(verdict, /if \(\$env:ACCEPTANCE_OUTCOME -ne 'success' -or \(\$env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and \$env:PROFILE_OUTCOME -ne 'success'\)\) \{/);
   assert.match(verdict, /throw "YuE2 terminal evidence failed after upload/);

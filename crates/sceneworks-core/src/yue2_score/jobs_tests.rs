@@ -40,6 +40,10 @@ fn with_field(mut spec: Yue2JobSpec, field: &str) -> Yue2JobSpec {
         "decoder" => spec.decoder = Some(Decoder::Legacy),
         "tier" => spec.tier = Some(Tier::Q8),
         "precision" => spec.precision = Some(ComputePrecision::Fp32),
+        "arMode" => {
+            spec.ar_mode = Some(ArMode::ExperimentalFp8);
+            spec.tier = Some(Tier::Bf16);
+        }
         "offloadPolicy" => spec.offload_policy = Some(OffloadPolicy::Sequential),
         "memory.acoustic" => {
             spec.memory = Some(MemoryControls {
@@ -82,6 +86,47 @@ fn every_kind_accepts_its_minimal_request() {
     for kind in Yue2JobKind::ALL {
         validate_request(&base(kind)).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
     }
+}
+
+#[test]
+fn experimental_fp8_is_explicit_and_only_on_bf16_generation() {
+    for kind in [
+        Yue2JobKind::Create,
+        Yue2JobKind::Plan,
+        Yue2JobKind::FromPlan,
+        Yue2JobKind::Cover,
+        Yue2JobKind::RenderVersion,
+    ] {
+        let mut spec = base(kind);
+        assert!(serde_json::to_value(&spec).unwrap().get("arMode").is_none());
+        spec.ar_mode = Some(ArMode::ExperimentalFp8);
+        spec.tier = Some(Tier::Bf16);
+        validate_request(&spec).unwrap();
+        assert_eq!(
+            serde_json::to_value(&spec).unwrap()["arMode"],
+            "experimentalFp8"
+        );
+        spec.tier = None;
+        assert_eq!(validate_request(&spec).unwrap_err().field, "arMode");
+        for tier in [Tier::Q8, Tier::Q4] {
+            spec.tier = Some(tier);
+            assert_eq!(validate_request(&spec).unwrap_err().field, "arMode");
+        }
+        spec.tier = Some(Tier::Bf16);
+        spec.precision = Some(ComputePrecision::Fp32);
+        assert_eq!(validate_request(&spec).unwrap_err().field, "arMode");
+    }
+    for kind in [Yue2JobKind::Decode, Yue2JobKind::Transcribe] {
+        let mut spec = base(kind);
+        spec.ar_mode = Some(ArMode::ExperimentalFp8);
+        assert_eq!(validate_request(&spec).unwrap_err().field, "arMode");
+    }
+    let old: Yue2JobSpec = serde_json::from_value(serde_json::json!({
+        "kind": "create", "lyrics": "la"
+    }))
+    .unwrap();
+    assert_eq!(old.ar_mode, None);
+    assert_eq!(serde_json::to_value(&old).unwrap().get("arMode"), None);
 }
 
 #[test]

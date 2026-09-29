@@ -69,6 +69,13 @@
       "renderVersion",
       "decode"
     ],
+    "arMode": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
     "offloadPolicy": [
       "create",
       "fromPlan",
@@ -363,6 +370,14 @@
       "kind": "transcribe",
       "sourceAudioAssetId": "asset_take",
       "requestedGpu": "auto"
+    },
+    {
+      "kind": "create",
+      "lyrics": "[verse]\nhello",
+      "planning": "full",
+      "tier": "bf16",
+      "arMode": "experimentalFp8",
+      "requestedGpu": "0"
     }
   ]
 }

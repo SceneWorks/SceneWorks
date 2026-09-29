@@ -581,6 +581,36 @@ async fn refuse_plan_request_mismatch(
     spec: &Yue2JobSpec,
     plan: &RunSource,
 ) -> Result<(), ApiError> {
+    // A saved plan is bound to its AR mode. The engine includes it in the run identity; reject
+    // a cross-mode restore before it queues rather than loading weights only to fail on identity.
+    let id = plan.job_id.clone();
+    let original = store_call(state.clone(), move |store, _| store.get_job(&id)).await?;
+    let original_spec: Yue2JobSpec = serde_json::from_value(
+        original
+            .payload
+            .get(yue2::PAYLOAD_KEY)
+            .cloned()
+            .ok_or_else(|| {
+                source_unavailable(format!(
+                    "planJobId: job {} has no YuE2 request.",
+                    plan.job_id
+                ))
+            })?,
+    )
+    .map_err(|_| {
+        source_unavailable(format!(
+            "planJobId: job {} has an invalid YuE2 request.",
+            plan.job_id
+        ))
+    })?;
+    if spec.ar_mode.unwrap_or_default() != original_spec.ar_mode.unwrap_or_default() {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            format!("YuE2 job: arMode differs from saved plan job {}; choose its original AR mode or plan again.", plan.job_id),
+            YUE2_PLAN_REQUEST_MISMATCH_CODE,
+            json!({ "field": "arMode", "planJobId": plan.job_id }),
+        ));
+    }
     let style = spec.style.as_deref().filter(|style| !style.is_empty());
     let lyrics = spec.lyrics.as_deref();
     if style.is_none() && lyrics.is_none() {

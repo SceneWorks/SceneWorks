@@ -526,6 +526,15 @@ async fn a_restored_plan_with_other_words_is_refused_before_it_queues() {
         assert_eq!(response["code"], "yue2_plan_request_mismatch", "{response}");
         assert_eq!(response["context"]["field"], field, "{response}");
     }
+    let (status, response) = submit(
+        &app,
+        &project_id,
+        json!({"kind": "fromPlan", "planJobId": plan_id, "tier": "bf16", "arMode": "experimentalFp8"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{response}");
+    assert_eq!(response["code"], "yue2_plan_request_mismatch", "{response}");
+    assert_eq!(response["context"]["field"], "arMode", "{response}");
     assert_eq!(
         job_count(
             request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
@@ -549,6 +558,92 @@ async fn a_restored_plan_with_other_words_is_refused_before_it_queues() {
         json!({"kind": "fromPlan", "planJobId": plan_id}),
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_restored_plan_cannot_switch_ar_mode_before_it_queues() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp_dir);
+    let project_id = project(&app).await;
+    let jobs = submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "plan", "lyrics": "[verse]\nhey", "tier": "bf16", "arMode": "experimentalFp8", "licenseAcknowledged": true}),
+    )
+    .await;
+    let plan_id = jobs[0]["id"].as_str().unwrap().to_owned();
+    let run_id = jobs[0]["payload"]["yue2"]["runId"].as_str().unwrap();
+    register(&app, WORKER).await;
+    claim(&app, WORKER).await;
+    let (_, created) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}"),
+        Value::Null,
+    )
+    .await;
+    let run_dir = std::path::PathBuf::from(created["path"].as_str().unwrap())
+        .join(format!("yue2/runs/{run_id}"));
+    std::fs::create_dir_all(&run_dir).unwrap();
+    std::fs::write(
+        run_dir.join("request.json"),
+        json!({"style": "", "lyrics": "[verse]\nhey", "cot": "full", "seed": 7}).to_string(),
+    )
+    .unwrap();
+    finish(
+        &app,
+        &plan_id,
+        "completed",
+        json!({"yue2": {
+            "status": "completed", "kind": "plan",
+            "run": {"dir": format!("yue2/runs/{run_id}"), "kind": "plan", "identity": "aa", "planIdentity": "bb"},
+        }}),
+        None,
+    )
+    .await;
+    let count = |jobs: Value| jobs.as_array().expect("jobs is an array").len();
+    let queued_before = count(
+        request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
+            .await
+            .1,
+    );
+    for ar_mode in [None, Some("native")] {
+        let mut body = json!({"kind": "fromPlan", "planJobId": plan_id, "tier": "bf16"});
+        if let Some(ar_mode) = ar_mode {
+            body["arMode"] = json!(ar_mode);
+        }
+        let (status, response) = submit(&app, &project_id, body).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{response}");
+        assert_eq!(response["code"], "yue2_plan_request_mismatch", "{response}");
+        assert_eq!(response["context"]["field"], "arMode", "{response}");
+    }
+    assert_eq!(
+        count(
+            request(app.clone(), "GET", "/api/v1/jobs", Value::Null)
+                .await
+                .1
+        ),
+        queued_before
+    );
+    let restored = submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "fromPlan", "planJobId": plan_id, "tier": "bf16", "arMode": "experimentalFp8"}),
+    )
+    .await;
+    assert_eq!(restored[0]["payload"]["yue2"]["arMode"], "experimentalFp8");
+    let selected = submit_ok(
+        &app,
+        &project_id,
+        json!({"kind": "create", "lyrics": "[verse]\nla", "tier": "bf16", "arMode": "experimentalFp8", "requestedGpu": "0", "licenseAcknowledged": true}),
+    )
+    .await;
+    assert_eq!(
+        selected[0]["requestedGpu"], "0",
+        "numeric CUDA worker id persists in the queue envelope"
+    );
+    assert_eq!(selected[0]["payload"]["yue2"]["arMode"], "experimentalFp8");
 }
 
 /// A completed plan becomes a score version linked to its job, once; a score-version render —
