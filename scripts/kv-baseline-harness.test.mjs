@@ -26,6 +26,12 @@ function memoryPhases(persistent) {
     return {phase,pid:9,source:"footprint -p",timestamp:"2026-08-29T12:00:0"+i+".000Z",physFootprintBytes,physFootprintPeakBytes:footprintPeak,mlx:{source:"mlx_rs::memory",activeBytes:active[i],cacheBytes:10,peakBytes:mlxPeak}};
   });
 }
+const compressionFixture = () => ({
+  method:"group-affine",representationIdentity:"sc-20676-packed-group-affine-v1",representationVersion:2,bits:2,quantizationGroupSize:32,
+  deviceCodeBytes:64,deviceMetadataBytes:32,hostPayloadBytes:96,physicalKvBytes:192,persistentKvRepresentation:"compressed",
+  fusedCalls:10,fallbackCalls:1,fallbacks:[{operation:"prompt-cache-reuse",reason:"the provider prefix cache stores dense contiguous K/V",calls:1}],
+  fullCacheDequantizations:0,failedDispatches:0,
+});
 function fixture(mode="dense", coordinate={}, extra={}) {
   const family = coordinate.family || "llama";
   const contract = SC20671_MODEL_CONTRACTS[family];
@@ -51,7 +57,7 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
   memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20}},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...extra});
+    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture()}:{}),...extra});
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
@@ -696,4 +702,55 @@ test("cache release is exact lifecycle evidence and never allocation",()=>{
 test("allocation accounting fails closed outside the safe integer range",()=>{
   assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.allocationEvents[0].bytes=Number.MAX_SAFE_INTEGER+1;}),/safe integer|schema validation/);
   assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.capacity=Number.MAX_SAFE_INTEGER;}),/overflow|schema validation/);
+});
+
+test("SC-20676 compressed receipts carry reasoned fused/fallback evidence and no dense reconstruction", () => {
+  const accepted = fixture("compressed");
+  assert.equal(accepted.compression.method, "group-affine");
+  assert.equal(validateReceipt(accepted), accepted);
+  const withCompression = (edit) => {
+    const compression = compressionFixture();
+    edit(compression);
+    return () => fixture("compressed", {}, { compression });
+  };
+  // The block belongs exactly to compressed rows.
+  assert.throws(() => fixture("dense", {}, { compression: compressionFixture() }), /schema validation|present exactly/);
+  assert.throws(() => rebuildReceipt(accepted, (raw) => { delete raw.compression; }), /schema validation|present exactly/);
+  // Silent fallback: uncounted, unreasoned, or unordered dense execution, or no fused execution.
+  assert.throws(withCompression((c) => { c.fallbackCalls = 2; }), /not fully reasoned/);
+  assert.throws(withCompression((c) => { c.fallbacks[0].reason = " "; }), /unreasoned/);
+  assert.throws(withCompression((c) => {
+    c.fallbacks = [{ operation: "z", reason: "r", calls: 1 }, { operation: "a", reason: "r", calls: 1 }];
+    c.fallbackCalls = 2;
+  }), /unordered/);
+  assert.throws(withCompression((c) => { c.fusedCalls = 0; }), /never executed the fused/);
+  assert.throws(withCompression((c) => {
+    c.persistentKvRepresentation = "dense-fallback"; c.fallbacks = []; c.fallbackCalls = 0;
+  }), /persistent KV representation/);
+  assert.throws(() => fixture("compressed", {}, { lifecycle: { ...lifecycle, denseFallback: false, denseFallbackFallbackReason: "unsupported" } }), /not fully reasoned/);
+  // Dense reconstruction: counted by the cache, or witnessed by an explicit allocation event.
+  assert.throws(withCompression((c) => { c.fullCacheDequantizations = 1; }), /reconstructed a dense full cache/);
+  assert.throws(() => rebuildReceipt(accepted, (raw) => {
+    raw.memory.allocationEvents.push({ kind: "full_cache_materialization", role: "cache", lifetime: "transient", phase: "prefill-peak", timestamp: "2026-08-29T12:00:02.300Z", bytes: 1 });
+  }), /full-cache temporary/);
+  // Physical bytes are the measured components, not bit accounting.
+  assert.throws(withCompression((c) => { c.hostPayloadBytes += 1; }), /do not reconcile with measured storage/);
+});
+
+test("SC-20676 compressed campaigns are uniform and bound to their resume identity mode", () => {
+  const identity = sampleResumeIdentity(safetyPolicy);
+  const policySha256 = campaignPolicySha256(safetyPolicy);
+  const denseSha = campaignResumeIdentitySha256(identity, policySha256);
+  const compressedSha = campaignResumeIdentitySha256({ ...identity, mode: "compressed", kvMethod: "group-affine" }, policySha256);
+  assert.notEqual(denseSha, compressedSha);
+  assert.throws(() => campaignResumeIdentitySha256({ ...identity, mode: "compressed" }, policySha256), /compressed mode binding/);
+  assert.throws(() => campaignResumeIdentitySha256({ ...identity, mode: "dense", kvMethod: "group-affine" }, policySha256), /compressed mode binding/);
+  const rows = SC20671_COVERING_SCHEDULE.map(([family, contextBand, requestMode, prefillMode, processTemperature], index) =>
+    withCampaignPid(fixture("compressed", { family, contextBand, requestMode, prefillMode, processTemperature }), index + 10));
+  const summary = validateCampaign(rows);
+  assert.equal(summary.mode, "compressed");
+  assert.equal(summary.kvMethod, "group-affine");
+  const mixed = [...rows];
+  mixed[0] = withCampaignPid(fixture("dense", rows[0].matrix), 10);
+  assert.throws(() => validateCampaign(mixed), /mixes dense and compressed/);
 });

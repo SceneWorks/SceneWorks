@@ -708,7 +708,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "schemaVersion", "harnessVersion", "runId", "capturedAt", "mode", "status",
       "contractHash", "receiptSha256", "provenance", "matrix", "geometry", "memory",
-      "timings", "quality", "lifecycle", "cancellation", "warmup",
+      "timings", "quality", "lifecycle", "cancellation", "warmup", "compression",
     ],
     "receipt",
   );
@@ -1190,7 +1190,69 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       fail("warmup suite seal is not bound to compile probe operation evidence");
     }
   }
+  if ((receipt.mode === "compressed") !== Object.hasOwn(receipt, "compression")) {
+    fail("compression evidence must be present exactly on compressed receipts");
+  }
+  if (receipt.mode === "compressed") validateCompression(receipt);
   return receipt;
+}
+
+/**
+ * Mirrors the inference producer's SC-20676 compressed-row rules: fused execution happened, every
+ * dense fallback is reasoned and counted, physical bytes are the sum of their measured
+ * components, and no dense full-cache reconstruction survived.
+ */
+function validateCompression(receipt) {
+  const compression = receipt.compression;
+  exactKeys(compression, [
+    "method", "representationIdentity", "representationVersion", "bits", "quantizationGroupSize",
+    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes",
+    "persistentKvRepresentation", "fusedCalls", "fallbackCalls", "fallbacks",
+    "fullCacheDequantizations", "failedDispatches",
+  ], "compression");
+  if (!/^[a-z0-9-]+$/.test(compression.method)) fail("compression.method must be a method identifier");
+  text(compression.representationIdentity, "compression.representationIdentity");
+  for (const field of ["representationVersion", "bits", "quantizationGroupSize", "deviceCodeBytes", "physicalKvBytes"]) {
+    positiveInteger(compression[field], `compression.${field}`);
+  }
+  for (const field of ["deviceMetadataBytes", "hostPayloadBytes", "fusedCalls", "fallbackCalls", "fullCacheDequantizations", "failedDispatches"]) {
+    nonnegativeInteger(compression[field], `compression.${field}`);
+  }
+  if (BigInt(compression.deviceCodeBytes) + BigInt(compression.deviceMetadataBytes)
+      + BigInt(compression.hostPayloadBytes) !== BigInt(compression.physicalKvBytes)) {
+    fail("compressed physical KV bytes do not reconcile with measured storage");
+  }
+  if (compression.fusedCalls === 0) {
+    fail("compressed row never executed the fused compressed-domain reader");
+  }
+  if (!Array.isArray(compression.fallbacks)) fail("compression.fallbacks must be an array");
+  let calls = 0n;
+  compression.fallbacks.forEach((fallback, index) => {
+    exactKeys(fallback, ["operation", "reason", "calls"], `compression.fallbacks[${index}]`);
+    const prior = compression.fallbacks[index - 1];
+    if (typeof fallback.operation !== "string" || fallback.operation.trim() === ""
+      || typeof fallback.reason !== "string" || fallback.reason.trim() === ""
+      || !Number.isSafeInteger(fallback.calls) || fallback.calls <= 0
+      || (prior && !(prior.operation < fallback.operation
+        || (prior.operation === fallback.operation && prior.reason < fallback.reason)))) {
+      fail("compressed dense fallback is unreasoned, empty, or unordered");
+    }
+    calls += BigInt(fallback.calls);
+  });
+  if (calls !== BigInt(compression.fallbackCalls)
+    || (compression.failedDispatches !== 0 && compression.fallbackCalls === 0)
+    || (compression.fallbackCalls !== 0 && receipt.lifecycle.denseFallback !== true)) {
+    fail("compressed fallback calls are not fully reasoned");
+  }
+  const representationAgrees = compression.persistentKvRepresentation === "compressed"
+    ? receipt.memory.persistentKvBytes < receipt.memory.denseTheoreticalKvBytes
+    : compression.persistentKvRepresentation === "dense-fallback" && compression.fallbackCalls !== 0;
+  if (!representationAgrees) {
+    fail("compressed persistent KV representation disagrees with its evidence");
+  }
+  if (compression.fullCacheDequantizations !== 0) {
+    fail("compressed row reconstructed a dense full cache");
+  }
 }
 
 export function buildReceipt(input) {
@@ -1786,9 +1848,15 @@ export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
   const familyModels = new Map();
   const coldPids = new Set();
   let campaignIdentity;
+  let campaignMode;
   for (const receipt of receipts) {
     validateReceipt(receipt);
-    if (receipt.mode !== "dense") fail("dense baseline campaign contains a non-dense receipt");
+    // A campaign is uniformly the dense baseline or one compressed method (SC-20676).
+    const receiptMode = receipt.mode === "compressed" ? `compressed:${receipt.compression.method}` : "dense";
+    if (campaignMode !== undefined && campaignMode !== receiptMode) {
+      fail("campaign mixes dense and compressed (or compressed-method) receipts");
+    }
+    campaignMode ??= receiptMode;
     const coordinate = campaignCoordinate(receipt);
     if (coordinates.has(coordinate)) fail(`duplicate campaign coordinate ${coordinate}`);
     coordinates.add(coordinate);
@@ -1844,6 +1912,8 @@ export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
   return {
     schemaVersion: SCHEMA_VERSION,
     scheduleVersion,
+    mode: campaignMode.split(":")[0],
+    ...(campaignMode.startsWith("compressed:") ? { kvMethod: campaignMode.slice("compressed:".length) } : {}),
     complete: true,
     receipts: receipts.length,
     coordinates: coordinates.size,
@@ -1872,7 +1942,15 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
     "schemaVersion", "kind", "scheduleVersion", "coordinates", "inferenceRevision",
     "sceneWorksRevision", "executableSha256", "promptSha256", "policySha256",
     "llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference",
+    "mode", "kvMethod",
   ], "campaign resume identity");
+  // A compressed campaign binds its mode and method; dense identities carry neither key.
+  if (Object.hasOwn(identity, "mode") || Object.hasOwn(identity, "kvMethod")) {
+    if (identity.mode !== "compressed" || typeof identity.kvMethod !== "string"
+      || !/^[a-z0-9-]+$/.test(identity.kvMethod)) {
+      fail("campaign resume identity has a malformed compressed mode binding");
+    }
+  }
   if (identity.schemaVersion !== 1 || identity.kind !== "sc-20671-resume-identity"
     || identity.scheduleVersion !== 2
     || canonicalJson(identity.coordinates) !== canonicalJson(SC20671_COVERING_SCHEDULE.map((row) => row.join("-")))) {
@@ -2046,6 +2124,11 @@ export async function readCampaignSet(directory, {
     if (version === 2) {
       const candidate = resumeIdentity[`${receipt.matrix.family}Candidate`];
       const reference = resumeIdentity[`${receipt.matrix.family}Reference`];
+      const identityMode = resumeIdentity.mode === "compressed" ? "compressed" : "dense";
+      if (receipt.mode !== identityMode
+        || (receipt.compression?.method ?? undefined) !== resumeIdentity.kvMethod) {
+        fail("campaign receipt dense/compressed mode differs from trusted resume identity");
+      }
       if (receipt.provenance.inferenceRevision !== resumeIdentity.inferenceRevision
         || receipt.provenance.sceneWorksRevision !== resumeIdentity.sceneWorksRevision
         || receipt.provenance.modelFileSha256 !== candidate.sha256

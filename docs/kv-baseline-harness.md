@@ -181,6 +181,43 @@ captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is
 a sealed `logs/<row>.attempt-<n>.unaccepted.json` record with its reason and is
 never an accepted row.
 
+## Compressed rows (SC-20676)
+
+`sc20671-kv-baseline parent --mode compressed --kv-method <method>` runs the same
+frozen eight-row schedule, fixtures, and geometry with each row's KV held in the
+method's compressed cache and fused decode attention (only `group-affine`, the
+SC-20675 packed 2-bit cache read by the SC-20676 Metal kernel, is wired). Each
+worker runs the compressed arm, then a dense-KV reference arm on the **same
+candidate snapshot**, and gates quality against it (contract v3). The resume
+identity carries `mode: "compressed"` and `kvMethod`, so dense and compressed
+rows can never resume into each other, and a published campaign is uniformly
+one mode (`validateCampaign` reports `mode`/`kvMethod`).
+
+A compressed receipt carries a `compression` block (dense receipts never do):
+the method and cache-reported representation identity; the peak live
+compressed storage measured from the cache's retained device arrays plus its
+allocated host staging payload (`physicalKvBytes` must equal their sum);
+whether `memory.persistentKvBytes` measured the compressed representation or an
+explicit dense fallback of the coordinate operation; fused call and dense
+fallback counts with every fallback's operation and reason (prefix-cache reuse
+and the synchronous batch decoder are dense by construction and are always
+listed); and `fullCacheDequantizations`. Readers reject a compressed receipt
+with no fused calls, an unreasoned or uncounted fallback, a dense full-cache
+reconstruction (counted by the cache or witnessed by a
+`full_cache_materialization`/`dense_cache_temporary` allocation event), or
+physical bytes that do not reconcile. One-command GPU-window launch, from the
+inference checkout:
+
+```text
+eval "$(scripts/fetch-prebuilt-mlx.sh --build-type Release)" && export PMETAL_MLX_PREBUILT_DIR PMETAL_METALLIB_PATH && \
+SCENEWORKS_ROOT=/abs/SceneWorks cargo run --locked --release -p mlx-llm --bin sc20671_kv_baseline -- \
+  parent --mode compressed --kv-method group-affine \
+  --llama-snapshot <llama-4bit> --qwen-snapshot <qwen-4bit> \
+  --llama-fp32-reference-snapshot <llama-bf16> --qwen-fp32-reference-snapshot <qwen-bf16> \
+  --prompt-file <prompt.txt> --safety-policy <policy.json> \
+  --resume-dir /abs/sc20676-compressed-resume --out /abs/sc20676-compressed-campaign
+```
+
 ## Contract v3 change record
 
 Contract v3 (`config/kv-baseline-quality-contract.json`) replaced v2 before any
