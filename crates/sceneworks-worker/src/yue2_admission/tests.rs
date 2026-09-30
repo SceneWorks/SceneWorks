@@ -13,6 +13,41 @@ use serde_json::json;
 
 use super::*;
 
+/// The profile inventory reported `12.0` for GPU 0, while its admission lacked worker-startup
+/// discovery. The capture's selected-GPU reading must override even a stale cache for another card;
+/// an unreadable or sub-floor reading must still refuse FP8. Mutation: ignoring the capture reading
+/// in `selected_compute_cap` fails the stale-cache and missing-cache assertions.
+#[tokio::test]
+async fn fp8_capture_admission_uses_only_its_selected_gpus_live_capability() {
+    for (raw, expected) in [
+        ("12.0\n", Some(12.0)),
+        ("8.6\n", Some(8.6)),
+        ("N/A\n", None),
+    ] {
+        let capture = capture_selected_compute_cap("0", |gpu_id| async move {
+            assert_eq!(gpu_id, "0", "the profile must probe its selected GPU");
+            crate::gpu::parse_selected_compute_cap(raw)
+        })
+        .await;
+        let cap = selected_compute_cap(Some(12.0));
+        assert_eq!(cap, expected, "a stale cache must not override {raw:?}");
+        assert_eq!(selected_compute_cap(None), expected);
+        assert!(
+            fp8_supported(
+                Yue2Tier::Bf16,
+                Yue2Backend::Cuda,
+                Yue2Precision::Default,
+                cap
+            )
+            .is_ok()
+                == (expected == Some(12.0)),
+            "{raw:?} must admit FP8 exactly when the selected GPU meets the floor"
+        );
+        drop(capture);
+        assert_eq!(selected_compute_cap(Some(8.9)), Some(8.9));
+    }
+}
+
 /// Serializes the tests that open leases or run [`check`]: the live-lease table is process-wide, so
 /// a lease another test holds would otherwise shrink a unified budget under a parallel test. Async
 /// tests hold it around their own current-thread runtime (never across an `.await`).

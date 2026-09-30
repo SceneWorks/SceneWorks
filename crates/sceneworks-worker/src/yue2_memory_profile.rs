@@ -431,6 +431,13 @@ fn capture_case() {
         .enable_all()
         .build()
         .expect("runtime");
+    // The normal worker discovers and caches its selected GPU before claiming a job. This
+    // standalone capture enters admission directly, so bind a fresh reading for this GPU instead.
+    // An unreadable capability remains None and the FP8 gate still refuses it.
+    let _selected_cap = runtime.block_on(crate::yue2_admission::capture_selected_compute_cap(
+        &settings.gpu_id,
+        |gpu_id| async move { crate::gpu::nvidia_compute_cap(&gpu_id).await },
+    ));
     let admitted = runtime.block_on(crate::yue2_admission::check(
         contract::MODEL_ID,
         &entry,

@@ -2440,6 +2440,8 @@ thread_local! {
     static BUDGET_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Whether this thread's admissions read the real hardware budget (the profile capture).
     static HARDWARE_PROBE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The profile capture's fresh reading for its selected GPU. `Some(None)` is an unreadable cap.
+    static CAPTURE_COMPUTE_CAP: std::cell::Cell<Option<Option<f32>>> = const { std::cell::Cell::new(None) };
     /// Evictions [`check`] requested on this thread.
     static EVICTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
@@ -2475,6 +2477,38 @@ pub(crate) fn budget_probes() -> usize {
 )]
 pub(crate) fn probe_hardware_in_this_test() {
     HARDWARE_PROBE.with(|probe| probe.set(true));
+}
+
+/// Bind the standalone profile's selected-GPU probe to its admission. That test enters the job
+/// gate without worker startup, so the process-wide startup cache has not necessarily been filled.
+/// Its own reading wins even when a previous test populated that cache for a different GPU.
+#[cfg(test)]
+pub(crate) async fn capture_selected_compute_cap<F, Fut>(
+    gpu_id: &str,
+    probe: F,
+) -> CaptureComputeCap
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Option<f32>>,
+{
+    let cap = probe(gpu_id.to_owned()).await;
+    let previous = CAPTURE_COMPUTE_CAP.with(|slot| slot.replace(Some(cap)));
+    CaptureComputeCap(previous)
+}
+
+#[cfg(test)]
+pub(crate) struct CaptureComputeCap(Option<Option<f32>>);
+
+#[cfg(test)]
+impl Drop for CaptureComputeCap {
+    fn drop(&mut self) {
+        CAPTURE_COMPUTE_CAP.with(|slot| slot.set(self.0));
+    }
+}
+
+#[cfg(test)]
+fn selected_compute_cap(cached: Option<f32>) -> Option<f32> {
+    CAPTURE_COMPUTE_CAP.with(|slot| slot.get().unwrap_or(cached))
 }
 
 /// Evictions [`check`] requested on this thread (tests only).
@@ -2568,13 +2602,16 @@ async fn probe_budget(gpu_id: &str) -> Option<Yue2Budget> {
         crate::vram_gate::cuda_vram_cap_gb(),
     )?;
     let bytes = |gib: f64| (gib.max(0.0) * BYTES_PER_GIB) as u64;
+    let compute_cap = crate::gpu::cached_compute_cap();
+    #[cfg(test)]
+    let compute_cap = selected_compute_cap(compute_cap);
     Some(Yue2Budget::Dedicated {
         free_bytes: bytes(budget.free_gb),
         total_bytes: bytes(budget.total_gb),
         reclaimable_bytes: bytes(crate::vram_gate::reclaimable_pool_gb(gpu_id)),
         host_available_bytes: host_available_bytes().await,
         gpu_id: gpu_id.to_owned(),
-        compute_cap: crate::gpu::cached_compute_cap(),
+        compute_cap,
     })
 }
 
