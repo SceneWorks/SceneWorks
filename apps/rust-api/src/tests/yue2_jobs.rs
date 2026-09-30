@@ -1128,6 +1128,70 @@ async fn replays_cannot_swap_the_model_inject_a_block_or_share_a_run() {
     );
 }
 
+#[tokio::test]
+async fn replay_precision_requires_a_choice_for_new_runs_but_preserves_legacy_retries() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let (app, state) = app_with_yue1_and_yue2_state(&temp_dir);
+    let project_id = project(&app).await;
+    let legacy_id = stored_yue2_job(&state, &project_id, json!({}));
+    let duplicate_route = format!("/api/v1/jobs/{legacy_id}/duplicate");
+
+    // A stored pre-policy job can retry the same run without changing its Legacy semantics.
+    let (status, retried) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{legacy_id}/retry"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{retried}");
+    assert_eq!(retried["payload"]["yue2"]["runId"], "yue2run_stored");
+    assert!(retried["payload"]["yue2"].get("computePolicy").is_none());
+
+    // A duplicate starts a fresh run. Removing this check would queue an implicit Legacy run.
+    let (status, missing) = request(
+        app.clone(),
+        "POST",
+        &duplicate_route,
+        json!({"payloadChanges": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{missing}");
+    assert_eq!(missing["code"], "yue2_missing_field");
+    assert_eq!(missing["context"]["field"], "computePolicy");
+
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &duplicate_route,
+        json!({"payloadChanges": {"yue2": {
+            "kind": "create", "lyrics": "[verse]\nla", "runId": "yue2run_stored",
+            "computePolicy": "bf16"
+        }}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(duplicate["payload"]["yue2"]["computePolicy"], "bf16");
+    assert_ne!(duplicate["payload"]["yue2"]["runId"], "yue2run_stored");
+
+    let explicit = submit_ok(&app, &project_id, create_body()).await;
+    let explicit_id = explicit[0]["id"].as_str().unwrap();
+    let mut downgraded = explicit[0]["payload"]["yue2"].clone();
+    downgraded.as_object_mut().unwrap().remove("computePolicy");
+    // A nested payload replacement must not turn an explicit-policy retry into Legacy.
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{explicit_id}/retry"),
+        json!({"payloadChanges": {"yue2": downgraded}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert_eq!(refused["code"], "yue2_invalid_combination");
+    assert_eq!(refused["context"]["field"], "computePolicy");
+}
+
 fn stored_yue2_job(state: &AppState, project_id: &str, payload_extra: Value) -> String {
     let mut payload = json!({
         "projectId": project_id, "model": "yue2", "prompt": "",

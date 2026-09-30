@@ -944,12 +944,28 @@ pub(crate) async fn canonicalize_replayed_audio_payload(
                 .map_err(|error| {
                     ApiError::internal(format!("stored YuE2 job is malformed: {error}"))
                 })?;
+                // A retry keeps its run identity. An explicit policy must not silently fall back
+                // to the historical Legacy policy, while an unchanged pre-policy job may retry.
+                if original.compute_policy.is_some() && spec.compute_policy.is_none() {
+                    return Err(refused(
+                        "computePolicy",
+                        "a retry cannot remove its explicit compute policy".into(),
+                    ));
+                }
                 if !valid_transcription_retry(&original, &spec) {
                     return Err(refused(
                         "yue2",
                         "a recording transcription retry must keep its original recording, settings and run identity; duplicate the job for a new transcription".into(),
                     ));
                 }
+            } else if spec.kind != Yue2JobKind::Transcribe && spec.compute_policy.is_none() {
+                // A duplicate starts a new run, so it follows the same explicit-choice rule as
+                // the YuE2 submission route even when its source predates that rule.
+                return Err(spec_error(Yue2JobError {
+                    code: yue2::MISSING_FIELD,
+                    field: "computePolicy".into(),
+                    message: "choose Auto, BF16, or FP32 explicitly for the new run".into(),
+                }));
             }
             let entry = resolve_model_manifest_entry(state, yue2::MODEL_ID).await?;
             merged.insert("modelManifestEntry".to_owned(), entry);
