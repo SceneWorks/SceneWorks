@@ -776,7 +776,7 @@ pub(crate) async fn create_yue2_jobs(
     Path(project_id): Path<String>,
     ApiJson(mut spec): ApiJson<Yue2JobSpec>,
 ) -> Result<(StatusCode, Json<Value>), ApiError> {
-    yue2::validate_request(&spec).map_err(spec_error)?;
+    yue2::validate_new_submission(&spec).map_err(spec_error)?;
     let project = project_call(state.clone(), {
         let project_id = project_id.clone();
         move |store| store.get_project(&project_id)

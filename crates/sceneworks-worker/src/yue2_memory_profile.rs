@@ -86,6 +86,8 @@ pub(crate) struct ProfileCase {
     decoder: String,
     #[serde(default)]
     ar_mode: Option<contract::ArMode>,
+    #[serde(default)]
+    compute_policy: Option<contract::ComputePolicy>,
     request: CaseRequest,
 }
 
@@ -113,6 +115,7 @@ pub(crate) fn case_spec(case: &ProfileCase) -> Result<Yue2JobSpec, String> {
         "decoder": case.decoder,
         "tier": case.tier,
         "arMode": case.ar_mode,
+        "computePolicy": case.compute_policy,
     });
     let spec: Yue2JobSpec =
         serde_json::from_value(body).map_err(|error| format!("{}: {error}", case.id))?;
@@ -330,13 +333,18 @@ pub(crate) fn stage_seconds(marks: &[(&'static str, f64)]) -> serde_json::Map<St
 /// flags and identities (`result.json`: run, plan, decoder, latent) and its engine timings, and the
 /// per-stage wall times. Every run field is required — a run record that lacks one is an error, never
 /// a default, so a record can never claim an identity or a truncation state the run did not state.
-pub(crate) fn outcome_json(
+struct OutcomeModes<'a> {
+    ar_mode: contract::ArMode,
+    compute_policy: Option<contract::ComputePolicy>,
+    engine_config: Option<&'a Value>,
+}
+
+fn outcome_json(
     case_id: &str,
     audio_seconds: f64,
     rms: f32,
     run_result: &Value,
-    ar_mode: contract::ArMode,
-    engine_config: Option<&Value>,
+    modes: OutcomeModes<'_>,
     stage_seconds: serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
     let field = |key: &str| {
@@ -375,8 +383,9 @@ pub(crate) fn outcome_json(
         "decoder": field("decoder")?,
         "latent": latent,
     });
-    if ar_mode == contract::ArMode::ExperimentalFp8 {
-        let quantization = engine_config
+    if modes.ar_mode == contract::ArMode::ExperimentalFp8 {
+        let quantization = modes
+            .engine_config
             .and_then(|config| config.get("quantization"))
             .and_then(Value::as_str)
             .ok_or_else(|| "the run's config.json has no effective quantization".to_owned())?;
@@ -386,6 +395,30 @@ pub(crate) fn outcome_json(
             ));
         }
         outcome["engineQuantization"] = json!(quantization);
+    }
+    if let Some(policy) = modes.compute_policy {
+        let expected = match policy {
+            contract::ComputePolicy::Auto => ("auto", "bfloat16", "float32"),
+            contract::ComputePolicy::Bf16 => ("bf16", "bfloat16", "bfloat16"),
+            contract::ComputePolicy::Fp32 => ("fp32", "float32", "float32"),
+        };
+        let config = modes
+            .engine_config
+            .ok_or("the run has no effective config.json")?;
+        for (key, wanted) in [
+            ("compute_policy", expected.0),
+            ("model_dtype", expected.1),
+            ("vae_dtype", expected.2),
+        ] {
+            if config.get(key).and_then(Value::as_str) != Some(wanted) {
+                return Err(format!(
+                    "the run's effective {key} is not requested {wanted}"
+                ));
+            }
+        }
+        outcome["engineComputePolicy"] = json!(expected.0);
+        outcome["engineModelDtype"] = json!(expected.1);
+        outcome["engineVaeDtype"] = json!(expected.2);
     }
     Ok(outcome)
 }
@@ -503,7 +536,9 @@ fn capture_case() {
         &std::fs::read(published.dir.join("result.json")).expect("read the run's result.json"),
     )
     .expect("the run's result.json is JSON");
-    let engine_config = if case.ar_mode == Some(contract::ArMode::ExperimentalFp8) {
+    let engine_config = if case.ar_mode == Some(contract::ArMode::ExperimentalFp8)
+        || case.compute_policy.is_some()
+    {
         Some(
             serde_json::from_slice::<Value>(
                 &std::fs::read(published.dir.join("config.json"))
@@ -532,8 +567,11 @@ fn capture_case() {
         seconds,
         rms,
         &run_result,
-        case.ar_mode.unwrap_or_default(),
-        engine_config.as_ref(),
+        OutcomeModes {
+            ar_mode: case.ar_mode.unwrap_or_default(),
+            compute_policy: case.compute_policy,
+            engine_config: engine_config.as_ref(),
+        },
         stage_seconds(&marks.marks),
     )
     .unwrap_or_else(|why| panic!("{why}"));
@@ -777,8 +815,11 @@ mod tests {
             42.0,
             0.2,
             &run_result(),
-            contract::ArMode::Native,
-            None,
+            OutcomeModes {
+                ar_mode: contract::ArMode::Native,
+                compute_policy: None,
+                engine_config: None,
+            },
             marks,
         )
         .unwrap();
@@ -810,8 +851,11 @@ mod tests {
                     42.0,
                     0.2,
                     &result,
-                    contract::ArMode::Native,
-                    None,
+                    OutcomeModes {
+                        ar_mode: contract::ArMode::Native,
+                        compute_policy: None,
+                        engine_config: None
+                    },
                     Default::default(),
                 )
                 .is_err(),
@@ -829,8 +873,11 @@ mod tests {
                 42.0,
                 0.2,
                 &result,
-                contract::ArMode::ExperimentalFp8,
-                config,
+                OutcomeModes {
+                    ar_mode: contract::ArMode::ExperimentalFp8,
+                    compute_policy: None,
+                    engine_config: config,
+                },
                 Default::default(),
             )
         };
@@ -838,6 +885,40 @@ mod tests {
         assert_eq!(capture(Some(&fp8)).unwrap()["engineQuantization"], "fp8");
         assert!(capture(None).is_err());
         assert!(capture(Some(&json!({ "quantization": "none" }))).is_err());
+    }
+
+    #[test]
+    fn explicit_precision_case_binds_job_and_effective_stage_dtypes() {
+        let mut case = full_case();
+        case.compute_policy = Some(contract::ComputePolicy::Bf16);
+        let spec = case_spec(&case).unwrap();
+        assert_eq!(spec.compute_policy, Some(contract::ComputePolicy::Bf16));
+        contract::validate_new_submission(&spec).unwrap();
+        let config = json!({
+            "compute_policy": "bf16", "model_dtype": "bfloat16", "vae_dtype": "bfloat16",
+        });
+        let capture = |config: &Value| {
+            outcome_json(
+                &case.id,
+                42.0,
+                0.2,
+                &run_result(),
+                OutcomeModes {
+                    ar_mode: contract::ArMode::Native,
+                    compute_policy: case.compute_policy,
+                    engine_config: Some(config),
+                },
+                Default::default(),
+            )
+        };
+        let outcome = capture(&config).unwrap();
+        assert_eq!(outcome["engineComputePolicy"], "bf16");
+        assert_eq!(outcome["engineModelDtype"], "bfloat16");
+        assert_eq!(outcome["engineVaeDtype"], "bfloat16");
+        assert!(capture(
+            &json!({ "compute_policy": "bf16", "model_dtype": "bfloat16", "vae_dtype": "float32" })
+        )
+        .is_err());
     }
 
     /// The plan's case shape maps onto the job's request; unknown fields and values are refused.

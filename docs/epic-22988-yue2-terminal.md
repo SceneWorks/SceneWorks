@@ -50,6 +50,58 @@ The worker keeps the shipped 10 s heartbeat. Cancellation rides that heartbeat, 
 make their target stage longer than it: 3 000 forced semantic tokens for AR, 400 ODE steps for NAR,
 and the smallest decode tile for decode.
 
+## Weight tier and compute precision (pending terminal proof)
+
+The Song Lab has separate **Weight tier** and **Compute precision** controls. `bf16` is the released
+weight tier; `q8` and `q4` are locally derived compressed matmul weights. A Q8/Q4 tier does not
+mean every operation performs integer Q8/Q4 arithmetic. A fresh create, plan, saved-plan render,
+cover, score-version render or cached decode API request must include `computePolicy`:
+
+| `computePolicy` | MoT model stage | VAE decoder stage |
+|---|---|---|
+| `auto` | BF16 on a supported GPU; FP32 on CPU | FP32 |
+| `bf16` | BF16 on a supported GPU | BF16 on that GPU; CPU is refused before weights load |
+| `fp32` | FP32 | FP32 |
+
+For example, a fresh request can use
+`{"kind":"create","lyrics":"[verse] hello","tier":"q8","computePolicy":"bf16"}`.
+Omitting `computePolicy` returns a typed `yue2_missing_field` error; sending it together with the
+old `precision` field returns `yue2_invalid_combination`. The transcription-only request is a
+separate CPU model and does not accept this control. New experimental FP8 AR submissions require
+the released `bf16` weight tier, an explicitly selected supported CUDA GPU, and
+`computePolicy:"auto"`; its FP8 AR projections are a separate opt-in from floating compute policy.
+
+Explicit BF16 or FP32 applies to both stages' floating weights and activations; Q8/Q4 matmul
+weights retain their separately selected compressed representation. At each Q8/Q4 GGML projection,
+the operator casts its input activation to a transient FP32 operand, produces an FP32 matmul result,
+then casts that result back to the selected stage dtype; admission reserves this transient pair in
+addition to the compressed weights and interlayer residency. Standard FP32 kernel
+accumulators/reductions and final audio serialization do not change that stage selection. Auto
+deliberately mixes BF16 MoT with FP32 VAE on GPU and discloses both stage dtypes in the engine's
+`config.json` (`compute_policy`, `model_dtype`, `vae_dtype`). The worker's `effectiveSettings`
+reports `computePolicy` separately from the old `precision` field and includes that engine config
+after publication. A cached decode may reuse a verified compatible source latent and runs its new
+VAE under the newly requested policy; its new run identity and source provenance remain distinct.
+
+Historical queued/retried jobs keep their recorded Legacy load behavior. Earlier completed
+receipts and profile records keep the actual MoT/FP32-VAE policy they measured; neither a saved
+BF16 weight tier nor an old unspecified/default precision becomes explicit strict BF16 or Auto.
+Old saved Song Lab settings and presets with default precision require a visible compute-policy
+choice before another submission. A previously explicit `fp32` setting maps to new FP32 because
+both model stages already ran FP32. Existing API clients must send `computePolicy` on fresh
+generation/decode requests; they cannot rely on the historical default.
+
+The ten baseline Native profile records below are historical measurements, not strict-BF16 VAE
+proof. New bounded off-plan CUDA or Metal precision cases can use `capture --case-file <outside-repo.json>`
+through the same guarded native capture helper, with the case's explicit `computePolicy`; they do
+not change the checked-in plan or ingest into its corpus. Their actual GPU results and final
+precision-policy acceptance remain pending.
+
+For a fresh CUDA or Metal profile host, `yue2-acceptance.mjs --platform <cuda|metal>
+--profile-install-only` runs only the existing cold app install flow (BF16 plus both decoders and
+locally derived Q8/Q4). It leaves every acceptance case skipped and its verdict incomplete; a
+successful install preparation is not terminal acceptance.
+
 ## Cold install: a fresh, per-run Hugging Face home
 
 `--hf-home` (default `<out>/hf-home`) must be a **fresh** directory for every run. `install-cold`
@@ -225,7 +277,8 @@ it exits 0 when none of those checks failed.
 The baseline inference source was M2 `99a60541a73706fb67b4e78f44458774423ffb8e`. The ten
 source-owned records in `docs/calibration/yue2/` were **current completed** under that closure:
 five Metal and five CUDA cases, including both
-long-context captures. They retain the SceneWorks revision and admission estimate of their own
+long-context captures. Their default/Legacy GPU behavior used BF16 MoT with FP32 VAE; labels such
+as `bf16` in a case ID name the weight tier, not a strict all-stage BF16 run. They retain the SceneWorks revision and admission estimate of their own
 capture. The new FP8 route changes the source closure, so the checker may mark these records stale
 under a later pin; their measured bytes and historical validity are unchanged, and currency is
 advisory under `FEATURE_DEVELOPMENT.md`. The four original Metal records contain eleven `UNDER-PRICED` stage observations; the
@@ -249,8 +302,9 @@ The owner [accepted the retained local listening playlist](https://app.shortcut.
 it does not extend to remote-only FP8 output. Hashes, RMS, stage peaks and fidelity metrics do not
 replace a listening review.
 
-The two precision exceptions still require explicit owner disposition: FP32 standard/legacy VAEs
-at every tier, and BF16 embedding/latent-position tables plus norms/biases in q8/q4. Listening
+The owner corrected the future precision contract above; the earlier FP32 standard/legacy VAEs
+and BF16 embedding/latent-position tables plus norms/biases in q8/q4 remain historical facts of
+these records, not evidence of strict BF16 or all-integer quantized arithmetic. Listening
 acceptance does not resolve them. Weight rehosting remains gated. Preserve the Metal safety skip,
 the earlier red runs and separate run identities in final evidence; this table alone does not
 claim sc-23002 Done or feature-to-main delivery.

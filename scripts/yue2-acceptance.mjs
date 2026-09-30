@@ -180,7 +180,7 @@ export function planCases({ platform, skip = [], dryRun = false, allowMetalWorke
   for (const id of skip) caseById(id);
   return CASES.map((item) => {
     if (profileInstallOnly && item.id !== "install-cold") {
-      return { id: item.id, action: "skip", reason: "FP8 profile installation preparation only (not an acceptance run)" };
+      return { id: item.id, action: "skip", reason: "profile installation preparation only (not an acceptance run)" };
     }
     if (skip.includes(item.id)) return { id: item.id, action: "skip", reason: "skipped by the operator (--skip)" };
     if (dryRun && !item.dry) {
@@ -238,8 +238,8 @@ export function parseArgs(argv) {
   }
   if (!PLATFORMS[options.platform]) fail("--platform metal|cuda is required");
   if (!options.out) fail("--out <dir> is required");
-  if (options.profileInstallOnly && (options.platform !== "cuda" || options.dryRun || options.skip.length)) {
-    fail("--profile-install-only requires CUDA and cannot combine with --dry-run or --skip");
+  if (options.profileInstallOnly && (options.dryRun || options.skip.length)) {
+    fail("--profile-install-only cannot combine with --dry-run or --skip");
   }
   if (options.port !== undefined && (!Number.isInteger(options.port) || options.port < 1 || options.port > 65535)) fail("--port must be a TCP port");
   if (!Number.isFinite(options.jobTimeoutMinutes) || options.jobTimeoutMinutes <= 0) fail("--job-timeout-minutes must be positive");
@@ -714,7 +714,7 @@ export function exitCodeFor(summary) {
 
 export function renderMarkdown(summary) {
   const lines = [
-    summary.profileInstallOnly ? "# YuE2 FP8 profile installation preparation — CUDA (not acceptance)" :
+    summary.profileInstallOnly ? `# YuE2 profile installation preparation — ${summary.platform} (not acceptance)` :
       `# YuE2 terminal acceptance — ${summary.platform}${summary.dryRun ? " (dry run)" : ""}`,
     "",
     `Verdict: **${summary.verdict}** — ${STATUSES.map((status) => `${summary.counts[status]} ${status}`).join(", ")}${summary.missing.length ? `; not run: ${summary.missing.join(", ")}` : ""}.`,
@@ -1293,7 +1293,11 @@ class Context {
   }
 
   async submit(rec, body, expect = 201) {
-    const response = await this.call(rec, "POST", `/api/v1/projects/${this.project.id}/yue2/jobs`, body, expect);
+    const { precision, ...request } = body;
+    if (body.kind !== "transcribe" && request.computePolicy === undefined) {
+      request.computePolicy = precision === "fp32" ? "fp32" : "auto";
+    }
+    const response = await this.call(rec, "POST", `/api/v1/projects/${this.project.id}/yue2/jobs`, request, expect);
     return response.body;
   }
 

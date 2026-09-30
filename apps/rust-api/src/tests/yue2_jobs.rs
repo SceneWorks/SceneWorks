@@ -34,8 +34,19 @@ pub(super) async fn project(app: &axum::Router) -> String {
 pub(super) async fn submit(
     app: &axum::Router,
     project_id: &str,
-    body: Value,
+    mut body: Value,
 ) -> (StatusCode, Value) {
+    // These route fixtures predate the explicit compute control. Keep each fresh request honest;
+    // dedicated migration tests below exercise missing and conflicting policies without this seam.
+    if body["kind"] != "transcribe" && body.get("computePolicy").is_none() {
+        let policy = if body["precision"] == "fp32" {
+            "fp32"
+        } else {
+            "auto"
+        };
+        body.as_object_mut().unwrap().remove("precision");
+        body["computePolicy"] = json!(policy);
+    }
     request(
         app.clone(),
         "POST",
@@ -49,6 +60,32 @@ pub(super) async fn submit_ok(app: &axum::Router, project_id: &str, body: Value)
     let (status, response) = submit(app, project_id, body).await;
     assert_eq!(status, StatusCode::CREATED, "{response}");
     response["jobs"].as_array().unwrap().clone()
+}
+
+#[tokio::test]
+async fn fresh_submission_requires_explicit_compute_policy() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = app_with_yue1_and_yue2(&temp_dir);
+    let project_id = project(&app).await;
+    let route = format!("/api/v1/projects/{project_id}/yue2/jobs");
+    for body in [
+        json!({"kind":"create","lyrics":"la la"}),
+        json!({"kind":"create","lyrics":"la la","precision":"default"}),
+    ] {
+        let (status, response) = request(app.clone(), "POST", &route, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+        assert_eq!(response["code"], "yue2_missing_field", "{response}");
+    }
+    let (status, response) = request(
+        app,
+        "POST",
+        &route,
+        json!({"kind":"create","lyrics":"la la","computePolicy":"bf16","precision":"fp32"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    assert_eq!(response["code"], "yue2_invalid_combination", "{response}");
 }
 
 pub(super) async fn register(app: &axum::Router, worker: &str) {
@@ -1674,7 +1711,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
     let refused = client
         .call_tool(call(
             "yue2_render_score_version",
-            json!({"projectId": project_id, "versionId": version_id}),
+            json!({"projectId": project_id, "versionId": version_id, "computePolicy": "auto"}),
         ))
         .await
         .expect("a refusal is a tool result");
@@ -1690,7 +1727,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
     let smuggled = client
         .call_tool(call(
             "yue2_render_score_version",
-            json!({"projectId": project_id, "versionId": version_id, "licenseAcknowledged": true}),
+            json!({"projectId": project_id, "versionId": version_id, "computePolicy": "auto", "licenseAcknowledged": true}),
         ))
         .await;
     assert!(
@@ -1711,7 +1748,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
     let rendered = client
         .call_tool(call(
             "yue2_render_score_version",
-            json!({"projectId": project_id, "versionId": version_id, "steps": 8}),
+            json!({"projectId": project_id, "versionId": version_id, "steps": 8, "computePolicy": "auto"}),
         ))
         .await
         .expect("render call");
@@ -1724,6 +1761,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
     let stored = job(&http, &job_id).await;
     assert_eq!(stored["payload"]["yue2"]["versionId"], version_id);
     assert_eq!(stored["payload"]["yue2"]["steps"], 8);
+    assert_eq!(stored["payload"]["yue2"]["computePolicy"], "auto");
     assert_eq!(stored["payload"]["commercialUse"], false);
 
     let polled = client
@@ -1742,7 +1780,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
             "yue2_cover_score_version",
             json!({"projectId": project_id, "versionId": version_id, "mode": "melody",
                    "keep": "vocal", "lyrics": "[Verse]\nNuevas palabras",
-                   "translatedFrom": "[Verse]\nNew words"}),
+                   "translatedFrom": "[Verse]\nNew words", "computePolicy": "auto"}),
         ))
         .await
         .expect("cover call");
@@ -1756,6 +1794,7 @@ async fn mcp_agent_renders_a_score_version_only_after_the_user_accepts_the_licen
         cover_job["payload"]["yue2"]["cover"]["translatedFrom"], "[Verse]\nNew words",
         "{cover_job}"
     );
+    assert_eq!(cover_job["payload"]["yue2"]["computePolicy"], "auto");
     assert_eq!(covered["renderNotice"], REGENERATION_NOTICE);
 
     let missing = client
@@ -1790,6 +1829,6 @@ fn the_web_lab_request_bodies_deserialize_and_validate_against_the_core_contract
         // Mutation that reds this: a field the builder sends that `Yue2JobSpec` does not declare.
         let spec: Yue2JobSpec =
             serde_json::from_value(body.clone()).unwrap_or_else(|error| panic!("{body}: {error}"));
-        contract::validate_request(&spec).unwrap_or_else(|error| panic!("{body}: {error}"));
+        contract::validate_new_submission(&spec).unwrap_or_else(|error| panic!("{body}: {error}"));
     }
 }

@@ -40,6 +40,7 @@ fn with_field(mut spec: Yue2JobSpec, field: &str) -> Yue2JobSpec {
         "decoder" => spec.decoder = Some(Decoder::Legacy),
         "tier" => spec.tier = Some(Tier::Q8),
         "precision" => spec.precision = Some(ComputePrecision::Fp32),
+        "computePolicy" => spec.compute_policy = Some(ComputePolicy::Auto),
         "arMode" => {
             spec.ar_mode = Some(ArMode::ExperimentalFp8);
             spec.tier = Some(Tier::Bf16);
@@ -86,6 +87,38 @@ fn every_kind_accepts_its_minimal_request() {
     for kind in Yue2JobKind::ALL {
         validate_request(&base(kind)).unwrap_or_else(|e| panic!("{kind:?}: {e}"));
     }
+}
+
+#[test]
+fn fresh_requests_require_separate_explicit_compute_policy() {
+    for kind in Yue2JobKind::ALL {
+        let mut spec = base(kind);
+        if kind == Yue2JobKind::Transcribe {
+            validate_new_submission(&spec).unwrap();
+            continue;
+        }
+        assert_eq!(
+            validate_new_submission(&spec).unwrap_err().code,
+            "yue2_missing_field"
+        );
+        spec.compute_policy = Some(ComputePolicy::Auto);
+        validate_new_submission(&spec).unwrap();
+        spec.compute_policy = Some(ComputePolicy::Bf16);
+        validate_new_submission(&spec).unwrap();
+        spec.precision = Some(ComputePrecision::Fp32);
+        assert_eq!(
+            validate_new_submission(&spec).unwrap_err().code,
+            "yue2_invalid_combination"
+        );
+    }
+    let mut fp8 = base(Yue2JobKind::Create);
+    fp8.tier = Some(Tier::Bf16);
+    fp8.ar_mode = Some(ArMode::ExperimentalFp8);
+    fp8.compute_policy = Some(ComputePolicy::Bf16);
+    assert_eq!(
+        validate_new_submission(&fp8).unwrap_err().code,
+        "yue2_invalid_combination"
+    );
 }
 
 #[test]

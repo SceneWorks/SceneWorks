@@ -42,13 +42,14 @@ use gen_core::{
     GenerationRequest, Generator, LoadSpec, OffloadPolicy as GenOffloadPolicy, Precision, Progress,
     Quant, SavedPlan, SongCover, SongCoverMode, SongCoverVoice, SongDecoder, SongParams,
     SongPlanning, TokenSampling as GenTokenSampling, WeightsSource, Yue2ArMode as EngineArMode,
+    Yue2ComputePolicy as EngineComputePolicy,
 };
 use sceneworks_core::model_artifacts::artifact_selection::{
     derived_snapshot_state, local_derivation, local_derivation_snapshot_dir, DerivedSnapshotState,
 };
 use sceneworks_core::yue2_score::jobs::{
-    self as contract, ArMode, ComputePrecision, CoverKeep, CoverMode, Decoder, OffloadPolicy,
-    Planning, Tier, TokenSampling, Yue2JobKind, Yue2JobSpec,
+    self as contract, ArMode, ComputePolicy, ComputePrecision, CoverKeep, CoverMode, Decoder,
+    OffloadPolicy, Planning, Tier, TokenSampling, Yue2JobKind, Yue2JobSpec,
 };
 use sceneworks_core::yue2_score::store::ScoreVersionRecord;
 
@@ -688,9 +689,18 @@ pub(crate) fn resolve_load(
     if let Some(quant) = quant {
         load = load.with_quant(quant);
     }
-    if spec.precision == Some(ComputePrecision::Fp32) {
+    let compute_policy = match spec.compute_policy {
+        Some(ComputePolicy::Auto) => EngineComputePolicy::Auto,
+        Some(ComputePolicy::Bf16) => EngineComputePolicy::Bf16,
+        Some(ComputePolicy::Fp32) => EngineComputePolicy::Fp32,
+        None => EngineComputePolicy::Legacy,
+    };
+    if spec.compute_policy == Some(ComputePolicy::Fp32)
+        || (spec.compute_policy.is_none() && spec.precision == Some(ComputePrecision::Fp32))
+    {
         load.precision = Precision::Fp32;
     }
+    load = load.with_yue2_compute_policy(compute_policy);
     load = load.with_yue2_ar_mode(match spec.ar_mode.unwrap_or_default() {
         ArMode::Native => EngineArMode::Native,
         ArMode::ExperimentalFp8 => EngineArMode::ExperimentalFp8,
@@ -1396,7 +1406,13 @@ fn effective_settings(
         "precision": spec.precision.map(|p| match p {
             ComputePrecision::Default => "default",
             ComputePrecision::Fp32 => "fp32",
-        }).unwrap_or("default"),
+        }).or_else(|| spec.compute_policy.is_none().then_some("default")),
+        "computePolicy": match spec.compute_policy {
+            Some(ComputePolicy::Auto) => "auto",
+            Some(ComputePolicy::Bf16) => "bf16",
+            Some(ComputePolicy::Fp32) => "fp32",
+            None => "legacy",
+        },
         "arMode": match spec.ar_mode.unwrap_or_default() {
             ArMode::Native => "native",
             ArMode::ExperimentalFp8 => "experimentalFp8",

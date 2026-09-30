@@ -270,7 +270,7 @@ function lastJobBody() {
   return call ? JSON.parse(call[2].body) : null;
 }
 
-const ENABLED_SETTINGS = { optIn: true };
+const ENABLED_SETTINGS = { optIn: true, computePolicy: "auto" };
 
 function seedLab(yue2lab = ENABLED_SETTINGS, audio = { songLab: true }) {
   seedStudioSettingsFromServer({ project_1: { audio, yue2lab } });
@@ -410,7 +410,12 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await render(context());
     expect(byLabel(lab(), "Lyrics").value).toBe("restored lyrics");
     expect(byLabel(lab(), "Style").value).toBe("lofi");
-    expect(byLabel(lab(), "Tier").value).toBe("q8");
+    expect(byLabel(lab(), "Weight tier").value).toBe("q8");
+    await click(buttonStarting(lab(), "Advanced"));
+    expect(byLabel(lab(), "Compute precision").value).toBe("");
+    expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
+    await choose(byLabel(lab(), "Compute precision"), "bf16");
+    expect(byLabel(lab(), "Compute precision").value).toBe("bf16");
     expect(calls("/license-acknowledgment", "PUT")).toHaveLength(0);
   });
 
@@ -427,7 +432,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("requires an explicit supported GPU for the experimental FP8 AR control and persists the choice", async () => {
     await openEnabledLab();
     await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
-    await choose(byLabel(lab(), "Tier"), "bf16");
+    await choose(byLabel(lab(), "Weight tier"), "bf16");
     await click(buttonStarting(lab(), "Advanced"));
     await choose(byLabel(lab(), "AR mode"), "experimentalFp8");
     expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
@@ -448,7 +453,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await type(byLabel(lab(), "Seed"), "42");
     await type(byLabel(lab(), "Guidance"), "1.5");
     await type(byLabel(lab(), "ODE steps"), "32");
-    await choose(byLabel(lab(), "Precision"), "fp32");
+    await choose(byLabel(lab(), "Compute precision"), "fp32");
     await choose(byLabel(lab(), "Offload"), "sequential");
     const score = { Temperature: "0.9", "Top-p": "0.95", "Top-k": "40", "Repetition penalty": "1.1", "Penalty window": "32", "Min tokens": "64", "Max tokens": "2048" };
     const semantic = { Temperature: "1", "Top-p": "0.9", "Top-k": "50", "Repetition penalty": "1.2", "Penalty window": "16", "Min tokens": "300", "Max tokens": "8000" };
@@ -459,7 +464,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await type(byLabel(lab(), "Attention chunk size"), "393216");
     await choose(byLabel(lab(), "Tiled decode"), "on");
     await type(byLabel(lab(), "Decode tile"), "256");
-    await choose(byLabel(lab(), "Tier"), "q8");
+    await choose(byLabel(lab(), "Weight tier"), "q8");
     await choose(byLabel(lab(), "Decoder"), "legacy");
   }
   const SCORE_SAMPLING = { temperature: 0.9, topP: 0.95, topK: 40, repetitionPenalty: 1.1, penaltyWindow: 32, minTokens: 64, maxTokens: 2048 };
@@ -488,7 +493,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       semanticSampling: SEMANTIC_SAMPLING,
       decoder: "legacy",
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       offloadPolicy: "sequential",
       count: 3,
       memory: MEMORY,
@@ -511,7 +516,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       planning: "full",
       scoreSampling: SCORE_SAMPLING,
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       requestedGpu: "auto",
     });
   });
@@ -529,7 +534,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab().querySelector('[data-testid="yue2-score-preview"]').textContent).toContain("88 BPM");
     await click(buttonWithText(lab(), "Generate song"));
     await settle();
-    expect(lastJobBody()).toEqual({ kind: "create", lyrics: "[verse]\nhello", planning: "full", score: "X:1\nK:C\nC4|", requestedGpu: "auto" });
+    expect(lastJobBody()).toEqual({ kind: "create", lyrics: "[verse]\nhello", planning: "full", score: "X:1\nK:C\nC4|", computePolicy: "auto", requestedGpu: "auto" });
   });
 
   // A score exported from the lab opens with its licence header, which the native dialect refuses
@@ -586,7 +591,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       semanticSampling: SEMANTIC_SAMPLING,
       decoder: "legacy",
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       offloadPolicy: "sequential",
       planJobId: "job_plan",
       memory: MEMORY,
@@ -648,7 +653,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       }
       return undefined;
     } }));
-    seedLab({ optIn: true, tab: "cover", transcribeAssetId: "asset_take" });
+    seedLab({ optIn: true, tab: "cover", transcribeAssetId: "asset_take", computePolicy: "auto" });
     await render(context({ models: [...STANDARD, YUE1, entry], assets: [{ id: "asset_take", type: "audio", displayName: "take.wav" }] }));
     const review = lab().querySelector('[data-testid="yue2-transcription-review"]');
     expect(review.textContent).toContain("Review the vocal octave");
@@ -815,7 +820,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       semanticSampling: SEMANTIC_SAMPLING,
       decoder: "legacy",
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       offloadPolicy: "sequential",
       cover: { versionId: "ver_1", mode: "melody", keep: "vocal", translatedFrom: "[verse]\nhola" },
       memory: MEMORY,
@@ -831,7 +836,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await typeText(byLabel(lab(), "Cover ABC score"), "X:1\nK:C\nC4|");
     await click(buttonWithText(lab(), "Generate cover"));
     await settle();
-    expect(lastJobBody()).toEqual({ kind: "cover", lyrics: "[verse]\nhello", cover: { score: "X:1\nK:C\nC4|", mode: "melody" }, requestedGpu: "auto" });
+    expect(lastJobBody()).toEqual({ kind: "cover", lyrics: "[verse]\nhello", cover: { score: "X:1\nK:C\nC4|", mode: "melody" }, computePolicy: "auto", requestedGpu: "auto" });
   });
 
   // ---- AC2: score preview, bounded edits, renders, comparisons --------------------------------
@@ -959,7 +964,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       semanticSampling: SEMANTIC_SAMPLING,
       decoder: "legacy",
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       offloadPolicy: "sequential",
       memory: MEMORY,
       requestedGpu: "auto",
@@ -1132,7 +1137,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(card, "Decode again"));
     await settle();
     // Mutation that reds this: sending `s.decoder` (the lab-wide select) for a decode.
-    expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "standard", requestedGpu: "auto" });
+    expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "standard", computePolicy: "auto", requestedGpu: "auto" });
   });
 
   it("offers the legacy decoder for Decode again only once its add-on is installed", async () => {
@@ -1158,7 +1163,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await choose(byLabel(card, "Decode again with"), "legacy");
     await click(buttonWithText(card, "Decode again"));
     await settle();
-    expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "legacy", requestedGpu: "auto" });
+    expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "legacy", computePolicy: "auto", requestedGpu: "auto" });
   });
 
   it("offers no Decode again until YuE2 and the chosen tier are installed", async () => {
@@ -1207,17 +1212,17 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("saves presets that visibly retain the model version and licence", async () => {
     await openEnabledLab();
     await typeText(byLabel(lab(), "Style"), "shoegaze");
-    await choose(byLabel(lab(), "Tier"), "q8");
+    await choose(byLabel(lab(), "Weight tier"), "q8");
     await type(byLabel(lab(), "Preset name"), "Wall of sound");
     await click(buttonStarting(lab(), "Save preset"));
     const presets = lab().querySelector('[data-testid="yue2-presets"]');
     expect(presets.textContent).toContain("Wall of sound");
     expect(presets.textContent).toContain("YuE2 (v2) · CC BY-NC 4.0 · Noncommercial");
     await typeText(byLabel(lab(), "Style"), "changed");
-    await choose(byLabel(lab(), "Tier"), "bf16");
+    await choose(byLabel(lab(), "Weight tier"), "bf16");
     await click(buttonWithText(presets, "Wall of sound"));
     // A preset restores controls; free text (style, lyrics, scores) is never part of a preset.
-    expect(byLabel(lab(), "Tier").value).toBe("q8");
+    expect(byLabel(lab(), "Weight tier").value).toBe("q8");
     expect(byLabel(lab(), "Style").value).toBe("changed");
   });
 
@@ -1236,7 +1241,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await openEnabledLab(context({ jobs: [plan] }));
     await click(buttonWithText(lab(), "Restore a saved plan"));
     await choose(byLabel(lab(), "Saved plan"), "job_plan");
-    await choose(byLabel(lab(), "Tier"), "q8");
+    await choose(byLabel(lab(), "Weight tier"), "q8");
     await type(byLabel(lab(), "Preset name"), "Restored");
     await click(buttonStarting(lab(), "Save preset"));
     await wait(500);
@@ -1264,7 +1269,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(lab().querySelector('[data-testid="yue2-presets"]'), "Old"));
     // Mutation that reds this: applying `preset.settings` unfiltered in `applyPreset`.
     expect(buttonWithText(lab(), "Sample a new plan").getAttribute("aria-checked")).toBe("true");
-    expect(byLabel(lab(), "Tier").value).toBe("q8");
+    expect(byLabel(lab(), "Weight tier").value).toBe("q8");
+    await click(buttonStarting(lab(), "Advanced"));
+    expect(byLabel(lab(), "Compute precision").value).toBe("", "the older preset must ask for a fresh choice");
   });
 
   it("installs a derived tier through the deriver when YuE2 is not installed", async () => {

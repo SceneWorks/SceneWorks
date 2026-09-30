@@ -21,6 +21,7 @@ import {
   corpusStatus,
   coverage,
   expandCases,
+  externalCaseItem,
   gradeRecord,
   parseArgs,
   parseStageMarks,
@@ -138,6 +139,42 @@ test("the checked-in plan validates against the catalog and closure table and ex
   const fp8 = cases.filter((item) => item.arMode === "experimentalFp8");
   assert.deepEqual(fp8.map((item) => item.id), ["yue2:bf16:cuda:experimental-fp8-ar"]);
   assert.equal(caseFile(fp8[0]).arMode, "experimentalFp8");
+});
+
+test("an off-plan explicit precision case uses the guarded capture path without replacing corpus cases", async () => {
+  const body = {
+    id: "yue2:bf16:metal:strict-bf16-standard", tier: "bf16", decoder: "standard",
+    computePolicy: "bf16", request: clone(sources.plan.requests.default.request),
+  };
+  const item = externalCaseItem(body, sources.plan);
+  assert.deepEqual(caseFile(item), body);
+  assert.equal(item.backend, "metal");
+  assert.throws(() => externalCaseItem({ ...body, id: "yue2:bf16:metal:default" }, sources.plan), /cannot be overridden/);
+  assert.throws(() => externalCaseItem({ ...body, computePolicy: undefined }, sources.plan), /explicit computePolicy/);
+  const dir = await mkdtemp(path.join(os.tmpdir(), "yue2-precision-case-"));
+  try {
+    const file = path.join(dir, "case.json");
+    await writeFile(file, JSON.stringify(body));
+    const planned = await planCapture({ externalCaseFile: file, outDir: dir, sources });
+    assert.equal(planned.item.computePolicy, "bf16");
+    assert.equal(planned.guarded.eventFile, path.join(planned.outDir, "watchdog.jsonl"));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an explicit precision record must preserve its effective model and VAE dtypes", () => {
+  const item = externalCaseItem({
+    id: "yue2:bf16:metal:strict-bf16-standard", tier: "bf16", decoder: "standard",
+    computePolicy: "bf16", request: clone(sources.plan.requests.default.request),
+  }, sources.plan);
+  const captured = record(item);
+  captured.outcome.engineComputePolicy = "bf16";
+  captured.outcome.engineModelDtype = "bfloat16";
+  captured.outcome.engineVaeDtype = "bfloat16";
+  validateRecord(captured);
+  captured.outcome.engineVaeDtype = "float32";
+  assert.throws(() => validateRecord(captured), /model\/VAE dtypes/);
 });
 
 test("the plan refuses an undeclared lane, a non-catalog tier and a field the entrypoint cannot read", () => {

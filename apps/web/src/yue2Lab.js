@@ -64,6 +64,7 @@ export const YUE2_FIELD_KINDS = Object.freeze({
   decoder: ["create", "fromPlan", "cover", "renderVersion", "decode"],
   tier: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
   precision: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
+  computePolicy: ["create", "plan", "fromPlan", "cover", "renderVersion", "decode"],
   arMode: ["create", "plan", "fromPlan", "cover", "renderVersion"],
   offloadPolicy: ["create", "fromPlan", "cover", "renderVersion"],
   "memory.acoustic": ["create", "fromPlan", "cover", "renderVersion"],
@@ -142,6 +143,8 @@ export function defaultYue2Settings() {
     tier: "",
     decoder: "",
     precision: "",
+    // No implicit migration from the older mixed-precision default. A fresh render must choose.
+    computePolicy: "",
     arMode: "",
     offloadPolicy: "",
     stageResidency: "",
@@ -185,10 +188,15 @@ export function restoreYue2Settings(saved) {
       out[key] = restored && typeof restored === "object" && !Array.isArray(restored) ? { ...value, ...restored } : value;
     } else if (key === "arMode") {
       out.arMode = ["", "native", "experimentalFp8"].includes(restored) ? restored : "";
+    } else if (key === "computePolicy") {
+      out.computePolicy = ["", "auto", "bf16", "fp32"].includes(restored) ? restored : "";
     } else if (typeof value === typeof restored) {
       out[key] = restored;
     }
   }
+  // The old explicit FP32 setting already meant FP32 for every stage. Its old default meant
+  // BF16 MoT plus FP32 VAE, so it cannot be called explicit BF16 or silently renamed Auto.
+  if (saved.computePolicy === undefined && saved.precision === "fp32") out.computePolicy = "fp32";
   return out;
 }
 
@@ -321,7 +329,7 @@ export function buildYue2JobRequest(kind, settings, target = {}, requestedGpu = 
     // through the lab-wide select.
     decoder: (target.decoder !== undefined ? target.decoder : s.decoder) || undefined,
     tier: s.tier || undefined,
-    precision: s.precision || undefined,
+    computePolicy: s.computePolicy || undefined,
     arMode: s.arMode || undefined,
     offloadPolicy: s.offloadPolicy || undefined,
     planJobId: trimmed(s.restorePlanJobId),
@@ -421,9 +429,12 @@ export function yue2RequestProblems(kind, settings, target = {}, context = {}) {
   if (context.hasProject === false) {
     problems.push("Open or create a workspace first.");
   }
+  if (YUE2_FIELD_KINDS.computePolicy.includes(kind) && !["auto", "bf16", "fp32"].includes(s.computePolicy)) {
+    problems.push("Choose a compute precision (Auto, BF16, or FP32) before starting a new run. The weight tier does not set compute precision.");
+  }
   if (YUE2_FIELD_KINDS.arMode.includes(kind) && s.arMode === "experimentalFp8") {
     if (s.tier !== "bf16") problems.push("Experimental FP8 AR needs the bf16 tier selected explicitly.");
-    if (s.precision === "fp32") problems.push("Experimental FP8 AR needs BF16 compute, not FP32.");
+    if (s.computePolicy && s.computePolicy !== "auto") problems.push("Experimental FP8 AR requires Auto compute precision.");
     const capabilities = context.selectedGpuCapabilities ?? [];
     if (!context.requestedGpu || context.requestedGpu === "auto" ||
         !["nvidia", "candle", "int8_convrot"].every((capability) => capabilities.includes(capability))) {

@@ -777,6 +777,7 @@ export function Yue2RecordingCover({
         <li>Review the transcription, then review or edit the score version it imported.</li>
         <li>Cover that score version with your own style and lyrics.</li>
       </ol>
+      <p className="yue2-muted">SheetSage2 and MERT-v2-FullSong transcribe on CPU under their own settings. The Song Lab compute policy applies when YuE2 generates or decodes the cover, not to this transcription.</p>
 
       {!setup.installed ? (
         <CoverSetup
