@@ -437,6 +437,30 @@ fn safe_join(project_path: &Path, rel: &str) -> Option<PathBuf> {
     Some(path)
 }
 
+/// The source decode command: every frame, in presentation order, to `in_%05d.png` (numbered from
+/// 1). `-fps_mode passthrough` neither drops nor duplicates, so PNG `k` is the probe's frame `k-1`
+/// and the probe's timestamps describe it (sc-24391). Kept pure so tests run this exact command.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn seedvr2_source_decode_args(source: &Path, frames_dir: &Path) -> Vec<String> {
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-y".to_owned(),
+        "-i".to_owned(),
+        source.to_string_lossy().into_owned(),
+        "-fps_mode".to_owned(),
+        "passthrough".to_owned(),
+        frames_dir
+            .join("in_%05d.png")
+            .to_string_lossy()
+            .into_owned(),
+    ]
+}
+
 /// Decode every frame of `source` to a numbered PNG sequence ON DISK (native resolution — the engine
 /// bicubic-upscales internally to the target) and return the ordered PNG paths, WITHOUT loading any
 /// pixels into RAM (sc-9595). Uses the bundled ffmpeg (`run_ffmpeg`); `-fps_mode passthrough` keeps the
@@ -457,23 +481,7 @@ async fn decode_seedvr2_source_to_disk(
     let _ = tokio::fs::remove_dir_all(frames_dir).await;
     tokio::fs::create_dir_all(frames_dir).await?;
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    run_ffmpeg(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-i".to_owned(),
-            source.to_string_lossy().into_owned(),
-            "-fps_mode".to_owned(),
-            "passthrough".to_owned(),
-            frames_dir
-                .join("in_%05d.png")
-                .to_string_lossy()
-                .into_owned(),
-        ],
-        Some(ctx),
-    )
-    .await?;
+    run_ffmpeg(seedvr2_source_decode_args(source, frames_dir), Some(ctx)).await?;
     let dir = frames_dir.to_path_buf();
     let paths = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
@@ -540,8 +548,36 @@ pub(super) fn parse_seedvr2_source_probe(stderr: &str) -> Option<Seedvr2SourcePr
     })
 }
 
-/// Decode-free, VFR-safe source probe using the bundled FFmpeg null mux. The shared runner preserves
-/// the normal heartbeat/cancellation lifecycle while FFmpeg walks the source.
+/// The probe command: one FFmpeg null-mux pass that decodes every source frame. `showinfo` logs
+/// each decoded frame's presentation timestamp and the stream time base, which is where the
+/// upscale's output timing comes from ([`parse_seedvr2_source_timing`], sc-24391). `checksum=0`
+/// skips the per-plane checksums the filter would otherwise compute on every frame; the option
+/// exists in every FFmpeg the worker ships with (5.1+). Kept pure so tests run this exact command.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn seedvr2_source_probe_args(source: &Path) -> Vec<String> {
+    vec![
+        "ffmpeg".to_owned(),
+        "-nostdin".to_owned(),
+        "-hide_banner".to_owned(),
+        "-i".to_owned(),
+        source.to_string_lossy().into_owned(),
+        "-map".to_owned(),
+        "0:v:0".to_owned(),
+        "-vf".to_owned(),
+        "showinfo=checksum=0".to_owned(),
+        "-f".to_owned(),
+        "null".to_owned(),
+        "-".to_owned(),
+    ]
+}
+
+/// VFR-safe source probe using the bundled FFmpeg null mux: frame count, output geometry and the
+/// frame timing the upscaled clip must keep. The shared runner preserves the normal
+/// heartbeat/cancellation lifecycle while FFmpeg walks the source.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -551,30 +587,359 @@ async fn probe_seedvr2_source(
     settings: &Settings,
     job_id: &str,
     source: &Path,
-) -> WorkerResult<Seedvr2SourceProbe> {
+) -> WorkerResult<(Seedvr2SourceProbe, Seedvr2Timing)> {
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
-    let stderr = crate::media_jobs::run_ffmpeg_capture_stderr(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-hide_banner".to_owned(),
-            "-i".to_owned(),
-            source.to_string_lossy().into_owned(),
-            "-map".to_owned(),
-            "0:v:0".to_owned(),
-            "-f".to_owned(),
-            "null".to_owned(),
-            "-".to_owned(),
-        ],
-        Some(ctx),
-    )
-    .await?;
-    parse_seedvr2_source_probe(&stderr).ok_or_else(|| {
+    let stderr =
+        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(source), Some(ctx))
+            .await?;
+    let probe = parse_seedvr2_source_probe(&stderr).ok_or_else(|| {
         WorkerError::InvalidPayload(
             "Could not determine the source video's frame count and dimensions before upscale."
                 .to_owned(),
         )
+    })?;
+    let timing = parse_seedvr2_source_timing(&stderr, probe.frame_count).ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Could not determine the source video's frame timing before upscale.".to_owned(),
+        )
+    })?;
+    Ok((probe, timing))
+}
+
+// ---------------------------------------------------------------------------
+// Source frame timing (sc-24391)
+// ---------------------------------------------------------------------------
+// The upscale keeps every source frame, so the output is only right if it also keeps WHEN each frame
+// is shown. That timing used to come from the asset sidecar's `fps`, which an imported clip does not
+// have: `import_asset` writes `fps: null` for every video upload, and this lane fell back to 24 fps.
+// MEASURED (sc-24391): a 10 s, 29.97 fps clip came out as 12.46 s of picture at 24 fps against its
+// own 10 s soundtrack. A sidecar that did carry a rate was rounded to an integer (29.97 -> 30). The
+// worker now measures the timing off the decoded source frames in the probe pass it already makes,
+// and the sidecar's `fps` is not read at all.
+
+/// How far a measured frame may sit off a constant-rate grid and still be encoded on that grid: one
+/// millisecond, or one source tick when the time base is coarser than that. A millisecond time base
+/// (Matroska) cannot store 30000/1001 exactly, so its "29.97 fps" frames sit up to half a tick off the
+/// ideal grid. A frame further off than this belongs to a genuinely variable clip, which keeps its own
+/// timestamps.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_CFR_TOLERANCE_SECONDS: f64 = 0.001;
+
+/// The finest tick the variable-rate encode carries. FFmpeg's concat demuxer reads each frame's
+/// `duration` in microseconds (`AV_TIME_BASE`), so a finer source time base is rescaled to
+/// microseconds, far below anything a viewer or a soundtrack can resolve.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SEEDVR2_MAX_TIMESCALE: u64 = 1_000_000;
+
+/// When the upscaled frames are shown (sc-24391). The upscale is 1:1 in frames, so this is the
+/// source's own timing as measured by [`parse_seedvr2_source_timing`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+pub(super) enum Seedvr2Timing {
+    /// Every frame sits on one uniform grid: encode at exactly `num/den` frames per second
+    /// (`30000/1001`, never a rounded 30).
+    Constant { num: u64, den: u64 },
+    /// A genuinely variable-rate source. `offsets[i]` is frame `i`'s presentation time after the
+    /// first frame, in `1/timescale` s ticks, and `last_duration` is how long the final frame shows.
+    Variable {
+        timescale: u64,
+        offsets: Vec<u64>,
+        last_duration: u64,
+    },
+}
+
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+impl Seedvr2Timing {
+    /// Constant-rate timing at a whole `fps`, clamped to at least 1 fps like the other encode paths.
+    #[cfg(test)]
+    pub(super) fn from_fps(fps: u32) -> Self {
+        Self::Constant {
+            num: u64::from(fps.max(1)),
+            den: 1,
+        }
+    }
+
+    /// The picture's length in seconds for `frame_count` frames: the number the audio mux bounds
+    /// the file at.
+    pub(super) fn picture_seconds(&self, frame_count: usize) -> f64 {
+        match self {
+            Self::Constant { num, den } => frame_count as f64 * *den as f64 / *num as f64,
+            Self::Variable {
+                timescale,
+                offsets,
+                last_duration,
+            } => {
+                let end = offsets.last().copied().unwrap_or(0) + last_duration;
+                end as f64 / *timescale as f64
+            }
+        }
+    }
+
+    /// The rate FFmpeg is handed for a constant-rate encode: `30000/1001`, or a bare `24` for a
+    /// whole rate so a whole-rate clip gets the same encode arguments it always did.
+    fn rate_arg(num: u64, den: u64) -> String {
+        if den == 1 {
+            num.to_string()
+        } else {
+            format!("{num}/{den}")
+        }
+    }
+
+    /// The whole-number rate handed to the engine request, which takes an integer and does not use
+    /// it to time anything (SeedVR2 upscales frames, not seconds).
+    pub(super) fn nominal_fps(&self, frame_count: usize) -> u32 {
+        let fps = self.average_fps(frame_count).round();
+        if fps.is_finite() {
+            (fps as u32).max(1)
+        } else {
+            1
+        }
+    }
+
+    /// Mean frames per second over the picture.
+    fn average_fps(&self, frame_count: usize) -> f64 {
+        match self {
+            Self::Constant { num, den } => *num as f64 / *den as f64,
+            Self::Variable { .. } => frame_count as f64 / self.picture_seconds(frame_count),
+        }
+    }
+
+    /// The `fps` recorded on the upscaled asset: a whole number for a whole rate (the JSON integer
+    /// it has always been), the exact mean otherwise (`29.97002997…`, not a rounded 30).
+    pub(super) fn fps_json(&self, frame_count: usize) -> Value {
+        match self {
+            Self::Constant { num, den: 1 } => json!(num),
+            _ => json!(self.average_fps(frame_count)),
+        }
+    }
+}
+
+/// Read the source's frame timing off the probe's `showinfo` log (sc-24391): the stream time base
+/// from the filter's `config in` line and every frame's `pts`, in order. `None` when the log does not
+/// describe exactly `frame_count` frames, numbered from zero, in one time base; the caller then fails
+/// the job rather than guess a rate, because a guessed rate is the bug this replaces.
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn parse_seedvr2_source_timing(stderr: &str, frame_count: u64) -> Option<Seedvr2Timing> {
+    fn ratio_after(text: &str, key: &str) -> Option<(u64, u64)> {
+        let value = text.split_once(key)?.1.trim_start();
+        let value = value.split([',', ' ']).next()?;
+        let (num, den) = value.split_once('/')?;
+        Some((num.parse().ok()?, den.parse().ok()?))
+    }
+
+    let mut time_base: Option<(u64, u64)> = None;
+    let mut frame_rate: Option<(u64, u64)> = None;
+    let mut pts: Vec<Option<i64>> = Vec::new();
+    for line in stderr.lines() {
+        // `[Parsed_showinfo_0 @ 0x…] <body>`; every other line (and showinfo's own side-data and
+        // colour continuation lines) is skipped.
+        let Some((_, body)) = line.split_once("[Parsed_showinfo_0 @ ") else {
+            continue;
+        };
+        let Some((_, body)) = body.split_once("] ") else {
+            continue;
+        };
+        if let Some(config) = body.strip_prefix("config in ") {
+            let base = ratio_after(config, "time_base:")?;
+            if base.0 == 0 || base.1 == 0 {
+                return None;
+            }
+            match time_base {
+                // A mid-stream reconfiguration onto a different time base would make the pts
+                // before and after it incomparable.
+                Some(previous) if previous != base => return None,
+                Some(_) => {}
+                None => {
+                    time_base = Some(base);
+                    frame_rate = ratio_after(config, "frame_rate:");
+                }
+            }
+        } else if let Some(frame) = body.strip_prefix("n:") {
+            let frame = frame.trim_start();
+            let index: usize = frame.split_whitespace().next()?.parse().ok()?;
+            if index != pts.len() {
+                return None;
+            }
+            let value = frame.split_once("pts:")?.1.split_whitespace().next()?;
+            // `NOPTS` (a frame the demuxer could not time) parses as `None`.
+            pts.push(value.parse().ok());
+        }
+    }
+    if pts.len() as u64 != frame_count {
+        return None;
+    }
+    classify_seedvr2_timing(time_base?, frame_rate, &pts)
+}
+
+/// Decide how the measured frames are laid out in time (sc-24391). Constant-rate when every frame
+/// sits within [`SEEDVR2_CFR_TOLERANCE_SECONDS`] of one uniform grid: first the rate the stream
+/// declares (`frame_rate`, FFmpeg's own guess, which is the tidy `30000/1001` a millisecond-timebase
+/// file cannot store exactly), then the grid through the first and last frames. Anything else is
+/// variable-rate and keeps every frame's own timestamp. The declared rate is also the answer when
+/// per-frame timing is unusable (a frame without a timestamp, timestamps that do not increase, or a
+/// single frame).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn classify_seedvr2_timing(
+    time_base: (u64, u64),
+    frame_rate: Option<(u64, u64)>,
+    pts: &[Option<i64>],
+) -> Option<Seedvr2Timing> {
+    fn gcd(a: u128, b: u128) -> u128 {
+        if b == 0 {
+            a
+        } else {
+            gcd(b, a % b)
+        }
+    }
+    fn reduced(num: u128, den: u128) -> Option<(u64, u64)> {
+        if num == 0 || den == 0 {
+            return None;
+        }
+        let divisor = gcd(num, den);
+        Some((
+            u64::try_from(num / divisor).ok()?,
+            u64::try_from(den / divisor).ok()?,
+        ))
+    }
+
+    let (tb_num, tb_den) = time_base;
+    if tb_num == 0 || tb_den == 0 {
+        return None;
+    }
+    let declared = frame_rate.and_then(|(num, den)| reduced(u128::from(num), u128::from(den)));
+    let declared_timing = declared.map(|(num, den)| Seedvr2Timing::Constant { num, den });
+
+    let Some(pts) = pts.iter().copied().collect::<Option<Vec<i64>>>() else {
+        return declared_timing;
+    };
+    let first = *pts.first()?;
+    if pts.len() == 1 || pts.windows(2).any(|pair| pair[1] <= pair[0]) {
+        return declared_timing;
+    }
+    let offsets: Vec<u64> = pts
+        .iter()
+        .map(|&p| u64::try_from(i128::from(p) - i128::from(first)).ok())
+        .collect::<Option<_>>()?;
+
+    let tick = tb_num as f64 / tb_den as f64;
+    let tolerance = tick.max(SEEDVR2_CFR_TOLERANCE_SECONDS);
+    let on_grid = |num: u64, den: u64| {
+        let frame_seconds = den as f64 / num as f64;
+        offsets.iter().enumerate().all(|(index, &offset)| {
+            (offset as f64 * tick - index as f64 * frame_seconds).abs() <= tolerance
+        })
+    };
+    if let Some((num, den)) = declared {
+        if on_grid(num, den) {
+            return declared_timing;
+        }
+    }
+    let last = *offsets.last()?;
+    if let Some((num, den)) = reduced(
+        (offsets.len() as u128 - 1) * u128::from(tb_den),
+        u128::from(last) * u128::from(tb_num),
+    ) {
+        if on_grid(num, den) {
+            return Some(Seedvr2Timing::Constant { num, den });
+        }
+    }
+
+    // Variable-rate: carry the offsets in the source's own ticks when those are no finer than a
+    // microsecond, else in microseconds. `tb_num/tb_den` s per tick is `tb_num` ticks of `1/tb_den`.
+    let timescale = tb_den.min(SEEDVR2_MAX_TIMESCALE);
+    let rescaled: Vec<u64> = offsets
+        .iter()
+        .map(|&offset| {
+            let scaled = u128::from(offset) * u128::from(tb_num) * u128::from(timescale);
+            let tb_den = u128::from(tb_den);
+            u64::try_from((scaled + tb_den / 2) / tb_den).ok()
+        })
+        .collect::<Option<_>>()?;
+    if rescaled.windows(2).any(|pair| pair[1] <= pair[0]) {
+        // Two frames collapsed onto one microsecond; per-frame timing cannot be written.
+        return declared_timing;
+    }
+    // The final frame shows for as long as the one before it. The per-frame `duration` showinfo
+    // prints comes from packet durations and is not trustworthy on variable-rate files (MEASURED:
+    // 3000 ticks for a frame shown for 6000 on a 30-then-15 fps clip).
+    let last_duration = rescaled[rescaled.len() - 1] - rescaled[rescaled.len() - 2];
+    Some(Seedvr2Timing::Variable {
+        timescale,
+        offsets: rescaled,
+        last_duration,
     })
+}
+
+/// The FFmpeg concat list that encodes a variable-rate clip with every frame at its own time
+/// (sc-24391): one entry per numbered `frame_%05d.png`, each with the demuxer's time base raised to
+/// the timing's timescale (`option framerate`) and its display duration. Durations are written as
+/// the difference of each frame's start ROUNDED to the microsecond, not rounded one at a time, so
+/// the rounding never accumulates: frame `i` lands within half a microsecond of its source time, and
+/// FFmpeg's rescale to `1/timescale` puts it back on the exact source tick. `None` unless `timing`
+/// is variable-rate and describes exactly `frame_count` frames.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+pub(super) fn seedvr2_concat_list(timing: &Seedvr2Timing, frame_count: usize) -> Option<String> {
+    let Seedvr2Timing::Variable {
+        timescale,
+        offsets,
+        last_duration,
+    } = timing
+    else {
+        return None;
+    };
+    if offsets.len() != frame_count || *timescale == 0 {
+        return None;
+    }
+    let micros = |ticks: u64| -> u64 {
+        let timescale = u128::from(*timescale);
+        ((u128::from(ticks) * 1_000_000 + timescale / 2) / timescale) as u64
+    };
+    let end = offsets.last()? + last_duration;
+    let mut list = String::from("ffconcat version 1.0\n");
+    for (index, &offset) in offsets.iter().enumerate() {
+        let next = offsets.get(index + 1).copied().unwrap_or(end);
+        let duration = micros(next) - micros(offset);
+        list.push_str(&format!(
+            "file frame_{index:05}.png\noption framerate {timescale}\nduration {}.{:06}\n",
+            duration / 1_000_000,
+            duration % 1_000_000
+        ));
+    }
+    Some(list)
 }
 
 /// Load the temporal window `paths[start .. start+len]` (clamped to the sequence end) into engine
@@ -643,10 +1008,13 @@ async fn append_seedvr2_frames(
 }
 
 /// Encode a pre-written numbered PNG sequence (`frame_%05d.png`, `frame_count` frames from index 0) to
-/// the final mp4 (silent) + faststart + poster (sc-9595). The ffmpeg encode args are byte-identical to
-/// the whole-clip `encode_media` path (`libx264` / `yuv420p` / `-framerate fps` / `-r fps`), so the
-/// streamed output matches the old path frame-for-frame. Audio muxing stays the caller's source
-/// passthrough step (SeedVR2 emits no audio).
+/// the final mp4 (silent) + faststart + poster (sc-9595), laid out in time by the source's measured
+/// `timing` (sc-24391). A constant-rate source encodes exactly as the whole-clip `encode_media` path
+/// does (`libx264` / `yuv420p` / `-framerate` / `-r`), at the exact rational rate (`30000/1001`); a
+/// whole rate keeps the bare-integer arguments it always had. A variable-rate source reads the
+/// frames through a concat list ([`seedvr2_concat_list`]) that puts each one at its own source
+/// timestamp, and the encode passes those timestamps through in the source's own time base. Audio
+/// muxing stays the caller's source passthrough step (SeedVR2 emits no audio).
 ///
 /// `workflow_metadata` is the sanitized envelope as an `ffmetadata` document, or `None` for
 /// "encode exactly as before" (sc-15956 review). It rides in HERE for the same reason
@@ -672,7 +1040,7 @@ pub(super) async fn encode_seedvr2_stream(
     media_path: &Path,
     frames_dir: &Path,
     frame_count: usize,
-    fps: u32,
+    timing: &Seedvr2Timing,
     workflow_metadata: Option<&Path>,
     ctx: Option<FfmpegContext<'_>>,
 ) -> WorkerResult<()> {
@@ -681,20 +1049,51 @@ pub(super) async fn encode_seedvr2_stream(
             "video generation produced no frames".to_owned(),
         ));
     }
-    let fps = fps.max(1);
     let enc_tmp = media_path.with_extension("enc.mp4");
-    let pattern = frames_dir.join("frame_%05d.png");
-    let mut args = vec![
-        "ffmpeg".to_owned(),
-        "-nostdin".to_owned(),
-        "-y".to_owned(),
-        "-framerate".to_owned(),
-        fps.to_string(),
-        "-start_number".to_owned(),
-        "0".to_owned(),
-        "-i".to_owned(),
-        pattern.to_string_lossy().into_owned(),
-    ];
+    let mut args = vec!["ffmpeg".to_owned(), "-nostdin".to_owned(), "-y".to_owned()];
+    // Input 0 (the frames) and the output options that time them.
+    let timing_output_args = match timing {
+        Seedvr2Timing::Constant { num, den } => {
+            let rate = Seedvr2Timing::rate_arg(*num, *den);
+            args.extend([
+                "-framerate".to_owned(),
+                rate.clone(),
+                "-start_number".to_owned(),
+                "0".to_owned(),
+                "-i".to_owned(),
+                frames_dir
+                    .join("frame_%05d.png")
+                    .to_string_lossy()
+                    .into_owned(),
+            ]);
+            vec!["-r".to_owned(), rate]
+        }
+        Seedvr2Timing::Variable { timescale, .. } => {
+            let list = seedvr2_concat_list(timing, frame_count).ok_or_else(|| {
+                WorkerError::InvalidPayload(format!(
+                    "the measured source timing does not describe the {frame_count} upscaled frames"
+                ))
+            })?;
+            let list_path = frames_dir.join("frames.ffconcat");
+            tokio::fs::write(&list_path, list).await?;
+            args.extend([
+                "-f".to_owned(),
+                "concat".to_owned(),
+                "-safe".to_owned(),
+                "0".to_owned(),
+                "-i".to_owned(),
+                list_path.to_string_lossy().into_owned(),
+            ]);
+            vec![
+                "-fps_mode".to_owned(),
+                "passthrough".to_owned(),
+                "-enc_time_base".to_owned(),
+                format!("1/{timescale}"),
+                "-video_track_timescale".to_owned(),
+                timescale.to_string(),
+            ]
+        }
+    };
     if let Some(metadata_path) = workflow_metadata {
         // Input 1, exactly as `encode_media` does it: the frames are input 0 and stay mapped by
         // ffmpeg's own stream selection, because an `ffmetadata` input carries no streams to
@@ -708,9 +1107,8 @@ pub(super) async fn encode_seedvr2_stream(
         "libx264".to_owned(),
         "-pix_fmt".to_owned(),
         "yuv420p".to_owned(),
-        "-r".to_owned(),
-        fps.to_string(),
     ]);
+    args.extend(timing_output_args);
     if workflow_metadata.is_some() {
         args.extend(sceneworks_core::workflow_mp4::ffmetadata_map_args(1));
     }
@@ -864,7 +1262,8 @@ pub(super) fn seedvr2_workflow_metadata(
 struct Seedvr2Stream {
     /// Real output frame count (== source frame count).
     frame_count: usize,
-    fps: u32,
+    /// When those frames are shown: the source's own measured timing (sc-24391).
+    timing: Seedvr2Timing,
     out_w: u32,
     out_h: u32,
     src_w: u32,
@@ -941,13 +1340,14 @@ async fn run_seedvr2_stream(
     src_frames_dir: &Path,
     out_frames_dir: &Path,
     factor: u32,
-    source_fps: u32,
     weights_dir: PathBuf,
 ) -> WorkerResult<Seedvr2Stream> {
     let seed = req.seed.unwrap_or(0);
     // Probe BEFORE creating either PNG sequence. The source and output sequences coexist at peak, so
-    // admission must account for both before the first source frame can consume scratch.
-    let probe = probe_seedvr2_source(api, settings, &job.id, source_path).await?;
+    // admission must account for both before the first source frame can consume scratch. The same
+    // pass measures the frame timing the output keeps (sc-24391).
+    let (probe, timing) = probe_seedvr2_source(api, settings, &job.id, source_path).await?;
+    let engine_fps = timing.nominal_fps(probe.frame_count as usize);
     let (target_w, target_h) = match (req.target_width, req.target_height) {
         (Some(w), Some(h)) if w > 0 && h > 0 => (w, h),
         _ => (
@@ -1054,7 +1454,7 @@ async fn run_seedvr2_stream(
             width: target_w,
             height: target_h,
             frames: window_len,
-            fps: source_fps,
+            fps: engine_fps,
             seed,
             softness: Some(req.softness),
             ..Default::default()
@@ -1095,7 +1495,7 @@ async fn run_seedvr2_stream(
 
     Ok(Seedvr2Stream {
         frame_count: next_index,
-        fps: source_fps,
+        timing,
         out_w,
         out_h,
         src_w,
@@ -1122,9 +1522,9 @@ pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
 
 /// The source-audio passthrough mux: copy the upscaled picture untouched, re-encode the source
 /// clip's optional audio as AAC, and **bound the file at the upscaled picture's own length** —
-/// [`picture_bound_seconds`], the same one number the generation mux (`audio_mux_args`) is bounded
-/// by. `-map 1:a:0?` keeps the audio optional, so a silent source yields a clean video-only file
-/// rather than an error.
+/// `timing`'s picture length, spelled by [`format_picture_bound`] exactly as the generation mux
+/// (`audio_mux_args`) spells its bound. `-map 1:a:0?` keeps the audio optional, so a silent source
+/// yields a clean video-only file rather than an error.
 ///
 /// # Why `-t` and not `-shortest` (sc-19549)
 ///
@@ -1145,17 +1545,15 @@ pub(super) fn resolve_video_upscale_factor(factor: u8) -> WorkerResult<u32> {
 /// source audio the unbounded command produced a 4.01 s container around 2.00 s of picture
 /// (measured, same vector). `-t` is the only one of the three that is right in both directions.
 ///
-/// # Variable-frame-rate sources (sc-19549 AC2)
+/// # Variable-frame-rate sources (sc-19549 AC2, sc-24391)
 ///
-/// Supported, with a bound that cannot be wrong. The bound is read off input 0 — the upscaled
-/// picture — never off the source clip: `run_seedvr2_stream` decodes the source with
-/// `-fps_mode passthrough` (exact frame count, whatever its timestamps) and `encode_seedvr2_stream`
-/// writes those frames back at a constant `-r fps`, so input 0 holds exactly `frame_count` frames
-/// on a constant timebase BY CONSTRUCTION regardless of how ragged the source's own timestamps
-/// were. Input 1 contributes only `0:a` here; its video stream is not mapped and its variability
-/// cannot reach the bound. MEASURED: a genuinely VFR source (10.67 fps average against a 24 tbr
-/// declaration) carrying 1.5 s of audio muxes to all 48 frames at 2.00 s under `-t`, and to 33
-/// frames at an advertised 1.51 s under `-shortest`.
+/// Supported, with a bound that cannot be wrong. The bound is the length of input 0, the upscaled
+/// picture, as `encode_seedvr2_stream` laid it out from the source's measured `timing`: exactly
+/// `frame_count` frames, either on the source's exact constant rate or each at its own source
+/// timestamp. Input 1 contributes only `0:a` here; its video stream is not mapped. MEASURED
+/// (sc-19549): a genuinely VFR source (10.67 fps average against a 24 tbr declaration) carrying
+/// 1.5 s of audio muxes to all 48 frames at 2.00 s under `-t`, and to 33 frames at an advertised
+/// 1.51 s under `-shortest`.
 #[cfg(any(
     test,
     target_os = "macos",
@@ -1166,7 +1564,7 @@ pub(super) fn seedvr2_audio_mux_args(
     source: &Path,
     out: &Path,
     frame_count: usize,
-    fps: u32,
+    timing: &Seedvr2Timing,
 ) -> Vec<String> {
     vec![
         "ffmpeg".to_owned(),
@@ -1185,7 +1583,7 @@ pub(super) fn seedvr2_audio_mux_args(
         "-c:a".to_owned(),
         "aac".to_owned(),
         "-t".to_owned(),
-        picture_bound_seconds(frame_count, fps),
+        format_picture_bound(timing.picture_seconds(frame_count)),
         // Explicit, though it is also ffmpeg's default for a multi-input command: the container
         // metadata — including the sc-15956 workflow tag the encode above wrote — comes from the
         // UPSCALED VIDEO (input 0), never from the source clip (input 1). Input 1 is the user's own
@@ -1252,7 +1650,9 @@ pub(crate) async fn run_video_upscale_job(
     )
     .await?;
 
-    // Resolve the source video asset (on-disk path + fps + display name) from its sidecar.
+    // Resolve the source video asset (on-disk path + display name) from its sidecar. Its `fps` is
+    // deliberately NOT read: an imported clip has none, and the probe measures the real timing off
+    // the file itself (sc-24391).
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
     let project = store.get_project(&project_id)?;
     let project_path = PathBuf::from(project.path);
@@ -1270,12 +1670,6 @@ pub(crate) async fn run_video_upscale_job(
         .ok_or_else(|| {
             WorkerError::InvalidPayload("Source media file is unavailable.".to_owned())
         })?;
-    let source_fps = file
-        .get("fps")
-        .and_then(Value::as_f64)
-        .map(|fps| fps.round() as u32)
-        .filter(|fps| *fps > 0)
-        .unwrap_or(24);
     let source_display = asset
         .get("displayName")
         .and_then(Value::as_str)
@@ -1319,7 +1713,7 @@ pub(crate) async fn run_video_upscale_job(
     .await?;
     // Decode the whole source to a numbered PNG sequence ON DISK (disk-bounded, no RAM), then load each
     // temporal window on demand (sc-9595). `-fps_mode passthrough` preserves the exact source frame
-    // count / order; the output frame count/order/fps therefore stay identical to the whole-clip path.
+    // count / order; the output keeps that count and order, and the probe's measured timing (sc-24391).
     // Sanitize the job id before it becomes a temp-dir path component (F-111): a hostile id would
     // otherwise escape `temp_dir()`. Mirrors the person-track work dir sanitization.
     let safe_job = safe_download_dir(&job.id);
@@ -1341,7 +1735,6 @@ pub(crate) async fn run_video_upscale_job(
         &src_frames_dir,
         &out_frames_dir,
         factor,
-        source_fps,
         weights_dir,
     )
     .await;
@@ -1351,14 +1744,14 @@ pub(crate) async fn run_video_upscale_job(
     let stream = stream_result?;
     let Seedvr2Stream {
         frame_count: out_count,
-        fps: out_fps,
+        timing,
         out_w,
         out_h,
         src_w,
         src_h,
         seed,
     } = stream;
-    let duration = out_count as f64 / out_fps.max(1) as f64;
+    let duration = timing.picture_seconds(out_count);
 
     // Plan the output asset path (nested under the per-generation id, like VideoPlan).
     let genset_id = format!("genset_{}", Uuid::new_v4().simple());
@@ -1409,7 +1802,7 @@ pub(crate) async fn run_video_upscale_job(
         &media_path,
         &out_frames_dir,
         out_count,
-        out_fps,
+        &timing,
         embedded.then_some(workflow_metadata.as_path()),
         Some(ctx),
     )
@@ -1446,7 +1839,7 @@ pub(crate) async fn run_video_upscale_job(
     let ctx = FfmpegContext::new(api, settings, &job.id, SEEDVR2_CANCEL_MESSAGE);
     let mux_result: WorkerResult<()> = async {
         run_ffmpeg(
-            seedvr2_audio_mux_args(&media_path, &source_path, &mux_tmp, out_count, out_fps),
+            seedvr2_audio_mux_args(&media_path, &source_path, &mux_tmp, out_count, &timing),
             Some(ctx),
         )
         .await?;
@@ -1486,7 +1879,7 @@ pub(crate) async fn run_video_upscale_job(
         "width": out_w,
         "height": out_h,
         "duration": duration,
-        "fps": out_fps,
+        "fps": timing.fps_json(out_count),
         "quality": "best",
         "family": "video",
         "seed": seed as i64,

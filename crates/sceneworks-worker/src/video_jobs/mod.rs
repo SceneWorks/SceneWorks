@@ -76,13 +76,14 @@ mod prelude {
     };
     #[allow(unused_imports)]
     pub(super) use super::{
-        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
-        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, picture_bound_seconds,
-        resolve_video_seed, run_ffmpeg, safe_download_dir, shutdown_requested, task_join_error,
-        update_job, video_progress, write_poster_frame, ApiClient, AudioTrack, BTreeMap,
-        CancelJoinGuard, DecodedVideo, Duration, FfmpegContext, Instant, JobSnapshot, JobStatus,
-        JsonObject, Path, PathBuf, ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value,
-        VideoRequest, WorkerError, WorkerResult, WorkerStatus, CANCEL_MESSAGE,
+        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, format_picture_bound,
+        fresh_asset_id, heartbeat, huggingface_snapshot_dir, json, now_rfc3339,
+        picture_bound_seconds, resolve_video_seed, run_ffmpeg, safe_download_dir,
+        shutdown_requested, task_join_error, update_job, video_progress, write_poster_frame,
+        ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo, Duration, FfmpegContext,
+        Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf, ProgressStage, ProjectStore,
+        RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError, WorkerResult, WorkerStatus,
+        CANCEL_MESSAGE,
     };
     #[cfg(any(
         target_os = "macos",
@@ -1672,7 +1673,14 @@ async fn encode_inner(
 ///
 /// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
 pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
-    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    format_picture_bound(frame_count as f64 / f64::from(fps.max(1)))
+}
+
+/// Render a picture length for `-t`, to the microsecond. The one spelling of the bound: the
+/// whole-rate lanes reach it through [`picture_bound_seconds`], and the SeedVR2 upscale, whose
+/// picture keeps a source's exact (often fractional or variable) timing, hands it the length that
+/// timing gives (sc-24391).
+pub(crate) fn format_picture_bound(seconds: f64) -> String {
     format!("{seconds:.6}")
 }
 

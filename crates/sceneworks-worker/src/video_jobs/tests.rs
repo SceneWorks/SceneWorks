@@ -1763,6 +1763,217 @@ fn seedvr2_probe_uses_effective_output_geometry_after_rotation() {
     );
 }
 
+/// One `showinfo` frame line, as FFmpeg 6.1 and 8.1 both print it (the `color_range` continuation
+/// line and a progress line ride along, as they do in a real log).
+fn showinfo_frame_line(index: usize, pts: &str) -> String {
+    format!(
+        "[Parsed_showinfo_0 @ 0x61987193adc0] n:{index:4} pts:{pts:>7} pts_time:0 duration:   1001 \
+         duration_time:0.0333667 fmt:yuv420p cl:left sar:1/1 s:320x240 i:P iskey:0 type:B\n\
+         [Parsed_showinfo_0 @ 0x61987193adc0] color_range:unknown color_space:unknown \
+         color_primaries:unknown color_trc:unknown\n\
+         frame=  {index} fps=0.0 q=-0.0 size=       0kB time=00:00:00.00 bitrate=N/A speed=   0x\n"
+    )
+}
+
+/// A synthetic probe log: the `config in` line for `time_base`/`frame_rate`, then one line per pts.
+fn showinfo_log(time_base: &str, frame_rate: &str, pts: &[&str]) -> String {
+    let mut log = format!(
+        "Stream mapping:\n  Stream #0:0 -> #0:0 (h264 (native) -> wrapped_avframe (native))\n\
+         [Parsed_showinfo_0 @ 0x61987193adc0] config in time_base: {time_base}, frame_rate: {frame_rate}\n\
+         [Parsed_showinfo_0 @ 0x61987193adc0] config out time_base: 0/0, frame_rate: 0/0\n"
+    );
+    for (index, pts) in pts.iter().enumerate() {
+        log.push_str(&showinfo_frame_line(index, pts));
+    }
+    log
+}
+
+/// sc-24391: a 29.97 fps clip is timed at exactly 30000/1001, not the sidecar's rounded (or absent,
+/// hence 24) rate. The pts sit exactly on the declared grid in a 1/30000 time base.
+#[test]
+fn seedvr2_timing_reads_an_exact_ntsc_rate_off_the_probe_log() {
+    let pts = ["0", "1001", "2002", "3003", "4004"];
+    let log = showinfo_log("1/30000", "30000/1001", &pts);
+    assert_eq!(
+        parse_seedvr2_source_timing(&log, 5),
+        Some(Seedvr2Timing::Constant {
+            num: 30000,
+            den: 1001
+        })
+    );
+    // The frame count the log must describe is the probe's own `frame=` count.
+    assert_eq!(parse_seedvr2_source_timing(&log, 4), None);
+    assert_eq!(parse_seedvr2_source_timing(&log, 6), None);
+}
+
+/// A millisecond time base cannot hold 30000/1001, so a Matroska "29.97" clip's pts land up to half
+/// a tick off the ideal grid. That is still the declared constant rate, not a variable-rate clip.
+#[test]
+fn seedvr2_timing_keeps_a_millisecond_timebase_ntsc_clip_on_its_declared_rate() {
+    let pts = [
+        "0", "33", "67", "100", "133", "167", "200", "234", "267", "300",
+    ];
+    assert_eq!(
+        parse_seedvr2_source_timing(&showinfo_log("1/1000", "30000/1001", &pts), 10),
+        Some(Seedvr2Timing::Constant {
+            num: 30000,
+            den: 1001
+        })
+    );
+}
+
+/// When the declared rate does not describe the frames (a 25 fps clip declared 30), the uniform grid
+/// through the first and last frames is used, reduced: exactly 25/1.
+#[test]
+fn seedvr2_timing_falls_back_to_the_measured_grid_when_the_declared_rate_is_wrong() {
+    let pts: Vec<String> = (0..8).map(|i| (i * 512).to_string()).collect();
+    let pts: Vec<&str> = pts.iter().map(String::as_str).collect();
+    assert_eq!(
+        parse_seedvr2_source_timing(&showinfo_log("1/12800", "30/1", &pts), 8),
+        Some(Seedvr2Timing::Constant { num: 25, den: 1 })
+    );
+}
+
+/// A genuinely variable clip (30 fps, then 15 fps) keeps every frame's own time. The last frame is
+/// shown for as long as the one before it.
+#[test]
+fn seedvr2_timing_keeps_per_frame_offsets_for_a_variable_rate_clip() {
+    let pts = ["90000", "93000", "96000", "102000", "108000"];
+    assert_eq!(
+        parse_seedvr2_source_timing(&showinfo_log("1/90000", "30/1", &pts), 5),
+        Some(Seedvr2Timing::Variable {
+            timescale: 90000,
+            offsets: vec![0, 3000, 6000, 12000, 18000],
+            last_duration: 6000,
+        })
+    );
+}
+
+/// A time base finer than a microsecond (100 ns, as Windows Media sources use) is carried in
+/// microseconds, rounded per frame from the source tick rather than accumulated.
+#[test]
+fn seedvr2_timing_rescales_a_sub_microsecond_timebase_to_microseconds() {
+    let pts = ["0", "333667", "1000000", "1333333"];
+    assert_eq!(
+        classify_seedvr2_timing(
+            (1, 10_000_000),
+            Some((30, 1)),
+            &pts.iter().map(|p| p.parse().ok()).collect::<Vec<_>>()
+        ),
+        Some(Seedvr2Timing::Variable {
+            timescale: 1_000_000,
+            offsets: vec![0, 33367, 100000, 133333],
+            last_duration: 33333,
+        })
+    );
+}
+
+/// Unusable per-frame timing (a frame without a timestamp, or timestamps that do not increase)
+/// falls back to the stream's declared rate. With no declared rate either, there is nothing honest to
+/// encode at and the probe fails the job rather than guess.
+#[test]
+fn seedvr2_timing_uses_the_declared_rate_only_when_per_frame_timing_is_unusable() {
+    let nopts = showinfo_log("1/90000", "25/1", &["0", "NOPTS", "7200"]);
+    assert_eq!(
+        parse_seedvr2_source_timing(&nopts, 3),
+        Some(Seedvr2Timing::Constant { num: 25, den: 1 })
+    );
+    let backwards = showinfo_log("1/90000", "24/1", &["0", "7500", "3750"]);
+    assert_eq!(
+        parse_seedvr2_source_timing(&backwards, 3),
+        Some(Seedvr2Timing::Constant { num: 24, den: 1 })
+    );
+    let nothing_declared = showinfo_log("1/90000", "0/0", &["0", "NOPTS", "7200"]);
+    assert_eq!(parse_seedvr2_source_timing(&nothing_declared, 3), None);
+}
+
+/// The log must describe the frames it claims to: a gap in the frame numbering, a missing `config`
+/// line, or a second `config` on a different time base (a mid-stream reconfiguration, after which
+/// the pts are not comparable) all refuse.
+#[test]
+fn seedvr2_timing_refuses_a_log_it_cannot_read_consistently() {
+    let mut gap = showinfo_log("1/30000", "30000/1001", &["0", "1001"]);
+    gap.push_str(&showinfo_frame_line(3, "3003"));
+    assert_eq!(parse_seedvr2_source_timing(&gap, 3), None);
+
+    let no_config: String = ["0", "1001", "2002"]
+        .iter()
+        .enumerate()
+        .map(|(index, pts)| showinfo_frame_line(index, pts))
+        .collect();
+    assert_eq!(parse_seedvr2_source_timing(&no_config, 3), None);
+
+    let mut reconfigured = showinfo_log("1/30000", "30000/1001", &["0", "1001"]);
+    reconfigured.push_str(
+        "[Parsed_showinfo_0 @ 0x61987193adc0] config in time_base: 1/90000, frame_rate: 30/1\n",
+    );
+    reconfigured.push_str(&showinfo_frame_line(2, "6006"));
+    assert_eq!(parse_seedvr2_source_timing(&reconfigured, 3), None);
+}
+
+/// The concat list places every frame at its own source tick: each duration is the difference of
+/// the frames' ROUNDED microsecond starts, so 1001/30000 s frames (33366.67 µs) alternate 33367 /
+/// 33366 and the running total never drifts (the end lands exactly on 6006 ticks = 200200 µs).
+#[test]
+fn seedvr2_concat_list_writes_drift_free_microsecond_durations() {
+    let timing = Seedvr2Timing::Variable {
+        timescale: 30000,
+        offsets: vec![0, 1001, 2002, 4004],
+        last_duration: 2002,
+    };
+    assert_eq!(
+        seedvr2_concat_list(&timing, 4).as_deref(),
+        Some(
+            "ffconcat version 1.0\n\
+             file frame_00000.png\noption framerate 30000\nduration 0.033367\n\
+             file frame_00001.png\noption framerate 30000\nduration 0.033366\n\
+             file frame_00002.png\noption framerate 30000\nduration 0.066734\n\
+             file frame_00003.png\noption framerate 30000\nduration 0.066733\n"
+        )
+    );
+    // The list must describe exactly the frames on disk, and a constant-rate clip has no list.
+    assert_eq!(seedvr2_concat_list(&timing, 3), None);
+    assert_eq!(
+        seedvr2_concat_list(&Seedvr2Timing::Constant { num: 24, den: 1 }, 4),
+        None
+    );
+}
+
+/// The mux bound and the asset facts come off the measured timing: 299 frames at 30000/1001 is
+/// 9.976633 s (the bug bounded it at 299/24 = 12.458333 s), a variable clip is as long as its last
+/// frame's end, and the recorded `fps` stays a JSON integer for a whole rate.
+#[test]
+fn seedvr2_mux_bound_and_asset_fps_follow_the_measured_timing() {
+    let ntsc = Seedvr2Timing::Constant {
+        num: 30000,
+        den: 1001,
+    };
+    let args = seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), 299, &ntsc);
+    assert_eq!(
+        args[args.iter().position(|a| a == "-t").unwrap() + 1],
+        "9.976633"
+    );
+    assert_eq!(ntsc.nominal_fps(299), 30);
+    let fps = ntsc.fps_json(299);
+    assert!(
+        fps.as_u64().is_none() && (fps.as_f64().unwrap() - 30000.0 / 1001.0).abs() < 1e-12,
+        "a fractional rate is recorded exactly, not rounded: {fps}"
+    );
+    assert_eq!(Seedvr2Timing::from_fps(25).fps_json(10), json!(25));
+
+    let variable = Seedvr2Timing::Variable {
+        timescale: 90000,
+        offsets: vec![0, 3000, 6000, 12000, 18000],
+        last_duration: 6000,
+    };
+    let args = seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), 5, &variable);
+    assert_eq!(
+        args[args.iter().position(|a| a == "-t").unwrap() + 1],
+        "0.266667"
+    );
+    assert_eq!(variable.nominal_fps(5), 19);
+}
+
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn comfyui_wan_a14b_gate_rejects_32gb_and_admits_large_card() {
@@ -14721,7 +14932,7 @@ fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio()
         Path::new("/tmp/source.mp4"),
         Path::new("/tmp/mux.mp4"),
         48,
-        24,
+        &Seedvr2Timing::from_fps(24),
     );
     assert!(
         !args.iter().any(|a| a == "-shortest"),
@@ -14745,8 +14956,13 @@ fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio()
     // the generation mux emits for the same picture. The inexact rungs are the ones with content —
     // at 124/24 the two would diverge in the sixth decimal if either recomputed it its own way.
     for (frames, fps) in [(48usize, 24u32), (124, 24), (345, 24), (151, 30), (9, 0)] {
-        let upscale =
-            seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), frames, fps);
+        let upscale = seedvr2_audio_mux_args(
+            Path::new("u"),
+            Path::new("s"),
+            Path::new("o"),
+            frames,
+            &Seedvr2Timing::from_fps(fps),
+        );
         let generation =
             audio_mux_args(Path::new("e"), Path::new("a"), Path::new("m"), frames, fps);
         let upscale_bound = &upscale[upscale.iter().position(|a| a == "-t").unwrap() + 1];
@@ -14758,7 +14974,13 @@ fn the_seedvr2_upscale_mux_bounds_the_clip_at_the_picture_not_the_source_audio()
     }
 
     // Degenerate fps mirrors `encode_inner`'s own `.max(1)` clamp rather than dividing by zero.
-    let zero = seedvr2_audio_mux_args(Path::new("u"), Path::new("s"), Path::new("o"), 9, 0);
+    let zero = seedvr2_audio_mux_args(
+        Path::new("u"),
+        Path::new("s"),
+        Path::new("o"),
+        9,
+        &Seedvr2Timing::from_fps(0),
+    );
     assert_eq!(
         zero[zero.iter().position(|a| a == "-t").unwrap() + 1],
         "9.000000"
@@ -14978,7 +15200,13 @@ async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent
 
         let out = dir.join(format!("mux_{label}.mp4"));
         run_ffmpeg(
-            seedvr2_audio_mux_args(&upscaled, &source, &out, frames, fps),
+            seedvr2_audio_mux_args(
+                &upscaled,
+                &source,
+                &out,
+                frames,
+                &Seedvr2Timing::from_fps(fps),
+            ),
             None,
         )
         .await
@@ -16317,9 +16545,16 @@ async fn the_upscaled_clip_carries_its_own_recipe() {
     );
     assert!(document.exists(), "the ffmetadata document must be written");
 
-    encode_seedvr2_stream(&media_path, &frames, 3, 8, Some(document.as_path()), None)
-        .await
-        .unwrap();
+    encode_seedvr2_stream(
+        &media_path,
+        &frames,
+        3,
+        &Seedvr2Timing::from_fps(8),
+        Some(document.as_path()),
+        None,
+    )
+    .await
+    .unwrap();
 
     let read = sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path)
         .expect("the upscaled clip is readable")
@@ -16404,9 +16639,16 @@ async fn an_upscale_with_the_setting_off_carries_nothing() {
         "and writes no metadata document when it is off"
     );
 
-    encode_seedvr2_stream(&media_path, &frames, 2, 8, None, None)
-        .await
-        .unwrap();
+    encode_seedvr2_stream(
+        &media_path,
+        &frames,
+        2,
+        &Seedvr2Timing::from_fps(8),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     assert_eq!(
         sceneworks_core::workflow_mp4::read_workflow_metadata_file(&media_path).expect("readable"),
         None
@@ -16612,7 +16854,7 @@ async fn no_person_track_string_reaches_a_published_clip_or_its_poster() {
         &upscaled,
         &frames,
         2,
-        8,
+        &Seedvr2Timing::from_fps(8),
         Some(upscale_document.as_path()),
         None,
     )
