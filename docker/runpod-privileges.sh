@@ -81,6 +81,77 @@ grant_service_tree() (
   done
 )
 
+# Successful chmod/setfacl calls do not prove that a provider enforces them.
+# Work only on disposable inodes, before changing any legacy permissions.
+preflight_runpod_permissions() (
+  local dir="$1" scratch="" unrelated_uid=65534 unrelated_gid=65534
+  [[ "${service_uid}" != "${unrelated_uid}" ]] || unrelated_uid=65533
+  [[ "${service_gid}" != "${unrelated_gid}" ]] || unrelated_gid=65533
+  trap '[[ -z "${scratch}" ]] || rm -rf -- "${scratch}"' EXIT
+  scratch="$(mktemp -d "${dir}/.sceneworks-permission-test.XXXXXX")" || return 1
+  # Remove inherited grants on our own fixture only; keep the parent untouched.
+  setfacl -b -k -- "${scratch}" && chmod 0711 -- "${scratch}" || return 1
+  ( umask 077
+    mkdir -- "${scratch}/private" &&
+    printf 'fixture\n' > "${scratch}/protected" &&
+    printf 'fixture\n' > "${scratch}/private/protected"
+  ) || return 1
+  chmod 0600 -- "${scratch}/protected" "${scratch}/private/protected" &&
+    chmod 0700 -- "${scratch}/private" || return 1
+  # Relative lookups from an inherited cwd exercise this filesystem even when
+  # an ancestor denies traversal. Such a denial must not mask a permissive mount.
+  cd -- "${scratch}" || return 1
+  probe_permission_identity() {
+    timeout --signal=KILL 5 setpriv --reuid="$1" --regid="$2" --clear-groups \
+      --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+      bash -euc '
+        [[ "$(id -u)" == "$1" && "$(id -g)" == "$2" ]]
+        case "$3" in
+          denied)
+            if ( : < protected ) 2>/dev/null; then exit 1; fi
+            if ( : >> protected ) 2>/dev/null; then exit 1; fi
+            if ( cd private ) 2>/dev/null; then exit 1; fi
+            if ( : > private/unauthorized ) 2>/dev/null; then exit 1; fi
+            ;;
+          allowed)
+            IFS= read -r content < protected
+            [[ "$content" == fixture ]]
+            printf appended >> protected
+            mkdir -p private/child/grandchild
+            printf inherited > private/child/grandchild/file
+            printf reopened >> private/child/grandchild/file
+            [[ "$(< private/child/grandchild/file)" == inheritedreopened ]]
+            ;;
+          unrelated)
+            if ( : < protected ) 2>/dev/null; then exit 1; fi
+            if ( : >> protected ) 2>/dev/null; then exit 1; fi
+            if ( cd private ) 2>/dev/null; then exit 1; fi
+            if ( : < private/child/grandchild/file ) 2>/dev/null; then exit 1; fi
+            if ( : >> private/child/grandchild/file ) 2>/dev/null; then exit 1; fi
+            if ( : > private/unauthorized ) 2>/dev/null; then exit 1; fi
+            ;;
+          inherited)
+            if ( : < file ) 2>/dev/null; then exit 1; fi
+            if ( : >> file ) 2>/dev/null; then exit 1; fi
+            if ( : > unauthorized ) 2>/dev/null; then exit 1; fi
+            ;;
+          *) exit 1 ;;
+        esac
+      ' _ "$1" "$2" "$3"
+  }
+  # The child returns success only after proving every expected denial. A
+  # setpriv/exec/timeout failure is therefore never mistaken for enforcement.
+  probe_permission_identity "${service_uid}" "${service_gid}" denied &&
+    grant_service_tree "${scratch}" &&
+    probe_permission_identity "${service_uid}" "${service_gid}" allowed &&
+    probe_permission_identity "${unrelated_uid}" "${unrelated_gid}" unrelated || return 1
+  # Do not let the root-owned private parent conceal broken default inheritance.
+  cd -- private/child/grandchild &&
+    probe_permission_identity "${unrelated_uid}" "${unrelated_gid}" inherited || return 1
+  cd -- "${dir}" && rm -rf -- "${scratch}" || return 1
+  scratch=""
+)
+
 wait_for_runpod_devices() {
   # CUDA images require all driver-enumerated GPU nodes plus control/UVM before
   # irrevocably dropping privileges. Use device minor numbers: NVML indices can
@@ -126,7 +197,8 @@ wait_for_runpod_devices() {
 initialize_runpod_service() {
   service_uid="${SCENEWORKS_SERVICE_UID:-1000}"
   service_gid="${SCENEWORKS_SERVICE_GID:-1000}"
-  local dir parent device device_gid id_value
+  local dir parent device device_gid id_value physical_dir target
+  local -a mount_fields
   local device_groups=""
   privilege_group_args=(--clear-groups)
   for id_value in "${service_uid}" "${service_gid}"; do
@@ -148,8 +220,28 @@ initialize_runpod_service() {
       log "managed directory '${dir}' must not contain symlink ancestors; choose its explicit physical path"
       return 1
     fi
-    if ! mkdir -p -- "${dir}" ||
-       ! grant_service_tree "${dir}"; then
+    if ! mkdir -p -- "${dir}" || ! preflight_runpod_permissions "${dir}"; then
+      log "managed directory '${dir}' does not enforce private permissions and named service ACL access; services were not started. Configure enforcing storage or writable per-path overrides."
+      return 1
+    fi
+    physical_dir="$(realpath -m -- "${dir}")" || return 1
+    # find -P also crosses nested mounts. Check those boundaries, including bind
+    # mounts on the same device, rather than weakening migration with -xdev.
+    while IFS=' ' read -r -a mount_fields; do
+      target="${mount_fields[4]}"
+      printf -v target '%b' "${target//\\/\\0}" || return 1
+      case "${target}" in
+        "${physical_dir}"/*)
+          if ! preflight_runpod_permissions "${target}"; then
+            log "nested managed mount '${target}' does not enforce private permissions and named service ACL access; services were not started."
+            return 1
+          fi
+          ;;
+      esac
+    done < /proc/self/mountinfo
+  done
+  for dir in "$@" "${HOME}"; do
+    if ! grant_service_tree "${dir}"; then
       log "cannot grant service UID ${service_uid} access to '${dir}'; configure the volume export/ACL or select writable per-path overrides. Root services are never a fallback."
       return 1
     fi
