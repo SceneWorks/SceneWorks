@@ -41,14 +41,14 @@ use gen_core::{
     AudioArtifacts, AudioParams, CancelFlag, GenerationMemory, GenerationOutput, GenerationReport,
     GenerationRequest, Generator, LoadSpec, OffloadPolicy as GenOffloadPolicy, Precision, Progress,
     Quant, SavedPlan, SongCover, SongCoverMode, SongCoverVoice, SongDecoder, SongParams,
-    SongPlanning, TokenSampling as GenTokenSampling, WeightsSource,
+    SongPlanning, TokenSampling as GenTokenSampling, WeightsSource, Yue2ArMode as EngineArMode,
 };
 use sceneworks_core::model_artifacts::artifact_selection::{
     derived_snapshot_state, local_derivation, local_derivation_snapshot_dir, DerivedSnapshotState,
 };
 use sceneworks_core::yue2_score::jobs::{
-    self as contract, ComputePrecision, CoverKeep, CoverMode, Decoder, OffloadPolicy, Planning,
-    Tier, TokenSampling, Yue2JobKind, Yue2JobSpec,
+    self as contract, ArMode, ComputePrecision, CoverKeep, CoverMode, Decoder, OffloadPolicy,
+    Planning, Tier, TokenSampling, Yue2JobKind, Yue2JobSpec,
 };
 use sceneworks_core::yue2_score::store::ScoreVersionRecord;
 
@@ -691,6 +691,10 @@ pub(crate) fn resolve_load(
     if spec.precision == Some(ComputePrecision::Fp32) {
         load.precision = Precision::Fp32;
     }
+    load = load.with_yue2_ar_mode(match spec.ar_mode.unwrap_or_default() {
+        ArMode::Native => EngineArMode::Native,
+        ArMode::ExperimentalFp8 => EngineArMode::ExperimentalFp8,
+    });
     if spec.offload_policy == Some(OffloadPolicy::Sequential) {
         load = load.with_offload_policy(GenOffloadPolicy::Sequential);
     }
@@ -1393,6 +1397,10 @@ fn effective_settings(
             ComputePrecision::Default => "default",
             ComputePrecision::Fp32 => "fp32",
         }).unwrap_or("default"),
+        "arMode": match spec.ar_mode.unwrap_or_default() {
+            ArMode::Native => "native",
+            ArMode::ExperimentalFp8 => "experimentalFp8",
+        },
         "offloadPolicy": spec.offload_policy.map(|p| match p {
             OffloadPolicy::Resident => "resident",
             OffloadPolicy::Sequential => "sequential",

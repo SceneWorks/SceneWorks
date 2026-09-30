@@ -133,6 +133,17 @@ export function validatePlan(plan, { closures, manifest }) {
     for (const tier of spec.tiers) {
       if (!TIERS.includes(tier) || !variants.has(tier)) fail(`${name}: ${tier} is not a catalog tier`);
     }
+    if (spec.backends !== undefined && (!Array.isArray(spec.backends) || !spec.backends.length ||
+        spec.backends.some((backend) => !plan.backends.includes(backend)) || new Set(spec.backends).size !== spec.backends.length)) {
+      fail(`${name}: backends must be distinct declared backends`);
+    }
+    if (spec.arMode !== undefined && !["native", "experimentalFp8"].includes(spec.arMode)) {
+      fail(`${name}: unknown arMode ${spec.arMode}`);
+    }
+    if (spec.arMode === "experimentalFp8" &&
+        (spec.tiers.some((tier) => tier !== "bf16") || (spec.backends ?? plan.backends).some((backend) => backend !== "cuda"))) {
+      fail(`${name}: experimental FP8 AR requires bf16 on CUDA only`);
+    }
     if (!DECODERS[spec.decoder]) fail(`${name}: unknown decoder ${spec.decoder}`);
     validateRequest(spec.request, name);
   }
@@ -144,7 +155,7 @@ export function expandCases(plan) {
   const cases = [];
   for (const [name, spec] of Object.entries(plan.requests)) {
     for (const tier of spec.tiers) {
-      for (const backend of plan.backends) {
+      for (const backend of spec.backends ?? plan.backends) {
         cases.push({
           id: `${plan.modelId}:${tier}:${backend}:${name}`,
           modelId: plan.modelId,
@@ -152,6 +163,7 @@ export function expandCases(plan) {
           backend,
           requestName: name,
           decoder: spec.decoder,
+          arMode: spec.arMode,
           request: spec.request,
         });
       }
@@ -192,7 +204,8 @@ export function caseIdentity(item, manifest) {
 
 /** The case file the native entrypoint reads (`yue2_memory_profile::ProfileCase`). */
 export function caseFile(item) {
-  return { id: item.id, tier: item.tier, decoder: item.decoder, request: item.request };
+  return { id: item.id, tier: item.tier, decoder: item.decoder,
+    ...(item.arMode ? { arMode: item.arMode } : {}), request: item.request };
 }
 
 // ---- Measurement -----------------------------------------------------------------------------------
@@ -261,7 +274,7 @@ export function buildRecord({
     backend: item.backend,
     identity: { ...identity, engine, sceneworks },
     hardware,
-    request: { name: item.requestName, ...item.request },
+    request: { name: item.requestName, ...(item.arMode ? { arMode: item.arMode } : {}), ...item.request },
     admission,
     measured: { sampler, stages: measured, peakBytes: peak || null,
       timingNote: "Stage wall times include external sample waits; observed peaks may miss transient maxima." },
@@ -286,6 +299,15 @@ export function validateRecord(record) {
     fail(`${record.caseId}: unknown outcome ${record.outcome.status}`);
   }
   if (record.outcome.status === "completed") {
+    if (record.request?.arMode === "experimentalFp8") {
+      const host = record.admission?.estimate?.weights?.hostBytes;
+      if (!Number.isSafeInteger(host) || host < 2 * 1024 ** 3) {
+        fail(`${record.caseId}: FP8 admission did not price the retained BF16 AR originals in host RAM`);
+      }
+      if (record.outcome.engineQuantization !== "fp8") {
+        fail(`${record.caseId}: FP8 capture did not prove the engine's effective FP8 AR mode`);
+      }
+    }
     for (const stage of Object.keys(record.measured.stages)) {
       if (!STAGES.includes(stage)) fail(`${record.caseId}: unknown measured stage ${stage}`);
     }
@@ -356,6 +378,9 @@ export function gradeRecord(record, { plan, closures, manifest }) {
   if (!item) {
     reasons.push(`case ${record.caseId} is not in the plan`);
   } else {
+    if ((record.request?.arMode ?? "native") !== (item.arMode ?? "native")) {
+      reasons.push(`arMode ${record.request?.arMode ?? "native"} is now ${item.arMode ?? "native"}`);
+    }
     const expected = caseIdentity(item, manifest);
     for (const part of ["model", "decoder"]) {
       for (const [field, value] of Object.entries(expected[part])) {

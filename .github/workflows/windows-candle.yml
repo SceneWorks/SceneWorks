@@ -216,6 +216,11 @@ on:
         required: false
         type: boolean
         default: false
+      yue2_fp8_profile_only:
+        description: "Install YuE2 in fresh state and capture only the experimental FP8 CUDA/bf16 profile case; no acceptance or native profile rerun"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -383,9 +388,16 @@ jobs:
           PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
           RUN_YUE2_TERMINAL_CUDA: ${{ inputs.run_yue2_terminal_cuda }}
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
             throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'
+          }
+          if ($env:YUE2_FP8_PROFILE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
+            throw 'yue2_fp8_profile_only requires run_yue2_terminal_cuda=true'
+          }
+          if ($env:YUE2_FP8_PROFILE_ONLY -eq 'true' -and $env:YUE2_ACCEPTANCE_ONLY -eq 'true') {
+            throw 'yue2_fp8_profile_only and yue2_acceptance_only are mutually exclusive'
           }
           if ($env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -and ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true')) {
             throw 'the epic-20738 terminal profile cannot share a dispatch with another measurement flag'
@@ -1457,7 +1469,7 @@ jobs:
       cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     # One release build and the acceptance matrix (a cold install with q8/q4 derivation and a few
-    # dozen short renders); the default full dispatch adds five serial profile captures.
+    # dozen short renders); the default full dispatch adds six serial profile captures.
     timeout-minutes: 720
     env:
       CUDA_COMPUTE_CAP: "120"
@@ -1473,12 +1485,17 @@ jobs:
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
           RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
           PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+          YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
           if ($env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true') {
             throw 'the YuE2 terminal profile cannot share a dispatch with another measurement flag'
           }
           if ($env:INFERENCE_REVISION -notmatch '^[0-9a-f]{40}$') {
             throw 'inference_revision must be an exact lowercase 40-hex commit'
+          }
+          if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:YUE2_FP8_PROFILE_ONLY -eq 'true') {
+            throw 'YuE2 acceptance-only and FP8-profile-only cannot share a dispatch'
           }
           $pin = Select-String -Path 'Cargo.toml' -Pattern 'SceneWorks/inference", rev = "([0-9a-f]{40})"' | Select-Object -First 1
           if (-not $pin -or $pin.Matches[0].Groups[1].Value -ne $env:INFERENCE_REVISION) {
@@ -1533,6 +1550,7 @@ jobs:
           }
           Add-Content -Path $env:GITHUB_ENV -Value "YUE2_FFMPEG_BIN=$ffmpeg"
       - name: Run the YuE2 terminal acceptance matrix (CUDA)
+        if: ${{ !inputs.yue2_fp8_profile_only }}
         id: yue2_acceptance
         continue-on-error: true
         shell: cmd
@@ -1540,10 +1558,19 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
+      - name: Install YuE2 for the single FP8 profile case (not acceptance)
+        if: ${{ inputs.yue2_fp8_profile_only }}
+        id: yue2_fp8_install
+        continue-on-error: true
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts\yue2-acceptance.mjs --platform cuda --gpu-id 0 --profile-install-only --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\acceptance" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --hf-home "%YUE2_TERMINAL_STATE%\hf-home" --api-bin target\release\sceneworks-rust-api.exe --ffmpeg-bin "%YUE2_FFMPEG_BIN%"
       # Reuses the acceptance run's installed tiers (a capture resolves weights from the app data dir
       # exactly as a job does), so it runs after the acceptance matrix whatever its verdict.
       - name: Run the YuE2 memory profile campaign (CUDA)
-        if: ${{ !inputs.yue2_acceptance_only }}
+        if: ${{ !inputs.yue2_acceptance_only && !inputs.yue2_fp8_profile_only }}
         id: yue2_profile
         continue-on-error: true
         shell: cmd
@@ -1554,11 +1581,39 @@ jobs:
           set HUGGINGFACE_HUB_CACHE=
           set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
           node scripts\yue2-memory-profile.mjs run --backend cuda --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+      - name: Capture only the experimental FP8 CUDA profile case
+        if: ${{ inputs.yue2_fp8_profile_only && steps.yue2_fp8_install.outcome == 'success' }}
+        id: yue2_fp8_profile
+        continue-on-error: true
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          set HF_HUB_CACHE=
+          set HUGGINGFACE_HUB_CACHE=
+          set HF_HOME=%YUE2_TERMINAL_STATE%\hf-home
+          node scripts\yue2-memory-profile.mjs capture --case yue2:bf16:cuda:experimental-fp8-ar --gpu-id 0 --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --data-dir "%YUE2_TERMINAL_STATE%\app-data" --out "%RUNNER_TEMP%\sc-23002-yue2-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%\profile"
+      - name: Verify the single FP8 profile record
+        if: ${{ inputs.yue2_fp8_profile_only && steps.yue2_fp8_profile.outcome == 'success' }}
+        id: yue2_fp8_verify
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $recordPath = Join-Path $env:RUNNER_TEMP ("sc-23002-yue2-{0}-{1}\profile\yue2__bf16__cuda__experimental-fp8-ar\record.json" -f $env:GITHUB_RUN_ID, $env:GITHUB_RUN_ATTEMPT)
+          if (-not (Test-Path -LiteralPath $recordPath)) { throw "FP8 profile record is missing: $recordPath" }
+          $record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+          if ($record.caseId -ne 'yue2:bf16:cuda:experimental-fp8-ar' -or $record.outcome.status -ne 'completed' -or
+              $record.request.arMode -ne 'experimentalFp8' -or $record.outcome.engineQuantization -ne 'fp8' -or
+              $record.admission.outcome -ne 'admitted' -or $record.admission.estimate.weights.hostBytes -lt 2147483648) {
+            throw "FP8 profile did not prove requested/effective FP8 and retained BF16 originals: $recordPath"
+          }
+          node scripts\yue2-memory-profile.mjs check $recordPath
+          if ($LASTEXITCODE -ne 0) { throw "FP8 profile record is stale or invalid: $recordPath" }
       - name: Upload the YuE2 terminal records and receipts (no audio)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sc-23002-yue2-cuda${{ inputs.yue2_acceptance_only && '-acceptance-only' || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: sc-23002-yue2-cuda${{ inputs.yue2_acceptance_only && '-acceptance-only' || inputs.yue2_fp8_profile_only && '-fp8-profile-only' || '' }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/acceptance/evidence/
             ${{ runner.temp }}/sc-23002-yue2-${{ github.run_id }}-${{ github.run_attempt }}/profile/*/case.json
@@ -1577,7 +1632,18 @@ jobs:
           ACCEPTANCE_OUTCOME: ${{ steps.yue2_acceptance.outcome }}
           PROFILE_OUTCOME: ${{ steps.yue2_profile.outcome }}
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
+          FP8_INSTALL_OUTCOME: ${{ steps.yue2_fp8_install.outcome }}
+          FP8_PROFILE_OUTCOME: ${{ steps.yue2_fp8_profile.outcome }}
+          FP8_VERIFY_OUTCOME: ${{ steps.yue2_fp8_verify.outcome }}
         run: |
+          if ($env:YUE2_FP8_PROFILE_ONLY -eq 'true') {
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'YuE2 CUDA FP8-profile-only capture. Installation preparation is explicitly incomplete as acceptance; the prior acceptance and native profiles were not rerun.'
+            if ($env:FP8_INSTALL_OUTCOME -ne 'success' -or $env:FP8_PROFILE_OUTCOME -ne 'success' -or $env:FP8_VERIFY_OUTCOME -ne 'success') {
+              throw "YuE2 FP8 profile failed after upload: install $env:FP8_INSTALL_OUTCOME, capture $env:FP8_PROFILE_OUTCOME, verify $env:FP8_VERIFY_OUTCOME"
+            }
+            return
+          }
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true') {
             Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value 'YuE2 CUDA acceptance-only rerun. The memory profile was intentionally skipped; use separately retained profile evidence from an earlier run. This run supplies no new profile verdict.'
           }

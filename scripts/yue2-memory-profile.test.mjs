@@ -91,6 +91,7 @@ function record(item, overrides = {}) {
     admission: {
       outcome: "admitted",
       estimate: {
+        weights: { deviceBytes: 4 * GIB, hostBytes: item.arMode === "experimentalFp8" ? 3 * GIB : 0 },
         stages: {
           load: estimate(9 * GIB),
           plan: estimate(10 * GIB),
@@ -100,7 +101,10 @@ function record(item, overrides = {}) {
         },
       },
     },
-    outcome: { status: "completed", audioSeconds: 30, rms: 0.1, ...RUN_FIELDS },
+    outcome: {
+      status: "completed", audioSeconds: 30, rms: 0.1, ...RUN_FIELDS,
+      ...(item.arMode === "experimentalFp8" ? { engineQuantization: "fp8" } : {}),
+    },
     sampler: "synthetic",
     samples,
     marks,
@@ -131,6 +135,9 @@ test("the checked-in plan validates against the catalog and closure table and ex
     assert.equal(identity.model.weightsSha256 === null, item.tier === "bf16", item.id);
     assert.equal(identity.decoder.componentId, item.decoder === "legacy" ? "vae_legacy" : "vae");
   }
+  const fp8 = cases.filter((item) => item.arMode === "experimentalFp8");
+  assert.deepEqual(fp8.map((item) => item.id), ["yue2:bf16:cuda:experimental-fp8-ar"]);
+  assert.equal(caseFile(fp8[0]).arMode, "experimentalFp8");
 });
 
 test("the plan refuses an undeclared lane, a non-catalog tier and a field the entrypoint cannot read", () => {
@@ -143,6 +150,9 @@ test("the plan refuses an undeclared lane, a non-catalog tier and a field the en
   const field = clone(sources.plan);
   field.requests.default.request.temperature = 0.7;
   assert.throws(() => validatePlan(field, sources), /unknown request field temperature/);
+  const unsupported = clone(sources.plan);
+  unsupported.requests["experimental-fp8-ar"].backends = ["metal"];
+  assert.throws(() => validatePlan(unsupported, sources), /bf16 on CUDA only/);
   const inverted = clone(sources.plan);
   inverted.requests["long-context"].request.semanticSampling = { minTokens: 10, maxTokens: 5 };
   assert.throws(() => validatePlan(inverted, sources), /minTokens exceeds maxTokens/);
@@ -160,8 +170,30 @@ test("the case file's request fields are exactly the native entrypoint's (deny_u
   const lib = await readFile(path.join(ROOT, "crates/sceneworks-worker/src/lib.rs"), "utf8");
   assert.match(lib, /\nmod yue2_memory_profile;/);
   for (const item of expandCases(sources.plan)) {
-    assert.deepEqual(Object.keys(caseFile(item)), ["id", "tier", "decoder", "request"]);
+    assert.deepEqual(Object.keys(caseFile(item)), item.arMode
+      ? ["id", "tier", "decoder", "arMode", "request"]
+      : ["id", "tier", "decoder", "request"]);
   }
+});
+
+test("an FP8 profile record is mode-bound", () => {
+  const item = expandCases(sources.plan).find((row) => row.arMode === "experimentalFp8");
+  const current = record(item);
+  assert.equal(current.request.arMode, "experimentalFp8");
+  assert.equal(current.outcome.engineQuantization, "fp8");
+  assert.equal(gradeRecord(current, sources).status, "current");
+  const altered = clone(current);
+  altered.request.arMode = "native";
+  assert.match(gradeRecord(altered, sources).reasons.join(), /arMode native is now experimentalFp8/);
+  const unpriced = clone(current);
+  unpriced.admission.estimate.weights.hostBytes = 0;
+  assert.throws(() => validateRecord(unpriced), /retained BF16 AR originals/);
+  const nativeEngine = clone(current);
+  nativeEngine.outcome.engineQuantization = "none";
+  assert.throws(() => validateRecord(nativeEngine), /effective FP8 AR mode/);
+  const unprovenEngine = clone(current);
+  delete unprovenEngine.outcome.engineQuantization;
+  assert.throws(() => validateRecord(unprovenEngine), /effective FP8 AR mode/);
 });
 
 test("samples are attributed to the stage in force; start-up and teardown belong to none", () => {

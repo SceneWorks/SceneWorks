@@ -84,6 +84,8 @@ pub(crate) struct ProfileCase {
     id: String,
     tier: String,
     decoder: String,
+    #[serde(default)]
+    ar_mode: Option<contract::ArMode>,
     request: CaseRequest,
 }
 
@@ -110,6 +112,7 @@ pub(crate) fn case_spec(case: &ProfileCase) -> Result<Yue2JobSpec, String> {
         "semanticSampling": request.semantic_sampling.as_ref().map(sampling_json),
         "decoder": case.decoder,
         "tier": case.tier,
+        "arMode": case.ar_mode,
     });
     let spec: Yue2JobSpec =
         serde_json::from_value(body).map_err(|error| format!("{}: {error}", case.id))?;
@@ -332,6 +335,8 @@ pub(crate) fn outcome_json(
     audio_seconds: f64,
     rms: f32,
     run_result: &Value,
+    ar_mode: contract::ArMode,
+    engine_config: Option<&Value>,
     stage_seconds: serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
     let field = |key: &str| {
@@ -357,7 +362,7 @@ pub(crate) fn outcome_json(
     {
         return Err("the run's latent identity has no sha256".into());
     }
-    Ok(json!({
+    let mut outcome = json!({
         "caseId": case_id,
         "outcome": "completed",
         "audioSeconds": audio_seconds,
@@ -369,7 +374,20 @@ pub(crate) fn outcome_json(
         "planIdentity": field("plan_identity")?,
         "decoder": field("decoder")?,
         "latent": latent,
-    }))
+    });
+    if ar_mode == contract::ArMode::ExperimentalFp8 {
+        let quantization = engine_config
+            .and_then(|config| config.get("quantization"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "the run's config.json has no effective quantization".to_owned())?;
+        if quantization != "fp8" {
+            return Err(format!(
+                "the run's effective AR quantization is {quantization}, not requested fp8"
+            ));
+        }
+        outcome["engineQuantization"] = json!(quantization);
+    }
+    Ok(outcome)
 }
 
 fn builtin_entry() -> Value {
@@ -478,6 +496,17 @@ fn capture_case() {
         &std::fs::read(published.dir.join("result.json")).expect("read the run's result.json"),
     )
     .expect("the run's result.json is JSON");
+    let engine_config = if case.ar_mode == Some(contract::ArMode::ExperimentalFp8) {
+        Some(
+            serde_json::from_slice::<Value>(
+                &std::fs::read(published.dir.join("config.json"))
+                    .expect("read the run's effective config.json"),
+            )
+            .expect("the run's config.json is JSON"),
+        )
+    } else {
+        None
+    };
     let (seconds, rms) = match report.output {
         Some(GenerationOutput::Audio(track)) => {
             let n = track.samples.len().max(1);
@@ -496,6 +525,8 @@ fn capture_case() {
         seconds,
         rms,
         &run_result,
+        case.ar_mode.unwrap_or_default(),
+        engine_config.as_ref(),
         stage_seconds(&marks.marks),
     )
     .unwrap_or_else(|why| panic!("{why}"));
@@ -671,10 +702,16 @@ mod tests {
         assert!(!requests.is_empty());
         for (name, spec) in requests {
             for tier in spec["tiers"].as_array().unwrap() {
+                let backend = spec["backends"]
+                    .as_array()
+                    .and_then(|rows| rows.first())
+                    .and_then(Value::as_str)
+                    .unwrap_or("metal");
                 let parsed = case(json!({
-                    "id": format!("yue2:{}:metal:{name}", tier.as_str().unwrap()),
+                    "id": format!("yue2:{}:{backend}:{name}", tier.as_str().unwrap()),
                     "tier": tier,
                     "decoder": spec["decoder"],
+                    "arMode": spec.get("arMode"),
                     "request": spec["request"],
                 }))
                 .unwrap();
@@ -728,7 +765,16 @@ mod tests {
     #[test]
     fn the_outcome_carries_the_runs_truncation_identities_and_timings() {
         let marks = stage_seconds(&[("load", 1.0), ("plan", 2.0), ("done", 4.0)]);
-        let outcome = outcome_json("case", 42.0, 0.2, &run_result(), marks).unwrap();
+        let outcome = outcome_json(
+            "case",
+            42.0,
+            0.2,
+            &run_result(),
+            contract::ArMode::Native,
+            None,
+            marks,
+        )
+        .unwrap();
         assert_eq!(
             outcome["truncated"],
             json!({ "abc": false, "semantic": true })
@@ -752,10 +798,39 @@ mod tests {
             let mut result = run_result();
             *result.pointer_mut(pointer).unwrap() = broken;
             assert!(
-                outcome_json("case", 42.0, 0.2, &result, Default::default()).is_err(),
+                outcome_json(
+                    "case",
+                    42.0,
+                    0.2,
+                    &result,
+                    contract::ArMode::Native,
+                    None,
+                    Default::default(),
+                )
+                .is_err(),
                 "a run record with a broken {pointer} must be refused, not defaulted"
             );
         }
+    }
+
+    #[test]
+    fn fp8_outcome_requires_the_engines_effective_fp8_config() {
+        let result = run_result();
+        let capture = |config: Option<&Value>| {
+            outcome_json(
+                "case",
+                42.0,
+                0.2,
+                &result,
+                contract::ArMode::ExperimentalFp8,
+                config,
+                Default::default(),
+            )
+        };
+        let fp8 = json!({ "quantization": "fp8" });
+        assert_eq!(capture(Some(&fp8)).unwrap()["engineQuantization"], "fp8");
+        assert!(capture(None).is_err());
+        assert!(capture(Some(&json!({ "quantization": "none" }))).is_err());
     }
 
     /// The plan's case shape maps onto the job's request; unknown fields and values are refused.
@@ -806,6 +881,7 @@ mod tests {
         let load = Yue2LoadFacts {
             tier: Yue2Tier::Q8,
             precision: Yue2Precision::Default,
+            ar: Yue2ArMode::Native,
             sequential_offload: false,
         };
         let shape = shape_of(&builtin_entry(), &request, load, None, Yue2ArMode::Native).unwrap();

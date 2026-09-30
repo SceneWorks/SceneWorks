@@ -289,6 +289,7 @@ export function Yue2SongLab({ header }) {
     importAsset,
     createModelDownloadJob,
     requestedGpu,
+    visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
   const projectId = activeProject?.id ?? null;
@@ -436,7 +437,8 @@ export function Yue2SongLab({ header }) {
     reviewedTranscriptionVersionId !== settings.coverVersionId
       ? "Review the transcription and score, then confirm your review before covering it."
       : null;
-  const problemContext = { hasProject: Boolean(projectId), coverVersion };
+  const selectedGpuCapabilities = visibleWorkers.find((worker) => worker.gpuId === requestedGpu)?.capabilities ?? [];
+  const problemContext = { hasProject: Boolean(projectId), coverVersion, requestedGpu, selectedGpuCapabilities };
 
   // The server says the acceptance lapsed (the terms changed, or it was withdrawn): re-gate.
   function licenseLapsed() {
@@ -1096,7 +1098,7 @@ export function Yue2SongLab({ header }) {
             <ErrorNotice error={submitError} testId="yue2-submit-error" />
 
             <AdvancedSection
-              hint="Sampling, guidance, seed, synthesis steps, precision and memory"
+              hint="Sampling, guidance, seed, synthesis steps, AR mode, precision and memory"
               onToggle={() => update({ advancedOpen: !settings.advancedOpen })}
               open={settings.advancedOpen}
             >
@@ -1119,6 +1121,13 @@ export function Yue2SongLab({ header }) {
                     <option value="">Default (BF16 on GPU)</option>
                     <option value="default">Default</option>
                     <option value="fp32">FP32</option>
+                  </select>
+                </label>
+                <label>
+                  AR mode
+                  <select aria-label="AR mode" disabled={Boolean(why("arMode"))} title={why("arMode") ?? undefined} onChange={(event) => update({ arMode: event.target.value })} value={settings.arMode}>
+                    <option value="">Native (default)</option>
+                    <option value="experimentalFp8">Experimental FP8 AR (CUDA sm_89+, bf16 only)</option>
                   </select>
                 </label>
                 <label>

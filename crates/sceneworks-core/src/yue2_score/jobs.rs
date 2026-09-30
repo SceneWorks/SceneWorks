@@ -178,6 +178,17 @@ pub enum ComputePrecision {
     Fp32,
 }
 
+/// The optional AR projection mode. Omission keeps every existing job on the native path.
+/// Experimental FP8 is a CUDA sm_89+ BF16-only choice; the worker and engine verify the
+/// resolved tier and device before loading weights.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ArMode {
+    #[default]
+    Native,
+    ExperimentalFp8,
+}
+
 /// `LoadSpec::offload_policy`: `sequential` moves the AR-only weights to host memory while the
 /// acoustic stage runs (upstream `offload_ar`) unless a request's `memory.stageResidency` decides.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,6 +430,8 @@ pub struct Yue2JobSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precision: Option<ComputePrecision>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ar_mode: Option<ArMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offload_policy: Option<OffloadPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryControls>,
@@ -525,6 +538,10 @@ pub const FIELD_KINDS: &[(&str, &[Yue2JobKind])] = &[
         "precision",
         &[K_CREATE, K_PLAN, K_FROM_PLAN, K_COVER, K_RENDER, K_DECODE],
     ),
+    (
+        "arMode",
+        &[K_CREATE, K_PLAN, K_FROM_PLAN, K_COVER, K_RENDER],
+    ),
     ("offloadPolicy", &[K_CREATE, K_FROM_PLAN, K_COVER, K_RENDER]),
     (
         "memory.acoustic",
@@ -587,6 +604,7 @@ fn set_fields(spec: &Yue2JobSpec) -> Vec<&'static str> {
     push("decoder", spec.decoder.is_some());
     push("tier", spec.tier.is_some());
     push("precision", spec.precision.is_some());
+    push("arMode", spec.ar_mode.is_some());
     push("offloadPolicy", spec.offload_policy.is_some());
     push(
         "memory.acoustic",
@@ -895,6 +913,22 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
         if !allowed {
             let shown = field.split('.').next().unwrap_or(field);
             return Err(error(INVALID_COMBINATION, shown, why_not(field, kind)));
+        }
+    }
+    if spec.ar_mode == Some(ArMode::ExperimentalFp8) {
+        if spec.tier != Some(Tier::Bf16) {
+            return Err(error(
+                INVALID_COMBINATION,
+                "arMode",
+                "experimental FP8 AR needs an explicit bf16 tier",
+            ));
+        }
+        if spec.precision == Some(ComputePrecision::Fp32) {
+            return Err(error(
+                INVALID_COMBINATION,
+                "arMode",
+                "experimental FP8 AR needs BF16 compute, not FP32",
+            ));
         }
     }
     // Per-kind requirements.

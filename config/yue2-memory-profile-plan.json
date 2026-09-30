@@ -1,5 +1,5 @@
 {
-  "$comment": "sc-23001 (epic 22988): the YuE2 memory-profile cases the terminal story (sc-23002) captures ONCE, on Mac Metal and Windows CUDA, through scripts/yue2-memory-profile.mjs. YuE2 is an audio-lane model with no image five-rung contract, so it has its own profile harness rather than an anchor in config/memory-calibration-plan.json; it shares that harness's currency rule (the `candle:yue2` compile-closure digest in config/inference-provider-closures.json) and its Darwin footprint guard (scripts/memory-calibration-watchdog.py). Each case is `yue2:<tier>:<backend>:<request>`, expanded from `requests` x `backends`. A record is keyed by the exact model repo@revision + tier weights, the decoder repo@revision, the engine's closure digest, the tier and the backend; `check` grades a record whose identity no longer matches as stale and `ingest` refuses it. `run` skips every case the corpus already holds a current record for, so an interrupted campaign resumes instead of starting over. Nothing here runs in CI.",
+  "$comment": "sc-23001 (epic 22988): YuE2 memory-profile cases captured through scripts/yue2-memory-profile.mjs. YuE2 is an audio-lane model with no image five-rung contract, so it has its own profile harness rather than an anchor in config/memory-calibration-plan.json; it shares that harness's currency rule (the `candle:yue2` compile-closure digest in config/inference-provider-closures.json) and its Darwin footprint guard (scripts/memory-calibration-watchdog.py). Each case is `yue2:<tier>:<backend>:<request>`, expanded from each request's backends (defaulting to the plan backends). A record is keyed by the exact model repo@revision + tier weights, the decoder repo@revision, the engine's closure digest, the tier, backend and explicit AR mode; `check` grades a record whose identity no longer matches as stale and `ingest` refuses it. `run` skips every case the corpus already holds a current record for, so an interrupted campaign resumes instead of starting over. Nothing here runs in CI.",
   "schema": "sceneworks-yue2-memory-profile-plan-v1",
   "modelId": "yue2",
   "lane": "candle:yue2",
@@ -42,12 +42,20 @@
         "cfgScale": 1.01,
         "semanticSampling": { "minTokens": 16000, "maxTokens": 16000 }
       }
+    },
+    "experimental-fp8-ar": {
+      "$comment": "One bounded CUDA-only opt-in capture for experimental FP8 AR. The same production job path must price the retained BF16 AR originals in host RAM; this case is additive to the ten earlier Native records and does not rewrite them.",
+      "backends": ["cuda"],
+      "tiers": ["bf16"],
+      "decoder": "standard",
+      "arMode": "experimentalFp8",
+      "request": {
+        "planning": "full",
+        "style": "indie pop, female vocal, guitar and drums",
+        "lyrics": "[verse]\nMorning light, I hear your song\n\n[chorus]\nHold on, sing along",
+        "seed": 831003
+      }
     }
   },
-  "unreachable": [
-    {
-      "what": "the experimental FP8 AR mode (CUDA sm_89+, bf16 tier)",
-      "why": "candle-audio-yue2 owner decision `fp8_not_on_the_load_spec`: LoadSpec has no FP8 value, so the registered provider cannot request it. Admission prices its layout (the retained BF16 originals in host memory) and refuses it off CUDA sm_89+; there is nothing to capture until a load path exists."
-    }
-  ]
+  "unreachable": []
 }
