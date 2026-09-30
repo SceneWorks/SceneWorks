@@ -1714,6 +1714,12 @@ export function kernelPathValid(gpuFamily, kernel, selection, queryDtype) {
  * copy + staged tail) is below the dense geometry; a `dense-fallback` coordinate claims no
  * compressed storage.
  */
+/** Compressed KV methods the producer runs: code width and reader identity of each. */
+const COMPRESSED_KV_METHODS = Object.freeze({
+  "group-affine": Object.freeze({ bits: 2, representationIdentity: "sc-20676-packed-group-affine-v1" }),
+  "group-affine-4": Object.freeze({ bits: 4, representationIdentity: "sc-20676-packed-group-affine-b4-v1" }),
+});
+
 function validateCompression(receipt) {
   const compression = receipt.compression;
   exactKeys(compression, [
@@ -1726,6 +1732,13 @@ function validateCompression(receipt) {
   text(compression.representationIdentity, "compression.representationIdentity");
   for (const field of ["representationVersion", "bits", "quantizationGroupSize"]) {
     positiveInteger(compression[field], `compression.${field}`);
+  }
+  // Each method names exactly one representation (mirrors the producer's CompressedKvMethod).
+  const representation = Object.hasOwn(COMPRESSED_KV_METHODS, compression.method)
+    ? COMPRESSED_KV_METHODS[compression.method] : fail(`unknown compressed KV method ${compression.method}`);
+  if (compression.bits !== representation.bits
+    || compression.representationIdentity !== representation.representationIdentity) {
+    fail(`compressed method ${compression.method} is ${representation.bits}-bit ${representation.representationIdentity} but the receipt records ${compression.bits}-bit ${compression.representationIdentity}`);
   }
   for (const field of [
     "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",

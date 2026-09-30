@@ -1093,6 +1093,16 @@ test("SC-20676 group-affine-4 rows (4-bit codes) validate and bind their own met
     return withCampaignPid(fixture("compressed", matrix, { compression: fourBit(fixture("compressed", matrix)) }), index + 10);
   });
   assert.equal(validateCampaign(rows).kvMethod, "group-affine-4");
+  // Each method is bound to its width and reader identity; unknown methods are refused.
+  const b2 = "sc-20676-packed-group-affine-v1", b4 = "sc-20676-packed-group-affine-b4-v1";
+  for (const [method, bits, representationIdentity] of [
+    ["group-affine-4", 2, b2], ["group-affine-4", 4, b2], ["group-affine-4", 2, b4],
+    ["group-affine", 4, b4], ["group-affine", 2, b4], ["group-affine", 4, b2],
+  ]) {
+    const compression = { ...accepted.compression, method, bits, representationIdentity };
+    assert.throws(() => fixture("compressed", {}, { compression }), new RegExp(`compressed method ${method} is`), `${method}/${bits}/${representationIdentity}`);
+  }
+  assert.throws(() => fixture("compressed", {}, { compression: { ...accepted.compression, method: "rvq-unwired" } }), /unknown compressed KV method/);
   // A campaign is one method: a 2-bit row cannot join a 4-bit campaign.
   const mixed = [...rows];
   mixed[0] = withCampaignPid(fixture("compressed", rows[0].matrix), 10);
