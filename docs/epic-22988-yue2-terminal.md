@@ -240,9 +240,17 @@ decode 4), with a 6,864,981,976-byte peak.
 | [Metal q4-default profile resume 36570798539](https://github.com/SceneWorks/inference/actions/runs/36570798539) | Successful targeted capture in the original app state at SceneWorks `44dc4119` / M2. It rehashed the original acceptance summary and watchdog file before measuring. Its 75-event guard chain verifies; the guarded test exited 0 after process-group cleanup. The original acceptance verdict remains incomplete. |
 | [CUDA engine real-weight run 36361386863](https://github.com/SceneWorks/inference/actions/runs/36361386863) | Exact M2 registered render and fidelity checks passed for the declared CUDA configurations. |
 | [Metal quality runtime 36559069894](https://github.com/SceneWorks/inference/actions/runs/36559069894) and [artifact-only recovery 36560050786](https://github.com/SceneWorks/inference/actions/runs/36560050786) | Exact M2 f32dev, bf16, q8 and q4 Metal fidelity checks passed against the regenerated CPU reference. The runtime workflow stayed red because its artifact upload path was rejected; the separate upload-only run retained the unchanged receipts without rerunning inference. These metrics use previously characterized bounds and are not a listening verdict. |
+| [Registered FP8 engine run 36641569264](https://github.com/SceneWorks/inference/actions/runs/36641569264) | One selected real-weight registered-provider test passed at inference `c1e8f8e023bf4e1fe94a61c4c39e08f881fdd8e6`, producing audio with effective FP8 AR / BF16 compute and mode-bound artifact identity. This short test is not broad fidelity, long-context or app memory evidence. |
+| [FP8 app profile run 36661480677](https://github.com/SceneWorks/SceneWorks/actions/runs/36661480677) | Completed at SceneWorks `91a9a582c9531b7b648b76b53d9aee2cb116e630` / inference `c1e8f8e023bf4e1fe94a61c4c39e08f881fdd8e6` on CUDA. The explicit `experimentalFp8` request was admitted, engine output reported `fp8`, and admission retained 2,818,572,288 bytes of BF16 originals in host RAM. All five stages have external samples and measured peaks within estimates. Audio duration was 84.88 seconds, with no ABC or semantic truncation. This native loader/admission/generation profile is not a new HTTP acceptance run or broad FP8 fidelity proof. |
+| [Earlier FP8 app attempts 36652399981](https://github.com/SceneWorks/SceneWorks/actions/runs/36652399981) | Attempt 1 was cancelled before capture to avoid competing CUDA work. Attempt 2 refused before load because the standalone profile skipped capability discovery. Neither produced an FP8 measurement; both remain visible. PR2966 repaired selected-GPU capability initialization before the successful capture above. |
 
-The owner still needs to listen to the retained on-host audio for musical coherence, English and
-Mandarin output, reviewed covers and score edits, and standard/legacy decodes. Hashes, RMS,
-stage peaks and fidelity metrics cannot decide those questions. Preserve the Metal safety skip,
-the earlier red runs and the separate run identities in the final evidence; no sc-23002 Done or
-feature-to-main delivery claim follows from this table alone.
+The owner [accepted the retained local listening playlist](https://app.shortcut.com/trefry/story/23002/yue2-integrated-metalcuda-readiness-and-v1v2-license-separation#activity-24386):
+“They all sound really good.” That review covered the original recording and 22 retained renders;
+it does not extend to remote-only FP8 output. Hashes, RMS, stage peaks and fidelity metrics do not
+replace a listening review.
+
+The two precision exceptions still require explicit owner disposition: FP32 standard/legacy VAEs
+at every tier, and BF16 embedding/latent-position tables plus norms/biases in q8/q4. Listening
+acceptance does not resolve them. Weight rehosting remains gated. Preserve the Metal safety skip,
+the earlier red runs and separate run identities in final evidence; this table alone does not
+claim sc-23002 Done or feature-to-main delivery.
