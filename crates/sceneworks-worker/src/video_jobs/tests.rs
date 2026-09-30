@@ -2952,6 +2952,106 @@ fn resolve_mochi_model_dir_picks_the_requested_tier_dir() {
     });
 }
 
+/// The product's tier resolver must hand the bundled Mochi loaders a snapshot whose shared T5
+/// index is confined to that repository. HF blob links remain loadable; an index that selects a
+/// sibling outside the shared component and repository blobs fails before any shard is returned.
+#[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+#[test]
+fn cached_mochi_tier_preserves_shared_encoder_blob_boundary() {
+    use std::os::unix::fs::symlink;
+
+    let _env = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", ""),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+        (MOCHI_DIR_ENV, ""),
+    ]);
+    let data = tempfile::tempdir().unwrap();
+    let repo =
+        sceneworks_core::hf_home::huggingface_repo_cache_path(data.path(), MOCHI_REPO).unwrap();
+    let root = repo.join("snapshots/0123456789abcdef0123456789abcdef01234567");
+    let tier = root.join("q4");
+    for dir in [
+        tier.join("transformer"),
+        root.join("text_encoder/nested"),
+        root.join("tokenizer"),
+        root.join("vae"),
+        repo.join("blobs"),
+    ] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(tier.join("split_model.json"), b"{}").unwrap();
+    std::fs::write(tier.join("transformer/model.safetensors"), b"tier").unwrap();
+    let blob = repo.join("blobs/accepted");
+    std::fs::write(&blob, b"encoder").unwrap();
+    let encoder = root.join("text_encoder");
+    symlink(&blob, encoder.join("nested/accepted.safetensors")).unwrap();
+    let index = encoder.join("model.safetensors.index.json");
+    std::fs::write(
+        &index,
+        json!({"weight_map": {"w": "nested/accepted.safetensors"}}).to_string(),
+    )
+    .unwrap();
+
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..Settings::from_env()
+    };
+    let selected = resolve_mochi_model_dir(&settings, &mochi_request(json!({}))).unwrap();
+    assert_eq!(selected, tier);
+    let shared = selected.parent().unwrap().join("text_encoder");
+    let roots = gen_core::safetensors_shards::snapshot_shard_roots(&shared).unwrap();
+    assert!(roots.contains(&std::fs::canonicalize(repo.join("blobs")).unwrap()));
+    let selected_shards = gen_core::safetensors_shards::resolve_indexed_safetensors_shards(
+        &shared,
+        "model.safetensors.index.json",
+        &roots,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(selected_shards.len(), 1);
+    assert_eq!(
+        selected_shards[0].loader_path,
+        encoder.join("nested/accepted.safetensors")
+    );
+    assert_eq!(
+        selected_shards[0].canonical_path,
+        blob.canonicalize().unwrap()
+    );
+
+    std::fs::write(
+        &index,
+        json!({"weight_map": {"w": "../../outside.safetensors"}}).to_string(),
+    )
+    .unwrap();
+    let error = gen_core::safetensors_shards::resolve_indexed_safetensors_shards(
+        &shared,
+        "model.safetensors.index.json",
+        &roots,
+    )
+    .expect_err("the selected Mochi snapshot must reject an escaping encoder index");
+    assert!(error.to_string().contains("invalid shard path"), "{error}");
+
+    let foreign = data.path().join("outside.safetensors");
+    std::fs::write(&foreign, b"foreign").unwrap();
+    symlink(&foreign, encoder.join("nested/foreign.safetensors")).unwrap();
+    std::fs::write(
+        &index,
+        json!({"weight_map": {"w": "nested/foreign.safetensors"}}).to_string(),
+    )
+    .unwrap();
+    let error = gen_core::safetensors_shards::resolve_indexed_safetensors_shards(
+        &shared,
+        "model.safetensors.index.json",
+        &roots,
+    )
+    .expect_err("a cached model must not follow a link outside its own repository");
+    assert!(
+        error.to_string().contains("outside authorized shard roots"),
+        "{error}"
+    );
+}
+
 /// A complete tier with NO shared co-requisite must NOT resolve. The T5/tokenizer/VAE are a
 /// SEPARATE download (`coRequisite`, sc-9696), so "q4 present, text_encoder absent" is a real
 /// user state — and resolving it would dead-end inside the provider on a missing-file error

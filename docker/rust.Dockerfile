@@ -19,6 +19,8 @@ COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix apps/web
 COPY apps/web ./apps/web
 COPY apps/desktop/licenses ./apps/desktop/licenses
+# The editor-guides Vite plugin bundles these first-party documents.
+COPY docs/film-script-writing.md docs/film-editor.md ./docs/
 # Explicit empty (not unset): apps/web/src/api.js maps this to window.location.origin.
 ENV VITE_API_BASE_URL=""
 # Guard the built artifact, not just the Dockerfile environment declaration:
@@ -29,9 +31,13 @@ RUN npm run build --prefix apps/web \
 FROM rust:1-bookworm AS builder
 # Which workspace binary to build (sceneworks-rust-api | sceneworks-rust-worker).
 ARG BIN=sceneworks-rust-api
+# Allows resource-constrained local builds without slowing the CI default.
+ARG CARGO_BUILD_JOBS
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+# Cargo resolves the GTK3 safety patch even for server-only builds.
+COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
@@ -122,10 +128,15 @@ FROM debian:bookworm-slim AS rust-api
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 sceneworks \
+    && useradd --uid 1000 --gid sceneworks --create-home --shell /usr/sbin/nologin sceneworks
+
+ENV HOME=/home/sceneworks
 
 COPY --from=builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 
+USER sceneworks
 CMD ["sceneworks-rust-api"]
 
 # --- Rust API + embedded production web runtime ------------------------------
@@ -156,10 +167,15 @@ FROM debian:bookworm-slim AS rust-worker
 # (epic 3482). Don't re-add the hf CLI; it would bypass the native download watchdog.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 1000 sceneworks \
+    && useradd --uid 1000 --gid sceneworks --create-home --shell /usr/sbin/nologin sceneworks
+
+ENV HOME=/home/sceneworks
 
 COPY --from=builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 
+USER sceneworks
 CMD ["sceneworks-rust-worker"]
 
 # --- Candle GPU worker build (CUDA; compute_80 PTX → sm_120) ------------------
@@ -176,6 +192,7 @@ CMD ["sceneworks-rust-worker"]
 # feature lives on the sceneworks-worker library crate, enabled through the thin binary
 # (epic 5483 Phase 7 / sc-5503 — the Docker torch→candle cutover).
 FROM nvidia/cuda:12.9.1-devel-ubuntu22.04 AS candle-builder
+ARG CARGO_BUILD_JOBS
 ENV DEBIAN_FRONTEND=noninteractive
 # build-essential + pkg-config for the CUDA/native build scripts; libssl-dev because
 # native-tls (pulled transitively by the worker's deps) links system OpenSSL on Linux
@@ -198,6 +215,8 @@ WORKDIR /app
 # entrypoints, then `cargo fetch` so the candle dependency tree (candle-gen +
 # candle/cudarc, all public git deps) caches independently of source edits.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml rustfmt.toml ./
+# Cargo resolves the GTK3 safety patch even for server-only builds.
+COPY vendor/glib-0.18.5 ./vendor/glib-0.18.5
 COPY .cargo/config.toml ./.cargo/config.toml
 COPY crates/sceneworks-core/Cargo.toml ./crates/sceneworks-core/Cargo.toml
 COPY crates/sceneworks-worker/Cargo.toml ./crates/sceneworks-worker/Cargo.toml
@@ -348,7 +367,11 @@ RUN rm -rf "${ORT_PY_SITE}"/pip "${ORT_PY_SITE}"/pip-*.dist-info \
 #
 # ubuntu24.04 base. The candle builder stays on 22.04 — its older-glibc binary runs fine
 # on 24.04 (glibc is backward-compatible).
-FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle
+FROM nvidia/cuda:12.9.1-runtime-ubuntu24.04 AS rust-worker-candle-base
+
+# Ubuntu may already own UID/GID 1000. Keep its accounts intact and provision
+# only our dedicated home; both leaves use numeric IDs, without inherited groups.
+RUN install -d -m 0755 -o 1000 -g 1000 /home/sceneworks
 ENV DEBIAN_FRONTEND=noninteractive
 # ffmpeg: candle video lanes encode mp4. libgomp1: onnxruntime's OpenMP runtime.
 # No Python: the onnxruntime libraries arrive pre-staged from ort-builder, and model
@@ -378,6 +401,11 @@ RUN test -e "${ORT_DYLIB_PATH}"
 
 COPY --from=candle-builder /out/sceneworks-rust-worker /usr/local/bin/sceneworks-rust-worker
 
+# RunPod uses the root base for mount initialization before dropping privileges.
+# The standalone candle worker and its Compose UID/GID override use this leaf.
+FROM rust-worker-candle-base AS rust-worker-candle
+ENV HOME=/home/sceneworks
+USER 1000:1000
 CMD ["sceneworks-rust-worker"]
 
 # --- Combined RunPod GPU runtime ---------------------------------------------
@@ -389,15 +417,22 @@ CMD ["sceneworks-rust-worker"]
 # disjoint capabilities, so generation cannot leak onto the utility lane and
 # downloads/imports/exports cannot occupy the GPU lane.
 #
-# Keep this runtime based on rust-worker-candle: it is the validated CUDA 12.9.1
+# Keep this runtime based on rust-worker-candle-base: it is the validated CUDA 12.9.1
 # + cuDNN 9 + onnxruntime-gpu image and already contains ffmpeg. Model Manager
 # downloads run through the worker's native in-process downloader; intentionally
 # do not install the retired Hugging Face CLI (sc-12227 / sc-12232).
-FROM rust-worker-candle AS runpod
+FROM rust-worker-candle-base AS runpod
 
 COPY --from=embed-builder /out/sceneworks-rust-api /usr/local/bin/sceneworks-rust-api
 COPY docker/runpod-entrypoint.sh /usr/local/bin/sceneworks-runpod-entrypoint
-RUN chmod 0755 /usr/local/bin/sceneworks-runpod-entrypoint
+COPY docker/runpod-privileges.sh /usr/local/bin/runpod-privileges.sh
+# Root is required only for provider mount initialization. The entrypoint drops
+# the supervisor, API and worker to this unprivileged identity before startup.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends acl util-linux \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod 0755 /usr/local/bin/sceneworks-runpod-entrypoint
+ENV SCENEWORKS_SERVICE_UID=1000 SCENEWORKS_SERVICE_GID=1000 HOME=/home/sceneworks
 
 ENV SCENEWORKS_API_HOST=0.0.0.0 \
     SCENEWORKS_API_PORT=8010 \

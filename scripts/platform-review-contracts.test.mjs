@@ -49,6 +49,11 @@ test("RunPod validation provisions the same inference fixtures as PR scaffold ch
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
+  const terminalFetchName = "Fetch the exact public inference terminal contract";
+  const terminalFetch = workflowStep(publish, terminalFetchName);
+  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
+  assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
   assert.ok(dependencies.includes("npm ci --ignore-scripts"));
   assert.ok(publish.indexOf(dependencies) < publish.indexOf(fetch));
@@ -1424,6 +1429,37 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   const script = await source("scripts/check-docker-api-runtime.mjs");
   assert.doesNotMatch(script, /--entrypoint", "rm"/);
   assert.match(script, /SCENEWORKS_UID/);
+});
+
+test("standard server and web development images default to nonroot users", async () => {
+  const [rustDockerfile, webDockerfile] = await Promise.all([
+    source("docker/rust.Dockerfile"),
+    source("docker/web.Dockerfile"),
+  ]);
+  const stage = (dockerfile, name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(dockerfile);
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+
+  for (const name of ["rust-api", "rust-worker", "rust-worker-candle"]) {
+    const body = stage(rustDockerfile, name);
+    assert.match(body, /^ENV HOME=\/home\/sceneworks$/m, `${name} must set a writable home`);
+    const identity = name === "rust-worker-candle" ? /^USER 1000:1000$/m : /^USER sceneworks$/m;
+    assert.match(body, identity, `${name} must default to its nonroot service identity`);
+  }
+  assert.match(webDockerfile, /^ENV HOME=\/home\/node$/m);
+  assert.match(webDockerfile, /^USER node$/m);
+
+  for (const dockerfile of [rustDockerfile, webDockerfile]) {
+    assert.doesNotMatch(
+      dockerfile,
+      /\bchmod\s+(?:-R\s+)?(?:777|a\+w|o\+w)\b/,
+      "container hardening must not introduce broad writable permissions",
+    );
+  }
 });
 
 test("Rust Docker dependency layers include every memory-strategy adapter target", async () => {
