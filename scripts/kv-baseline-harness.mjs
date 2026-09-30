@@ -160,9 +160,9 @@ const COMPILE_ATTRIBUTION_FIELDS = [
   "firstDispatchExcessMs",
 ];
 // sc-20671: -v2 records the first-dispatch excess against the steady-state noise band instead of
-// requiring it to be positive; -v1 receipts (band-free, positive excess) stay valid.
+// requiring it to be positive. (-v1 receipts are bound to an older inference revision and can never
+// be resumed into a v6 campaign.)
 const COMPILE_ATTRIBUTION_METHOD = "first-dispatch-minus-steady-v2";
-const LEGACY_COMPILE_ATTRIBUTION_METHOD = "first-dispatch-minus-steady-v1";
 const COMPILE_NOISE_FIELDS = [
   "noiseSamplesMs",
   "noiseBandMs",
@@ -734,8 +734,7 @@ function matrixCoordinate(matrix) {
 }
 
 function validateCompileAttribution(attribution, matrix) {
-  const legacy = attribution?.method === LEGACY_COMPILE_ATTRIBUTION_METHOD;
-  if (!legacy && attribution?.method !== COMPILE_ATTRIBUTION_METHOD) {
+  if (attribution?.method !== COMPILE_ATTRIBUTION_METHOD) {
     fail("timings.compileAttribution.method is not the frozen attribution method");
   }
   const resolvedKey = attribution?.compileCostResolved === true
@@ -743,9 +742,7 @@ function validateCompileAttribution(attribution, matrix) {
     : "compileCostUnresolvedReason";
   exactKeys(
     attribution,
-    legacy
-      ? COMPILE_ATTRIBUTION_FIELDS
-      : [...COMPILE_ATTRIBUTION_FIELDS, ...COMPILE_NOISE_FIELDS, resolvedKey],
+    [...COMPILE_ATTRIBUTION_FIELDS, ...COMPILE_NOISE_FIELDS, resolvedKey],
     "timings.compileAttribution",
   );
   const expectedOperation = compileOperation(matrix);
@@ -797,9 +794,7 @@ function validateCompileAttribution(attribution, matrix) {
   for (const field of ["firstDispatchMs", "steadyDispatchMs"]) {
     positiveNumber(attribution[field], `timings.compileAttribution.${field}`);
   }
-  if (legacy) {
-    positiveNumber(attribution.firstDispatchExcessMs, "timings.compileAttribution.firstDispatchExcessMs");
-  } else if (typeof attribution.firstDispatchExcessMs !== "number"
+  if (typeof attribution.firstDispatchExcessMs !== "number"
     || !Number.isFinite(attribution.firstDispatchExcessMs)) {
     fail("timings.compileAttribution.firstDispatchExcessMs must be a finite number");
   }
@@ -808,7 +803,6 @@ function validateCompileAttribution(attribution, matrix) {
     || Math.abs(attribution.firstDispatchExcessMs - firstDispatchExcessMs) > 1e-9) {
     fail("timings.compileAttribution derived values do not match the raw probes");
   }
-  if (legacy) return;
   // The steady noise samples: a cold row's four post-first repeats, or the five measured repeats
   // after a warm row's warmups. Compile cost is resolved only when the excess clears their spread.
   const samples = attribution.noiseSamplesMs;
@@ -836,14 +830,10 @@ function validateCompileAttribution(attribution, matrix) {
 }
 
 function coldCompileAlias(attribution) {
-  if (attribution.method === LEGACY_COMPILE_ATTRIBUTION_METHOD) return attribution.firstDispatchExcessMs;
   return attribution.compileCostResolved ? attribution.compileCostMs : null;
 }
 
 function compileCostSummary(attribution) {
-  if (attribution.method === LEGACY_COMPILE_ATTRIBUTION_METHOD) {
-    return `${attribution.firstDispatchExcessMs} ms (legacy)`;
-  }
   return attribution.compileCostResolved
     ? `${attribution.compileCostMs} ms (noise band ${attribution.noiseBandMs} ms)`
     : `unresolved: ${attribution.compileCostUnresolvedReason} (noise band ${attribution.noiseBandMs} ms)`;
@@ -1360,7 +1350,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     receipt.quality,
     [
       ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
-      "greedyAgreementMethod", "freeRunningFirstDivergence", "statistics", "fixtureEvidence",
+      "greedyAgreementMethod", "freeRunningFirstDivergence", "greedyTokenAgreementByRepeat",
+      "statistics", "fixtureEvidence",
     ],
     "quality",
   );
@@ -1369,6 +1360,13 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   }
   if (receipt.quality.freeRunningFirstDivergence !== null) {
     nonnegativeInteger(receipt.quality.freeRunningFirstDivergence, "quality.freeRunningFirstDivergence");
+  }
+  // The gate is the weakest repeat's teacher-forced agreement; every repeat's value is recorded.
+  const byRepeat = receipt.quality.greedyTokenAgreementByRepeat;
+  if (!Array.isArray(byRepeat) || byRepeat.length !== CONTRACT.statistics.repeats
+    || byRepeat.some((value) => typeof value !== "number" || !(value >= 0 && value <= 1))
+    || Math.min(...byRepeat) !== receipt.quality.greedyTokenAgreement) {
+    fail("quality.greedyTokenAgreement is not the minimum over the recorded repeats");
   }
   for (const field of DISCRIMINATION_FIELDS) {
     if (typeof receipt.quality[field] !== "boolean") fail(`quality.${field} must be boolean`);

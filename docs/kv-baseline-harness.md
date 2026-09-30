@@ -91,8 +91,8 @@ Otherwise both are omitted/null, and `compileCostUnresolvedReason` is
 `first-dispatch-not-slower-than-steady` or `excess-within-steady-noise-band`.
 At large geometries compute dominates and kernel compile cost is below
 run-to-run noise, so a non-positive excess is a measurement, never a refused
-row. Missing or non-finite probes still fail closed. `-v1` receipts (positive,
-band-free excess) stay valid. The steady decode runs outside every
+row. Missing or non-finite probes still fail closed. The retired `-v1` method is
+refused (its receipts belong to older producer revisions and cannot resume). The steady decode runs outside every
 coordinate observer on a cache released before the next repeat, and its
 `prompt + 256` live tokens are admitted by the producer's preflight bound.
 Batch rows are timed as one sequence, since the compressed arm has no batch
@@ -332,8 +332,12 @@ threshold number is unchanged.
   Receipts record `quality.greedyAgreementMethod: "teacher-forced"`, and the
   free-running first divergence is recorded separately
   (`quality.freeRunningFirstDivergence` and the kernel fixture evidence) as an
-  observation. The contract JSON text and every threshold (0.999) are
-  unchanged.
+  observation. The reference stream keeps its stop token, so the stop position
+  counts: the candidate agrees there when it also chooses a stop token. The
+  gate is the minimum over the five repeats
+  (`quality.greedyTokenAgreementByRepeat` records each), and the forced pass
+  runs once per distinct reference stream. The contract JSON text and every
+  threshold (0.999) are unchanged.
 
 ## Receipt v6: recorded, not refused (sc-20671 hardware audit)
 
