@@ -235,8 +235,10 @@ never an accepted row.
 
 `sc20671-kv-baseline parent --mode compressed --kv-method <method>` runs the same
 frozen eight-row schedule, fixtures, and geometry with each row's KV held in the
-method's compressed cache and fused decode attention (only `group-affine`, the
-SC-20675 packed 2-bit cache read by the SC-20676 Metal kernel, is wired). Each
+method's compressed cache and fused decode attention (`group-affine`, the
+SC-20675 packed 2-bit cache read by the SC-20676 Metal kernel, and
+`group-affine-4`, the same cache and reader with 4-bit codes; both group 32, and
+each receipt's `compression.bits` and `representationIdentity` name the width). Each
 worker runs the compressed arm, then a dense-KV reference arm on the **same
 candidate snapshot**, and gates quality against it (contract v3). The resume
 identity carries `mode: "compressed"` and `kvMethod`, so dense and compressed

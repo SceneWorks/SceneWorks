@@ -1076,6 +1076,28 @@ test("SC-20676 compressed campaigns are uniform and bound to their resume identi
   mixed[0] = withCampaignPid(fixture("dense", rows[0].matrix), 10);
   assert.throws(() => validateCampaign(mixed), /mixes dense and compressed/);
 });
+
+test("SC-20676 group-affine-4 rows (4-bit codes) validate and bind their own method", () => {
+  const fourBit = (row) => ({ ...row.compression, method: "group-affine-4",
+    representationIdentity: "sc-20676-packed-group-affine-b4-v1", bits: 4 });
+  const accepted = fixture("compressed", {}, { compression: fourBit(fixture("compressed")) });
+  assert.equal(validateReceipt(accepted), accepted);
+  assert.equal(accepted.compression.bits, 4);
+  const identity = sampleResumeIdentity(safetyPolicy);
+  const policySha256 = campaignPolicySha256(safetyPolicy);
+  assert.notEqual(
+    campaignResumeIdentitySha256({ ...identity, mode: "compressed", kvMethod: "group-affine-4" }, policySha256),
+    campaignResumeIdentitySha256({ ...identity, mode: "compressed", kvMethod: "group-affine" }, policySha256));
+  const rows = SC20671_COVERING_SCHEDULE.map(([family, contextBand, requestMode, prefillMode, processTemperature], index) => {
+    const matrix = { family, contextBand, requestMode, prefillMode, processTemperature };
+    return withCampaignPid(fixture("compressed", matrix, { compression: fourBit(fixture("compressed", matrix)) }), index + 10);
+  });
+  assert.equal(validateCampaign(rows).kvMethod, "group-affine-4");
+  // A campaign is one method: a 2-bit row cannot join a 4-bit campaign.
+  const mixed = [...rows];
+  mixed[0] = withCampaignPid(fixture("compressed", rows[0].matrix), 10);
+  assert.throws(() => validateCampaign(mixed), /compressed-method/);
+});
 test("SC-20671 compressed quality misses are recorded as a failed gate, never a pass", () => {
   const base = fixture("compressed").quality;
   const miss = fixture("compressed", {}, { quality: gatedQuality("compressed", { ...base, needleRetrieval: 0, perplexityDelta: 0.5 }, forcedContinuation(1022)) });
