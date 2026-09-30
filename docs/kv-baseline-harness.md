@@ -324,6 +324,42 @@ threshold number is unchanged.
   every compressed candidate by construction. v3 gates compressed rows against
   the dense-KV run on the same weights; the bf16 model remains dense-row
   characterization only.
+- v3 greedy agreement is teacher-forced (decided before any compressed result
+  existed). At each position of the reference kernel stream, the candidate's
+  own greedy choice is compared with the reference token, the forced token is
+  fed back, and the denominator is the reference length. A free-running
+  comparison would count every token after one argmax flip as a mismatch.
+  Receipts record `quality.greedyAgreementMethod: "teacher-forced"`, and the
+  free-running first divergence is recorded separately
+  (`quality.freeRunningFirstDivergence` and the kernel fixture evidence) as an
+  observation. The contract JSON text and every threshold (0.999) are
+  unchanged.
+
+## Receipt v6: recorded, not refused (sc-20671 hardware audit)
+
+Receipt schema v6 (`sc-20671-kv-baseline-v6`) records real-hardware observations
+that v5 refused rows on:
+
+- **Host state.** Power mode and `NSProcessInfo.thermalState`
+  (nominal/fair/serious/critical) are recorded at row start, after every timing
+  sample (`timings.samples[].hostState`), and at row end. Each observation also
+  carries the verbatim `pmset -g therm` text and its `CPU_Speed_Limit`. Only a
+  throttled row start refuses the row (serious/critical, or CPU_Speed_Limit
+  < 100). Later changes are recorded as `provenance.thermalChangedDuringRow` /
+  `powerModeChangedDuringRow`. Unknown pmset note lines are tolerated. Power and
+  thermal state are not part of the campaign's global identity; the manifest
+  instead records `hostStateVaried`.
+- **Memory-material share.** `memory.denseKvShareBps` (dense KV over the
+  prefill-peak footprint) is recorded. `memory.belowMemoryMaterialShare` flags a
+  memory-material row below 10% (the band is defined by geometry).
+- **Post-release allocator slack.** MLX active/cache may exceed the
+  weights-loaded boundary by `max(1 MiB, 0.1% of baseline)`. The tolerances and
+  the actual residuals (`mlxActiveResidualBytes`, `mlxCacheResidualBytes`) are
+  recorded, and a larger residual still fails as a leak.
+- **Block growth.** The producer's dense cache records the retired pre-growth
+  buffer as the transient coexisting with the grown persistent cache. The peak
+  floor `baseline + persistent + transient` therefore counts the new buffer
+  once, including on chunked rows that land on a 256-token boundary.
 
 The v3 contract hash is the compatibility fence: receipts bound to v2 are
 refused, and v5 receipts produced under v3 carry the required

@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -14,6 +14,38 @@ const formula = (batch=1, capacity=4096) => batch*2*2*8*capacity*128*2;
 function sealedModelId(family, role, inventory) {
   const spec = SC20671_MODEL_CONTRACTS[family][role];
   return `${spec.repository}@${spec.revision};architecture=${spec.architecture};inventory=${inventory}`;
+}
+const PMSET_NOMINAL = "Note: No thermal warning level has been recorded\nNote: No performance warning level has been recorded\nNote: No CPU power status has been recorded";
+function hostState(boundary, capturedAt, overrides={}) {
+  return {boundary,capturedAt,powerMode:"automatic",thermalState:"nominal",cpuSpeedLimit:null,pmsetThermalRaw:PMSET_NOMINAL,throttled:false,...overrides};
+}
+// v6 derived evidence, recomputed from a raw receipt's own phases, samples and host states.
+const DERIVED_PATHS = [
+  ["memory","release","mlxActiveToleranceBytes"],["memory","release","mlxCacheToleranceBytes"],
+  ["memory","release","mlxActiveResidualBytes"],["memory","release","mlxCacheResidualBytes"],
+  ["memory","denseKvShareBps"],["memory","belowMemoryMaterialShare"],
+  ["provenance","thermalChangedDuringRow"],["provenance","powerModeChangedDuringRow"],
+];
+function derivedV6(raw) {
+  const start = raw.memory.phaseSamples[1], released = raw.memory.phaseSamples.at(-1);
+  const prefill = raw.memory.phaseSamples[2].physFootprintBytes, dense = raw.memory.denseTheoreticalKvBytes;
+  const [rowStart, rowEnd] = raw.provenance.hostStates;
+  const later = [...raw.timings.samples.map((sample)=>sample.hostState), rowEnd].filter(Boolean);
+  return [
+    postReleaseMlxSlackBytes(start.mlx.activeBytes), postReleaseMlxSlackBytes(start.mlx.cacheBytes),
+    Math.max(0, released.mlx.activeBytes - start.mlx.activeBytes),
+    Math.max(0, released.mlx.cacheBytes - start.mlx.cacheBytes),
+    Number(BigInt(dense) * 10_000n / BigInt(prefill)),
+    raw.matrix.contextBand === "memory-material" && BigInt(dense) * 10_000n < BigInt(prefill) * 1_000n,
+    later.some((state)=>state.thermalState !== rowStart.thermalState || state.throttled),
+    later.some((state)=>state.powerMode !== rowStart.powerMode),
+  ];
+}
+const getPath = (raw, keys) => keys.reduce((value, key) => value?.[key], raw);
+const setPath = (raw, keys, value) => { keys.slice(0, -1).reduce((node, key) => node[key], raw)[keys.at(-1)] = value; };
+function withDerived(raw) {
+  derivedV6(raw).forEach((value, index) => setPath(raw, DERIVED_PATHS[index], value));
+  return raw;
 }
 function memoryPhases(persistent) {
   const active = [100,1100,1100+persistent,1100+persistent,1100+persistent,1100+persistent,1100,100];
@@ -68,7 +100,7 @@ function fixture(mode="dense", coordinate={}, extra={}) {
   const capacity = ["memory-material","fit-boundary"].includes(contextBand) ? contextTargetTokens : 4096;
   const matrix = {family,contextBand,requestMode:"single",prefillMode:"single-shot",processTemperature:"cold",...coordinate};
   const batch = matrix.requestMode === "supported-batch" ? 2 : 1; const dense = formula(batch,capacity); const persistent = mode === "dense" ? dense : Math.floor(dense/2);
-  const samples = Array.from({length:5}, (_,i) => ({loadMs:10+i,prefillMs:20+i,ttftMs:25+i,firstTokenMs:30+i,decodeTokensPerSecond:100+i,steadyDecodePromptTokens:48,steadyDecodeGeneratedTokens:256,steadyDecodeTimedTokens:255,steadyDecodeMs:255000/(100+i),steadyDecodeForcedStopTokens:2}));
+  const samples = Array.from({length:5}, (_,i) => ({loadMs:10+i,prefillMs:20+i,ttftMs:25+i,firstTokenMs:30+i,decodeTokensPerSecond:100+i,steadyDecodePromptTokens:48,steadyDecodeGeneratedTokens:256,steadyDecodeTimedTokens:255,steadyDecodeMs:255000/(100+i),steadyDecodeForcedStopTokens:2,hostState:hostState("timing-sample",`2026-08-29T12:00:08.${100+i*10}Z`)}));
   const operation = matrix.requestMode === "supported-batch" ? "supported-batch" : matrix.prefillMode === "chunked" ? "chunked-prefix-reuse" : "single-shot-generation";
   const probeDurationsMs = matrix.processTemperature === "cold" ? [50,6,8,7,5] : [12,7];
   const steadyDispatchMs = matrix.processTemperature === "cold" ? 6.5 : 7;
@@ -80,18 +112,18 @@ function fixture(mode="dense", coordinate={}, extra={}) {
   const compileAttribution = {method:"first-dispatch-minus-steady-v2",operation,source,probeDurationsMs,probeEvidence,firstDispatchMs:probeDurationsMs[0],steadyDispatchMs,firstDispatchExcessMs:probeDurationsMs[0]-steadyDispatchMs,noiseSamplesMs,noiseBandMs,compileCostResolved:true,compileCostMs:probeDurationsMs[0]-steadyDispatchMs};
   const campaignSessionId = "c".repeat(64);
   const warmupSuiteSha256 = matrix.processTemperature === "warm" ? numericSemanticSha256({probeEvidence,sessionId:campaignSessionId,workerPid:9}) : "";
-  return buildReceipt({runId: mode+"-"+(coordinate.family||"llama")+"-"+Math.random(),capturedAt:"2026-08-29T12:00:00.000Z",mode,status:"complete",
-    provenance:{sceneWorksRepository:"github.com/SceneWorks/SceneWorks",inferenceRepository:"github.com/SceneWorks/inference",sceneWorksRevision:"a".repeat(40),inferenceRevision:"b".repeat(40),mlxVersion:"0.25.8",mlxSource:"git+https://github.com/michaeltrefry/mlx-rs?rev="+"1".repeat(40)+"#"+"1".repeat(40),mlxRevision:"1".repeat(40),dependencyLockSha256:"e".repeat(64),os:"macOS",xcode:"Xcode",hardware:"Apple",modelId:sealedModelId(family,"candidate","d".repeat(64)),modelFileSha256:"d".repeat(64),modelFileBytes:1000,referenceModelId:sealedModelId(family,"reference","9".repeat(64)),referenceModelSha256:"9".repeat(64),referenceModelBytes:2000,powerMode:"automatic",thermalState:"nominal",hostStates:[{boundary:"row-start",capturedAt:"2026-08-29T11:59:59.000Z",powerMode:"automatic",thermalState:"nominal"},{boundary:"row-end",capturedAt:"2026-08-29T12:00:09.000Z",powerMode:"automatic",thermalState:"nominal"}],commandTemplate:"runner --mode {mode}",command:"runner --mode "+mode,campaignSessionId, campaignCacheStateVersion:2,coordinateOperationSha256:"f".repeat(64)},
+  return buildReceipt(withDerived({runId: mode+"-"+(coordinate.family||"llama")+"-"+Math.random(),capturedAt:"2026-08-29T12:00:00.000Z",mode,status:"complete",
+    provenance:{sceneWorksRepository:"github.com/SceneWorks/SceneWorks",inferenceRepository:"github.com/SceneWorks/inference",sceneWorksRevision:"a".repeat(40),inferenceRevision:"b".repeat(40),mlxVersion:"0.25.8",mlxSource:"git+https://github.com/michaeltrefry/mlx-rs?rev="+"1".repeat(40)+"#"+"1".repeat(40),mlxRevision:"1".repeat(40),dependencyLockSha256:"e".repeat(64),os:"macOS",xcode:"Xcode",hardware:"Apple",modelId:sealedModelId(family,"candidate","d".repeat(64)),modelFileSha256:"d".repeat(64),modelFileBytes:1000,referenceModelId:sealedModelId(family,"reference","9".repeat(64)),referenceModelSha256:"9".repeat(64),referenceModelBytes:2000,powerMode:"automatic",thermalState:"nominal",hostStates:[hostState("row-start","2026-08-29T11:59:59.000Z"),hostState("row-end","2026-08-29T12:00:09.000Z")],thermalChangedDuringRow:false,powerModeChangedDuringRow:false,commandTemplate:"runner --mode {mode}",command:"runner --mode "+mode,campaignSessionId, campaignCacheStateVersion:2,coordinateOperationSha256:"f".repeat(64)},
     matrix,
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
-  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)}},
+  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0,mlxActiveResidualBytes:0,mlxCacheResidualBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)},denseKvShareBps:0,belowMemoryMaterialShare:false},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra});
+    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
   const evidence = name === "kernel-fp32-reference"
-    ? {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1}
+    ? {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1,freeRunningFirstDivergence:null}
     : name === "structured-tool-call"
       ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true,discriminating:true}
       : name === "long-context-needle"
@@ -192,7 +224,15 @@ async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceSha
 function rebuildReceipt(receipt, edit) {
   const raw = structuredClone(receipt);
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
+  // Derived v6 evidence follows the edit unless the edit set that field itself (a tamper).
+  const prior = DERIVED_PATHS.map((keys) => structuredClone(getPath(raw, keys)));
   edit(raw);
+  const derived = (() => { try { return derivedV6(raw); } catch { return null; } })();
+  if (derived) {
+    DERIVED_PATHS.forEach((keys, index) => {
+      if (canonicalJson(getPath(raw, keys) ?? null) === canonicalJson(prior[index] ?? null)) setPath(raw, keys, derived[index]);
+    });
+  }
   return buildReceipt(raw);
 }
 function denseWithAllocatedCapacity(base, capacity, kvLength) {
@@ -253,6 +293,7 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
   const resumeIdentity = sampleResumeIdentity(policy);
   const resumeIdentitySha256 = campaignResumeIdentitySha256(resumeIdentity, campaignPolicySha256(policy));
   const rows = [];
+  const receipts = [];
   for (const [index, entry] of SC20671_COVERING_SCHEDULE.entries()) {
     const coordinate = {
       family: entry[0], contextBand: entry[1], requestMode: entry[2],
@@ -285,10 +326,12 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
       sidecarSha256: sha256(await readFile(path.join(receiptDirectory, `${name}.sha256`))),
     })));
     rows.push({ coordinate: slug, receiptSha256: receipt.receiptSha256, workerPid: index + 100, files });
+    receipts.push(receipt);
   }
   const manifest = {
     schemaVersion: 2, kind: "sc-20671-complete-covering-set", scheduleVersion: 2,
     policySha256: campaignPolicySha256(policy), resumeIdentitySha256,
+    hostStateVaried: campaignHostStateVaried(receipts),
     coordinates: rows,
   };
   await writeFile(path.join(directory, "safety-policy.json"), canonicalJson(policy));
@@ -310,8 +353,8 @@ test("numeric semantic seals normalize exact f64 bits and object order",()=>{
 });
 test("compile attribution v4 accepts cold repeats and warmup suites",()=>{
   const cold=fixture();
-  assert.equal(cold.schemaVersion,5);
-  assert.equal(cold.harnessVersion,"sc-20671-kv-baseline-v5");
+  assert.equal(cold.schemaVersion,6);
+  assert.equal(cold.harnessVersion,"sc-20671-kv-baseline-v6");
   const {probeEvidence,...coldAttribution}=cold.timings.compileAttribution;
   assert.deepEqual(coldAttribution,{
     method:"first-dispatch-minus-steady-v2",
@@ -440,7 +483,7 @@ test("timestamp ordering preserves producer microseconds and normalizes equivale
 test("prefill containment uses the live prefill cache rather than the larger decode cache",()=>{assert.doesNotThrow(()=>rebuildReceipt(fixture(),(raw)=>{const prefillKv=raw.memory.persistentKvBytes-10;raw.memory.allocationEvents.find((event)=>event.phase==="prefill-peak"&&event.role==="cache"&&event.lifetime==="persistent").bytes=prefillKv;raw.memory.phaseSamples[2].mlx.activeBytes=raw.memory.prefillPeakWindow.baselineActiveBytes+prefillKv;raw.memory.phaseSamples[2].mlx.peakBytes=raw.memory.phaseSamples[2].mlx.activeBytes+raw.memory.transientWorkspaceBytes;}));});
 test("phase-local KV snapshots and decode containment fail closed",()=>{const findCache=(raw,phase)=>raw.memory.allocationEvents.find((event)=>event.phase===phase&&event.role==="cache"&&event.lifetime==="persistent");assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{findCache(raw,"prefill-peak").bytes=raw.memory.persistentKvBytes+1;}),/reconcile/);assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{findCache(raw,"decode-steady").bytes-=1;raw.memory.allocationEvents.find((event)=>event.lifetime==="released").bytes-=1;}),/reconcile/);assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.phaseSamples[4].mlx.activeBytes=raw.memory.prefillPeakWindow.baselineActiveBytes+raw.memory.persistentKvBytes-1;}),/decode MLX active bytes/);assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.allocationEvents.push({kind:"decode-workspace",role:"attention-workspace",lifetime:"transient",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.200Z",bytes:200});raw.memory.transientWorkspaceBytes=200;const below=raw.memory.prefillPeakWindow.baselineActiveBytes+raw.memory.persistentKvBytes+199;for(const sample of raw.memory.phaseSamples.slice(4))sample.mlx.peakBytes=below;}),/decode MLX peak bytes/);});
 test("every phase with transient evidence is bound to its MLX peak",()=>{const cancellation=[{kind:"cancellation-cache",role:"cache",lifetime:"persistent",phase:"cancellation-cleanup",timestamp:"2026-08-29T12:00:06.100Z",bytes:formula()},{kind:"cancellation-workspace",role:"output",lifetime:"transient",phase:"cancellation-cleanup",timestamp:"2026-08-29T12:00:06.200Z",bytes:200},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"cancellation-cleanup",timestamp:"2026-08-29T12:00:06.300Z",bytes:formula()}];assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.allocationEvents.push(...cancellation);raw.memory.transientWorkspaceBytes=200;}),/cancellation-cleanup MLX peak bytes/);assert.doesNotThrow(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.allocationEvents.push(...cancellation);raw.memory.transientWorkspaceBytes=200;const peak=raw.memory.prefillPeakWindow.baselineActiveBytes+raw.memory.persistentKvBytes+200;for(const sample of raw.memory.phaseSamples.slice(6))sample.mlx.peakBytes=peak;}));});
-test("release, exact phase order, PID and sources fail closed",()=>{const base=fixture(),weightsLoaded=base.memory.phaseSamples[1],excessPhys=weightsLoaded.physFootprintBytes+POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES+1;assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===7?{...s,physFootprintBytes:excessPhys,physFootprintPeakBytes:excessPhys}:s)}}),/post-run footprint/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===7?{...s,physFootprintBytes:weightsLoaded.mlx.activeBytes+1,mlx:{...s.mlx,activeBytes:weightsLoaded.mlx.activeBytes+1}}:s)}}),/MLX allocator/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,release:{...base.memory.release,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES+1}}}),/frozen release tolerances/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,pid:10}:s)}}),/PID/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,phase:"decode-steady"}:s)}}),/phase must/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,source:"rss"}:s)}}),/source/);});
+test("release, exact phase order, PID and sources fail closed",()=>{const base=fixture(),weightsLoaded=base.memory.phaseSamples[1],excessPhys=weightsLoaded.physFootprintBytes+POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES+1;assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===7?{...s,physFootprintBytes:excessPhys,physFootprintPeakBytes:excessPhys}:s)}}),/post-run footprint/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===7?{...s,physFootprintBytes:weightsLoaded.mlx.activeBytes+POST_RELEASE_MLX_SLACK_FLOOR_BYTES+1,physFootprintPeakBytes:Math.max(s.physFootprintPeakBytes,weightsLoaded.mlx.activeBytes+POST_RELEASE_MLX_SLACK_FLOOR_BYTES+1),mlx:{...s.mlx,activeBytes:weightsLoaded.mlx.activeBytes+POST_RELEASE_MLX_SLACK_FLOOR_BYTES+1}}:s)}}),/MLX allocator/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,release:{...base.memory.release,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES+1}}}),/tolerances or residuals/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,pid:10}:s)}}),/PID/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,phase:"decode-steady"}:s)}}),/phase must/);assert.throws(()=>fixture("dense",{}, {memory:{...base.memory,phaseSamples:base.memory.phaseSamples.map((s,i)=>i===3?{...s,source:"rss"}:s)}}),/source/);});
 test("v5 decode throughput is the fixed-length steady decode; host power/thermal state brackets the row",()=>{
   const receipt=fixture();
   assert.deepEqual(receipt.timings.samples.map((s)=>[s.steadyDecodeGeneratedTokens,s.steadyDecodeTimedTokens]),Array(5).fill([256,255]));
@@ -452,15 +495,56 @@ test("v5 decode throughput is the fixed-length steady decode; host power/thermal
   rejects((raw)=>{const s=raw.timings.samples[2];s.steadyDecodeGeneratedTokens=24;s.steadyDecodeTimedTokens=23;s.decodeTokensPerSecond=23000/s.steadyDecodeMs;},/schema validation|fixed-length/);
   rejects((raw)=>{raw.timings.samples[2].steadyDecodePromptTokens=raw.geometry.contextWindowTokens;},/native context window/);
   rejects((raw)=>{delete raw.timings.samples[2].steadyDecodeForcedStopTokens;},/schema validation|steadyDecodeForcedStopTokens/);
-  // Power mode and thermal state: recorded at row start and end, nominal, one mode, bracketing.
-  rejects((raw)=>{raw.provenance.hostStates[1].thermalState="fair";},/schema validation|not nominal/);
-  rejects((raw)=>{raw.provenance.hostStates[1].powerMode="low-power";},/power mode differs/);
-  rejects((raw)=>{raw.provenance.hostStates.reverse();},/schema validation|out of order/);
+  // Power mode and thermal state: recorded at row start, each timing sample and row end; only a
+  // throttled row start refuses, and later changes are recorded as flags.
+  const changed=rebuildReceipt(fixture(),(raw)=>{Object.assign(raw.provenance.hostStates[1],{thermalState:"serious",throttled:true,powerMode:"low-power"});});
+  assert.equal(changed.provenance.thermalChangedDuringRow,true);
+  assert.equal(changed.provenance.powerModeChangedDuringRow,true);
+  const sampleChange=rebuildReceipt(fixture(),(raw)=>{raw.timings.samples[3].hostState.thermalState="fair";});
+  assert.equal(sampleChange.provenance.thermalChangedDuringRow,true);
+  assert.throws(()=>rebuildReceipt(rebuildReceipt(fixture(),(raw)=>{raw.provenance.hostStates[1].thermalState="fair";}),(raw)=>{raw.provenance.thermalChangedDuringRow=false;}),/change flags/);
+  rejects((raw)=>{Object.assign(raw.provenance.hostStates[0],{thermalState:"critical",throttled:true});raw.provenance.thermalState="critical";},/schema validation|throttled/);
+  rejects((raw)=>{Object.assign(raw.provenance.hostStates[0],{pmsetThermalRaw:"CPU_Speed_Limit \t= 80",cpuSpeedLimit:80,throttled:true});},/throttled/);
+  rejects((raw)=>{raw.provenance.hostStates[1].throttled=true;},/recompute/);
+  rejects((raw)=>{raw.timings.samples.reverse();},/ordered|derive/);
+  rejects((raw)=>{delete raw.timings.samples[0].hostState;},/schema validation|hostState/);
+  rejects((raw)=>{raw.provenance.hostStates.reverse();},/schema validation|boundary must be/);
   rejects((raw)=>{raw.provenance.hostStates.pop();},/schema validation|row start and row end/);
   rejects((raw)=>{raw.provenance.hostStates[0].capturedAt="2026-08-29T12:00:03.000Z";},/bracket/);
-  rejects((raw)=>{raw.provenance.hostStates[1].capturedAt="2026-08-29T12:00:05.000Z";},/bracket/);
+  rejects((raw)=>{raw.provenance.hostStates[1].capturedAt="2026-08-29T12:00:05.000Z";},/bracket|ordered/);
   rejects((raw)=>{raw.provenance.powerMode="AC";for(const s of raw.provenance.hostStates)s.powerMode="AC";},/schema validation|normalized energy mode/);
 });
+test("v6 records real-hardware observations instead of refusing the row",()=>{
+  // pmset: unknown note lines are tolerated and recorded raw; only CPU_Speed_Limit is read.
+  assert.equal(pmsetCpuSpeedLimit(PMSET_NOMINAL+"\nNote: something new"),null);
+  assert.equal(pmsetCpuSpeedLimit("CPU_Scheduler_Limit \t= 100\nCPU_Speed_Limit \t= 70"),70);
+  assert.throws(()=>pmsetCpuSpeedLimit("CPU_Speed_Limit = fast"),/not a number/);
+  assert.throws(()=>pmsetCpuSpeedLimit("CPU_Speed_Limit = 100\nCPU_Speed_Limit = 90"),/contradictory/);
+  assert.equal(hostStateThrottled("fair",100),false);
+  assert.equal(hostStateThrottled("nominal",99),true);
+  assert.equal(hostStateThrottled("serious",null),true);
+  // Post-release MLX slack: max(1 MiB, 0.1% of baseline); residuals are recorded.
+  assert.equal(postReleaseMlxSlackBytes(3),POST_RELEASE_MLX_SLACK_FLOOR_BYTES);
+  assert.equal(postReleaseMlxSlackBytes(4_000_000_001),4_000_001);
+  const residual=rebuildReceipt(fixture(),(raw)=>{const end=raw.memory.phaseSamples[7];end.mlx.activeBytes=raw.memory.phaseSamples[1].mlx.activeBytes+1000;end.physFootprintBytes=Math.max(end.physFootprintBytes,end.mlx.activeBytes);end.physFootprintPeakBytes=Math.max(end.physFootprintPeakBytes,end.physFootprintBytes);});
+  assert.equal(residual.memory.release.mlxActiveResidualBytes,1000);
+  assert.throws(()=>rebuildReceipt(residual,(raw)=>{raw.memory.release.mlxActiveResidualBytes=0;}),/residuals/);
+  // Dense-KV share of the prefill footprint: recorded and flagged, never refused.
+  const low=rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{const footprint=raw.memory.denseTheoreticalKvBytes*20;raw.memory.phaseSamples[2].physFootprintBytes=footprint;for(const sample of raw.memory.phaseSamples.slice(2))sample.physFootprintPeakBytes=Math.max(sample.physFootprintPeakBytes,footprint);});
+  assert.equal(low.memory.belowMemoryMaterialShare,true);
+  assert.equal(low.memory.denseKvShareBps,500);
+  assert.throws(()=>rebuildReceipt(low,(raw)=>{raw.memory.belowMemoryMaterialShare=false;}),/dense KV share/);
+  // Greedy agreement is teacher-forced; free-running divergence is an observation.
+  const diverged=rebuildReceipt(fixture(),(raw)=>{raw.quality.freeRunningFirstDivergence=3;});
+  assert.equal(diverged.quality.freeRunningFirstDivergence,3);
+  assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.quality.greedyAgreementMethod="free-running";}),/schema validation|teacher-forced/);
+  // Campaign host-state variation is a recorded flag, not an identity drift.
+  const base=fixture(),lowPower=rebuildReceipt(fixture(),(raw)=>{raw.provenance.powerMode="low-power";for(const state of [...raw.provenance.hostStates,...raw.timings.samples.map((s)=>s.hostState)])state.powerMode="low-power";});
+  assert.equal(campaignHostStateVaried([base,base]),false);
+  assert.equal(campaignHostStateVaried([base,lowPower]),true);
+  assert.equal(campaignHostStateVaried([changedFlag(base)]),true);
+});
+function changedFlag(receipt){return {...receipt,provenance:{...receipt.provenance,thermalChangedDuringRow:true}};}
 test("identity, command pairing, thermal state and cancellation cleanup",async()=>{assert.throws(()=>compareReceipts(fixture(),fixture("compressed",{}, {provenance:{...fixture("compressed").provenance,hardware:"Other"}})),/identity/);assert.throws(()=>fixture("compressed",{}, {provenance:{...fixture("compressed").provenance,command:"different"}}),/mode-substitution/);assert.throws(()=>fixture("dense",{}, {provenance:{...fixture().provenance,thermalState:"serious"}}),/schema validation/);let cleaned=0;const ac=new AbortController();ac.abort();await assert.rejects(cancellationSafe(async()=>{},async()=>{cleaned++},ac.signal));assert.equal(cleaned,1);});
 test("sealed inference model contracts reject revision family and reference substitution",()=>{const llama=fixture();const qwen=fixture("dense",{family:"qwen"});assert.doesNotThrow(()=>validateReceipt(llama));assert.doesNotThrow(()=>validateReceipt(qwen));assert.throws(()=>rebuildReceipt(llama,(raw)=>{raw.provenance.modelId=raw.provenance.modelId.replace("7f0dc925e0d0afb0322d96f9255cfddf2ba5636e","0".repeat(40));}),/sealed llama contract|schema validation/);assert.throws(()=>rebuildReceipt(llama,(raw)=>{raw.provenance.modelId=qwen.provenance.modelId;}),/sealed llama contract|schema validation/);assert.throws(()=>rebuildReceipt(llama,(raw)=>{raw.provenance.referenceModelId=llama.provenance.modelId;}),/sealed llama contract|schema validation/);assert.throws(()=>rebuildReceipt(llama,(raw)=>{raw.geometry.contextWindowTokens=32768;raw.geometry.contextTargetTokens=32;raw.geometry.contextPayloadTokens=32;}),/sealed llama contract/);});
 test("session/cache evidence rejects omission and warm-state mutation",()=>{const base=fixture("dense",{processTemperature:"warm"});assert.throws(()=>fixture("dense",{processTemperature:"warm"},{provenance:(({campaignSessionId,...rest})=>rest)(base.provenance)}),/schema validation|keys/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{provenance:(({coordinateOperationSha256,...rest})=>rest)(base.provenance)}),/schema validation|keys/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{warmup:{...base.warmup,sessionId:"d".repeat(64)}}),/warmup session/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{warmup:{...base.warmup,cacheStateVersion:3}}),/warmup session/);});
@@ -624,8 +708,8 @@ test("published inference fixture bundles are required and bind cold probe evide
   await assert.rejects(readReceiptSet(published),/ENOENT/);
   await rm(dir,{recursive:true,force:true});
 });
-test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.25);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift, { scheduleVersion: 1 }),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift, { scheduleVersion: 1 }),/identity drift/);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
-test("measured context bands reject zero, non-material, and non-boundary receipts",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.contextWindowTokens=0;}),/must be >= 1|positive integer/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{raw.memory.phaseSamples=raw.memory.phaseSamples.map((sample)=>({...sample,physFootprintBytes:10_000_000_000,physFootprintPeakBytes:10_000_000_000}));}),/memory-material/);assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"fit-boundary"}),(raw)=>{raw.geometry.contextWindowTokens=8192;raw.geometry.contextTargetTokens=7680;raw.geometry.contextPayloadTokens=7680;}),/fit-boundary|sealed llama contract/);});
+test("volatile sessions do not change stable model identity while invariant drift fails",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"]){const row=fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature});rows.push(rebuildReceipt(row,(raw)=>{raw.provenance.campaignSessionId=sha256(raw.runId);if(raw.warmup.required){raw.warmup.sessionId=raw.provenance.campaignSessionId;raw.warmup.suiteSha256=numericSemanticSha256({probeEvidence:raw.timings.compileAttribution.probeEvidence,sessionId:raw.warmup.sessionId,workerPid:raw.warmup.workerPid});}}));}rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.equal(compareReceipts(rows[0],rebuildReceipt(fixture("compressed",rows[0].matrix),(raw)=>{raw.provenance.campaignSessionId="7".repeat(64);raw.provenance.modelId=rows[0].provenance.modelId;raw.provenance.referenceModelId=rows[0].provenance.referenceModelId;})).persistentKvReduction,.25);const refDrift=[...rows];refDrift[1]=rebuildReceipt(refDrift[1],(raw)=>{raw.provenance.referenceModelSha256="8".repeat(64);raw.provenance.referenceModelId=sealedModelId(raw.matrix.family,"reference",raw.provenance.referenceModelSha256);});assert.throws(()=>validateCampaign(refDrift, { scheduleVersion: 1 }),/model identity drift/);const sourceDrift=[...rows];sourceDrift[1]=rebuildReceipt(sourceDrift[1],(raw)=>{raw.provenance.inferenceRevision="8".repeat(40);});assert.throws(()=>validateCampaign(sourceDrift, { scheduleVersion: 1 }),/identity drift/);const powerChange=[...rows];powerChange[1]=rebuildReceipt(powerChange[1],(raw)=>{raw.provenance.powerMode="low-power";for(const state of [...raw.provenance.hostStates,...raw.timings.samples.map((sample)=>sample.hostState)])state.powerMode="low-power";});assert.equal(validateCampaign(powerChange, { scheduleVersion: 1 }).coordinates,64,"a different power mode is recorded, not an identity drift");assert.equal(campaignHostStateVaried(powerChange),true);assert.throws(()=>rebuildReceipt(rows[0],(raw)=>{raw.provenance.mlxSource=`git+https://github.com/fork/mlx-rs?rev=${raw.provenance.mlxRevision}#${raw.provenance.mlxRevision}`;}),/exact Git revision/);});
+test("measured context bands reject zero, non-material, and non-boundary receipts",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.contextWindowTokens=0;}),/must be >= 1|positive integer/);assert.equal(rebuildReceipt(fixture("dense",{contextBand:"memory-material"}),(raw)=>{raw.memory.phaseSamples=raw.memory.phaseSamples.map((sample)=>({...sample,physFootprintBytes:10_000_000_000,physFootprintPeakBytes:10_000_000_000}));}).memory.belowMemoryMaterialShare,true,"a non-material share is recorded, not refused");assert.throws(()=>rebuildReceipt(fixture("dense",{contextBand:"fit-boundary"}),(raw)=>{raw.geometry.contextWindowTokens=8192;raw.geometry.contextTargetTokens=7680;raw.geometry.contextPayloadTokens=7680;}),/fit-boundary|sealed llama contract/);});
 test("dense receipts distinguish live KV length from observed allocated capacity", () => {
   const padded = denseWithAllocatedCapacity(fixture(), 256, 32);
   assert.equal(padded.geometry.kvLength, 32);
@@ -711,6 +795,10 @@ test("v2 campaign reader binds every row and artifact to trusted policy and resu
     const { directory, manifest, resumeIdentity } = await writeEightCampaign(root, safetyPolicy);
     const trusted = { safetyPolicy, resumeIdentity };
     assert.equal((await readCampaignSet(directory, trusted)).summary.coordinates, 8);
+    // Host-state variation across the campaign is a recorded flag that must recompute.
+    await writeCampaignManifest(directory, { ...manifest, hostStateVaried: !manifest.hostStateVaried });
+    await assert.rejects(readCampaignSet(directory, trusted), /host-state variation flag/);
+    await writeCampaignManifest(directory, manifest);
     // Rows that ran under a different cap than the captured policy are refused.
     await mkdir(path.join(root, "drifted"));
     const drifted = await writeEightCampaign(path.join(root, "drifted"), safetyPolicy, {

@@ -11,15 +11,61 @@ import { fileURLToPath } from "node:url";
 
 // v5 (sc-20671): per-repeat decode throughput is a dedicated fixed-length steady decode recorded
 // beside each timing sample, and provenance records power mode and thermal state at row start/end.
-export const SCHEMA_VERSION = 5;
-export const HARNESS_VERSION = "sc-20671-kv-baseline-v5";
+// v6 (sc-20671 hardware audit): real-hardware observations are recorded instead of refused.
+export const SCHEMA_VERSION = 6;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v6";
 // Fixed decode length of every steady-decode sample (paired with the inference producer's
 // `STEADY_DECODE_TOKENS`): the first token is untimed, so 255 tokens are timed.
 export const STEADY_DECODE_TOKENS = 256;
 export const HOST_STATE_BOUNDARIES = Object.freeze(["row-start", "row-end"]);
 export const POWER_MODES = Object.freeze(["automatic", "low-power", "high-power"]);
+// NSProcessInfo.thermalState 0..3. Only serious/critical (or pmset CPU_Speed_Limit < 100)
+// throttle, and only a throttled row START refuses a row.
+export const THERMAL_STATES = Object.freeze(["nominal", "fair", "serious", "critical"]);
+export const TIMING_SAMPLE_HOST_BOUNDARY = "timing-sample";
+const HOST_STATE_FIELDS = [
+  "boundary", "capturedAt", "powerMode", "thermalState", "cpuSpeedLimit", "pmsetThermalRaw",
+  "throttled",
+];
+// Quality contract v3 greedy agreement is teacher-forced (decided before any compressed result).
+export const GREEDY_AGREEMENT_METHOD = "teacher-forced";
+export const POST_RELEASE_MLX_SLACK_FLOOR_BYTES = 1024 * 1024;
 export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
 export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
+
+/** Post-release MLX active/cache slack over a weights-loaded baseline: max(1 MiB, ceil(0.1%)). */
+export function postReleaseMlxSlackBytes(baseline) {
+  return Math.max(POST_RELEASE_MLX_SLACK_FLOOR_BYTES, Math.ceil(baseline / 1000));
+}
+
+/** `pmset -g therm` CPU_Speed_Limit, or null when only note lines are printed (all recorded raw). */
+export function pmsetCpuSpeedLimit(raw) {
+  let limit = null;
+  for (const line of String(raw).split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator < 0 || line.slice(0, separator).trim().toLowerCase() !== "cpu_speed_limit") continue;
+    const value = line.slice(separator + 1).trim();
+    if (!/^[0-9]+$/.test(value)) fail(`pmset CPU_Speed_Limit is not a number: ${JSON.stringify(value)}`);
+    const parsed = Number(value);
+    if (limit !== null && limit !== parsed) fail("pmset reports contradictory CPU_Speed_Limit values");
+    limit = parsed;
+  }
+  return limit;
+}
+
+export function hostStateThrottled(thermalState, cpuSpeedLimit) {
+  return thermalState === "serious" || thermalState === "critical"
+    || (cpuSpeedLimit !== null && cpuSpeedLimit < 100);
+}
+
+/** Recorded in a campaign manifest: rows started in several host states, or one changed mid-row. */
+export function campaignHostStateVaried(receipts) {
+  const starts = new Set(receipts.map((receipt) => canonicalJson([
+    receipt.provenance.powerMode, receipt.provenance.thermalState,
+  ])));
+  return starts.size > 1 || receipts.some((receipt) => receipt.provenance.thermalChangedDuringRow
+    || receipt.provenance.powerModeChangedDuringRow);
+}
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CONTRACT_FILE = path.join(ROOT, CONTRACT_PATH);
@@ -593,7 +639,7 @@ function nearlyEqual(actual, expected) {
 
 function validateTimingSample(sample, index, contextWindowTokens) {
   const name = `timings.samples[${index}]`;
-  exactKeys(sample, [...TIMING_FIELDS, ...STEADY_DECODE_FIELDS], name);
+  exactKeys(sample, [...TIMING_FIELDS, ...STEADY_DECODE_FIELDS, "hostState"], name);
   for (const field of TIMING_FIELDS) positiveNumber(sample[field], `${name}.${field}`);
   // Decode throughput is exactly the repeat's fixed-length steady decode: STEADY_DECODE_TOKENS
   // greedy tokens after the row context, stop tokens forced through, first token untimed.
@@ -618,28 +664,55 @@ function validateTimingSample(sample, index, contextWindowTokens) {
   }
 }
 
-// Power mode and thermal state observed at row start and end: nominal throughout, one power
-// mode, bracketing every measured phase sample.
+function validateHostState(state, boundary, name) {
+  exactKeys(state, HOST_STATE_FIELDS, name);
+  if (state.boundary !== boundary) fail(`${name}.boundary must be ${boundary}`);
+  isoTimestamp(state.capturedAt, `${name}.capturedAt`);
+  if (!POWER_MODES.includes(state.powerMode)) fail(`${name}.powerMode is not a normalized energy mode`);
+  if (!THERMAL_STATES.includes(state.thermalState)) fail(`${name}.thermalState is unknown`);
+  text(state.pmsetThermalRaw, `${name}.pmsetThermalRaw`);
+  if (state.cpuSpeedLimit !== null) nonnegativeInteger(state.cpuSpeedLimit, `${name}.cpuSpeedLimit`);
+  if (pmsetCpuSpeedLimit(state.pmsetThermalRaw) !== state.cpuSpeedLimit
+    || state.throttled !== hostStateThrottled(state.thermalState, state.cpuSpeedLimit)) {
+    fail(`${name} does not recompute from its raw probes`);
+  }
+}
+
+// Host power/thermal state at row start, after each timing sample, and at row end. Only a
+// throttled row start refuses the row; later changes are recorded as provenance flags.
 function validateHostStates(receipt) {
   const { provenance } = receipt;
-  if (!POWER_MODES.includes(provenance.powerMode)) {
-    fail("provenance.powerMode is not a normalized energy mode");
-  }
   if (!Array.isArray(provenance.hostStates)
     || provenance.hostStates.length !== HOST_STATE_BOUNDARIES.length) {
     fail("provenance.hostStates must record row start and row end");
   }
-  provenance.hostStates.forEach((state, index) => {
-    const name = `provenance.hostStates[${index}]`;
-    exactKeys(state, ["boundary", "capturedAt", "powerMode", "thermalState"], name);
-    isoTimestamp(state.capturedAt, `${name}.capturedAt`);
-    if (state.boundary !== HOST_STATE_BOUNDARIES[index]) fail(`${name}.boundary is out of order`);
-    if (state.thermalState !== "nominal") fail(`${name} thermal state is not nominal`);
-    if (state.powerMode !== provenance.powerMode) fail(`${name} power mode differs from the row's`);
+  const [start, end] = provenance.hostStates;
+  validateHostState(start, HOST_STATE_BOUNDARIES[0], "provenance.hostStates[0]");
+  validateHostState(end, HOST_STATE_BOUNDARIES[1], "provenance.hostStates[1]");
+  if (start.throttled) fail("row-start host is thermally throttled; the row must be refused");
+  if (provenance.powerMode !== start.powerMode || provenance.thermalState !== start.thermalState) {
+    fail("provenance power/thermal state is not the row-start state");
+  }
+  const samples = receipt.timings.samples.map((sample) => sample.hostState);
+  samples.forEach((state, index) => {
+    validateHostState(state, TIMING_SAMPLE_HOST_BOUNDARY, `timings.samples[${index}].hostState`);
   });
+  const ordered = [start, ...samples, end];
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (compareUtcTimestamps(ordered[index - 1].capturedAt, ordered[index].capturedAt) >= 0) {
+      fail("host states are not ordered row start, timing samples, row end");
+    }
+  }
+  const later = [...samples, end];
+  if (provenance.thermalChangedDuringRow
+      !== later.some((state) => state.thermalState !== start.thermalState || state.throttled)
+    || provenance.powerModeChangedDuringRow
+      !== later.some((state) => state.powerMode !== start.powerMode)) {
+    fail("provenance host-state change flags do not recompute");
+  }
   const phases = receipt.memory.phaseSamples;
-  if (compareUtcTimestamps(provenance.hostStates[0].capturedAt, phases[0].timestamp) >= 0
-    || compareUtcTimestamps(phases[phases.length - 1].timestamp, provenance.hostStates[1].capturedAt) >= 0) {
+  if (compareUtcTimestamps(start.capturedAt, phases[0].timestamp) >= 0
+    || compareUtcTimestamps(phases[phases.length - 1].timestamp, end.capturedAt) >= 0) {
     fail("provenance.hostStates do not bracket the row's measured phases");
   }
 }
@@ -900,7 +973,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
       "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
       "referenceModelId", "referenceModelSha256", "referenceModelBytes",
-      "thermalState", "hostStates", "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
+      "thermalState", "hostStates", "thermalChangedDuringRow", "powerModeChangedDuringRow",
+      "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
     ],
     "provenance",
   );
@@ -930,8 +1004,11 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   positiveInteger(receipt.provenance.modelFileBytes, "provenance.modelFileBytes");
   positiveInteger(receipt.provenance.referenceModelBytes, "provenance.referenceModelBytes");
   positiveInteger(receipt.provenance.campaignCacheStateVersion, "provenance.campaignCacheStateVersion");
-  if (receipt.provenance.thermalState !== "nominal") {
-    fail("thermal state is not nominal");
+  if (!THERMAL_STATES.includes(receipt.provenance.thermalState)) {
+    fail("provenance.thermalState is unknown");
+  }
+  for (const field of ["thermalChangedDuringRow", "powerModeChangedDuringRow"]) {
+    if (typeof receipt.provenance[field] !== "boolean") fail(`provenance.${field} must be boolean`);
   }
   if (!receipt.provenance.commandTemplate.includes("{mode}")
     || receipt.provenance.command
@@ -979,7 +1056,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       "modelWeightsBytes", "persistentKvBytes", "transientWorkspaceBytes",
       "denseTheoreticalKvBytes", "phaseSamples", "prefillPeakWindow", "allocationEvents",
-      "reconciliation", "release", "admission",
+      "reconciliation", "release", "admission", "denseKvShareBps", "belowMemoryMaterialShare",
     ],
     "memory",
   );
@@ -1162,10 +1239,17 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     || receipt.memory.reconciliation.observedPersistentKvBytes !== receipt.memory.persistentKvBytes) {
     fail("dense KV byte attribution does not reconcile with geometry");
   }
-  if (receipt.matrix.contextBand === "memory-material"
-    && expectedDenseKvBytes * 10_000
-      < prefillPeak.physFootprintBytes * MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS) {
-    fail("memory-material dense KV is below the frozen process-footprint share");
+  // The memory-material band is defined by geometry: a low dense-KV share of the prefill
+  // footprint is recorded and flagged, never refused.
+  if (prefillPeak.physFootprintBytes <= 0) fail("prefill-peak footprint is zero");
+  const denseShareBps = Number(BigInt(expectedDenseKvBytes) * 10_000n
+    / BigInt(prefillPeak.physFootprintBytes));
+  const belowShare = receipt.matrix.contextBand === "memory-material"
+    && BigInt(expectedDenseKvBytes) * 10_000n
+      < BigInt(prefillPeak.physFootprintBytes) * BigInt(MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS);
+  if (receipt.memory.denseKvShareBps !== denseShareBps
+    || receipt.memory.belowMemoryMaterialShare !== belowShare) {
+    fail("dense KV share of the prefill footprint does not recompute");
   }
   if (receipt.matrix.contextBand === "fit-boundary"
     && (receipt.geometry.kvLength > receipt.geometry.contextWindowTokens
@@ -1180,22 +1264,27 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail("dense persistent KV bytes do not equal allocated capacity bytes");
   }
 
-  exactKeys(
-    receipt.memory.release,
-    ["verified", "physFootprintToleranceBytes", "mlxActiveToleranceBytes", "mlxCacheToleranceBytes"],
-    "memory.release",
-  );
+  const releaseFields = [
+    "physFootprintToleranceBytes", "mlxActiveToleranceBytes", "mlxCacheToleranceBytes",
+    "mlxActiveResidualBytes", "mlxCacheResidualBytes",
+  ];
+  exactKeys(receipt.memory.release, ["verified", ...releaseFields], "memory.release");
   if (receipt.memory.release.verified !== true) fail("post-run release is not verified");
-  for (const field of ["physFootprintToleranceBytes", "mlxActiveToleranceBytes", "mlxCacheToleranceBytes"]) {
+  for (const field of releaseFields) {
     nonnegativeInteger(receipt.memory.release[field], `memory.release.${field}`);
-  }
-  if (receipt.memory.release.physFootprintToleranceBytes !== POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES
-    || receipt.memory.release.mlxActiveToleranceBytes !== 0
-    || receipt.memory.release.mlxCacheToleranceBytes !== 0) {
-    fail("memory.release differs from the frozen release tolerances");
   }
   const start = receipt.memory.phaseSamples.find((sample) => sample.phase === "weights-loaded");
   const released = receipt.memory.phaseSamples.at(-1);
+  // A small recorded MLX allocator residual is slack, not a leak (sc-20671).
+  if (receipt.memory.release.physFootprintToleranceBytes !== POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES
+    || receipt.memory.release.mlxActiveToleranceBytes !== postReleaseMlxSlackBytes(start.mlx.activeBytes)
+    || receipt.memory.release.mlxCacheToleranceBytes !== postReleaseMlxSlackBytes(start.mlx.cacheBytes)
+    || receipt.memory.release.mlxActiveResidualBytes
+      !== Math.max(0, released.mlx.activeBytes - start.mlx.activeBytes)
+    || receipt.memory.release.mlxCacheResidualBytes
+      !== Math.max(0, released.mlx.cacheBytes - start.mlx.cacheBytes)) {
+    fail("memory.release tolerances or residuals differ from the platform contract");
+  }
   if (released.physFootprintBytes > start.physFootprintBytes + receipt.memory.release.physFootprintToleranceBytes
     || released.mlx.activeBytes > start.mlx.activeBytes + receipt.memory.release.mlxActiveToleranceBytes
     || released.mlx.cacheBytes > start.mlx.cacheBytes + receipt.memory.release.mlxCacheToleranceBytes) {
@@ -1271,10 +1360,16 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     receipt.quality,
     [
       ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
-      "statistics", "fixtureEvidence",
+      "greedyAgreementMethod", "freeRunningFirstDivergence", "statistics", "fixtureEvidence",
     ],
     "quality",
   );
+  if (receipt.quality.greedyAgreementMethod !== GREEDY_AGREEMENT_METHOD) {
+    fail("quality.greedyAgreementMethod must be teacher-forced");
+  }
+  if (receipt.quality.freeRunningFirstDivergence !== null) {
+    nonnegativeInteger(receipt.quality.freeRunningFirstDivergence, "quality.freeRunningFirstDivergence");
+  }
   for (const field of DISCRIMINATION_FIELDS) {
     if (typeof receipt.quality[field] !== "boolean") fail(`quality.${field} must be boolean`);
   }
@@ -1687,7 +1782,7 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     "long-context-needle": ["candidateRecovered", "referenceRecovered", "outputsMatch", "discriminating"],
   }[fixture] ?? [];
   const requiredEvidence = {
-    "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal"],
+    "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal", "freeRunningFirstDivergence"],
     "structured-tool-call": ["matches", "total", ...outcomeEvidence],
     "long-context-needle": ["matches", "total", ...outcomeEvidence],
     "multi-turn-prompt-cache": ["matches", "total"],
@@ -1702,6 +1797,9 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
   if (fixture === "kernel-fp32-reference") {
     for (const field of ["candidatePerplexity", "referencePerplexity", "greedyMatches", "greedyTotal"]) {
       if (typeof artifact.evidence[field] !== "number" || !Number.isFinite(artifact.evidence[field])) fail(`fixture artifact ${fixture}.${field} must be finite`);
+    }
+    if (artifact.evidence.freeRunningFirstDivergence !== null) {
+      nonnegativeInteger(artifact.evidence.freeRunningFirstDivergence, `fixture artifact ${fixture}.freeRunningFirstDivergence`);
     }
     if (!Array.isArray(artifact.evidence.parityErrors) || artifact.evidence.parityErrors.length === 0
       || artifact.evidence.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
@@ -2121,10 +2219,11 @@ export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
     const globalIdentity = canonicalJson(Object.fromEntries([
       "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
       "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256", "os", "xcode",
-      "hardware", "powerMode", "thermalState", "commandTemplate",
+      "hardware", "commandTemplate",
     ].map((field) => [field, receipt.provenance[field]])));
+    // Power/thermal state is recorded per row and flagged across the campaign, never a drift.
     if (campaignIdentity && campaignIdentity !== globalIdentity) {
-      fail("campaign source, dependency, toolchain, hardware, or power identity drift");
+      fail("campaign source, dependency, toolchain, or hardware identity drift");
     }
     campaignIdentity ??= globalIdentity;
     const identity = canonicalJson({
@@ -2315,7 +2414,8 @@ export async function readCampaignSet(directory, {
   object(manifest, "campaign manifest");
   const version = manifest.schemaVersion;
   if (version === 2) {
-    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "coordinates"], "campaign manifest");
+    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates"], "campaign manifest");
+    if (typeof manifest.hostStateVaried !== "boolean") fail("campaign manifest hostStateVaried must be boolean");
     if (manifest.kind !== "sc-20671-complete-covering-set" || manifest.scheduleVersion !== 2) {
       fail("campaign v2 manifest has a mismatched kind or schedule");
     }
@@ -2426,6 +2526,9 @@ export async function readCampaignSet(directory, {
   ].sort();
   if (canonicalJson(actualEntries) !== canonicalJson(expectedEntries)) {
     fail("campaign directory contains missing or unexpected entries");
+  }
+  if (version === 2 && manifest.hostStateVaried !== campaignHostStateVaried(receipts)) {
+    fail("campaign manifest host-state variation flag does not recompute");
   }
   return { manifest, summary: validateCampaign(receipts, { scheduleVersion: version }), receipts };
 }
