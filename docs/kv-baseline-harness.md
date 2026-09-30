@@ -199,7 +199,7 @@ dense-KV run on the **same weights**: every fixture's `independentReference` is
 `binding.reference` coordinate/quality inventory must equal the receipt's
 `modelFileSha256` (a bf16 reference is refused as a compressed denominator, and a
 dense receipt may not claim one). Readers re-derive each tool/needle metric and
-flag from the recorded outcomes, and compressed rows must pass every repeat. This isolates
+flag from the recorded outcomes of every repeat. This isolates
 the effect of KV compression from weight quantization. When the same-weights
 dense run missed the needle, the compressed needle check requires exact
 agreement with the dense output and the receipt carries
@@ -338,6 +338,43 @@ threshold number is unchanged.
   (`quality.greedyTokenAgreementByRepeat` records each), and the forced pass
   runs once per distinct reference stream. The contract JSON text and every
   threshold (0.999) are unchanged.
+
+## Measured quality gate (compressed rows)
+
+A compressed row whose quality is validly measured but misses a frozen
+threshold is evidence for the Go/No-Go decision (sc-20678), not an invalid run.
+The row is accepted and records `quality.qualityGate`:
+`{passed, failures: [{metric, fixture, repeat, value, threshold, comparison}]}`.
+The gate evaluates every measured repeat against the contract v3 thresholds
+(`greedyTokenAgreement`, `perplexityDelta`, `structuredToolAgreement`,
+`needleRetrieval`, `multiTurnPromptCache`); `passed` is true only when no repeat
+missed. Validators reject a gate that omits, edits, reorders, or claims a pass
+over any failing value. Campaign readers re-derive every repeat's metrics from
+the sealed fixture artifacts and require the gate to equal their evaluation.
+`compare` reports `qualityGatePassed` and the failures. The campaign manifest and
+summary carry each row's outcome, and a compressed campaign is
+`qualityGatePassed: false` when any row failed. Dense rows carry no gate.
+
+Some failures still refuse the row: kernel parity (`parityMaxError`, which
+compares the fused reader with its independent host-fp32
+dequantize-then-attend reference over the stored codes), fixture-evidence and
+binding integrity, identity, silent fallback, dense reconstruction, and a
+discrimination flag its outcomes do not derive. Kernel parity is a correctness
+check of the kernel, not a quality-versus-dense metric. Each refusal names its
+metric, value, threshold, and fixture.
+
+Greedy agreement on compressed rows is measured over a forced continuation, not
+the short natural fixture streams. Over ~16 natural tokens, one argmax flip is
+already 0.9375, so the frozen 0.999 would mean zero flips. The same-weights
+dense-KV session greedily continues the kernel fixture prompt through every stop
+token for 1024 tokens. A fit-boundary row uses the window left after the prompt,
+never fewer than 256 tokens. This runs once per row because the stream is
+deterministic. The compressed session is teacher-forced on that stream in one
+pass and compared by argmax at every position. `quality.forcedContinuation`
+records the length, matches, agreement, flip count, the first 32 flip positions,
+and stream digests. `greedyTokenAgreement` is that agreement, shared by every
+repeat. The free-running first divergence stays an observation. The threshold
+(0.999) is unchanged; over 1024 positions it allows one flip.
 
 ## Receipt v6: recorded, not refused (sc-20671 hardware audit)
 

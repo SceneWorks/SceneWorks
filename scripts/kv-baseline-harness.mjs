@@ -210,6 +210,224 @@ export function sameWeightsFixtureReference(fixture, modelInventorySha256) {
   return fixture === "kernel-fp32-reference" ? `host-fp32-dense-attention-v1;${model}` : model;
 }
 
+// Measured quality gate of a compressed row (mirrors the inference producer's
+// `QUALITY_GATE_METRICS`): each contract v3 threshold, evaluated for every measured repeat against
+// the same-weights dense-KV run. A miss is recorded evidence for the Go/No-Go decision, never a
+// refused row. Kernel parity (`parityMaxError`) is deliberately absent: it compares the fused
+// reader with its independent host-fp32 dequantize-then-attend reference, a kernel-correctness
+// check that still refuses the row.
+const QUALITY_GATE_METRICS = [
+  { metric: "greedyTokenAgreement", fixture: "kernel-fp32-reference", comparison: "minimum" },
+  { metric: "perplexityDelta", fixture: "kernel-fp32-reference", comparison: "maximum" },
+  { metric: "structuredToolAgreement", fixture: "structured-tool-call", comparison: "minimum" },
+  { metric: "needleRetrieval", fixture: "long-context-needle", comparison: "minimum" },
+  { metric: "multiTurnPromptCache", fixture: "multi-turn-prompt-cache", comparison: "minimum" },
+];
+export const FORCED_CONTINUATION_TOKENS = 1024;
+const FORCED_CONTINUATION_MIN_TOKENS = 256;
+const FORCED_CONTINUATION_RECORDED_FLIPS = 32;
+const FORCED_CONTINUATION_METHOD = "dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced";
+const FORCED_CONTINUATION_FIELDS = [
+  "method", "tokens", "matches", "agreement", "flipCount", "firstFlipPositions",
+  "referenceStreamSha256", "candidateChoicesSha256",
+];
+
+function gateMisses(spec, value) {
+  const threshold = CONTRACT.thresholds[spec.metric];
+  return spec.comparison === "minimum" ? value < threshold : value > threshold;
+}
+
+/** The frozen-threshold gate over every measured repeat's metrics, in repeat order. */
+export function qualityGateFromRepeats(repeats) {
+  const failures = [];
+  repeats.forEach((metrics, repeat) => {
+    for (const spec of QUALITY_GATE_METRICS) {
+      const value = metrics[spec.metric];
+      if (gateMisses(spec, value)) {
+        failures.push({
+          metric: spec.metric, fixture: spec.fixture, repeat, value,
+          threshold: CONTRACT.thresholds[spec.metric], comparison: spec.comparison,
+        });
+      }
+    }
+  });
+  return { passed: failures.length === 0, failures };
+}
+
+export function qualityGateSummary(gate) {
+  if (gate.passed) return "passed";
+  return `FAILED: ${gate.failures.map((failure) => `${failure.metric} repeat ${failure.repeat} = ${failure.value} (${failure.comparison} ${failure.threshold}, fixture ${failure.fixture})`).join("; ")}`;
+}
+
+function validateForcedContinuation(continuation, contextBand) {
+  exactKeys(continuation, FORCED_CONTINUATION_FIELDS, "quality.forcedContinuation");
+  const { tokens, matches, flipCount, firstFlipPositions } = continuation;
+  const lengthValid = tokens === FORCED_CONTINUATION_TOKENS
+    || (contextBand === "fit-boundary" && Number.isSafeInteger(tokens)
+      && tokens >= FORCED_CONTINUATION_MIN_TOKENS && tokens < FORCED_CONTINUATION_TOKENS);
+  if (continuation.method !== FORCED_CONTINUATION_METHOD || !lengthValid
+    || !Number.isSafeInteger(matches) || matches < 0 || matches > tokens
+    || flipCount !== tokens - matches || continuation.agreement !== matches / tokens
+    || !Array.isArray(firstFlipPositions)
+    || firstFlipPositions.length !== Math.min(flipCount, FORCED_CONTINUATION_RECORDED_FLIPS)
+    || firstFlipPositions.some((position, index) => !Number.isSafeInteger(position) || position < 0
+      || position >= tokens || (index > 0 && position <= firstFlipPositions[index - 1]))
+    || !/^[0-9a-f]{64}$/.test(continuation.referenceStreamSha256)
+    || !/^[0-9a-f]{64}$/.test(continuation.candidateChoicesSha256)) {
+    fail(`forced continuation evidence is inconsistent: method=${continuation.method}, tokens=${tokens} (band ${contextBand}), matches=${matches}, agreement=${continuation.agreement}, flipCount=${flipCount}, recordedFlips=${firstFlipPositions?.length}`);
+  }
+}
+
+/**
+ * A compressed receipt's measured quality gate must be exactly the frozen-threshold evaluation of
+ * the values it records; dense receipts carry neither a gate nor a forced continuation. Values of
+ * repeats 1-4 other than greedy agreement live in the sealed repeat artifacts and are bound by
+ * `validateSealedQualityGate`.
+ */
+function validateQualityGate(receipt) {
+  const quality = receipt.quality;
+  if (receipt.mode !== "compressed") {
+    if (Object.hasOwn(quality, "qualityGate") || Object.hasOwn(quality, "forcedContinuation")) {
+      fail("a quality gate and forced continuation are recorded only on compressed receipts");
+    }
+    return;
+  }
+  if (!Object.hasOwn(quality, "forcedContinuation")) {
+    fail("compressed receipt has no forced-continuation greedy agreement");
+  }
+  const continuation = object(quality.forcedContinuation, "quality.forcedContinuation");
+  validateForcedContinuation(continuation, receipt.matrix.contextBand);
+  if ([...quality.greedyTokenAgreementByRepeat, quality.greedyTokenAgreement]
+    .some((value) => value !== continuation.agreement)) {
+    fail(`greedyTokenAgreement ${quality.greedyTokenAgreement} is not the row's forced-continuation agreement ${continuation.agreement}`);
+  }
+  if (!Object.hasOwn(quality, "qualityGate")) fail("compressed receipt has no measured quality-gate record");
+  const gate = object(quality.qualityGate, "quality.qualityGate");
+  exactKeys(gate, ["passed", "failures"], "quality.qualityGate");
+  if (typeof gate.passed !== "boolean" || !Array.isArray(gate.failures)) {
+    fail("quality.qualityGate must carry a boolean passed and a failures list");
+  }
+  let previous;
+  for (const failure of gate.failures) {
+    exactKeys(failure, ["metric", "fixture", "repeat", "value", "threshold", "comparison"], "quality gate failure");
+    const index = QUALITY_GATE_METRICS.findIndex((spec) => spec.metric === failure.metric);
+    const spec = QUALITY_GATE_METRICS[index];
+    const key = [failure.repeat, index];
+    if (!spec || failure.fixture !== spec.fixture
+      || failure.threshold !== CONTRACT.thresholds[spec.metric]
+      || failure.comparison !== spec.comparison
+      || !Number.isSafeInteger(failure.repeat) || failure.repeat < 0
+      || failure.repeat >= CONTRACT.statistics.repeats
+      || typeof failure.value !== "number" || !Number.isFinite(failure.value)
+      || !gateMisses(spec, failure.value)
+      || (previous && (previous[0] > key[0] || (previous[0] === key[0] && previous[1] >= key[1])))) {
+      fail(`quality gate failure is not an ordered frozen-threshold miss: metric=${failure.metric} value=${failure.value} threshold=${failure.threshold} comparison=${failure.comparison} repeat=${failure.repeat} fixture=${failure.fixture}`);
+    }
+    previous = key;
+  }
+  if (gate.passed !== (gate.failures.length === 0)) {
+    fail(`quality gate claims passed=${gate.passed} with ${gate.failures.length} recorded failure(s)`);
+  }
+  const visible = [
+    ...quality.greedyTokenAgreementByRepeat.map((value, repeat) => ["greedyTokenAgreement", repeat, value]),
+    ["perplexityDelta", 0, quality.perplexityDelta],
+    ["structuredToolAgreement", 0, quality.structuredToolAgreement],
+    ["needleRetrieval", 0, quality.needleRetrieval],
+    ["multiTurnPromptCache", 0, quality.multiTurnPromptCache],
+  ];
+  for (const [metric, repeat, value] of visible) {
+    const spec = QUALITY_GATE_METRICS.find((entry) => entry.metric === metric);
+    const recorded = gate.failures.find((failure) => failure.metric === metric && failure.repeat === repeat);
+    if ((recorded?.value) !== (gateMisses(spec, value) ? value : undefined)) {
+      fail(`quality gate does not record ${metric} repeat ${repeat} = ${value} against the frozen ${spec.comparison} ${CONTRACT.thresholds[metric]} (fixture ${spec.fixture}): passed=${gate.passed}`);
+    }
+  }
+}
+
+/**
+ * Re-derive every measured repeat's quality metrics from its sealed fixture artifacts
+ * (`artifacts[repeat][fixture]`). A compressed repeat's kernel evidence carries the row's forced
+ * continuation, which must be the receipt's.
+ */
+export function sealedRepeatQualityMetrics(receipt, artifacts) {
+  if (!Array.isArray(artifacts) || artifacts.length !== CONTRACT.statistics.repeats) {
+    fail("sealed quality evidence requires every repeat");
+  }
+  return artifacts.map((fixtures, repeat) => repeatQualityMetrics(receipt, fixtures, repeat));
+}
+
+/** A published receipt set's primary artifacts must derive the receipt's own quality values. */
+function validatePrimaryQuality(receipt, primaryArtifacts) {
+  if (receipt.mode !== "compressed") return;
+  const primary = repeatQualityMetrics(receipt, primaryArtifacts, 0);
+  const recorded = { ...receipt.quality, greedyTokenAgreement: receipt.quality.greedyTokenAgreementByRepeat[0] };
+  for (const [metric, value] of Object.entries(primary)) {
+    if (recorded[metric] !== value) {
+      fail(`receipt ${metric} ${recorded[metric]} is not the primary repeat's sealed value ${value}`);
+    }
+  }
+}
+
+function repeatQualityMetrics(receipt, fixtures, repeat) {
+  {
+    const ratio = (evidence, fixture, matches, total) => {
+      const [m, t] = [evidence[matches], evidence[total]];
+      if (typeof m !== "number" || typeof t !== "number" || !(t >= 1) || !(m >= 0) || m > t) {
+        fail(`fixture ${fixture} repeat ${repeat} evidence has ${m} of ${t} matches`);
+      }
+      return m / t;
+    };
+    const kernel = object(fixtures["kernel-fp32-reference"]?.evidence, `repeat ${repeat} kernel evidence`);
+    if (canonicalJson(kernel.forcedContinuation ?? null)
+      !== canonicalJson(receipt.quality.forcedContinuation ?? null)) {
+      fail(`repeat ${repeat} kernel fixture forced continuation is not the receipt's`);
+    }
+    if (kernel.forcedContinuation && (kernel.greedyMatches !== kernel.forcedContinuation.matches
+      || kernel.greedyTotal !== kernel.forcedContinuation.tokens)) {
+      fail(`repeat ${repeat} kernel greedy counts are not its forced continuation's`);
+    }
+    if (!Array.isArray(kernel.parityErrors) || kernel.parityErrors.length === 0
+      || kernel.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+      fail(`repeat ${repeat} kernel fixture lacks finite parity errors`);
+    }
+    return {
+      parityMaxError: Math.max(0, ...kernel.parityErrors),
+      perplexityDelta: kernel.candidatePerplexity - kernel.referencePerplexity,
+      greedyTokenAgreement: ratio(kernel, "kernel-fp32-reference", "greedyMatches", "greedyTotal"),
+      structuredToolAgreement: ratio(object(fixtures["structured-tool-call"]?.evidence, `repeat ${repeat} tool evidence`), "structured-tool-call", "matches", "total"),
+      needleRetrieval: ratio(object(fixtures["long-context-needle"]?.evidence, `repeat ${repeat} needle evidence`), "long-context-needle", "matches", "total"),
+      multiTurnPromptCache: ratio(object(fixtures["multi-turn-prompt-cache"]?.evidence, `repeat ${repeat} cache evidence`), "multi-turn-prompt-cache", "matches", "total"),
+    };
+  }
+}
+
+/**
+ * A compressed receipt's recorded quality must be its sealed repeats': per-repeat greedy
+ * agreement, the primary repeat's receipt-level values, and a gate exactly equal to the
+ * frozen-threshold evaluation of every repeat (a failing value can never be recorded as a pass).
+ * Kernel parity still refuses.
+ */
+export function validateSealedQualityGate(receipt, repeats) {
+  const quality = receipt.quality;
+  repeats.forEach((metrics, repeat) => {
+    if (metrics.parityMaxError > CONTRACT.thresholds.parityMaxError) {
+      fail(`kernel parity failed: metric=parityMaxError value=${metrics.parityMaxError} threshold=${CONTRACT.thresholds.parityMaxError} comparison=maximum fixture=kernel-fp32-reference repeat=${repeat}`);
+    }
+    if (quality.greedyTokenAgreementByRepeat[repeat] !== metrics.greedyTokenAgreement) {
+      fail(`greedyTokenAgreement repeat ${repeat} is not its sealed agreement ${metrics.greedyTokenAgreement}`);
+    }
+  });
+  for (const metric of ["parityMaxError", "perplexityDelta", "structuredToolAgreement", "needleRetrieval", "multiTurnPromptCache"]) {
+    if (quality[metric] !== repeats[0][metric]) {
+      fail(`receipt ${metric} ${quality[metric]} is not the primary repeat's sealed value ${repeats[0][metric]}`);
+    }
+  }
+  const expected = qualityGateFromRepeats(repeats);
+  if (canonicalJson(quality.qualityGate ?? null) !== canonicalJson(expected)) {
+    fail(`receipt quality gate (${quality.qualityGate ? qualityGateSummary(quality.qualityGate) : "absent"}) is not the gate of its sealed repeats (${qualityGateSummary(expected)})`);
+  }
+}
+
 function fail(message) {
   throw new Error(`KV baseline receipt: ${message}`);
 }
@@ -1351,7 +1569,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     [
       ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
       "greedyAgreementMethod", "freeRunningFirstDivergence", "greedyTokenAgreementByRepeat",
-      "statistics", "fixtureEvidence",
+      "statistics", "fixtureEvidence", "qualityGate", "forcedContinuation",
     ],
     "quality",
   );
@@ -1388,17 +1606,12 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (canonicalJson(receipt.quality.statistics) !== canonicalJson(CONTRACT.statistics)) {
     fail("quality statistics policy differs from the frozen contract");
   }
+  // Kernel parity against the host-fp32 dequantize-then-attend reference is a correctness check
+  // of the fused reader, not a quality-versus-dense metric: a miss still refuses the row. The
+  // other thresholds are the measured quality gate (validateQualityGate).
   if (receipt.mode === "compressed"
-    && (receipt.quality.parityMaxError > CONTRACT.thresholds.parityMaxError
-      || receipt.quality.perplexityDelta > CONTRACT.thresholds.perplexityDelta)) {
-    fail("quality error exceeds the frozen maximum");
-  }
-  if (receipt.mode === "compressed") {
-    for (const field of AGREEMENT_QUALITY_FIELDS) {
-      if (receipt.quality[field] < CONTRACT.thresholds[field]) {
-        fail(`quality.${field} is below the frozen minimum`);
-      }
-    }
+    && receipt.quality.parityMaxError > CONTRACT.thresholds.parityMaxError) {
+    fail(`kernel parity failed: metric=parityMaxError value=${receipt.quality.parityMaxError} threshold=${CONTRACT.thresholds.parityMaxError} comparison=maximum fixture=kernel-fp32-reference repeat=all`);
   }
   validateFixtureEvidence(receipt.quality.fixtureEvidence);
   // Contract v3: compressed quality is gated against the same-weights dense-KV run, never the
@@ -1461,6 +1674,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     fail("compression evidence must be present exactly on compressed receipts");
   }
   if (receipt.mode === "compressed") validateCompression(receipt);
+  // Last: integrity, identity, safety, and fixture checks above refuse first.
+  validateQualityGate(receipt);
   return receipt;
 }
 
@@ -1752,6 +1967,7 @@ export async function buildVerifiedReceipt(input) {
   }
   const receipt = buildReceipt(verifiedInput);
   validatePrimaryDiscrimination(receipt, primaryArtifacts);
+  validatePrimaryQuality(receipt, primaryArtifacts);
   Object.defineProperty(receipt, FIXTURE_SOURCES, {
     value: fixtureSources,
     enumerable: false,
@@ -1785,7 +2001,13 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     "long-context-needle": ["matches", "total", ...outcomeEvidence],
     "multi-turn-prompt-cache": ["matches", "total"],
   }[fixture];
-  exactKeys(artifact.evidence, requiredEvidence, `fixture artifact ${fixture}.evidence`);
+  // A compressed row's kernel evidence also carries its forced continuation.
+  exactKeys(
+    artifact.evidence,
+    fixture === "kernel-fp32-reference" && Object.hasOwn(artifact.evidence, "forcedContinuation")
+      ? [...requiredEvidence, "forcedContinuation"] : requiredEvidence,
+    `fixture artifact ${fixture}.evidence`,
+  );
   // Both arms' tool/needle behaviour is recorded as raw observation, never as a pass flag.
   for (const field of outcomeEvidence) {
     if (typeof artifact.evidence[field] !== "boolean") {
@@ -1817,7 +2039,7 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
 /**
  * Bind one fixture artifact to its receipt beyond the label: a compressed row's reference arm must
  * be the candidate's own weights, and tool/needle metrics and discrimination flags are re-derived
- * from the raw outcomes. Compressed rows must pass every repeat. Returns the artifact's flag.
+ * from the raw outcomes. Returns the artifact's flag.
  */
 export function validateFixtureOutcomes(artifact, fixture, receipt) {
   const compressed = receipt.mode === "compressed";
@@ -1836,9 +2058,9 @@ export function validateFixtureOutcomes(artifact, fixture, receipt) {
   const reference = needle ? evidence.referenceRecovered : evidence.referenceValid;
   const sameWeightsDense = compressed ? reference : candidate;
   const expectedMatch = needle && !(compressed && !sameWeightsDense) ? candidate : evidence.outputsMatch;
+  // A compressed repeat that validly measured a miss is quality-gate evidence, not malformed.
   if (evidence.total !== 1 || evidence.discriminating !== sameWeightsDense
-    || evidence.matches !== (expectedMatch ? 1 : 0)
-    || (compressed && evidence.matches !== evidence.total)) {
+    || evidence.matches !== (expectedMatch ? 1 : 0)) {
     fail(`fixture ${fixture} outcome evidence does not derive its metric and discrimination`);
   }
   return evidence.discriminating;
@@ -1942,6 +2164,7 @@ export function renderReceiptMarkdown(receipt) {
     + `- First dispatch excess: ${receipt.timings.compileAttribution.firstDispatchExcessMs} ms\n`
     + `- Compile cost: ${compileCostSummary(receipt.timings.compileAttribution)}\n`
     + `- Steady dispatch: ${receipt.timings.warmCompileMs} ms\n`
+    + (receipt.quality.qualityGate ? `- Quality gate: ${qualityGateSummary(receipt.quality.qualityGate)}\n` : "")
     + `- Quality contract: ${receipt.contractHash}\n`
     + `- Receipt hash: ${receipt.receiptSha256}\n`
     + `- Lifecycle checks: ${supportedLifecycle}/${LIFECYCLE.length} supported\n`
@@ -1973,6 +2196,7 @@ export function renderComparisonMarkdown(comparison) {
     + (comparison.quality.toolDiscriminating === false
       ? "- Tool check: NON-DISCRIMINATING (same-weights dense run emitted no valid tool call; compressed matched dense output only)\n"
       : "")
+    + `- Quality gate: ${qualityGateSummary(comparison.qualityGate)}\n`
     + `- Quality contract: ${comparison.contractHash}\n`;
 }
 
@@ -2075,6 +2299,7 @@ export async function readReceiptSet(directory) {
     primaryArtifacts[fixture] = artifact;
   }
   validatePrimaryDiscrimination(receipt, primaryArtifacts);
+  validatePrimaryQuality(receipt, primaryArtifacts);
   if (receipt.matrix.processTemperature === "cold") {
     for (let index = 0; index < CONTRACT.statistics.repeats; index += 1) {
       const artifactName = index === 0
@@ -2168,6 +2393,10 @@ export function compareReceipts(dense, compressed) {
       [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS]
         .map((field) => [field, compressed.quality[field]]),
     ),
+    // The compressed row's measured gate outcome: a failed gate is reported, never a pass.
+    qualityGatePassed: compressed.quality.qualityGate.passed,
+    qualityGate: compressed.quality.qualityGate,
+    forcedContinuation: compressed.quality.forcedContinuation,
   };
 }
 
@@ -2259,16 +2488,38 @@ export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
       fail(`context-band tokenizer measurements are not strictly increasing for ${family}`);
     }
   }
+  // A compressed campaign reports every row's measured gate outcome; it passes only when every
+  // row passed. Dense campaigns are characterization and carry no gate.
+  const compressed = campaignMode.startsWith("compressed:");
+  const qualityGates = compressed
+    ? receipts.map((receipt) => ({
+      coordinate: campaignCoordinate(receipt, "-"),
+      passed: receipt.quality.qualityGate.passed,
+      failures: receipt.quality.qualityGate.failures,
+    }))
+    : undefined;
   return {
     schemaVersion: SCHEMA_VERSION,
     scheduleVersion,
     mode: campaignMode.split(":")[0],
-    ...(campaignMode.startsWith("compressed:") ? { kvMethod: campaignMode.slice("compressed:".length) } : {}),
+    ...(compressed ? { kvMethod: campaignMode.slice("compressed:".length) } : {}),
     complete: true,
     receipts: receipts.length,
     coordinates: coordinates.size,
     contractHash: QUALITY_CONTRACT_HASH,
+    ...(compressed ? {
+      qualityGatePassed: qualityGates.every((row) => row.passed),
+      qualityGates,
+    } : {}),
   };
+}
+
+/** A compressed campaign's gate verdict (every row passed); undefined for a dense campaign. */
+export function campaignQualityGatePassed(receipts) {
+  const gates = receipts.map((receipt) => receipt.quality.qualityGate);
+  if (gates.every((gate) => gate === undefined)) return undefined;
+  if (gates.some((gate) => gate === undefined)) fail("campaign mixes gated and ungated rows");
+  return gates.every((gate) => gate.passed);
 }
 
 export function campaignPolicySha256(policy) {
@@ -2365,13 +2616,19 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
   const coordinate = campaignCoordinate(receipt, "-");
   validateAdmissionPolicy(receipt, safetyPolicy);
   const flags = Object.fromEntries(Object.keys(DISCRIMINATION_FIXTURES).map((fixture) => [fixture, []]));
+  const repeatArtifacts = [];
+  // A compressed row's denominator is the same-weights dense-KV run; a dense row's is bf16.
+  const referenceInventory = receipt.mode === "compressed"
+    ? receipt.provenance.modelFileSha256 : receipt.provenance.referenceModelSha256;
   for (let repeat = 0; repeat < CONTRACT.statistics.repeats; repeat += 1) {
+    repeatArtifacts.push({});
     for (const fixture of FIXTURES) {
       const name = repeat === 0
         ? `fixtures/${fixture}.json`
         : `fixtures/repeat-${repeat}/${fixture}.json`;
       const artifact = JSON.parse(await readFile(path.join(directory, name), "utf8"));
       validateFixtureArtifact(artifact, fixture, receipt.quality.fixtureEvidence[fixture]);
+      repeatArtifacts[repeat][fixture] = artifact;
       const flag = validateFixtureOutcomes(artifact, fixture, receipt);
       if (flag !== undefined) flags[fixture].push(flag);
       const binding = object(artifact.binding, `campaign fixture ${name} binding`);
@@ -2379,7 +2636,7 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
       const reference = object(binding.reference, `campaign fixture ${name} reference`);
       if (binding.coordinate !== coordinate || binding.repeat !== repeat
         || candidate.coordinateInventorySha256 !== receipt.provenance.modelFileSha256
-        || reference.coordinateInventorySha256 !== receipt.provenance.referenceModelSha256) {
+        || reference.coordinateInventorySha256 !== referenceInventory) {
         fail(`campaign fixture ${name} producer coordinate or model binding differs`);
       }
       for (const arm of [candidate, reference]) {
@@ -2400,6 +2657,9 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
     }
   }
   validateRepeatDiscrimination(receipt, flags);
+  if (receipt.mode === "compressed") {
+    validateSealedQualityGate(receipt, sealedRepeatQualityMetrics(receipt, repeatArtifacts));
+  }
 }
 
 /** Read a producer campaign only after binding its manifest to every sealed receipt artifact. */
@@ -2412,7 +2672,7 @@ export async function readCampaignSet(directory, {
   object(manifest, "campaign manifest");
   const version = manifest.schemaVersion;
   if (version === 2) {
-    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates"], "campaign manifest");
+    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates", "qualityGatePassed"], "campaign manifest");
     if (typeof manifest.hostStateVaried !== "boolean") fail("campaign manifest hostStateVaried must be boolean");
     if (manifest.kind !== "sc-20671-complete-covering-set" || manifest.scheduleVersion !== 2) {
       fail("campaign v2 manifest has a mismatched kind or schedule");
@@ -2449,7 +2709,7 @@ export async function readCampaignSet(directory, {
   const seen = new Set();
   const receipts = [];
   for (const row of manifest.coordinates) {
-    exactKeys(row, ["coordinate", "receiptSha256", "workerPid", "files"], "campaign row");
+    exactKeys(row, ["coordinate", "receiptSha256", "workerPid", "files", "qualityGatePassed"], "campaign row");
     if (typeof row.coordinate !== "string" || !allowed.has(row.coordinate)) {
       fail("campaign manifest contains an unscheduled coordinate");
     }
@@ -2465,6 +2725,9 @@ export async function readCampaignSet(directory, {
       || receipt.receiptSha256 !== row.receiptSha256
       || receipt.memory.phaseSamples[0].pid !== row.workerPid) {
       fail("campaign manifest coordinate, receipt seal, or worker PID differs from the receipt");
+    }
+    if (row.qualityGatePassed !== receipt.quality.qualityGate?.passed) {
+      fail(`campaign manifest row ${row.coordinate} qualityGatePassed does not recompute from its receipt`);
     }
     if (version === 2
       && (receipt.geometry.contextTargetTokens > safetyPolicy.maxContextTokens
@@ -2527,6 +2790,9 @@ export async function readCampaignSet(directory, {
   }
   if (version === 2 && manifest.hostStateVaried !== campaignHostStateVaried(receipts)) {
     fail("campaign manifest host-state variation flag does not recompute");
+  }
+  if (manifest.qualityGatePassed !== campaignQualityGatePassed(receipts)) {
+    fail("campaign manifest qualityGatePassed does not recompute from its rows");
   }
   return { manifest, summary: validateCampaign(receipts, { scheduleVersion: version }), receipts };
 }

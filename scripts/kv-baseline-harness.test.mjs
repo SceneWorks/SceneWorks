@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { FORCED_CONTINUATION_TOKENS, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -91,6 +91,18 @@ function hostMemoryFor(requiredBytes, counters) {
   const availableBytes=(pages.freePages+pages.speculativePages+pages.purgeablePages+reclaimableFilePages)*pageSizeBytes;
   return {metric:"darwin-vm-stat-available-v3",pageSizeBytes,...pages,reclaimableFilePages,availableBytes};
 }
+// A compressed row's forced continuation over `tokens` positions with `matches` agreeing.
+function forcedContinuation(matches=FORCED_CONTINUATION_TOKENS, tokens=FORCED_CONTINUATION_TOKENS) {
+  const flips=Array.from({length:tokens-matches},(_,i)=>matches+i);
+  return {method:"dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced",tokens,matches,agreement:matches/tokens,flipCount:tokens-matches,firstFlipPositions:flips.slice(0,32),referenceStreamSha256:sha256("reference"),candidateChoicesSha256:sha256(`choices-${matches}`)};
+}
+// Compressed quality records its forced continuation and the gate of its receipt-level values
+// (every repeat measured the same values).
+function gatedQuality(mode, quality, continuation=forcedContinuation()) {
+  if (mode !== "compressed") return quality;
+  const gated={...quality,greedyTokenAgreement:continuation.agreement,greedyTokenAgreementByRepeat:Array(5).fill(continuation.agreement),forcedContinuation:continuation};
+  return {...gated,qualityGate:qualityGateFromRepeats(Array(5).fill(gated))};
+}
 function fixture(mode="dense", coordinate={}, extra={}) {
   const family = coordinate.family || "llama";
   const contract = SC20671_MODEL_CONTRACTS[family];
@@ -118,12 +130,16 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
   memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0,mlxActiveResidualBytes:0,mlxCacheResidualBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)},denseKvShareBps:0,belowMemoryMaterialShare:false},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,greedyTokenAgreementByRepeat:[1,1,1,1,1],structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))},lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
+    quality:gatedQuality(mode,{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,greedyTokenAgreementByRepeat:[1,1,1,1,1],structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))}),lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
+  const continuation = raw.quality.forcedContinuation;
   const evidence = name === "kernel-fp32-reference"
-    ? {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1,freeRunningFirstDivergence:null}
+    ? (continuation
+      // Compressed: 0.1 - 0.2 is exactly the fixture's perplexityDelta of -0.1.
+      ? {candidatePerplexity:0.1,referencePerplexity:0.2,parityErrors:[0],greedyMatches:continuation.matches,greedyTotal:continuation.tokens,freeRunningFirstDivergence:null,forcedContinuation:continuation}
+      : {candidatePerplexity:1,referencePerplexity:1,parityErrors:[0],greedyMatches:1,greedyTotal:1,freeRunningFirstDivergence:null})
     : name === "structured-tool-call"
       ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true,discriminating:true}
       : name === "long-context-needle"
@@ -161,11 +177,15 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
   };
 }
 
-async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false, pid=9, policy }={}) {
+async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceShaped=false, pid=9, policy, continuation }={}) {
   await mkdir(root, { recursive: true });
   const model = path.join(root, "model.safetensors");
   await writeFile(model, "weights");
   const raw = fixture(mode, coordinate);
+  if (continuation) {
+    const { qualityGate: _gate, forcedContinuation: _forced, ...measured } = raw.quality;
+    raw.quality = gatedQuality(mode, measured, continuation);
+  }
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
   raw.memory.phaseSamples = raw.memory.phaseSamples.map((sample) => ({ ...sample, pid }));
   if (policy) {
@@ -287,10 +307,13 @@ function sampleResumeIdentity(policy) {
     llamaReference: reference, qwenReference: reference,
   };
 }
-async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = policy } = {}) {
+async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = policy, mode = "dense", continuations = {} } = {}) {
   const directory = path.join(root, "campaign");
   await mkdir(directory);
-  const resumeIdentity = sampleResumeIdentity(policy);
+  const resumeIdentity = {
+    ...sampleResumeIdentity(policy),
+    ...(mode === "compressed" ? { mode, kvMethod: "group-affine" } : {}),
+  };
   const resumeIdentitySha256 = campaignResumeIdentitySha256(resumeIdentity, campaignPolicySha256(policy));
   const rows = [];
   const receipts = [];
@@ -300,8 +323,8 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
       prefillMode: entry[3], processTemperature: entry[4],
     };
     const slug = entry.join("-");
-    const receipt = await verifiedFixture(path.join(root, `source-${index}`), "dense", coordinate, {
-      pid: index + 100, inferenceShaped: true, policy: rowPolicy,
+    const receipt = await verifiedFixture(path.join(root, `source-${index}`), mode, coordinate, {
+      pid: index + 100, inferenceShaped: true, policy: rowPolicy, continuation: continuations[index],
     });
     const receiptDirectory = path.join(directory, slug);
     await writeReceiptSet(receiptDirectory, receipt);
@@ -325,7 +348,10 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
       sha256: sha256(await readFile(path.join(receiptDirectory, name))),
       sidecarSha256: sha256(await readFile(path.join(receiptDirectory, `${name}.sha256`))),
     })));
-    rows.push({ coordinate: slug, receiptSha256: receipt.receiptSha256, workerPid: index + 100, files });
+    rows.push({
+      coordinate: slug, receiptSha256: receipt.receiptSha256, workerPid: index + 100, files,
+      ...(receipt.quality.qualityGate ? { qualityGatePassed: receipt.quality.qualityGate.passed } : {}),
+    });
     receipts.push(receipt);
   }
   const manifest = {
@@ -333,6 +359,7 @@ async function writeEightCampaign(root, policy = safetyPolicy, { rowPolicy = pol
     policySha256: campaignPolicySha256(policy), resumeIdentitySha256,
     hostStateVaried: campaignHostStateVaried(receipts),
     coordinates: rows,
+    ...(mode === "compressed" ? { qualityGatePassed: campaignQualityGatePassed(receipts) } : {}),
   };
   await writeFile(path.join(directory, "safety-policy.json"), canonicalJson(policy));
   await writeFile(path.join(directory, "resume-identity.json"), canonicalJson(resumeIdentity));
@@ -471,7 +498,7 @@ test("compile attribution v4 fails closed on malformed or tampered evidence",()=
   assert.throws(()=>rebuildReceipt(fixture("dense",{processTemperature:"warm"}),(raw)=>{raw.warmup.suiteSha256="0".repeat(64);}),/warmup suite seal/);
 });
 test("Darwin footprint requires current and lifetime peak units",()=>{const timestamp="2026-08-29T12:00:00.000Z";assert.deepEqual(readDarwinMemory(9,()=>"phys_footprint: 1664 KB\nphys_footprint_peak: 2 MB\n","process-start",timestamp),{phase:"process-start",pid:9,source:"footprint -p",timestamp,physFootprintBytes:1703936,physFootprintPeakBytes:2097152});assert.throws(()=>readDarwinMemory(9,()=>"phys_footprint: 1664 KB\n","process-start",timestamp),/phys_footprint_peak/);});
-test("tamper, quality, formula and reconciliation fail closed",()=>{const r=fixture();r.memory.persistentKvBytes++;assert.throws(()=>validateReceipt(r),/receiptSha256/);assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,parityMaxError:1,perplexityDelta:1,greedyTokenAgreement:0,greedyTokenAgreementByRepeat:[1,0,1,1,1],multiTurnPromptCache:0}}));assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,parityMaxError:1}}),/frozen maximum/);assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,perplexityDelta:1}}),/frozen maximum/);assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,greedyTokenAgreement:0,greedyTokenAgreementByRepeat:[1,0,1,1,1]}}),/below the frozen minimum/);assert.throws(()=>fixture("dense",{}, {memory:{...fixture().memory,denseTheoreticalKvBytes:formula()*2}}),/does not reconcile/);assert.throws(()=>fixture("dense",{}, {memory:{...fixture().memory,reconciliation:{...fixture().memory.reconciliation,observedPersistentKvBytes:1}}}),/does not reconcile/);});
+test("tamper, quality, formula and reconciliation fail closed",()=>{const r=fixture();r.memory.persistentKvBytes++;assert.throws(()=>validateReceipt(r),/receiptSha256/);assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,parityMaxError:1,perplexityDelta:1,greedyTokenAgreement:0,greedyTokenAgreementByRepeat:[1,0,1,1,1],multiTurnPromptCache:0}}));assert.throws(()=>fixture("compressed",{}, {quality:gatedQuality("compressed",{...fixture("compressed").quality,parityMaxError:1})}),/kernel parity failed: metric=parityMaxError value=1 threshold=0.0001/);assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,perplexityDelta:1}}),/quality gate does not record perplexityDelta repeat 0 = 1 against the frozen maximum 0.01/);assert.equal(fixture("compressed",{}, {quality:gatedQuality("compressed",{...fixture("compressed").quality,perplexityDelta:1})}).quality.qualityGate.passed,false);assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,greedyTokenAgreement:0,greedyTokenAgreementByRepeat:[1,0,1,1,1]}}),/forced-continuation agreement/);assert.throws(()=>fixture("dense",{}, {memory:{...fixture().memory,denseTheoreticalKvBytes:formula()*2}}),/does not reconcile/);assert.throws(()=>fixture("dense",{}, {memory:{...fixture().memory,reconciliation:{...fixture().memory.reconciliation,observedPersistentKvBytes:1}}}),/does not reconcile/);});
 test("persistent cache allowed; sequential transient snapshots never sum",()=>{assert.doesNotThrow(()=>fixture());const split=[{kind:"k-temp",role:"cache",lifetime:"transient",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.000Z",bytes:formula()/2},{kind:"v-temp",role:"output",lifetime:"transient",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:formula()/2}];assert.equal(detectFullCacheTemporary(split,formula()).detected,false);assert.equal(detectFullCacheTemporary([{...split[0],kind:"full_cache_materialization"}],formula()).detected,true);assert.throws(()=>fixture("dense",{}, {memory:{...fixture().memory,allocationEvents:[{kind:"hidden",role:"other",lifetime:"transient",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.000Z",bytes:formula()}]}}),/schema validation/);});
 test("prefill peak window admits released transient workspace and one boundary reset",()=>{const base=fixture(),prefill=base.memory.phaseSamples[2],window=base.memory.prefillPeakWindow;assert.equal(prefill.mlx.activeBytes,window.baselineActiveBytes+base.memory.persistentKvBytes);assert.equal(prefill.mlx.peakBytes,prefill.mlx.activeBytes+base.memory.transientWorkspaceBytes);assert.doesNotThrow(()=>rebuildReceipt(base,(raw)=>{raw.memory.phaseSamples[1].mlx.peakBytes=raw.memory.phaseSamples[2].mlx.peakBytes+1;}));assert.throws(()=>rebuildReceipt(base,(raw)=>{raw.memory.phaseSamples[3].mlx.peakBytes=raw.memory.phaseSamples[3].mlx.activeBytes;}),/decreased without a declared reset boundary/);});
 test("prefill peak window is required and exact",()=>{assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{delete raw.memory.prefillPeakWindow;}),/schema validation/);assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.memory.prefillPeakWindow.note="unexpected";}),/schema validation/);});
@@ -585,8 +612,10 @@ test("contract v3 gates compressed quality only against the same-weights dense-K
   assert.throws(()=>checkContract({...contract,needleFixture:{...contract.needleFixture,statement:"The special magic identifier."}}),/exact needle token/);
   assert.throws(()=>checkContract({...contract,version:2}),/unsupported quality contract version/);
   // A compressed receipt whose denominator is not the same-weights dense-KV run is refused.
-  assert.throws(()=>fixture("compressed",{}, {quality:{...fixture().quality,needleDiscriminating:true}}),/contract v3 denominator/);
-  assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,needleRetrieval:0}}),/below the frozen minimum/);
+  assert.throws(()=>fixture("compressed",{}, {quality:gatedQuality("compressed",{...fixture().quality,needleDiscriminating:true})}),/contract v3 denominator/);
+  // A measured needle miss is a recorded gate failure, never an unrecorded or refused row.
+  assert.throws(()=>fixture("compressed",{}, {quality:{...fixture("compressed").quality,needleRetrieval:0}}),/quality gate does not record needleRetrieval repeat 0 = 0/);
+  assert.equal(fixture("compressed",{}, {quality:gatedQuality("compressed",{...fixture("compressed").quality,needleRetrieval:0})}).quality.qualityGate.passed,false);
   // A shared dense miss is accepted only when flagged non-discriminating, and the comparison says so.
   const sharedMiss=fixture("compressed",{}, {quality:{...fixture("compressed").quality,needleDiscriminating:false}});
   const comparison=compareReceipts(fixture(),sharedMiss);
@@ -596,7 +625,10 @@ test("contract v3 gates compressed quality only against the same-weights dense-K
   // Dense rows are characterization: a needle/tool miss is recorded, never rejected, but not hidden.
   assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0,needleDiscriminating:false,structuredToolAgreement:0}}));
   assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0}}),/needle discrimination/);
-  assert.throws(()=>fixture("dense",{}, {quality:{...fixture("compressed").quality}}),/contract v3 denominator/);
+  const { qualityGate: _gate, forcedContinuation: _forced, ...compressedQuality } = fixture("compressed").quality;
+  assert.throws(()=>fixture("dense",{}, {quality:compressedQuality}),/contract v3 denominator/);
+  // A dense row is characterization: it can carry neither a gate nor a forced continuation.
+  assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,qualityGate:{passed:true,failures:[]}}}),/schema validation failed/);
 });
 test("rows record runtime-guarded admission with the stated cap and estimate",()=>{
   const memory=fixture().memory;
@@ -650,12 +682,14 @@ test("fixture outcomes are bound to the same weights and re-derived, and flags A
   assert.throws(()=>validateFixtureOutcomes({evidence:{}},"multi-turn-prompt-cache",compressed),/binding/);
   assert.equal(validateFixtureOutcomes({...sameWeights,...needle(false,false,true,1,false)},"long-context-needle",compressed),false);
   assert.equal(validateFixtureOutcomes({...sameWeights,...tool(false,false,true,false)},"structured-tool-call",compressed),false);
+  // A validly measured compressed miss is quality-gate evidence, not a malformed artifact.
+  assert.equal(validateFixtureOutcomes({...sameWeights,...needle(false,true,false,0,true)},"long-context-needle",compressed),true);
+  assert.equal(validateFixtureOutcomes({...sameWeights,...tool(true,true,false,true)},"structured-tool-call",compressed),true);
   for (const [fixture,forged] of [
     ["long-context-needle",needle(false,false,false,1,false)],
     ["long-context-needle",needle(true,true,true,1,false)],
-    ["long-context-needle",needle(false,true,false,0,true)],
+    ["long-context-needle",needle(false,true,false,1,true)],
     ["structured-tool-call",tool(true,false,true,true)],
-    ["structured-tool-call",tool(true,true,false,true)],
   ]) assert.throws(()=>validateFixtureOutcomes({...sameWeights,...forged},fixture,compressed),/does not derive/,fixture);
   // Dense rows derive discrimination from their own run and are never gated on outcomes.
   assert.equal(validateFixtureOutcomes(needle(false,true,false,0,false),"long-context-needle",dense),false);
@@ -1041,4 +1075,103 @@ test("SC-20676 compressed campaigns are uniform and bound to their resume identi
   const mixed = [...rows];
   mixed[0] = withCampaignPid(fixture("dense", rows[0].matrix), 10);
   assert.throws(() => validateCampaign(mixed), /mixes dense and compressed/);
+});
+test("SC-20671 compressed quality misses are recorded as a failed gate, never a pass", () => {
+  const base = fixture("compressed").quality;
+  const miss = fixture("compressed", {}, { quality: gatedQuality("compressed", { ...base, needleRetrieval: 0, perplexityDelta: 0.5 }, forcedContinuation(1022)) });
+  const gate = miss.quality.qualityGate;
+  assert.equal(gate.passed, false);
+  assert.equal(gate.failures.length, 15, "three misses in each of five repeats");
+  assert.deepEqual(gate.failures.slice(0, 3), [
+    { metric: "greedyTokenAgreement", fixture: "kernel-fp32-reference", repeat: 0, value: 1022 / 1024, threshold: 0.999, comparison: "minimum" },
+    { metric: "perplexityDelta", fixture: "kernel-fp32-reference", repeat: 0, value: 0.5, threshold: 0.01, comparison: "maximum" },
+    { metric: "needleRetrieval", fixture: "long-context-needle", repeat: 0, value: 0, threshold: 1, comparison: "minimum" },
+  ]);
+  assert.deepEqual(miss.quality.forcedContinuation.firstFlipPositions, [1022, 1023]);
+  // One flip in 1024 clears 0.999; two do not.
+  assert.equal(qualityGateFromRepeats([{ ...base, greedyTokenAgreement: 1023 / 1024 }]).passed, true);
+  assert.equal(qualityGateFromRepeats([{ ...base, greedyTokenAgreement: 1022 / 1024 }]).passed, false);
+  // Comparison and its human record report the failed gate.
+  const comparison = compareReceipts(fixture(), miss);
+  assert.equal(comparison.qualityGatePassed, false);
+  assert.deepEqual(comparison.qualityGate, gate);
+  assert.equal(compareReceipts(fixture(), fixture("compressed")).qualityGatePassed, true);
+  assert.match(renderComparisonMarkdown(comparison), /Quality gate: FAILED: greedyTokenAgreement repeat 0 = 0\.998046875 \(minimum 0\.999, fixture kernel-fp32-reference\); perplexityDelta repeat 0 = 0\.5 \(maximum 0\.01/);
+  assert.match(renderReceiptMarkdown(miss), /- Quality gate: FAILED: /);
+  assert.match(renderReceiptMarkdown(fixture("compressed")), /- Quality gate: passed\n/);
+  assert.doesNotMatch(renderReceiptMarkdown(fixture()), /Quality gate/);
+  // A pass can never be claimed over a failing value.
+  const forged = (edit) => {
+    const quality = structuredClone(miss.quality);
+    edit(quality.qualityGate);
+    return () => fixture("compressed", {}, { quality });
+  };
+  assert.throws(forged((g) => { g.passed = true; g.failures = []; }), /quality gate does not record greedyTokenAgreement repeat 0 = 0\.998046875 against the frozen minimum 0\.999/);
+  assert.throws(forged((g) => { g.passed = true; }), /claims passed=true with 15 recorded failure/);
+  assert.throws(forged((g) => { g.failures[0].value = 0.5; }), /does not record greedyTokenAgreement repeat 0/);
+  assert.throws(forged((g) => { g.failures[1].threshold = 0.6; }), /not an ordered frozen-threshold miss/);
+  assert.throws(forged((g) => { g.failures.reverse(); }), /not an ordered frozen-threshold miss/);
+  assert.throws(forged((g) => { g.failures[2].fixture = "kernel-fp32-reference"; }), /not an ordered frozen-threshold miss/);
+  // Integrity still refuses: a gated row with a broken kernel, or a missing measurement.
+  assert.throws(() => fixture("compressed", {}, { quality: gatedQuality("compressed", { ...base, parityMaxError: 0.5 }) }), /kernel parity failed/);
+  const { forcedContinuation: _forced, ...unmeasured } = base;
+  assert.throws(() => fixture("compressed", {}, { quality: unmeasured }), /schema validation failed/);
+  assert.throws(() => fixture("compressed", {}, { quality: { ...base, forcedContinuation: { ...base.forcedContinuation, matches: 1000 } } }), /forced continuation evidence is inconsistent/);
+  // The sealed repeats bind the gate: a miss visible only in repeat 3's artifact must be recorded.
+  const evidence = (raw, repeat, overrides = {}) => Object.fromEntries(qualityFixtures.map((name) => {
+    const artifact = artifactFixture(raw, name, repeat);
+    return [name, { ...artifact, evidence: { ...artifact.evidence, ...(overrides[name] ?? {}) } }];
+  }));
+  const clean = fixture("compressed");
+  const sealed = [0, 1, 2, 3, 4].map((repeat) => evidence(clean, repeat, repeat === 3 ? { "long-context-needle": { matches: 0 } } : {}));
+  const repeats = sealedRepeatQualityMetrics(clean, sealed);
+  assert.equal(repeats[3].needleRetrieval, 0);
+  assert.throws(() => validateSealedQualityGate(clean, repeats), /is not the gate of its sealed repeats \(FAILED: needleRetrieval repeat 3 = 0/);
+  const recorded = { ...clean, quality: { ...clean.quality, qualityGate: qualityGateFromRepeats(repeats) } };
+  validateSealedQualityGate(recorded, repeats);
+  assert.throws(() => sealedRepeatQualityMetrics(clean, sealed.map((fixtures, repeat) => repeat === 1
+    ? { ...fixtures, "kernel-fp32-reference": { ...fixtures["kernel-fp32-reference"], evidence: { ...fixtures["kernel-fp32-reference"].evidence, forcedContinuation: forcedContinuation(1000) } } }
+    : fixtures)), /repeat 1 kernel fixture forced continuation is not the receipt's/);
+  assert.throws(() => validateSealedQualityGate(clean, [0, 1, 2, 3, 4].map((repeat) => ({ ...repeats[0], parityMaxError: repeat === 2 ? 0.5 : 0 }))), /kernel parity failed: metric=parityMaxError value=0\.5 .*repeat=2/);
+  assert.equal(campaignQualityGatePassed([clean, clean]), true);
+  assert.equal(campaignQualityGatePassed([clean, miss]), false);
+  assert.equal(campaignQualityGatePassed([fixture(), fixture()]), undefined);
+  assert.throws(() => campaignQualityGatePassed([fixture(), clean]), /mixes gated and ungated/);
+  assert.equal(qualityGateSummary(clean.quality.qualityGate), "passed");
+});
+test("SC-20671 compressed campaign completes with every row and reports a failed gate verdict", async () => {
+  const root = await mkdtemp("/tmp/kv20671-qgate-");
+  try {
+    const { directory, manifest, resumeIdentity } = await writeEightCampaign(root, safetyPolicy, {
+      mode: "compressed", continuations: { 0: forcedContinuation(1022) },
+    });
+    const trusted = { safetyPolicy, resumeIdentity };
+    const { summary } = await readCampaignSet(directory, trusted);
+    assert.equal(summary.mode, "compressed");
+    assert.equal(summary.receipts, 8);
+    assert.equal(summary.qualityGatePassed, false);
+    assert.equal(manifest.qualityGatePassed, false);
+    assert.deepEqual(summary.qualityGates.map((row) => row.passed), [false, true, true, true, true, true, true, true]);
+    assert.equal(summary.qualityGates[0].coordinate, "llama-short-single-chunked-cold");
+    assert.deepEqual(summary.qualityGates[0].failures.map((failure) => [failure.metric, failure.repeat, failure.value]),
+      [0, 1, 2, 3, 4].map((repeat) => ["greedyTokenAgreement", repeat, 1022 / 1024]));
+    // The manifest verdicts must recompute from the rows.
+    await writeCampaignManifest(directory, { ...manifest, qualityGatePassed: true });
+    await assert.rejects(readCampaignSet(directory, trusted), /qualityGatePassed does not recompute from its rows/);
+    const { qualityGatePassed: _omitted, ...unstated } = manifest;
+    await writeCampaignManifest(directory, unstated);
+    await assert.rejects(readCampaignSet(directory, trusted), /qualityGatePassed does not recompute from its rows/);
+    await writeCampaignManifest(directory, { ...manifest, coordinates: manifest.coordinates.map((row, index) => index === 0 ? { ...row, qualityGatePassed: true } : row) });
+    await assert.rejects(readCampaignSet(directory, trusted), /row llama-short-single-chunked-cold qualityGatePassed does not recompute/);
+    await writeCampaignManifest(directory, manifest);
+    assert.equal((await readCampaignSet(directory, trusted)).summary.qualityGatePassed, false);
+    // Every row meeting its thresholds passes the campaign.
+    await mkdir(path.join(root, "clean"));
+    const clean = await writeEightCampaign(path.join(root, "clean"), safetyPolicy, { mode: "compressed" });
+    const cleanSummary = (await readCampaignSet(clean.directory, { safetyPolicy, resumeIdentity: clean.resumeIdentity })).summary;
+    assert.equal(cleanSummary.qualityGatePassed, true);
+    assert.ok(cleanSummary.qualityGates.every((row) => row.passed && row.failures.length === 0));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
