@@ -835,6 +835,17 @@ test("v2 campaign reader binds every row and artifact to trusted policy and resu
     await writeCampaignManifest(directory, { ...manifest, hostStateVaried: !manifest.hostStateVaried });
     await assert.rejects(readCampaignSet(directory, trusted), /host-state variation flag/);
     await writeCampaignManifest(directory, manifest);
+    // An inference `--only-coordinate` run (kind sc-20671-partial-coordinate-run, marked partial
+    // and non-publishable, one row) is never read as a campaign.
+    const only = manifest.coordinates[0].coordinate;
+    await writeCampaignManifest(directory, {
+      ...manifest, kind: "sc-20671-partial-coordinate-run", partial: true, publishable: false,
+      onlyCoordinate: only, coordinates: [manifest.coordinates[0]],
+    });
+    await assert.rejects(readCampaignSet(directory, trusted), /campaign manifest/);
+    await writeCampaignManifest(directory, { ...manifest, kind: "sc-20671-partial-coordinate-run" });
+    await assert.rejects(readCampaignSet(directory, trusted), /mismatched kind/);
+    await writeCampaignManifest(directory, manifest);
     // Rows that ran under a different cap than the captured policy are refused.
     await mkdir(path.join(root, "drifted"));
     const drifted = await writeEightCampaign(path.join(root, "drifted"), safetyPolicy, {
