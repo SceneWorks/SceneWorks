@@ -1668,8 +1668,8 @@ async fn encode_inner(
 /// `seedvr2::seedvr2_audio_mux_args` (cfg-gated to the lanes that ship it, so it is named rather
 /// than linked). Their argument vectors legitimately differ — the upscale
 /// maps a source clip's optional audio and writes `+faststart` in the same pass — but the BOUND is
-/// one policy and is computed in exactly one place. The rationale, and the measurements behind the
-/// choice of `-t` over `-shortest` and over no flag at all, live on [`audio_mux_args`].
+/// one policy, spelled once by [`format_picture_bound`] (SeedVR2 feeds it its measured length,
+/// sc-24391). The measurements behind `-t` over `-shortest` live on [`audio_mux_args`].
 ///
 /// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
 pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
@@ -1886,8 +1886,8 @@ async fn write_poster_frame(media_path: &Path) {
 /// without measuring the clip, so the record cannot silently fall back to a prediction. That is a
 /// compile error rather than a test we would have to remember to write.
 ///
-/// Mirrors [`run_video_upscale_job`], which has always recorded its real `out_count` and
-/// `out_count / out_fps`.
+/// Mirrors [`run_video_upscale_job`], which records its real `out_count` and the picture length of
+/// the source timing it measured (sc-24391).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EncodedClip {
     /// `decoded.frames.len()` — `encode_inner` writes exactly one PNG per entry, so this IS the
