@@ -5552,3 +5552,39 @@ fn a_plan_backed_entry_under_a_builtin_model_id_is_refused_by_the_mlx_lane() {
         &plan_backed
     ));
 }
+
+/// sc-22999: a YuE2 derived-tier install (`model_download` carrying `localDerivation`) is claimed
+/// only by a worker that links the audio lane (advertises `audio_generate`) — never by the utility
+/// worker of a build without it (the Docker "neither" image), which cannot run the preparer. An
+/// ordinary download still goes to the utility worker. Mutation that reds this: dropping the
+/// `localDerivation` arm of `required_capability`.
+#[test]
+fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
+    let job = |payload: Value| -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_derive", "type": "model_download", "status": "queued", "payload": payload,
+            "result": {}, "requestedGpu": "auto", "progress": 0, "stage": "queued", "message": "",
+            "attempts": 1, "cancelRequested": false, "createdAt": "2026-09-26T00:00:00Z",
+            "updatedAt": "2026-09-26T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    };
+    let derive = job(json!({"modelId": "yue2", "localDerivation": {"variant": "q8"}}));
+    let plain = job(json!({"modelId": "yue2"}));
+    // The utility worker of a server build without the audio lane.
+    let utility: &[&str] = &["cpu", "model_download", "model_import", "model_convert"];
+    // A GPU worker that links the audio lane (candle off-Mac, mlx on the Mac).
+    let audio_lane: &[&str] = &["gpu", "image_generate", "audio_generate", "candle"];
+    assert!(!worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(audio_lane, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &plain
+    ));
+}

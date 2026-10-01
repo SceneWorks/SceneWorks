@@ -9,6 +9,7 @@
 # Source and review artifacts must remain text even when an unexpected control
 # byte appears. The explicit rules keep Git from suppressing their patches as
 # binary while scripts/check-source-control-bytes.mjs prevents them from landing.
+*.abc           text diff
 *.bat           text diff
 *.c             text diff
 *.cc            text diff

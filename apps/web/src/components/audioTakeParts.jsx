@@ -3,7 +3,7 @@ import { Icon } from "./Icons.jsx";
 import { AssetMedia, assetUrl } from "./assetMedia.jsx";
 import { audioAssetDurationSeconds } from "./WorkerProgressCard.jsx";
 import { idlePeaks, useAudioPeaks, waveformPath, waveformWidth } from "../audioWaveform.js";
-import { formatClock } from "../audioTakes.js";
+import { audioDownloadName, audioTakeTruncation, formatClock } from "../audioTakes.js";
 
 // Shared audio-take primitives for the Audio Studio redesign (epic 14361).
 //
@@ -268,6 +268,16 @@ export function AudioPlayButton({ playing, onClick, size = "md", label = null, c
   );
 }
 
+/** "Truncated" on a YuE2 take that hit its token budget (nothing for a complete take). */
+export function AudioTruncatedBadge({ asset }) {
+  const reason = audioTakeTruncation(asset);
+  return reason ? (
+    <span aria-label={reason} className="status-badge warning" data-testid="audio-truncated-badge" title={reason}>
+      Truncated
+    </span>
+  ) : null;
+}
+
 /** The mono `m:ss / m:ss` clock every transport shows. */
 export function AudioClock({ current, total, className = "audio-clock" }) {
   return (
@@ -284,13 +294,21 @@ export function AudioClock({ current, total, className = "audio-clock" }) {
  * already carries the auth ticket in remote-auth mode, sc-8810) rather than a fetch, so the
  * browser owns the save dialog — same mechanism the Simple UI's DownloadButton uses.
  */
-export function AudioDownloadButton({ asset, className = "", label = null, iconSize = 14, ariaLabel = "Download" }) {
+// `job` (optional) lets a YuE2 take fall back to its run's usage policy for the licence-marked name.
+export function AudioDownloadButton({
+  asset,
+  job = null,
+  className = "",
+  label = null,
+  iconSize = 14,
+  ariaLabel = "Download",
+}) {
   const anchorRef = useRef(null);
   return (
     <>
       <a
         aria-hidden="true"
-        download={asset?.displayName ?? ""}
+        download={audioDownloadName(asset, job)}
         href={assetUrl(asset)}
         ref={anchorRef}
         style={{ display: "none" }}

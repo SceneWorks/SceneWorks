@@ -23,6 +23,7 @@ import { basename, extname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 export const SOURCE_EXTENSIONS = new Set([
+  ".abc",
   ".bat",
   ".c",
   ".cc",

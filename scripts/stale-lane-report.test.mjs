@@ -13,6 +13,7 @@ import {
   CAPTURABILITY_SOURCE,
   MARGIN_SOURCE,
   OVERLAY_PROVIDER_SOURCE,
+  PROFILE_HARNESS_SOURCE,
   SOURCE_PATHS,
   shippedControlOverlayProviders,
   adapterCapturableProviders,
@@ -527,11 +528,15 @@ test("the real corpus report is internally consistent, whatever the corpus curre
   // grades the data that IS present.
   // Declared+unmeasured+armless lanes live ONLY in `uncapturableLanes` (status "uncapturable") —
   // or, since sc-22738, in `overlayProviderLanes` when the provider is a strict-control overlay,
-  // which is a SCOPE partition rather than an adapter-work one. Measured armless lanes stay in the
-  // staleness partition and appear in one of those two lists as a second, cross-cutting membership.
-  const armless = [...report.uncapturableLanes, ...report.overlayProviderLanes].filter(
-    (lane) => lane.status === "uncapturable",
-  );
+  // which is a SCOPE partition rather than an adapter-work one — or, since sc-23001, in
+  // `profileHarnessLanes` when a dedicated profile harness (YuE2) captures the lane. Measured armless
+  // lanes stay in the staleness partition and appear in one of those lists as a second,
+  // cross-cutting membership.
+  const armless = [
+    ...report.uncapturableLanes,
+    ...report.overlayProviderLanes,
+    ...report.profileHarnessLanes,
+  ].filter((lane) => lane.status === "uncapturable");
   const all = [
     ...report.staleLanes,
     ...report.currentLanes,
@@ -597,14 +602,16 @@ test("the real corpus report is internally consistent, whatever the corpus curre
   // sc-22738: the armless population splits in two. A strict-control overlay provider is reported
   // as out of the E1 cell universe rather than as adapter work, and the two lists together are
   // still exactly the lanes with no arm — nothing may fall out of both.
+  // sc-23001: and a third, profile-harness lanes (YuE2), captured by their own harness.
   const overlayLanes = new Set(report.capturability.overlayProviderLanes);
+  const harnessLanes = new Set(report.capturability.profileHarnessLanes);
   assert.deepEqual(
     universe
-      .filter((lane) => !lane.capturable && !overlayLanes.has(lane.lane))
+      .filter((lane) => !lane.capturable && !overlayLanes.has(lane.lane) && !harnessLanes.has(lane.lane))
       .map((lane) => lane.lane)
       .sort(),
     [...report.capturability.uncapturableLanes].sort(),
-    "the uncapturable list is exactly the armless lanes that are not overlay providers",
+    "the uncapturable list is exactly the armless lanes that are neither overlay nor harness lanes",
   );
   assert.deepEqual(
     report.overlayProviderLanes.map((lane) => lane.lane).sort(),
@@ -617,9 +624,10 @@ test("the real corpus report is internally consistent, whatever the corpus curre
       ...new Set([
         ...report.capturability.uncapturableLanes,
         ...universe.filter((lane) => !lane.capturable && overlayLanes.has(lane.lane)).map((lane) => lane.lane),
+        ...universe.filter((lane) => !lane.capturable && harnessLanes.has(lane.lane)).map((lane) => lane.lane),
       ]),
     ].sort(),
-    "every armless lane is reported under exactly one of the two headings",
+    "every armless lane is reported under exactly one of the three headings",
   );
   for (const lane of report.unmeasuredLanes) {
     assert.ok(lane.capturable, `${lane.lane} is pending capture, so an adapter arm must exist`);
@@ -1398,5 +1406,28 @@ test("the overlay-provider derivation refuses a table it cannot read", () => {
   assert.throws(
     () => buildStaleLaneReport({ ...twoLaneFixture(), controlWeightsSource: undefined }),
     /SHIPPED_CONTROL_WEIGHTS is no longer a parseable table/,
+  );
+});
+
+// sc-23001: YuE2 is declared in the closure table (its profile records carry the same currency
+// term) but has no five-rung contract, so no adapter arm serves it. Its own harness captures it, and
+// the report must say so instead of filing it as adapter work. The partition is read from the
+// profile plan: without the plan the lane falls back to "uncapturable" (mutation: drop the
+// `!harnesses.has` filter and the first assertion reds).
+test("a lane a dedicated profile harness captures is reported under its harness, not as uncapturable", async () => {
+  const sources = await loadSources();
+  const report = buildStaleLaneReport(sources);
+  const lanes = report.uncapturableLanes.map((lane) => lane.lane);
+  assert.ok(!lanes.includes("candle:yue2"), `candle:yue2 is not adapter work: ${lanes}`);
+  assert.deepEqual(report.capturability.profileHarnessLanes, ["candle:yue2"]);
+  assert.equal(report.profileHarnessLanes[0].harness, "scripts/yue2-memory-profile.mjs");
+  assert.equal(report.capturability.profileHarnessSource, PROFILE_HARNESS_SOURCE);
+  assert.equal(report.totals.profileHarnessLanes, 1);
+  assert.match(formatReport(report), /CAPTURED BY A DEDICATED PROFILE HARNESS[\s\S]*candle:yue2/);
+  const without = buildStaleLaneReport({ ...sources, profileHarnessPlans: [] });
+  assert.ok(without.uncapturableLanes.some((lane) => lane.lane === "candle:yue2"));
+  assert.throws(
+    () => buildStaleLaneReport({ ...sources, profileHarnessPlans: [{ lane: "candle:yue2" }] }),
+    /must name its `lane` and `harness`/,
   );
 });
