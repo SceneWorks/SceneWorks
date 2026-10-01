@@ -102,6 +102,9 @@ for (const contract of ["exec setpriv", "--bounding-set=-all", "--inh-caps=-all"
   assert.ok(entrypoint.includes(contract), `RunPod privilege drop is missing ${contract}`);
 }
 assert.ok(privileges.includes('find -P') && privileges.includes('setfacl --no-mask --set-file=-'), "legacy managed files need ownership-preserving, physical ACL migration");
+for (const contract of ['SCENEWORKS_PERMISSION_STRATEGY:-acl', 'acl|private-owned', 'initialize_private_owned_paths', 'preflight_private_owned_permissions', 'umask 077']) {
+  assert.ok(privileges.includes(contract), `optional private-owned strategy is missing ${contract}`);
+}
 assert.ok(!/\bchown\s+-R|\bchmod\s+(?:777|a\+w)/.test(privileges), "RunPod must not recursively change ownership or grant world writes");
 
 assert.ok(

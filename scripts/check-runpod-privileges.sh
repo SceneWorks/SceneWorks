@@ -345,4 +345,5 @@ for scenario in permissive permissive-override permissive-nested ignored-grant l
   [[ "${status}" == 0 ]] || exit 1
   docker volume rm "${volume}" >/dev/null
 done
+bash "${repo_root}/scripts/check-runpod-private-owned.sh" "${image}"
 printf 'RunPod Linux nonroot mount/device permission tests passed (simulated device; no CUDA/provider claim).\n'

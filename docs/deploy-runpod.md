@@ -286,7 +286,7 @@ the persisted SceneWorks projects, generated assets, and downloaded models.
 | Startup refuses a public bind | `SCENEWORKS_ACCESS_TOKEN` is missing or blank. Confirm the environment variable uses the RunPod secret reference. |
 | Login is rejected | Enter the SceneWorks access-token value, not the RunPod API key. If you rotated the secret, restart or replace the Pod. |
 | Only the CPU worker appears | Wait for GPU initialization, then inspect logs and RunPod GPU telemetry. Confirm an NVIDIA GPU is actually attached. |
-| A managed directory is not writable | Confirm the mount permits root to initialize POSIX ACLs and the configured service UID to traverse/write the managed paths. Check the exact startup error; services never fall back to root. |
+| A managed directory is not writable | Check the selected permission strategy: `acl` requires writable POSIX ACLs; `private-owned` requires dedicated new or private service-owned paths and ownership initialization. Both require actual service access and enforced privacy. Check the exact startup error; services never fall back to root. |
 | A model remains gated | Accept its license, provide a read-only `HF_TOKEN` through a RunPod secret, and restart the Pod. |
 | A generation reports insufficient memory | Choose a smaller quantization tier or workload, reduce video frames/resolution, or use a GPU with more VRAM. |
 | Model Manager returns `524` | A large cache scan can outlast the proxy request. Wait, refresh, and check Queue/worker health. |
@@ -441,7 +441,8 @@ undocumented limit.
 
 ## Privilege separation acceptance
 
-The privileged entrypoint now grants a named-user ACL to dedicated managed
+By default (`SCENEWORKS_PERMISSION_STRATEGY=acl`), the privileged entrypoint
+grants a named-user ACL to dedicated managed
 storage trees before dropping the supervisor and services to UID/GID 1000
 (overridable with `SCENEWORKS_SERVICE_UID`/`SCENEWORKS_SERVICE_GID`). Existing
 owners remain unchanged. This requires writable POSIX ACLs on the provider
@@ -459,6 +460,18 @@ diagnostics to skip this GPU requirement.
 Do not use managed-path overrides for unrelated/shared mount roots. Legacy
 managed content gets ACL access recursively; unrelated sibling trees do not.
 
+The explicit alternative `SCENEWORKS_PERMISSION_STRATEGY=private-owned` does not
+use ACL tools. It creates only absent dedicated path components with service
+ownership and private modes; populated existing paths must already be private
+service-owned trees. It leaves provider roots and existing network data unchanged
+and refuses incompatible legacy trees, unsafe ancestors and external links before
+service startup. Use the existing absolute per-path overrides for isolated paths;
+there is no implicit migration or cache relocation. The default ACL strategy and
+its mixed-owner legacy initialization remain available. Actual owner enforcement,
+service operations and unrelated denial are checked on each managed filesystem.
+The empty image HOME has a narrow initialization exception for UID/GID overrides;
+an attached HOME does not. Provider chown support is not inferred from ACL failure.
+
 Local permission and lifecycle proof:
 
 ```bash
@@ -473,12 +486,14 @@ provider acceptance. The checked-in deployment template still refers to its
 previously accepted image; it is not changed by this candidate.
 
 Provider acceptance requires an approved candidate build/publication and one
-NVIDIA Pod with a dedicated, root-owned network volume supporting POSIX ACLs.
+NVIDIA Pod with a dedicated, root-owned network volume supporting the selected
+permission strategy: writable POSIX ACLs for `acl`, or measured private ownership
+initialization for `private-owned`.
 Use an existing authorized Pod/volume if available; otherwise request approval
 for one 32 GB RTX PRO 4500 or 48 GB A40, 50 GB container disk, 100 GB network
 volume, and a 60-minute acceptance window after image download. No automatic
 relaunches or unbounded retries. Retain the volume and stop the Pod when the
-window ends. A failed ACL initialization is a measured provider constraint,
+window ends. Failed permission initialization is a measured provider constraint,
 not an accepted mitigation or permission to run services as root.
 
 Candidate build and publication use the existing manual workflow (heavy CUDA

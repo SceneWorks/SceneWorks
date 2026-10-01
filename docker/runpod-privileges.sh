@@ -152,6 +152,192 @@ preflight_runpod_permissions() (
   scratch=""
 )
 
+# Opt-in ownership setup never repairs existing network permissions. Only absent
+# path components are provisioned; legacy/mixed-owner trees retain the ACL path.
+private_owned_image_home() {
+  [[ "$1" == /home/sceneworks && -d "$1" && ! -L "$1" &&
+     "$(stat -c %u:%g:%a -- "$1")" == 1000:1000:755 &&
+     "$(findmnt -n -o TARGET -T "$1")" == / &&
+     -z "$(find -P "$1" -mindepth 1 -print -quit)" ]]
+}
+
+validate_private_owned_path() (
+  set -o pipefail
+  local dir="$1" parent="$1" owner mode path resolved root inside image_home=0
+  [[ "$(realpath -m -s -- "${dir}")" == "$(realpath -m -- "${dir}")" ]] || return 1
+  private_owned_image_home "${dir}" && image_home=1
+  while [[ "${parent}" != / ]]; do
+    if [[ -e "${parent}" && ! ( "${parent}" == "${dir}" && "${image_home}" == 1 ) ]]; then
+      [[ -d "${parent}" && ! -L "${parent}" ]] || return 1
+      read -r owner mode < <(stat -c '%u %a' -- "${parent}") || return 1
+      [[ "${owner}" == 0 || "${owner}" == "${service_uid}" ]] || return 1
+      # Root-owned sticky /tmp protects owned children. Other ancestors must
+      # not permit an untrusted identity to rename/replace a managed path.
+      if (( (8#${mode} & 0022) != 0 )); then
+        [[ "${parent}" == /tmp && "${owner}" == 0 ]] &&
+          (( (8#${mode} & 01000) != 0 )) || return 1
+      fi
+      timeout --signal=KILL 5 setpriv --reuid="${service_uid}" --regid="${service_gid}" \
+        --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+        --no-new-privs test -x "${parent}" || return 1
+    fi
+    parent="$(dirname -- "${parent}")"
+  done
+  [[ -e "${dir}" && "${image_home}" != 1 ]] || return 0
+  find -P "${dir}" -print0 | while IFS= read -r -d '' path; do
+    if [[ -L "${path}" ]]; then
+      resolved="$(realpath -e -- "${path}")" || return 1
+      inside=0
+      for root in "${private_owned_roots[@]}"; do
+        case "${resolved}" in "${root}"/*) inside=1 ;; esac
+      done
+      [[ "${inside}" == 1 && -f "${resolved}" ]] || return 1
+      path="${resolved}"
+    fi
+    [[ -d "${path}" || -f "${path}" ]] || return 1
+    read -r owner mode < <(stat -c '%u %a' -- "${path}") || return 1
+    [[ "${owner}" == "${service_uid}" ]] &&
+      (( (8#${mode} & 0077) == 0 && (8#${mode} & 0600) == 0600 )) || return 1
+    [[ ! -d "${path}" ]] || (( (8#${mode} & 0100) != 0 )) || return 1
+  done
+)
+
+preflight_private_owned_permissions() (
+  local dir="$1" scratch="" unrelated_uid=65534 unrelated_gid=65534
+  [[ "${service_uid}" != "${unrelated_uid}" ]] || unrelated_uid=65533
+  [[ "${service_gid}" != "${unrelated_gid}" ]] || unrelated_gid=65533
+  cleanup_owned_scratch() {
+    [[ -n "${scratch}" ]] || return 0
+    # Let the creator remove its children first: an NFS server need not grant
+    # namespace root permission to traverse a service-owned private directory.
+    timeout --signal=KILL 5 setpriv --reuid="${service_uid}" --regid="${service_gid}" \
+      --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+      bash -c 'rm -rf -- "$1/private/child"' _ "${scratch}" 2>/dev/null || true
+    rm -rf -- "${scratch}"
+  }
+  trap cleanup_owned_scratch EXIT
+  scratch="$(mktemp -d "${dir}/.sceneworks-owned-test.XXXXXX")" || return 1
+  chmod 0711 -- "${scratch}" || return 1
+  ( umask 077; mkdir "${scratch}/private" && printf fixture > "${scratch}/protected" ) || return 1
+  chmod 0700 -- "${scratch}/private" && chmod 0600 -- "${scratch}/protected" || return 1
+  cd -- "${scratch}" || return 1
+  probe_owned_identity() {
+    timeout --signal=KILL 5 setpriv --reuid="$1" --regid="$2" --clear-groups \
+      --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+      bash -euc '
+        [[ "$(id -u)" == "$1" && "$(id -g)" == "$2" && "$(id -G)" == "$2" ]]
+        for field in CapInh CapPrm CapEff CapBnd CapAmb; do
+          grep -Eq "^${field}:[[:space:]]+0+$" /proc/self/status
+        done
+        grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
+        case "$3" in
+          denied)
+            if ( : < protected ) 2>/dev/null; then exit 1; fi
+            if ( : >> protected ) 2>/dev/null; then exit 1; fi
+            if ( cd private ) 2>/dev/null; then exit 1; fi ;;
+          allowed)
+            cd "$4"
+            [[ "$(< protected)" == fixture ]]
+            printf appended >> protected
+            umask 077
+            mkdir -p private/child/grandchild
+            printf created > private/child/grandchild/file
+            mv private/child/grandchild/file private/child/grandchild/renamed
+            printf reopened >> private/child/grandchild/renamed
+            [[ "$(< private/child/grandchild/renamed)" == createdreopened ]]
+            [[ "$(stat -c %a private/child/grandchild/renamed)" == 600 ]]
+            [[ "$(stat -c %a private/child/grandchild)" == 700 ]]
+            # Expose the file boundary from an inherited cwd; a private parent
+            # must not conceal a filesystem ignoring the child-file restriction.
+            chmod 0711 private/child/grandchild ;;
+          inherited)
+            if ( : < renamed ) 2>/dev/null; then exit 1; fi
+            if ( : >> renamed ) 2>/dev/null; then exit 1; fi
+            if ( : > unauthorized ) 2>/dev/null; then exit 1; fi ;;
+          *) exit 1 ;;
+        esac
+      ' _ "$1" "$2" "$3" "${scratch}"
+  }
+  # Expected-deny stages return success only after identity/cap setup executes.
+  probe_owned_identity "${service_uid}" "${service_gid}" denied &&
+    chown "${service_uid}:${service_gid}" -- protected private &&
+    [[ "$(stat -c %u:%g protected)" == "${service_uid}:${service_gid}" ]] &&
+    [[ "$(stat -c %u:%g private)" == "${service_uid}:${service_gid}" ]] &&
+    probe_owned_identity "${service_uid}" "${service_gid}" allowed &&
+    probe_owned_identity "${unrelated_uid}" "${unrelated_gid}" denied || return 1
+  cd private/child/grandchild &&
+    probe_owned_identity "${unrelated_uid}" "${unrelated_gid}" inherited || return 1
+  cd "${dir}" && cleanup_owned_scratch || return 1
+  scratch=""
+)
+
+initialize_private_owned_paths() (
+  set -o pipefail
+  local dir path target index success=0 unrelated_uid=65534 unrelated_gid=65534
+  [[ "${service_uid}" != "${unrelated_uid}" ]] || unrelated_uid=65533
+  [[ "${service_gid}" != "${unrelated_gid}" ]] || unrelated_gid=65533
+  local -a missing created=() mount_fields
+  trap 'if [[ "${success}" != 1 ]]; then for ((index=${#created[@]}-1;index>=0;index--)); do rmdir -- "${created[index]}" 2>/dev/null || true; done; fi' EXIT
+  # Validate all existing roots before any ownership or mode changes.
+  for dir in "${private_owned_roots[@]}"; do
+    if ! validate_private_owned_path "${dir}"; then
+      log "private-owned path '${dir}' is not an accessible private service-owned tree with safe ancestors. Existing data was not changed; use dedicated path overrides or the default ACL strategy on compatible storage."
+      return 1
+    fi
+  done
+  for dir in "${private_owned_roots[@]}"; do
+    missing=(); path="${dir}"
+    while [[ ! -e "${path}" ]]; do missing+=("${path}"); path="$(dirname -- "${path}")"; done
+    for ((index=${#missing[@]}-1;index>=0;index--)); do
+      path="${missing[index]}"
+      ( umask 077; mkdir -- "${path}" ) || return 1
+      created+=("${path}")
+      if ! chown "${service_uid}:${service_gid}" -- "${path}" ||
+         [[ "$(stat -c %u:%g:%a -- "${path}")" != "${service_uid}:${service_gid}:700" ]]; then
+        log "cannot provision private-owned new directory '${path}' with enforced service ownership and mode 0700"
+        return 1
+      fi
+    done
+    if private_owned_image_home "${dir}"; then
+      chown "${service_uid}:${service_gid}" -- "${dir}" && chmod 0700 -- "${dir}" || return 1
+    fi
+    if ! validate_private_owned_path "${dir}" || ! preflight_private_owned_permissions "${dir}"; then
+      log "private-owned directory '${dir}' failed actual service access or privacy checks"
+      return 1
+    fi
+    # Audit traverses nested mounts, but never follows symlink directories.
+    # Probe each filesystem, including same-device bind mounts, independently.
+    while IFS=' ' read -r -a mount_fields; do
+      target="${mount_fields[4]}"
+      printf -v target '%b' "${target//\\/\\0}" || return 1
+      case "${target}" in "${dir}"/*)
+        preflight_private_owned_permissions "${target}" || return 1 ;; esac
+    done < /proc/self/mountinfo
+    # Actual existing-file opens do not change content. Pipefail also rejects a
+    # failed tree walk rather than treating an empty producer as verified data.
+    setpriv --reuid="${service_uid}" --regid="${service_gid}" \
+      --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+      bash -euco pipefail 'find -P "$1" -print0 | while IFS= read -r -d "" path; do
+        if [[ -d "$path" ]]; then ( cd "$path" ); else : < "$path"; : >> "$path"; fi
+      done' _ "${dir}" || return 1
+    find -P "${dir}" -print0 | setpriv \
+      --reuid="${unrelated_uid}" --regid="${unrelated_gid}" --clear-groups \
+      --bounding-set=-all --inh-caps=-all --ambient-caps=-all --no-new-privs \
+      bash -euc '
+        [[ "$(id -u)" == "$1" && "$(id -g)" == "$2" && "$(id -G)" == "$2" ]]
+        for field in CapInh CapPrm CapEff CapBnd CapAmb; do
+          grep -Eq "^${field}:[[:space:]]+0+$" /proc/self/status
+        done
+        grep -Eq "^NoNewPrivs:[[:space:]]+1$" /proc/self/status
+        while IFS= read -r -d "" path; do
+          if ( : < "$path" ) 2>/dev/null; then exit 1; fi
+          if ( : >> "$path" ) 2>/dev/null; then exit 1; fi
+          if ( cd "$path" ) 2>/dev/null; then exit 1; fi
+        done' _ "${unrelated_uid}" "${unrelated_gid}" || return 1
+  done
+  success=1
+)
+
 wait_for_runpod_devices() {
   # CUDA images require all driver-enumerated GPU nodes plus control/UVM before
   # irrevocably dropping privileges. Use device minor numbers: NVML indices can
@@ -207,7 +393,13 @@ initialize_runpod_service() {
       return 1
     fi
   done
-  command -v setpriv >/dev/null && command -v setfacl >/dev/null || {
+  local strategy="${SCENEWORKS_PERMISSION_STRATEGY:-acl}"
+  case "${strategy}" in acl|private-owned) ;; *)
+    log "SCENEWORKS_PERMISSION_STRATEGY must be acl or private-owned"
+    return 1 ;; esac
+  command -v setpriv >/dev/null || return 1
+  if [[ "${strategy}" == acl ]]; then
+  command -v setfacl >/dev/null || {
     log "RunPod initialization requires setpriv and setfacl from the combined image"
     return 1
   }
@@ -259,6 +451,15 @@ initialize_runpod_service() {
       parent="$(dirname "${parent}")"
     done
   done
+  else
+    export HOME=/home/sceneworks
+    local -a private_owned_roots=("$@" "${HOME}")
+    initialize_private_owned_paths || {
+      log "private-owned permission initialization failed; services were not started. No root service fallback."
+      return 1
+    }
+    umask 077
+  fi
   wait_for_runpod_devices || return 1
   # Device mounts commonly reject ACLs. Join the groups of attached NVIDIA
   # character devices only when primary-identity access is insufficient. Keep

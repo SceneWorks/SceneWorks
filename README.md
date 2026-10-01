@@ -399,7 +399,8 @@ retry sleep is bounded by that deadline. `SCENEWORKS_DEVICE_READINESS_INTERVAL_S
 defaults to 1. A missing/late device beyond the deadline fails startup before any
 service starts. CPU-only diagnostics can explicitly set `SCENEWORKS_CANDLE_REQUIRED=0`.
 
-Initialization preserves file owners and existing content. It applies a named
+The default `SCENEWORKS_PERMISSION_STRATEGY=acl` preserves file owners and existing
+content. It applies a named
 user ACL and inheritable directory ACL within the explicit data, configuration,
 credentials, Hugging Face cache, jobs-database parent, and runtime-home trees.
 Existing effective rights of unrelated ACL users/groups are preserved when
@@ -413,12 +414,29 @@ traversal permission is added to their ancestors; unrelated sibling trees are
 untouched. Symlinked managed roots are rejected; internal model-cache symlinks
 are preserved without following them during permission initialization.
 
-The network filesystem must support POSIX ACL updates by container root.
+For this default strategy, the network filesystem must support POSIX ACL updates
+by container root.
 Root-squashed, read-only, or ACL-incompatible exports fail with the affected
 path before services start. Fix the export/ACL or select compatible per-path
 overrides; startup never falls back to root services. Local Linux permission
 coverage is `bash scripts/check-runpod-privileges.sh`; actual provider/CUDA
 acceptance is described in [the deployment guide](docs/deploy-runpod.md#privilege-separation-acceptance).
+
+Set `SCENEWORKS_PERMISSION_STRATEGY=private-owned` explicitly for dedicated new
+paths on storage with enforced owner permissions but no writable POSIX ACLs.
+Root provisions only missing directories with single-inode ownership setup and
+private modes; existing trees must already be private to the configured service
+UID. The provider mount root and existing network inode owners, modes, ACLs and
+content stay untouched. Inaccessible legacy/mixed-owner trees fail before
+services start: choose dedicated per-path overrides or use the default ACL
+strategy on compatible storage. This option does not copy or relocate data.
+Both strategies test actual service access and unrelated-identity denial before
+launching services. `private-owned` rejects unsafe writable or inaccessible
+ancestors and links outside configured managed trees; internal HF file links
+remain supported. New service descendants use umask `077`. The empty image HOME
+is initialized narrowly for the selected UID/GID; mounted HOME is never treated
+as image-owned. Actual provider ownership, CUDA and restart acceptance still
+require measurement; ACL failure alone does not establish ownership support.
 
 Release tags matching `vX.Y.Z` publish the combined `linux/amd64` image to
 `ghcr.io/sceneworks/sceneworks-runpod:X.Y.Z` and `:latest`. The same workflow can
