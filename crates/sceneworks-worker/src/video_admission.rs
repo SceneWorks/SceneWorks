@@ -808,18 +808,43 @@ fn no_video_decode_profile(
     Ok(None)
 }
 
+/// Evidence revision of a decode priced at the provider planner's budgeted decision.
+const BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-budgeted-decode-profile-v1";
+
 /// Resolve the exact provider-owned decode working set for the candidate being graded.
 ///
 /// The selected MLX Wan rung-2 carrier has a narrower profile derived from the same provider planner
-/// that executes the request. Every other supported candidate uses the provider's conservative
-/// single-pass profile. A runtime bundle that exposes no profile returns `None`, preserving the
-/// historical weights-plus-headroom floor; provider validation errors fail closed instead of being
-/// rewritten as an unprofiled estimate.
+/// that executes the request. Every other supported candidate is priced at the decision the
+/// provider will actually make (sc-20686, epic E8): an MLX provider whose decode plans its tiling
+/// from the free memory it measures at decode time (the Wan family's `auto_tiling_budgeted`) is
+/// priced at that planner's decision for the worker's applied MLX limit -- an upper bound of that
+/// free memory, so never a smaller tile than the run picks -- instead of the single pass it would
+/// tile away from. Without an applied limit, or for a provider without a budget-planned decode, the
+/// provider's conservative single-pass profile. A runtime bundle that exposes no profile returns
+/// `None`, preserving the historical weights-plus-headroom floor; provider validation errors fail
+/// closed instead of being rewritten as an unprofiled estimate.
 fn packaged_video_decode_profile(
     lane: VideoLane,
     provider_id: &str,
     geometry: VideoAdmissionGeometry,
     selection: MemorySelection,
+) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
+    video_decode_profile_at_mlx_limit(
+        lane,
+        provider_id,
+        geometry,
+        selection,
+        crate::generator_cache::applied_mlx_memory_limit_bytes(),
+    )
+}
+
+/// [`packaged_video_decode_profile`] with the worker's applied MLX limit injected.
+fn video_decode_profile_at_mlx_limit(
+    lane: VideoLane,
+    provider_id: &str,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    mlx_limit_bytes: Option<u64>,
 ) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
     let frames = geometry.estimate_frames().max(1);
     #[cfg(target_os = "macos")]
@@ -855,6 +880,20 @@ fn packaged_video_decode_profile(
             // the rung selects. The unchanged generic floor remains the honest fallback.
             return Ok(None);
         }
+        if let Some((profile, _decision)) = mlx_limit_bytes.and_then(|limit| {
+            runtime_macos::budgeted_video_decode_memory_profile(
+                provider_id,
+                geometry.width,
+                geometry.height,
+                frames,
+                limit,
+            )
+        }) {
+            return Ok(Some(ResolvedVideoDecodeProfile {
+                profile,
+                evidence_revision: BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION,
+            }));
+        }
         return Ok(runtime_macos::conservative_video_decode_memory_profile(
             provider_id,
             geometry.width,
@@ -884,6 +923,7 @@ fn packaged_video_decode_profile(
     }
     #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
     let _ = (lane, provider_id, selection, frames);
+    let _ = mlx_limit_bytes;
     Ok(None)
 }
 
