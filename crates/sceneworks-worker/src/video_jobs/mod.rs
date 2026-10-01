@@ -1676,10 +1676,7 @@ pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
     format_picture_bound(frame_count as f64 / f64::from(fps.max(1)))
 }
 
-/// Render a picture length for `-t`, to the microsecond. The one spelling of the bound: the
-/// whole-rate lanes reach it through [`picture_bound_seconds`], and the SeedVR2 upscale, whose
-/// picture keeps a source's exact (often fractional or variable) timing, hands it the length that
-/// timing gives (sc-24391).
+/// The one spelling of the bound, to the microsecond; SeedVR2 passes its measured length (sc-24391).
 pub(crate) fn format_picture_bound(seconds: f64) -> String {
     format!("{seconds:.6}")
 }
