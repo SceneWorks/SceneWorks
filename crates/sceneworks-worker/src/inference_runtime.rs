@@ -37,7 +37,7 @@ fn catalog() -> &'static platform_runtime::RuntimeCatalog {
 
 /// The bundled audio preparer used by CPU-only consumer fixtures. The production audio registry
 /// and this preparer come from the same pinned platform catalog.
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, unix, any(target_os = "macos", feature = "backend-candle")))]
 pub(crate) fn audio_preparers() -> &'static gen_core::core_llm::SnapshotPreparerRegistry {
     catalog()
         .audio_preparers()
