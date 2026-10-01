@@ -237,8 +237,10 @@ never an accepted row.
 frozen eight-row schedule, fixtures, and geometry with each row's KV held in the
 method's compressed cache and fused decode attention (`group-affine`, the
 SC-20675 packed 2-bit cache read by the SC-20676 Metal kernel, and
-`group-affine-4`, the same cache and reader with 4-bit codes; both group 32, and
-each receipt's `compression.bits` and `representationIdentity` name the width). Each
+`group-affine-4` and `group-affine-8`, the same cache and reader with 4- and
+8-bit codes; all group 32. Each method is bound to exactly one
+`compression.bits` and `representationIdentity`, and a receipt naming any other
+pair is refused). Each
 worker runs the compressed arm, then a dense-KV reference arm on the **same
 candidate snapshot**, and gates quality against it (contract v3). The resume
 identity carries `mode: "compressed"` and `kvMethod`, so dense and compressed

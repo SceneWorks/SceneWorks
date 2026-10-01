@@ -1718,6 +1718,7 @@ export function kernelPathValid(gpuFamily, kernel, selection, queryDtype) {
 const COMPRESSED_KV_METHODS = Object.freeze({
   "group-affine": Object.freeze({ bits: 2, representationIdentity: "sc-20676-packed-group-affine-v1" }),
   "group-affine-4": Object.freeze({ bits: 4, representationIdentity: "sc-20676-packed-group-affine-b4-v1" }),
+  "group-affine-8": Object.freeze({ bits: 8, representationIdentity: "sc-20676-packed-group-affine-b8-v1" }),
 });
 
 function validateCompression(receipt) {

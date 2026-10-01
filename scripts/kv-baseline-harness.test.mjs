@@ -1077,7 +1077,7 @@ test("SC-20676 compressed campaigns are uniform and bound to their resume identi
   assert.throws(() => validateCampaign(mixed), /mixes dense and compressed/);
 });
 
-test("SC-20676 group-affine-4 rows (4-bit codes) validate and bind their own method", () => {
+test("SC-20676 group-affine-4 and -8 rows validate and bind their own method", () => {
   const fourBit = (row) => ({ ...row.compression, method: "group-affine-4",
     representationIdentity: "sc-20676-packed-group-affine-b4-v1", bits: 4 });
   const accepted = fixture("compressed", {}, { compression: fourBit(fixture("compressed")) });
@@ -1094,15 +1094,28 @@ test("SC-20676 group-affine-4 rows (4-bit codes) validate and bind their own met
   });
   assert.equal(validateCampaign(rows).kvMethod, "group-affine-4");
   // Each method is bound to its width and reader identity; unknown methods are refused.
-  const b2 = "sc-20676-packed-group-affine-v1", b4 = "sc-20676-packed-group-affine-b4-v1";
-  for (const [method, bits, representationIdentity] of [
-    ["group-affine-4", 2, b2], ["group-affine-4", 4, b2], ["group-affine-4", 2, b4],
-    ["group-affine", 4, b4], ["group-affine", 2, b4], ["group-affine", 4, b2],
-  ]) {
-    const compression = { ...accepted.compression, method, bits, representationIdentity };
-    assert.throws(() => fixture("compressed", {}, { compression }), new RegExp(`compressed method ${method} is`), `${method}/${bits}/${representationIdentity}`);
+  // Every (method, bits, identity) combination: only the method's own pair validates.
+  const table = [
+    ["group-affine", 2, "sc-20676-packed-group-affine-v1"],
+    ["group-affine-4", 4, "sc-20676-packed-group-affine-b4-v1"],
+    ["group-affine-8", 8, "sc-20676-packed-group-affine-b8-v1"],
+  ];
+  for (const [method, ownBits, ownIdentity] of table) {
+    for (const [, bits] of table) {
+      for (const [, , representationIdentity] of table) {
+        const compression = { ...accepted.compression, method, bits, representationIdentity };
+        if (bits === ownBits && representationIdentity === ownIdentity) {
+          const row = fixture("compressed", {}, { compression });
+          assert.equal(validateReceipt(row), row);
+        } else {
+          assert.throws(() => fixture("compressed", {}, { compression }), new RegExp(`compressed method ${method} is`), `${method}/${bits}/${representationIdentity}`);
+        }
+      }
+    }
   }
-  assert.throws(() => fixture("compressed", {}, { compression: { ...accepted.compression, method: "rvq-unwired" } }), /unknown compressed KV method/);
+  // Unknown methods and widths are refused by the schema and by the validator's table.
+  assert.throws(() => fixture("compressed", {}, { compression: { ...accepted.compression, method: "rvq-unwired" } }), /schema validation|unknown compressed KV method/);
+  assert.throws(() => fixture("compressed", {}, { compression: { ...accepted.compression, bits: 3 } }), /schema validation|compressed method/);
   // A campaign is one method: a 2-bit row cannot join a 4-bit campaign.
   const mixed = [...rows];
   mixed[0] = withCampaignPid(fixture("compressed", rows[0].matrix), 10);
