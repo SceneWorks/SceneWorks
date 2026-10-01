@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { promisify } from "node:util";
 import path from "node:path";
 import test from "node:test";
-import { FORCED_CONTINUATION_TOKENS, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { FORCED_CONTINUATION_TOKENS, MULTI_TURN_PROMPT_CACHE_METHOD, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -96,11 +96,18 @@ function forcedContinuation(matches=FORCED_CONTINUATION_TOKENS, tokens=FORCED_CO
   const flips=Array.from({length:tokens-matches},(_,i)=>matches+i);
   return {method:"dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced",tokens,matches,agreement:matches/tokens,flipCount:tokens-matches,firstFlipPositions:flips.slice(0,32),referenceStreamSha256:sha256("reference"),candidateChoicesSha256:sha256(`choices-${matches}`)};
 }
-// Compressed quality records its forced continuation and the gate of its receipt-level values
+// A compressed row's contract v4 turn-2 forced continuation (multiTurnPromptCache).
+function multiTurnForcedContinuation(matches=FORCED_CONTINUATION_TOKENS, tokens=FORCED_CONTINUATION_TOKENS) {
+  return {...forcedContinuation(matches,tokens),method:"dense-kv-same-weights-turn-2-prompt-cache-hit-greedy-continuation-eos-ignored-teacher-forced",candidateChoicesSha256:sha256(`turn-2-choices-${matches}`)};
+}
+// Both arms' multi-turn prompt-cache records: turn 1 misses, turn 2 reuses turn 1's prefix.
+const MULTI_TURN_TURNS={turn1:{promptTokens:40,cacheHit:false,reusedPrefixTokens:0},turn2:{promptTokens:70,cacheHit:true,reusedPrefixTokens:45}};
+const MULTI_TURN_QUALITY={multiTurnPromptCacheMethod:MULTI_TURN_PROMPT_CACHE_METHOD,multiTurnFreeRunningFirstDivergence:null,multiTurnMatchedPrefixTokens:8,multiTurnCache:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};
+// Compressed quality records its forced continuations and the gate of its receipt-level values
 // (every repeat measured the same values).
-function gatedQuality(mode, quality, continuation=forcedContinuation()) {
+function gatedQuality(mode, quality, continuation=forcedContinuation(), multiTurn=multiTurnForcedContinuation()) {
   if (mode !== "compressed") return quality;
-  const gated={...quality,greedyTokenAgreement:continuation.agreement,greedyTokenAgreementByRepeat:Array(5).fill(continuation.agreement),forcedContinuation:continuation};
+  const gated={...quality,greedyTokenAgreement:continuation.agreement,greedyTokenAgreementByRepeat:Array(5).fill(continuation.agreement),forcedContinuation:continuation,multiTurnPromptCache:multiTurn.agreement,multiTurnForcedContinuation:multiTurn};
   return {...gated,qualityGate:qualityGateFromRepeats(Array(5).fill(gated))};
 }
 function fixture(mode="dense", coordinate={}, extra={}) {
@@ -130,7 +137,7 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
   memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0,mlxActiveResidualBytes:0,mlxCacheResidualBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)},denseKvShareBps:0,belowMemoryMaterialShare:false},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
-    quality:gatedQuality(mode,{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,greedyTokenAgreementByRepeat:[1,1,1,1,1],structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))}),lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
+    quality:gatedQuality(mode,{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,greedyTokenAgreementByRepeat:[1,1,1,1,1],structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,...MULTI_TURN_QUALITY,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))}),lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
 }
 
 function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
@@ -144,7 +151,9 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
       ? {matches:1,total:1,candidateValid:true,referenceValid:true,outputsMatch:true,discriminating:true}
       : name === "long-context-needle"
         ? {matches:1,total:1,candidateRecovered:true,referenceRecovered:true,outputsMatch:true,discriminating:true}
-        : {matches:1,total:1};
+        : {...(raw.quality.multiTurnForcedContinuation
+          ? {matches:raw.quality.multiTurnForcedContinuation.matches,total:raw.quality.multiTurnForcedContinuation.tokens,forcedContinuation:raw.quality.multiTurnForcedContinuation}
+          : {matches:1,total:1}),method:MULTI_TURN_PROMPT_CACHE_METHOD,freeRunningFirstDivergence:null,matchedPrefixTokens:8,turns:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};
   const probe = raw.timings.compileAttribution.probeEvidence[Math.min(repeat,raw.timings.compileAttribution.probeEvidence.length-1)];
   return {
     fixture:name,
@@ -183,7 +192,7 @@ async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceSha
   await writeFile(model, "weights");
   const raw = fixture(mode, coordinate);
   if (continuation) {
-    const { qualityGate: _gate, forcedContinuation: _forced, ...measured } = raw.quality;
+    const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, ...measured } = raw.quality;
     raw.quality = gatedQuality(mode, measured, continuation);
   }
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
@@ -380,8 +389,8 @@ test("numeric semantic seals normalize exact f64 bits and object order",()=>{
 });
 test("compile attribution v4 accepts cold repeats and warmup suites",()=>{
   const cold=fixture();
-  assert.equal(cold.schemaVersion,6);
-  assert.equal(cold.harnessVersion,"sc-20671-kv-baseline-v6");
+  assert.equal(cold.schemaVersion,7);
+  assert.equal(cold.harnessVersion,"sc-20671-kv-baseline-v7");
   const {probeEvidence,...coldAttribution}=cold.timings.compileAttribution;
   assert.deepEqual(coldAttribution,{
     method:"first-dispatch-minus-steady-v2",
@@ -601,11 +610,16 @@ test("verified record hashes model and fixture artifacts and publishes one recei
   await assert.rejects(buildVerifiedReceipt({...raw,provenance:{...raw.provenance,modelFilePath:path.join(dir,"missing")}}),/unavailable/);
   await rm(dir,{recursive:true,force:true});
 });
-test("contract v3 gates compressed quality only against the same-weights dense-KV run",()=>{
+test("contract v4 gates compressed quality only against the same-weights dense-KV run",()=>{
   const contract=JSON.parse(readFileSync("config/kv-baseline-quality-contract.json","utf8"));
-  assert.equal(contract.version,3);
+  assert.equal(contract.version,4);
   assert.equal(contract.gate.compressedReference,"dense-kv-same-weights");
-  assert.deepEqual(contract.thresholds,{parityMaxError:0.0001,perplexityDelta:0.01,greedyTokenAgreement:0.999,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:1});
+  // v4 changed only multiTurnPromptCache (now teacher-forced on a cache-hit turn 2, aligned with
+  // greedy agreement); every other threshold is v3's.
+  assert.deepEqual(contract.thresholds,{parityMaxError:0.0001,perplexityDelta:0.01,greedyTokenAgreement:0.999,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0.999});
+  assert.equal(contract.multiTurnFixture.followUp,"Now repeat that same stable baseline fact once more, in one short sentence.");
+  assert.throws(()=>checkContract({...contract,version:3}),/unsupported quality contract version/);
+  assert.throws(()=>checkContract({...contract,multiTurnFixture:{...contract.multiTurnFixture,metric:""}}),/multiTurnFixture.metric/);
   assert.doesNotMatch(JSON.stringify(contract.needleFixture),/passphrase/i);
   assert.doesNotThrow(()=>checkContract(contract));
   assert.throws(()=>checkContract({...contract,gate:{...contract.gate,compressedReference:"bf16-model"}}),/same-weights dense-KV/);
@@ -625,7 +639,7 @@ test("contract v3 gates compressed quality only against the same-weights dense-K
   // Dense rows are characterization: a needle/tool miss is recorded, never rejected, but not hidden.
   assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0,needleDiscriminating:false,structuredToolAgreement:0}}));
   assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0}}),/needle discrimination/);
-  const { qualityGate: _gate, forcedContinuation: _forced, ...compressedQuality } = fixture("compressed").quality;
+  const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, ...compressedQuality } = fixture("compressed").quality;
   assert.throws(()=>fixture("dense",{}, {quality:compressedQuality}),/contract v3 denominator/);
   // A dense row is characterization: it can carry neither a gate nor a forced continuation.
   assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,qualityGate:{passed:true,failures:[]}}}),/schema validation failed/);
@@ -719,7 +733,7 @@ test("fixture artifacts record both arms' tool and needle outcomes as booleans",
   assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"ref",evidence:{...needle,referenceRecovered:1},metrics},"long-context-needle",row),/must be boolean/);
   assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:0,total:1,candidateValid:false,referenceValid:true,outputsMatch:false,discriminating:false},metrics},"structured-tool-call",row));
 });
-test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
+test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const cacheEvidence={matches:1,total:1,method:MULTI_TURN_PROMPT_CACHE_METHOD,freeRunningFirstDivergence:null,matchedPrefixTokens:0,turns:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row),/lacks method/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,method:"free-running"},metrics},"multi-turn-prompt-cache",row),/not teacher-forced on a cache-hit turn 2/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,turns:{...cacheEvidence.turns,reference:{...MULTI_TURN_TURNS,turn2:{...MULTI_TURN_TURNS.turn2,cacheHit:false,reusedPrefixTokens:0}}}},metrics},"multi-turn-prompt-cache",row),/did not serve turn 2/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
 test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp("/tmp/kv20671-snapshot-"),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});
 test("receipt sets reject mixed generations and CLI comparison preserves inputs",async()=>{const dir=await mkdtemp("/tmp/kv20671-"),dense=path.join(dir,"dense"),compressed=path.join(dir,"compressed"),out=path.join(dir,"comparison.json");const denseReceipt=await verifiedFixture(path.join(dir,"dense-source")),compressedReceipt=await verifiedFixture(path.join(dir,"compressed-source"),"compressed");await writeReceiptSet(dense,denseReceipt);await writeReceiptSet(compressed,compressedReceipt);const before=await readFile(path.join(compressed,"receipt.json"),"utf8");await run(process.execPath,["scripts/kv-baseline-harness.mjs","compare",dense,compressed,out]);assert.equal(await readFile(path.join(compressed,"receipt.json"),"utf8"),before);assert.match(await readFile(path.join(dir,"comparison.md"),"utf8"),/Persistent KV reduction: 25.00%/);await writeFile(path.join(dense,"receipt.md"),"# forged\n");await assert.rejects(readReceiptSet(dense),/sidecar hash mismatch|not bound/);await rm(dir,{recursive:true,force:true});});
 test("published inference fixture bundles are required and bind cold probe evidence exactly",async()=>{
@@ -1230,4 +1244,31 @@ test("SC-20671 compressed campaign completes with every row and reports a failed
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+test("contract v4 multiTurnPromptCache is teacher-forced on a cache-hit turn 2", () => {
+  const compressed = fixture("compressed");
+  assert.equal(compressed.quality.multiTurnPromptCacheMethod, MULTI_TURN_PROMPT_CACHE_METHOD);
+  assert.equal(compressed.quality.multiTurnPromptCache, compressed.quality.multiTurnForcedContinuation.agreement);
+  const measured = (() => { const { qualityGate: _g, ...rest } = compressed.quality; return rest; })();
+  // One flip in 1024 meets the 0.999 minimum (aligned with greedy agreement); two do not.
+  const oneFlip = fixture("compressed", {}, { quality: gatedQuality("compressed", measured, forcedContinuation(), multiTurnForcedContinuation(1023)) });
+  assert.equal(oneFlip.quality.qualityGate.passed, true);
+  const twoFlips = fixture("compressed", {}, { quality: gatedQuality("compressed", measured, forcedContinuation(), multiTurnForcedContinuation(1022)) });
+  assert.equal(twoFlips.quality.qualityGate.passed, false);
+  assert.deepEqual(twoFlips.quality.qualityGate.failures.map((failure) => [failure.metric, failure.threshold]),
+    Array(5).fill(["multiTurnPromptCache", 0.999]));
+  // The recorded value must be the turn-2 forced-continuation agreement, never a free-running one.
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnPromptCache: 0.5625 } }), /not the row's turn-2 forced-continuation agreement/);
+  const { multiTurnForcedContinuation: _turn2, ...unmeasured } = compressed.quality;
+  assert.throws(() => fixture("compressed", {}, { quality: unmeasured }), /schema validation|turn-2 forced continuation/);
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnForcedContinuation: { ...compressed.quality.multiTurnForcedContinuation, method: "dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced" } } }), /schema validation|forced continuation evidence is inconsistent/);
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnPromptCacheMethod: "free-running" } }), /schema validation|cache-hit turn 2/);
+  // Both arms' turn 2 must have been served by the prompt-cache hit.
+  const missed = { ...MULTI_TURN_TURNS, turn2: { ...MULTI_TURN_TURNS.turn2, cacheHit: false, reusedPrefixTokens: 0 } };
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnCache: { candidate: MULTI_TURN_TURNS, reference: missed } } }), /did not serve turn 2/);
+  // Dense rows carry no turn-2 forced continuation; a v3-contract receipt is refused outright.
+  assert.throws(() => fixture("dense", {}, { quality: { ...fixture().quality, multiTurnForcedContinuation: multiTurnForcedContinuation() } }), /schema validation/);
+  const v3 = structuredClone(fixture());
+  v3.contractHash = "58eaa007c35084c8acac2b35b5a2a1dff5af55832a7533557741d43a05944b49";
+  assert.throws(() => validateReceipt(v3), /quality contract hash mismatch/);
 });

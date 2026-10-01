@@ -343,13 +343,74 @@ threshold number is unchanged.
   runs once per distinct reference stream. The contract JSON text and every
   threshold (0.999) are unchanged.
 
+## Contract v4 change record
+
+Contract v4 changes one metric, `multiTurnPromptCache`. It was changed **after
+compressed results were visible**: the A2 2-bit and 4-bit campaigns and the
+K8V8 (8-bit) single-row run. It was changed because the v3 metric did not
+measure what its name claimed, not to move a result.
+
+What v3 measured:
+
+- The v3 `multi-turn-prompt-cache` fixture was a single turn, and it was cold.
+  Its quality output came from the ordinary observed generation, with no prompt
+  cache in either arm. It never exercised multiple turns or prompt-cache reuse.
+  The name was wrong.
+- The score was a free-running, position-by-position exact match over 64
+  tokens, with threshold 1.0. One argmax flip at a near-tie made every later
+  token count as a mismatch.
+- On `llama-memory-material-single-single-shot-warm`, the 4-bit and 8-bit rows
+  both scored 0.5625 (36/64). That is one flip at generated token 34 (" baseline"
+  vs " context"), plus two tokens that matched by chance.
+- The same-weights dense run flips between those two branches from one build to
+  the next. Inference `aa1ea42c0` picks " baseline"; `c7b1553c0` and
+  `4b9adc47d` pick " context". The 8-bit compressed output is byte-identical to
+  the dense output of `aa1ea42c0`. So the metric would fail dense against
+  itself across builds.
+
+What v4 measures:
+
+- **Two real turns.** Turn 1 is the frozen cache-fixture prompt. It is
+  generated and stored through the product prompt cache (`PrefixCache`). Turn 2
+  is turn 1's conversation, turn 1's answer, and a fixed follow-up
+  (`multiTurnFixture.followUp`). Turn 2 is served by a prompt-cache hit over
+  turn 1.
+- **The same flow in both arms.** A compressed arm imports the reused prefix
+  into its compressed cache by quantize-on-append. A dense arm seeds its dense
+  cache. Turn 1 is dense in both arms, because the provider prefix store holds
+  shared prefixes as dense K/V.
+- **Cache records, fail closed.** Each arm records every turn's cache hit and
+  reused-prefix tokens (`quality.multiTurnCache`, and `turns` in the fixture
+  evidence). Turn 1 must miss its fresh store. Turn 2 must be served by a hit
+  that reuses at least the prompt it shares with turn 1. Anything else refuses
+  the row.
+- **Scored like greedy agreement.** The score is teacher-forced, per-position
+  argmax agreement on turn 2, taken after that turn's own prompt-cache hit
+  (`quality.multiTurnPromptCacheMethod`).
+  - Compressed rows: the same-weights dense-KV session gives a turn-2 forced
+    continuation of 1024 tokens, greedy, with stop tokens decoded through. A
+    fit-boundary row uses the remaining window, never fewer than 256 tokens.
+    This runs once per row (`quality.multiTurnForcedContinuation`). The
+    compressed session is teacher-forced on it.
+  - Dense rows: the reference repeat's natural turn-2 stream.
+- **Threshold aligned with greedy agreement.** The threshold is 0.999. Over 1024
+  positions that allows one flip. Every measured repeat must meet it.
+- **Observations, never gated.** Turn 2's free-running first divergence
+  (`quality.multiTurnFreeRunningFirstDivergence`) and matched-prefix length
+  (`quality.multiTurnMatchedPrefixTokens`) are recorded but not gated.
+
+Every other threshold, and all other contract wording, is unchanged from v3.
+Receipt schema v7 (`sc-20671-kv-baseline-v7`) carries the new fields. The v4
+contract hash is the compatibility fence: any receipt bound to v3 is refused, so
+every campaign row is re-measured under v4.
+
 ## Measured quality gate (compressed rows)
 
 A compressed row whose quality is validly measured but misses a frozen
 threshold is evidence for the Go/No-Go decision (sc-20678), not an invalid run.
 The row is accepted and records `quality.qualityGate`:
 `{passed, failures: [{metric, fixture, repeat, value, threshold, comparison}]}`.
-The gate evaluates every measured repeat against the contract v3 thresholds
+The gate evaluates every measured repeat against the contract v4 thresholds
 (`greedyTokenAgreement`, `perplexityDelta`, `structuredToolAgreement`,
 `needleRetrieval`, `multiTurnPromptCache`); `passed` is true only when no repeat
 missed. Validators reject a gate that omits, edits, reorders, or claims a pass

@@ -1,12 +1,12 @@
 {
-  "version": 3,
+  "version": 4,
   "thresholds": {
     "parityMaxError": 0.0001,
     "perplexityDelta": 0.01,
     "greedyTokenAgreement": 0.999,
     "structuredToolAgreement": 1,
     "needleRetrieval": 1,
-    "multiTurnPromptCache": 1
+    "multiTurnPromptCache": 0.999
   },
   "gate": {
     "denseRows": "raw characterization: candidate and bf16-reference fixture outcomes are recorded as observations and never reject a dense row",
@@ -16,6 +16,12 @@
     "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle check requires exact agreement with the dense output and the receipt records needleDiscriminating=false",
     "nonDiscriminatingTool": "when the same-weights dense-KV run does not emit the valid structured tool call, compressed tool agreement is exact equality with that dense output and the receipt records toolDiscriminating=false",
     "repeats": "discrimination flags are the AND over all sealed repeats; each repeat records its own flag, and compressed rows must pass every repeat"
+  },
+  "multiTurnFixture": {
+    "turns": "turn 1 is the frozen cache-fixture prompt, generated and stored through the product prompt cache; turn 2 is turn 1's conversation, turn 1's answer, and the follow-up, served by a prompt-cache hit over turn 1 (a compressed row imports the reused prefix into its compressed cache, a dense row seeds its dense cache); both arms run the same flow, record each turn's cache hit and reused-prefix tokens, and a turn 2 that is not served by the hit is refused",
+    "followUp": "Now repeat that same stable baseline fact once more, in one short sentence.",
+    "metric": "teacher-forced per-position argmax agreement of turn 2 after its prompt-cache hit: a compressed row against the same-weights dense-KV turn-2 greedy continuation (stop tokens decoded through, 1024 positions, a fit-boundary row shortened to its remaining context window), a dense row against the reference's natural turn-2 stream; every measured repeat must meet the threshold",
+    "observations": "turn 2's free-running first divergence and matched-prefix length are recorded and never gated"
   },
   "needleFixture": {
     "statement": "The special magic identifier is {needle}.",

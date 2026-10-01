@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 // v5 (sc-20671): per-repeat decode throughput is a dedicated fixed-length steady decode recorded
 // beside each timing sample, and provenance records power mode and thermal state at row start/end.
 // v6 (sc-20671 hardware audit): real-hardware observations are recorded instead of refused.
-export const SCHEMA_VERSION = 6;
-export const HARNESS_VERSION = "sc-20671-kv-baseline-v6";
+export const SCHEMA_VERSION = 7;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v7";
 // Fixed decode length of every steady-decode sample (paired with the inference producer's
 // `STEADY_DECODE_TOKENS`): the first token is untimed, so 255 tokens are timed.
 export const STEADY_DECODE_TOKENS = 256;
@@ -29,6 +29,9 @@ const HOST_STATE_FIELDS = [
 ];
 // Quality contract v3 greedy agreement is teacher-forced (decided before any compressed result).
 export const GREEDY_AGREEMENT_METHOD = "teacher-forced";
+// Quality contract v4: multiTurnPromptCache is teacher-forced agreement of turn 2 of a real
+// two-turn conversation whose turn 2 was served by a prompt-cache hit over turn 1.
+export const MULTI_TURN_PROMPT_CACHE_METHOD = "teacher-forced-turn-2-after-prompt-cache-hit";
 export const POST_RELEASE_MLX_SLACK_FLOOR_BYTES = 1024 * 1024;
 export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
 export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
@@ -227,6 +230,12 @@ export const FORCED_CONTINUATION_TOKENS = 1024;
 const FORCED_CONTINUATION_MIN_TOKENS = 256;
 const FORCED_CONTINUATION_RECORDED_FLIPS = 32;
 const FORCED_CONTINUATION_METHOD = "dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced";
+const MULTI_TURN_FORCED_CONTINUATION_METHOD =
+  "dense-kv-same-weights-turn-2-prompt-cache-hit-greedy-continuation-eos-ignored-teacher-forced";
+const MULTI_TURN_FIXTURE_FIELDS = ["turns", "followUp", "metric", "observations"];
+const PROMPT_CACHE_TURN_FIELDS = ["promptTokens", "cacheHit", "reusedPrefixTokens"];
+// Mirrors the inference producer's fixture answer budget (turn 1's stored answer bound).
+const FIXTURE_MAX_NEW_TOKENS = 64;
 const FORCED_CONTINUATION_FIELDS = [
   "method", "tokens", "matches", "agreement", "flipCount", "firstFlipPositions",
   "referenceStreamSha256", "candidateChoicesSha256",
@@ -259,13 +268,15 @@ export function qualityGateSummary(gate) {
   return `FAILED: ${gate.failures.map((failure) => `${failure.metric} repeat ${failure.repeat} = ${failure.value} (${failure.comparison} ${failure.threshold}, fixture ${failure.fixture})`).join("; ")}`;
 }
 
-function validateForcedContinuation(continuation, contextBand) {
-  exactKeys(continuation, FORCED_CONTINUATION_FIELDS, "quality.forcedContinuation");
+function validateForcedContinuation(
+  continuation, contextBand, method = FORCED_CONTINUATION_METHOD, name = "quality.forcedContinuation",
+) {
+  exactKeys(continuation, FORCED_CONTINUATION_FIELDS, name);
   const { tokens, matches, flipCount, firstFlipPositions } = continuation;
   const lengthValid = tokens === FORCED_CONTINUATION_TOKENS
     || (contextBand === "fit-boundary" && Number.isSafeInteger(tokens)
       && tokens >= FORCED_CONTINUATION_MIN_TOKENS && tokens < FORCED_CONTINUATION_TOKENS);
-  if (continuation.method !== FORCED_CONTINUATION_METHOD || !lengthValid
+  if (continuation.method !== method || !lengthValid
     || !Number.isSafeInteger(matches) || matches < 0 || matches > tokens
     || flipCount !== tokens - matches || continuation.agreement !== matches / tokens
     || !Array.isArray(firstFlipPositions)
@@ -274,7 +285,28 @@ function validateForcedContinuation(continuation, contextBand) {
       || position >= tokens || (index > 0 && position <= firstFlipPositions[index - 1]))
     || !/^[0-9a-f]{64}$/.test(continuation.referenceStreamSha256)
     || !/^[0-9a-f]{64}$/.test(continuation.candidateChoicesSha256)) {
-    fail(`forced continuation evidence is inconsistent: method=${continuation.method}, tokens=${tokens} (band ${contextBand}), matches=${matches}, agreement=${continuation.agreement}, flipCount=${flipCount}, recordedFlips=${firstFlipPositions?.length}`);
+    fail(`forced continuation evidence is inconsistent (${name}): method=${continuation.method}, tokens=${tokens} (band ${contextBand}), matches=${matches}, agreement=${continuation.agreement}, flipCount=${flipCount}, recordedFlips=${firstFlipPositions?.length}`);
+  }
+}
+
+/**
+ * One arm's multi-turn prompt-cache record (contract v4): turn 1 misses its fresh store, and turn
+ * 2 is served by a hit reusing part of its prompt (at most turn 1's stored prompt and answer).
+ */
+function validateMultiTurnTurns(turns, name) {
+  exactKeys(turns, ["turn1", "turn2"], name);
+  for (const turn of ["turn1", "turn2"]) {
+    exactKeys(object(turns[turn], `${name}.${turn}`), PROMPT_CACHE_TURN_FIELDS, `${name}.${turn}`);
+    positiveInteger(turns[turn].promptTokens, `${name}.${turn}.promptTokens`);
+    nonnegativeInteger(turns[turn].reusedPrefixTokens, `${name}.${turn}.reusedPrefixTokens`);
+    if (typeof turns[turn].cacheHit !== "boolean") fail(`${name}.${turn}.cacheHit must be boolean`);
+  }
+  const { turn1, turn2 } = turns;
+  if (turn1.cacheHit || turn1.reusedPrefixTokens !== 0 || !turn2.cacheHit
+    || turn2.reusedPrefixTokens === 0 || turn2.reusedPrefixTokens >= turn2.promptTokens
+    || turn2.promptTokens <= turn1.promptTokens
+    || turn2.reusedPrefixTokens > turn1.promptTokens + FIXTURE_MAX_NEW_TOKENS) {
+    fail(`${name} multi-turn prompt cache did not serve turn 2 from turn 1's prefix`);
   }
 }
 
@@ -287,10 +319,22 @@ function validateForcedContinuation(continuation, contextBand) {
 function validateQualityGate(receipt) {
   const quality = receipt.quality;
   if (receipt.mode !== "compressed") {
-    if (Object.hasOwn(quality, "qualityGate") || Object.hasOwn(quality, "forcedContinuation")) {
+    if (Object.hasOwn(quality, "qualityGate") || Object.hasOwn(quality, "forcedContinuation")
+      || Object.hasOwn(quality, "multiTurnForcedContinuation")) {
       fail("a quality gate and forced continuation are recorded only on compressed receipts");
     }
     return;
+  }
+  if (!Object.hasOwn(quality, "multiTurnForcedContinuation")) {
+    fail("compressed receipt has no turn-2 forced continuation for multiTurnPromptCache");
+  }
+  const multiTurn = object(quality.multiTurnForcedContinuation, "quality.multiTurnForcedContinuation");
+  validateForcedContinuation(
+    multiTurn, receipt.matrix.contextBand, MULTI_TURN_FORCED_CONTINUATION_METHOD,
+    "quality.multiTurnForcedContinuation",
+  );
+  if (quality.multiTurnPromptCache !== multiTurn.agreement) {
+    fail(`multiTurnPromptCache ${quality.multiTurnPromptCache} is not the row's turn-2 forced-continuation agreement ${multiTurn.agreement}`);
   }
   if (!Object.hasOwn(quality, "forcedContinuation")) {
     fail("compressed receipt has no forced-continuation greedy agreement");
@@ -386,6 +430,23 @@ function repeatQualityMetrics(receipt, fixtures, repeat) {
       || kernel.greedyTotal !== kernel.forcedContinuation.tokens)) {
       fail(`repeat ${repeat} kernel greedy counts are not its forced continuation's`);
     }
+    const cache = object(fixtures["multi-turn-prompt-cache"]?.evidence, `repeat ${repeat} cache evidence`);
+    if (canonicalJson(cache.forcedContinuation ?? null)
+      !== canonicalJson(receipt.quality.multiTurnForcedContinuation ?? null)) {
+      fail(`repeat ${repeat} multi-turn fixture forced continuation is not the receipt's`);
+    }
+    if (cache.forcedContinuation && (cache.matches !== cache.forcedContinuation.matches
+      || cache.total !== cache.forcedContinuation.tokens)) {
+      fail(`repeat ${repeat} multi-turn counts are not its turn-2 forced continuation's`);
+    }
+    if (cache.method !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+      fail(`repeat ${repeat} multi-turn fixture is not teacher-forced on a cache-hit turn 2`);
+    }
+    const turns = object(cache.turns, `repeat ${repeat} multi-turn turns`);
+    exactKeys(turns, ["candidate", "reference"], `repeat ${repeat} multi-turn turns`);
+    for (const arm of ["candidate", "reference"]) {
+      validateMultiTurnTurns(object(turns[arm], `repeat ${repeat} ${arm} turns`), `repeat ${repeat} ${arm}`);
+    }
     if (!Array.isArray(kernel.parityErrors) || kernel.parityErrors.length === 0
       || kernel.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
       fail(`repeat ${repeat} kernel fixture lacks finite parity errors`);
@@ -396,7 +457,7 @@ function repeatQualityMetrics(receipt, fixtures, repeat) {
       greedyTokenAgreement: ratio(kernel, "kernel-fp32-reference", "greedyMatches", "greedyTotal"),
       structuredToolAgreement: ratio(object(fixtures["structured-tool-call"]?.evidence, `repeat ${repeat} tool evidence`), "structured-tool-call", "matches", "total"),
       needleRetrieval: ratio(object(fixtures["long-context-needle"]?.evidence, `repeat ${repeat} needle evidence`), "long-context-needle", "matches", "total"),
-      multiTurnPromptCache: ratio(object(fixtures["multi-turn-prompt-cache"]?.evidence, `repeat ${repeat} cache evidence`), "multi-turn-prompt-cache", "matches", "total"),
+      multiTurnPromptCache: ratio(cache, "multi-turn-prompt-cache", "matches", "total"),
     };
   }
 }
@@ -609,10 +670,14 @@ function parseSidecar(sidecar, expectedName) {
 export function checkContract(contract) {
   exactKeys(
     contract,
-    ["version", "thresholds", "gate", "needleFixture", "statistics", "fixtures"],
+    ["version", "thresholds", "gate", "multiTurnFixture", "needleFixture", "statistics", "fixtures"],
     "contract",
   );
-  if (contract.version !== 3) fail("unsupported quality contract version");
+  if (contract.version !== 4) fail("unsupported quality contract version");
+  exactKeys(contract.multiTurnFixture, MULTI_TURN_FIXTURE_FIELDS, "contract.multiTurnFixture");
+  for (const field of MULTI_TURN_FIXTURE_FIELDS) {
+    text(contract.multiTurnFixture[field], `contract.multiTurnFixture.${field}`);
+  }
   exactKeys(
     contract.gate,
     [
@@ -1570,11 +1635,28 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
       "greedyAgreementMethod", "freeRunningFirstDivergence", "greedyTokenAgreementByRepeat",
       "statistics", "fixtureEvidence", "qualityGate", "forcedContinuation",
+      "multiTurnPromptCacheMethod", "multiTurnFreeRunningFirstDivergence",
+      "multiTurnMatchedPrefixTokens", "multiTurnCache", "multiTurnForcedContinuation",
     ],
     "quality",
   );
   if (receipt.quality.greedyAgreementMethod !== GREEDY_AGREEMENT_METHOD) {
     fail("quality.greedyAgreementMethod must be teacher-forced");
+  }
+  if (receipt.quality.multiTurnPromptCacheMethod !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+    fail("quality.multiTurnPromptCacheMethod must be teacher-forced on a cache-hit turn 2");
+  }
+  const multiTurnCache = object(receipt.quality.multiTurnCache, "quality.multiTurnCache");
+  exactKeys(multiTurnCache, ["candidate", "reference"], "quality.multiTurnCache");
+  for (const arm of ["candidate", "reference"]) {
+    validateMultiTurnTurns(object(multiTurnCache[arm], `quality.multiTurnCache.${arm}`), `quality.multiTurnCache.${arm}`);
+  }
+  nonnegativeInteger(receipt.quality.multiTurnMatchedPrefixTokens, "quality.multiTurnMatchedPrefixTokens");
+  if (receipt.quality.multiTurnFreeRunningFirstDivergence !== null) {
+    nonnegativeInteger(receipt.quality.multiTurnFreeRunningFirstDivergence, "quality.multiTurnFreeRunningFirstDivergence");
+    if (receipt.quality.multiTurnMatchedPrefixTokens > receipt.quality.multiTurnFreeRunningFirstDivergence) {
+      fail("quality.multiTurnMatchedPrefixTokens extends past its first free-running divergence");
+    }
   }
   if (receipt.quality.freeRunningFirstDivergence !== null) {
     nonnegativeInteger(receipt.quality.freeRunningFirstDivergence, "quality.freeRunningFirstDivergence");
@@ -2013,15 +2095,33 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal", "freeRunningFirstDivergence"],
     "structured-tool-call": ["matches", "total", ...outcomeEvidence],
     "long-context-needle": ["matches", "total", ...outcomeEvidence],
-    "multi-turn-prompt-cache": ["matches", "total"],
+    "multi-turn-prompt-cache": ["matches", "total", "method", "freeRunningFirstDivergence", "matchedPrefixTokens", "turns"],
   }[fixture];
-  // A compressed row's kernel evidence also carries its forced continuation.
+  // A compressed row's kernel and multi-turn evidence also carry their forced continuations.
   exactKeys(
     artifact.evidence,
-    fixture === "kernel-fp32-reference" && Object.hasOwn(artifact.evidence, "forcedContinuation")
+    ["kernel-fp32-reference", "multi-turn-prompt-cache"].includes(fixture)
+      && Object.hasOwn(artifact.evidence, "forcedContinuation")
       ? [...requiredEvidence, "forcedContinuation"] : requiredEvidence,
     `fixture artifact ${fixture}.evidence`,
   );
+  if (fixture === "multi-turn-prompt-cache") {
+    for (const field of requiredEvidence) {
+      if (!Object.hasOwn(artifact.evidence, field)) fail(`fixture artifact ${fixture}.evidence lacks ${field}`);
+    }
+    if (artifact.evidence.method !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+      fail(`fixture artifact ${fixture} is not teacher-forced on a cache-hit turn 2`);
+    }
+    nonnegativeInteger(artifact.evidence.matchedPrefixTokens, `fixture artifact ${fixture}.matchedPrefixTokens`);
+    if (artifact.evidence.freeRunningFirstDivergence !== null) {
+      nonnegativeInteger(artifact.evidence.freeRunningFirstDivergence, `fixture artifact ${fixture}.freeRunningFirstDivergence`);
+    }
+    const turns = object(artifact.evidence.turns, `fixture artifact ${fixture}.turns`);
+    exactKeys(turns, ["candidate", "reference"], `fixture artifact ${fixture}.turns`);
+    for (const arm of ["candidate", "reference"]) {
+      validateMultiTurnTurns(object(turns[arm], `fixture artifact ${fixture}.turns.${arm}`), `fixture artifact ${fixture} ${arm}`);
+    }
+  }
   // Both arms' tool/needle behaviour is recorded as raw observation, never as a pass flag.
   for (const field of outcomeEvidence) {
     if (typeof artifact.evidence[field] !== "boolean") {
@@ -2411,6 +2511,7 @@ export function compareReceipts(dense, compressed) {
     qualityGatePassed: compressed.quality.qualityGate.passed,
     qualityGate: compressed.quality.qualityGate,
     forcedContinuation: compressed.quality.forcedContinuation,
+    multiTurnForcedContinuation: compressed.quality.multiTurnForcedContinuation,
   };
 }
 
