@@ -119,7 +119,8 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --offline -p "${BIN}" --release \
+    cargo fetch --locked \
+    && cargo build --locked --offline -p "${BIN}" --release \
     && mkdir -p /out \
     && cp "target/release/${BIN}" "/out/${BIN}"
 
@@ -150,7 +151,8 @@ COPY --from=web-builder /app/apps/web/dist ./apps/web/dist
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --offline -p sceneworks-rust-api --release --features embed-web \
+    cargo fetch --locked \
+    && cargo build --locked --offline -p sceneworks-rust-api --release --features embed-web \
     && mkdir -p /out \
     && cp target/release/sceneworks-rust-api /out/sceneworks-rust-api
 
@@ -274,7 +276,8 @@ COPY docs/generated/qwen-candle-five-rung-sc-15817.json ./docs/generated/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/app/target \
-    cargo build --offline -p sceneworks-rust-worker --release \
+    cargo fetch --locked \
+    && cargo build --locked --offline -p sceneworks-rust-worker --release \
         --features sceneworks-worker/backend-candle \
     && mkdir -p /out \
     && cp target/release/sceneworks-rust-worker /out/sceneworks-rust-worker \
