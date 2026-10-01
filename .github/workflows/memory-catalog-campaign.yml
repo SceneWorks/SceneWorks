@@ -163,8 +163,8 @@ on:
         default: ""
 
 # `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. The only other secret
-# this workflow reads is `HF_TOKEN`, and only the Hugging Face CLI sees it, only under
-# `download_missing` against a gated repository.
+# this workflow reads is `HF_TOKEN`, scoped to the two walk steps that can fetch
+# missing Hugging Face snapshots when `download_missing` is enabled.
 permissions:
   contents: write
   pull-requests: write
@@ -193,10 +193,6 @@ env:
   INPUT_INSTANTID_WEIGHTS: ${{ inputs.instantid_weights }}
   INPUT_INSTANTID_CONTROLNET: ${{ inputs.instantid_controlnet }}
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
-  # Read by the Hugging Face CLI itself when --download-missing fetches a gated repository. Absent
-  # is not an error: every SceneWorks rehost and every upstream this campaign fetches is public, so
-  # an unset token only matters for a gated one. `hf_transfer` is opt-in on the runner, not here.
-  HF_TOKEN: ${{ secrets.HF_TOKEN }}
 
 jobs:
   mlx:
@@ -294,6 +290,10 @@ jobs:
 
       - name: Walk the catalog
         id: walk
+        # The CLI reads this only if --download-missing fetches a gated repository.
+        # An unset token is fine for public snapshots.
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/ci/memory-catalog/run.sh
 
       - name: Push whatever landed
@@ -527,6 +527,8 @@ jobs:
 
       - name: Walk the catalog
         id: walk
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/ci/memory-catalog/run.sh
 
       - name: Push whatever landed

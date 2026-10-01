@@ -13,6 +13,8 @@ services:
       args:
         BIN: sceneworks-rust-api
     environment:
+      # Follow the writable data bind when user: overrides the image's UID/GID.
+      HOME: /sceneworks/data
       SCENEWORKS_API_HOST: ${SCENEWORKS_API_HOST:-0.0.0.0}
       SCENEWORKS_API_PORT: ${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
@@ -67,6 +69,7 @@ services:
       target: rust-worker-candle
     restart: unless-stopped
     environment:
+      HOME: /sceneworks/data
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config
@@ -117,6 +120,7 @@ services:
         BIN: sceneworks-rust-worker
     restart: unless-stopped
     environment:
+      HOME: /sceneworks/data
       SCENEWORKS_API_URL: http://api:${SCENEWORKS_API_PORT:-8010}
       SCENEWORKS_DATA_DIR: /sceneworks/data
       SCENEWORKS_CONFIG_DIR: /sceneworks/config

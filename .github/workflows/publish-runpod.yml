@@ -78,6 +78,17 @@ jobs:
 
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
+      - name: Fetch the exact public inference terminal contract
+        run: |
+          set -euo pipefail
+          inference_root="$RUNNER_TEMP/starvector-pinned-inference"
+          echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
+          git init "$inference_root"
+          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
+          git -C "$inference_root" fetch --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+          git -C "$inference_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$inference_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+
       # The scaffold suite reads real inference source at both the current pin
       # and the packaged anchor revisions, just as check.yml's parity-scaffold does.
       - name: Fetch the pinned inference source for the anchor-closure suite
@@ -128,6 +139,40 @@ jobs:
             type=raw,value=${{ steps.publication.outputs.release_tag }},enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=latest,enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=${{ steps.publication.outputs.manual_tag }},enable=${{ steps.publication.outputs.release != 'true' }}
+      # Build once into the shared Buildx cache; publication below reuses these
+      # exact stages after the standalone default/override runtime gate passes.
+      - name: Build combined RunPod candidate for runtime checks
+        id: build_candidate
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/rust.Dockerfile
+          target: runpod
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: sceneworks-runpod-smoke:ci
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=runpod-amd64
+      - name: Build standalone candle runtime from shared stages
+        id: build_candle_runtime
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: docker/rust.Dockerfile
+          target: rust-worker-candle
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: sceneworks-candle-smoke:ci
+      - name: Check standalone candle identities and bind writes
+        id: smoke_candle_runtime
+        timeout-minutes: 5
+        env:
+          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: sceneworks-runpod-smoke:ci
+          SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci
+          SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
+        run: bash scripts/check-docker-candle-runtime.sh
       - name: Build and publish combined RunPod image
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0

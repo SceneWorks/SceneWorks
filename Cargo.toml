@@ -145,7 +145,7 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "8d625c68cfd0903213ad38f311ec8b072adeedfb" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "eac60a770030aef0630ca418d85ffd169be9748a" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #
@@ -170,3 +170,8 @@ opt-level = 3
 
 [profile.dev.package.block-buffer]
 opt-level = 3
+
+# GTK3 requires glib ^0.18; retain its ABI and backport the upstream safety fix.
+# Provenance and removal criteria: vendor/glib-0.18.5/VENDORED.md.
+[patch.crates-io]
+glib = { path = "vendor/glib-0.18.5" }
