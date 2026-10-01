@@ -1452,6 +1452,7 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         inputs(241, budget(host_gb), 18 * GIB),
         None,
         tiered_decode_profile,
+        no_video_encode_profile,
         false,
     );
     let memory = outcome
@@ -1472,6 +1473,64 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
     assert!(outcome.refusal.is_none());
 }
 
+/// A 40 GiB conditioning-encode working set for image/video-conditioned requests only.
+fn conditioning_encode_profile(
+    _lane: VideoLane,
+    _provider_id: &str,
+    mode: &str,
+    reference_count: u32,
+    _geometry: VideoAdmissionGeometry,
+) -> Option<VideoDecodeMemoryProfile> {
+    (mode != "text_to_video" && reference_count > 0)
+        .then(|| VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile"))
+}
+
+fn image_conditioned<'a>(mut request: VideoAdmissionInputs<'a>) -> VideoAdmissionInputs<'a> {
+    request.mode = "image_to_video";
+    request.reference_count = 1;
+    request.reference_shape = "image";
+    request
+}
+
+/// sc-20686 (epic E8): an image-conditioned request is admitted only with its VAE-encode working
+/// set. The 20 GiB weights + 18 GiB generic floor (38 GiB) fits this host; weights + the 40 GiB
+/// encode (60 GiB) does not, so the conditioned request is refused while the same T2V request, which
+/// encodes nothing, is admitted.
+#[test]
+fn an_image_conditioned_request_is_admitted_with_its_encode_working_set() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
+    let host_gb = mlx_widened_gb(38, 0.5);
+    let admit = |request| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            None,
+            no_video_decode_profile,
+            conditioning_encode_profile,
+            false,
+        )
+    };
+    let text = admit(inputs(241, budget(host_gb), 18 * GIB));
+    assert!(text.refusal.is_none(), "{:?}", text.refusal);
+    let image = admit(image_conditioned(inputs(241, budget(host_gb), 18 * GIB)));
+    let refusal = image
+        .refusal
+        .expect("the conditioning encode must be priced into admission");
+    let widened = format!("needs about {:.1} GB", mlx_widened_floor_gb(60, 40, 0.0));
+    assert!(refusal.contains(&widened), "{refusal}");
+
+    // On a host that fits it, the encode is the binding phase and carries its own revision.
+    let roomy = admit(image_conditioned(inputs(
+        241,
+        budget(mlx_widened_floor_gb(60, 40, 0.5)),
+        18 * GIB,
+    )));
+    assert!(roomy.refusal.is_none(), "{:?}", roomy.refusal);
+    let context = roomy.context.expect("contract-backed admission");
+    assert_eq!(context.predicted_peak_bytes, 60 * GIB);
+    assert_eq!(context.evidence_revision, ENCODE_PROFILE_EVIDENCE_REVISION);
+}
+
 #[test]
 fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
@@ -1483,6 +1542,7 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
         inputs(241, budget(39.0), 18 * GIB),
         None,
         tiered_decode_profile,
+        no_video_encode_profile,
         false,
     );
     let refusal = outcome
@@ -1536,6 +1596,7 @@ fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
         request,
         None,
         decoder_substitution_profile,
+        no_video_encode_profile,
         false,
     );
     let context = outcome.context.expect("the 6 GiB incremental peak fits");
@@ -1699,6 +1760,7 @@ fn request_scoped_selection_refuses_crossed_identity_and_out_of_envelope_evidenc
             request,
             Some(&curves),
             no_video_decode_profile,
+            no_video_encode_profile,
             true,
         )
     };
