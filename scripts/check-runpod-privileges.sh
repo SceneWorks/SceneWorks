@@ -207,7 +207,7 @@ for scenario in default override collision nested delayed; do
     "${image}" bash /test/start >/dev/null
   ready=0
   for (( attempt=0; attempt<100; attempt++ )); do
-    if docker logs "${container}" 2>&1 | grep -q 'worker:ready'; then ready=1; break; fi
+    if docker logs "${container}" 2>&1 | grep -q 'worker:ready' && docker logs "${container}" 2>&1 | grep -q 'api:ready'; then ready=1; break; fi
     sleep 0.1
   done
   docker logs "${container}"
