@@ -370,6 +370,18 @@ What v3 measured:
 
 What v4 measures:
 
+- **Fixture sizing.** Turn 1 uses the row's context-band payload, but the
+  multi-turn fixture caps it so turn 2 plus the 1024-token continuation fits
+  the native window. The cap is native − 1024 − 64 (turn-1 answer) − 512
+  (prompt text, chat template, follow-up, re-tokenization slack).
+  - Only the fit-boundary band is capped: Llama 130,560 → 129,472 payload
+    tokens, Qwen 40,448 → 39,360.
+  - Short, medium and memory-material keep their full band payload.
+  - The row's coordinate operations always keep the full band prompt, so the
+    row's measured geometry is unchanged.
+  - Each turn's rendered prompt tokens are recorded in its turn record.
+  - Preflight refuses a row whose turn 2 cannot leave 1024 tokens before any
+    model loads. The provider refuses it again before decoding.
 - **Two real turns.** Turn 1 is the frozen cache-fixture prompt. It is
   generated and stored through the product prompt cache (`PrefixCache`). Turn 2
   is turn 1's conversation, turn 1's answer, and a fixed follow-up
@@ -379,19 +391,27 @@ What v4 measures:
   into its compressed cache by quantize-on-append. A dense arm seeds its dense
   cache. Turn 1 is dense in both arms, because the provider prefix store holds
   shared prefixes as dense K/V.
-- **Cache records, fail closed.** Each arm records every turn's cache hit and
-  reused-prefix tokens (`quality.multiTurnCache`, and `turns` in the fixture
-  evidence). Turn 1 must miss its fresh store. Turn 2 must be served by a hit
-  that reuses at least the prompt it shares with turn 1. Anything else refuses
-  the row.
+- **Cache records, fail closed.** Each arm records every turn's cache hit,
+  reused-prefix tokens, and prompt token digest (`quality.multiTurnCache`,
+  which must equal the primary repeat's sealed `turns` evidence). Turn 1 must
+  miss its fresh store. Turn 2 must be served by a hit that reuses at least the
+  prompt it shares with turn 1. Anything else refuses the row.
 - **Scored like greedy agreement.** The score is teacher-forced, per-position
   argmax agreement on turn 2, taken after that turn's own prompt-cache hit
   (`quality.multiTurnPromptCacheMethod`).
   - Compressed rows: the same-weights dense-KV session gives a turn-2 forced
-    continuation of 1024 tokens, greedy, with stop tokens decoded through. A
-    fit-boundary row uses the remaining window, never fewer than 256 tokens.
-    This runs once per row (`quality.multiTurnForcedContinuation`). The
-    compressed session is teacher-forced on it.
+    continuation of 1024 tokens, greedy, with stop tokens decoded through. It is
+    always 1024 tokens: a row whose turn 2 cannot leave them is refused, never
+    shortened. The compressed session is teacher-forced on it.
+  - The continuation is measured once per row, not once per repeat. That one
+    measurement is copied into every measured repeat
+    (`quality.multiTurnForcedContinuation`, and each repeat's fixture evidence),
+    so every repeat records the same `multiTurnPromptCache`.
+  - Both sessions' turn records for that pass are sealed
+    (`quality.multiTurnForcedPass`). The two sessions must have rendered the same
+    turn-2 prompt token ids (`promptSha256`), and that prompt must be the
+    fixture's own turn-2 prompt. Otherwise the row is refused. The two arms of a
+    compressed row's observed fixture must render the same turn-2 prompt too.
   - Dense rows: the reference repeat's natural turn-2 stream.
 - **Threshold aligned with greedy agreement.** The threshold is 0.999. Over 1024
   positions that allows one flip. Every measured repeat must meet it.

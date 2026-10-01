@@ -233,7 +233,7 @@ const FORCED_CONTINUATION_METHOD = "dense-kv-same-weights-greedy-continuation-eo
 const MULTI_TURN_FORCED_CONTINUATION_METHOD =
   "dense-kv-same-weights-turn-2-prompt-cache-hit-greedy-continuation-eos-ignored-teacher-forced";
 const MULTI_TURN_FIXTURE_FIELDS = ["turns", "followUp", "metric", "observations"];
-const PROMPT_CACHE_TURN_FIELDS = ["promptTokens", "cacheHit", "reusedPrefixTokens"];
+const PROMPT_CACHE_TURN_FIELDS = ["promptTokens", "promptSha256", "cacheHit", "reusedPrefixTokens"];
 // Mirrors the inference producer's fixture answer budget (turn 1's stored answer bound).
 const FIXTURE_MAX_NEW_TOKENS = 64;
 const FORCED_CONTINUATION_FIELDS = [
@@ -300,13 +300,28 @@ function validateMultiTurnTurns(turns, name) {
     positiveInteger(turns[turn].promptTokens, `${name}.${turn}.promptTokens`);
     nonnegativeInteger(turns[turn].reusedPrefixTokens, `${name}.${turn}.reusedPrefixTokens`);
     if (typeof turns[turn].cacheHit !== "boolean") fail(`${name}.${turn}.cacheHit must be boolean`);
+    digest(turns[turn].promptSha256, `${name}.${turn}.promptSha256`);
   }
   const { turn1, turn2 } = turns;
-  if (turn1.cacheHit || turn1.reusedPrefixTokens !== 0 || !turn2.cacheHit
+  if (turn1.promptSha256 === turn2.promptSha256 || turn1.cacheHit || turn1.reusedPrefixTokens !== 0 || !turn2.cacheHit
     || turn2.reusedPrefixTokens === 0 || turn2.reusedPrefixTokens >= turn2.promptTokens
     || turn2.promptTokens <= turn1.promptTokens
     || turn2.reusedPrefixTokens > turn1.promptTokens + FIXTURE_MAX_NEW_TOKENS) {
     fail(`${name} multi-turn prompt cache did not serve turn 2 from turn 1's prefix`);
+  }
+}
+
+/**
+ * A compressed row's turn-2 forced-continuation pass: both sessions served turn 2 by a cache hit
+ * over the same turn-2 prompt token ids.
+ */
+function validateMultiTurnForcedPass(pass, name) {
+  exactKeys(pass, ["reference", "candidate"], name);
+  for (const session of ["reference", "candidate"]) {
+    validateMultiTurnTurns(object(pass[session], `${name}.${session}`), `${name}.${session}`);
+  }
+  if (pass.reference.turn2.promptSha256 !== pass.candidate.turn2.promptSha256) {
+    fail(`${name}: the turn-2 forced continuation's reference and candidate turn-2 prompts differ`);
   }
 }
 
@@ -320,7 +335,8 @@ function validateQualityGate(receipt) {
   const quality = receipt.quality;
   if (receipt.mode !== "compressed") {
     if (Object.hasOwn(quality, "qualityGate") || Object.hasOwn(quality, "forcedContinuation")
-      || Object.hasOwn(quality, "multiTurnForcedContinuation")) {
+      || Object.hasOwn(quality, "multiTurnForcedContinuation")
+      || Object.hasOwn(quality, "multiTurnForcedPass")) {
       fail("a quality gate and forced continuation are recorded only on compressed receipts");
     }
     return;
@@ -329,10 +345,20 @@ function validateQualityGate(receipt) {
     fail("compressed receipt has no turn-2 forced continuation for multiTurnPromptCache");
   }
   const multiTurn = object(quality.multiTurnForcedContinuation, "quality.multiTurnForcedContinuation");
+  // The multi-turn fixture is sized so its turn-2 continuation always has the full length.
   validateForcedContinuation(
-    multiTurn, receipt.matrix.contextBand, MULTI_TURN_FORCED_CONTINUATION_METHOD,
-    "quality.multiTurnForcedContinuation",
+    multiTurn, null, MULTI_TURN_FORCED_CONTINUATION_METHOD, "quality.multiTurnForcedContinuation",
   );
+  if (!Object.hasOwn(quality, "multiTurnForcedPass")) {
+    fail("compressed receipt has no turn records for its turn-2 forced continuation");
+  }
+  validateMultiTurnForcedPass(object(quality.multiTurnForcedPass, "quality.multiTurnForcedPass"), "quality.multiTurnForcedPass");
+  if (quality.multiTurnForcedPass.reference.turn2.promptSha256
+    !== quality.multiTurnCache.reference.turn2.promptSha256
+    || quality.multiTurnCache.candidate.turn2.promptSha256
+      !== quality.multiTurnCache.reference.turn2.promptSha256) {
+    fail("the turn-2 forced continuation's prompt is not the multi-turn fixture's same-weights turn-2 prompt");
+  }
   if (quality.multiTurnPromptCache !== multiTurn.agreement) {
     fail(`multiTurnPromptCache ${quality.multiTurnPromptCache} is not the row's turn-2 forced-continuation agreement ${multiTurn.agreement}`);
   }
@@ -446,6 +472,13 @@ function repeatQualityMetrics(receipt, fixtures, repeat) {
     exactKeys(turns, ["candidate", "reference"], `repeat ${repeat} multi-turn turns`);
     for (const arm of ["candidate", "reference"]) {
       validateMultiTurnTurns(object(turns[arm], `repeat ${repeat} ${arm} turns`), `repeat ${repeat} ${arm}`);
+    }
+    // The receipt's per-turn records are the primary repeat's sealed ones.
+    if (repeat === 0 && canonicalJson(turns) !== canonicalJson(receipt.quality.multiTurnCache)) {
+      fail("receipt multiTurnCache is not the primary repeat's sealed turn records");
+    }
+    if (canonicalJson(cache.forcedPass ?? null) !== canonicalJson(receipt.quality.multiTurnForcedPass ?? null)) {
+      fail(`repeat ${repeat} multi-turn forced-pass turn records are not the receipt's`);
     }
     if (!Array.isArray(kernel.parityErrors) || kernel.parityErrors.length === 0
       || kernel.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
@@ -1637,6 +1670,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
       "statistics", "fixtureEvidence", "qualityGate", "forcedContinuation",
       "multiTurnPromptCacheMethod", "multiTurnFreeRunningFirstDivergence",
       "multiTurnMatchedPrefixTokens", "multiTurnCache", "multiTurnForcedContinuation",
+      "multiTurnForcedPass",
     ],
     "quality",
   );
@@ -2100,9 +2134,10 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
   // A compressed row's kernel and multi-turn evidence also carry their forced continuations.
   exactKeys(
     artifact.evidence,
-    ["kernel-fp32-reference", "multi-turn-prompt-cache"].includes(fixture)
-      && Object.hasOwn(artifact.evidence, "forcedContinuation")
-      ? [...requiredEvidence, "forcedContinuation"] : requiredEvidence,
+    fixture === "kernel-fp32-reference" && Object.hasOwn(artifact.evidence, "forcedContinuation")
+      ? [...requiredEvidence, "forcedContinuation"]
+      : fixture === "multi-turn-prompt-cache" ? [...requiredEvidence, "forcedContinuation", "forcedPass"]
+        : requiredEvidence,
     `fixture artifact ${fixture}.evidence`,
   );
   if (fixture === "multi-turn-prompt-cache") {
@@ -2120,6 +2155,12 @@ export function validateFixtureArtifact(artifact, fixture, sourceRow) {
     exactKeys(turns, ["candidate", "reference"], `fixture artifact ${fixture}.turns`);
     for (const arm of ["candidate", "reference"]) {
       validateMultiTurnTurns(object(turns[arm], `fixture artifact ${fixture}.turns.${arm}`), `fixture artifact ${fixture} ${arm}`);
+    }
+    if (Object.hasOwn(artifact.evidence, "forcedContinuation") !== Object.hasOwn(artifact.evidence, "forcedPass")) {
+      fail(`fixture artifact ${fixture} seals a turn-2 forced continuation with both sessions' turn records`);
+    }
+    if (Object.hasOwn(artifact.evidence, "forcedPass")) {
+      validateMultiTurnForcedPass(object(artifact.evidence.forcedPass, `fixture artifact ${fixture}.forcedPass`), `fixture artifact ${fixture}.forcedPass`);
     }
   }
   // Both arms' tool/needle behaviour is recorded as raw observation, never as a pass flag.

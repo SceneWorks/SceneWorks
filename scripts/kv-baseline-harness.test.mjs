@@ -101,13 +101,14 @@ function multiTurnForcedContinuation(matches=FORCED_CONTINUATION_TOKENS, tokens=
   return {...forcedContinuation(matches,tokens),method:"dense-kv-same-weights-turn-2-prompt-cache-hit-greedy-continuation-eos-ignored-teacher-forced",candidateChoicesSha256:sha256(`turn-2-choices-${matches}`)};
 }
 // Both arms' multi-turn prompt-cache records: turn 1 misses, turn 2 reuses turn 1's prefix.
-const MULTI_TURN_TURNS={turn1:{promptTokens:40,cacheHit:false,reusedPrefixTokens:0},turn2:{promptTokens:70,cacheHit:true,reusedPrefixTokens:45}};
+const MULTI_TURN_TURNS={turn1:{promptTokens:40,promptSha256:"1".repeat(64),cacheHit:false,reusedPrefixTokens:0},turn2:{promptTokens:70,promptSha256:"2".repeat(64),cacheHit:true,reusedPrefixTokens:45}};
+const MULTI_TURN_FORCED_PASS={reference:MULTI_TURN_TURNS,candidate:MULTI_TURN_TURNS};
 const MULTI_TURN_QUALITY={multiTurnPromptCacheMethod:MULTI_TURN_PROMPT_CACHE_METHOD,multiTurnFreeRunningFirstDivergence:null,multiTurnMatchedPrefixTokens:8,multiTurnCache:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};
 // Compressed quality records its forced continuations and the gate of its receipt-level values
 // (every repeat measured the same values).
 function gatedQuality(mode, quality, continuation=forcedContinuation(), multiTurn=multiTurnForcedContinuation()) {
   if (mode !== "compressed") return quality;
-  const gated={...quality,greedyTokenAgreement:continuation.agreement,greedyTokenAgreementByRepeat:Array(5).fill(continuation.agreement),forcedContinuation:continuation,multiTurnPromptCache:multiTurn.agreement,multiTurnForcedContinuation:multiTurn};
+  const gated={...quality,greedyTokenAgreement:continuation.agreement,greedyTokenAgreementByRepeat:Array(5).fill(continuation.agreement),forcedContinuation:continuation,multiTurnPromptCache:multiTurn.agreement,multiTurnForcedContinuation:multiTurn,multiTurnForcedPass:MULTI_TURN_FORCED_PASS};
   return {...gated,qualityGate:qualityGateFromRepeats(Array(5).fill(gated))};
 }
 function fixture(mode="dense", coordinate={}, extra={}) {
@@ -152,7 +153,7 @@ function artifactFixture(raw,name,repeat=0,{includeModel=false}={}) {
       : name === "long-context-needle"
         ? {matches:1,total:1,candidateRecovered:true,referenceRecovered:true,outputsMatch:true,discriminating:true}
         : {...(raw.quality.multiTurnForcedContinuation
-          ? {matches:raw.quality.multiTurnForcedContinuation.matches,total:raw.quality.multiTurnForcedContinuation.tokens,forcedContinuation:raw.quality.multiTurnForcedContinuation}
+          ? {matches:raw.quality.multiTurnForcedContinuation.matches,total:raw.quality.multiTurnForcedContinuation.tokens,forcedContinuation:raw.quality.multiTurnForcedContinuation,forcedPass:raw.quality.multiTurnForcedPass}
           : {matches:1,total:1}),method:MULTI_TURN_PROMPT_CACHE_METHOD,freeRunningFirstDivergence:null,matchedPrefixTokens:8,turns:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};
   const probe = raw.timings.compileAttribution.probeEvidence[Math.min(repeat,raw.timings.compileAttribution.probeEvidence.length-1)];
   return {
@@ -192,7 +193,7 @@ async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceSha
   await writeFile(model, "weights");
   const raw = fixture(mode, coordinate);
   if (continuation) {
-    const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, ...measured } = raw.quality;
+    const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, multiTurnForcedPass: _pass, ...measured } = raw.quality;
     raw.quality = gatedQuality(mode, measured, continuation);
   }
   for (const key of ["schemaVersion", "harnessVersion", "contractHash", "receiptSha256"]) delete raw[key];
@@ -639,7 +640,7 @@ test("contract v4 gates compressed quality only against the same-weights dense-K
   // Dense rows are characterization: a needle/tool miss is recorded, never rejected, but not hidden.
   assert.doesNotThrow(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0,needleDiscriminating:false,structuredToolAgreement:0}}));
   assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,needleRetrieval:0}}),/needle discrimination/);
-  const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, ...compressedQuality } = fixture("compressed").quality;
+  const { qualityGate: _gate, forcedContinuation: _forced, multiTurnForcedContinuation: _turn2, multiTurnForcedPass: _pass, ...compressedQuality } = fixture("compressed").quality;
   assert.throws(()=>fixture("dense",{}, {quality:compressedQuality}),/contract v3 denominator/);
   // A dense row is characterization: it can carry neither a gate nor a forced continuation.
   assert.throws(()=>fixture("dense",{}, {quality:{...fixture().quality,qualityGate:{passed:true,failures:[]}}}),/schema validation failed/);
@@ -1202,6 +1203,13 @@ test("SC-20671 compressed quality misses are recorded as a failed gate, never a 
   assert.throws(() => sealedRepeatQualityMetrics(clean, sealed.map((fixtures, repeat) => repeat === 1
     ? { ...fixtures, "kernel-fp32-reference": { ...fixtures["kernel-fp32-reference"], evidence: { ...fixtures["kernel-fp32-reference"].evidence, forcedContinuation: forcedContinuation(1000) } } }
     : fixtures)), /repeat 1 kernel fixture forced continuation is not the receipt's/);
+  // The receipt's multiTurnCache and forced-pass records are the sealed artifacts' own.
+  const otherTurns = { ...MULTI_TURN_TURNS, turn2: { ...MULTI_TURN_TURNS.turn2, reusedPrefixTokens: 46 } };
+  const cacheEdit = (repeat, edit) => sealed.map((fixtures, index) => index === repeat
+    ? { ...fixtures, "multi-turn-prompt-cache": { ...fixtures["multi-turn-prompt-cache"], evidence: edit({ ...fixtures["multi-turn-prompt-cache"].evidence }) } }
+    : fixtures);
+  assert.throws(() => sealedRepeatQualityMetrics(clean, cacheEdit(0, (e) => ({ ...e, turns: { candidate: otherTurns, reference: MULTI_TURN_TURNS } }))), /receipt multiTurnCache is not the primary repeat's sealed turn records/);
+  assert.throws(() => sealedRepeatQualityMetrics(clean, cacheEdit(2, (e) => ({ ...e, forcedPass: { reference: otherTurns, candidate: otherTurns } }))), /repeat 2 multi-turn forced-pass turn records are not the receipt's/);
   assert.throws(() => validateSealedQualityGate(clean, [0, 1, 2, 3, 4].map((repeat) => ({ ...repeats[0], parityMaxError: repeat === 2 ? 0.5 : 0 }))), /kernel parity failed: metric=parityMaxError value=0\.5 .*repeat=2/);
   assert.equal(campaignQualityGatePassed([clean, clean]), true);
   assert.equal(campaignQualityGatePassed([clean, miss]), false);
@@ -1266,6 +1274,15 @@ test("contract v4 multiTurnPromptCache is teacher-forced on a cache-hit turn 2",
   // Both arms' turn 2 must have been served by the prompt-cache hit.
   const missed = { ...MULTI_TURN_TURNS, turn2: { ...MULTI_TURN_TURNS.turn2, cacheHit: false, reusedPrefixTokens: 0 } };
   assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnCache: { candidate: MULTI_TURN_TURNS, reference: missed } } }), /did not serve turn 2/);
+  // The forced pass must be sealed, over one turn-2 prompt shared by both sessions and the fixture.
+  const { multiTurnForcedPass: _unsealed, ...unsealedPass } = compressed.quality;
+  assert.throws(() => fixture("compressed", {}, { quality: unsealedPass }), /schema validation|no turn records/);
+  const otherPrompt = { ...MULTI_TURN_TURNS, turn2: { ...MULTI_TURN_TURNS.turn2, promptSha256: "3".repeat(64) } };
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnForcedPass: { reference: MULTI_TURN_TURNS, candidate: otherPrompt } } }), /turn-2 prompts differ/);
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnForcedPass: { reference: otherPrompt, candidate: otherPrompt } } }), /not the multi-turn fixture's same-weights turn-2 prompt/);
+  assert.throws(() => fixture("compressed", {}, { quality: { ...compressed.quality, multiTurnCache: { candidate: otherPrompt, reference: MULTI_TURN_TURNS } } }), /not the multi-turn fixture's same-weights turn-2 prompt/);
+  // The multi-turn continuation is never shortened, even on a fit-boundary row.
+  assert.throws(() => fixture("compressed", {}, { quality: gatedQuality("compressed", measured, forcedContinuation(), multiTurnForcedContinuation(300, 300)) }), /schema validation|forced continuation evidence is inconsistent/);
   // Dense rows carry no turn-2 forced continuation; a v3-contract receipt is refused outright.
   assert.throws(() => fixture("dense", {}, { quality: { ...fixture().quality, multiTurnForcedContinuation: multiTurnForcedContinuation() } }), /schema validation/);
   const v3 = structuredClone(fixture());
