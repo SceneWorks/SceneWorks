@@ -15227,6 +15227,269 @@ async fn the_seedvr2_upscale_mux_keeps_every_frame_for_short_long_vfr_and_absent
     assert_eq!(checked, 4, "all four source shapes must be exercised");
 }
 
+/// Probe `path` with the production SeedVR2 probe command and read back its frame count and timing.
+async fn seedvr2_measure(path: &Path) -> (u64, Seedvr2Timing) {
+    let stderr =
+        crate::media_jobs::run_ffmpeg_capture_stderr(seedvr2_source_probe_args(path), None)
+            .await
+            .expect("the SeedVR2 probe command");
+    let probe = parse_seedvr2_source_probe(&stderr).expect("a frame count and geometry");
+    let timing =
+        parse_seedvr2_source_timing(&stderr, probe.frame_count).expect("a readable frame timing");
+    (probe.frame_count, timing)
+}
+
+/// The decoded length of `path`'s first audio stream, off ffmpeg's final `time=` (centiseconds).
+fn probe_audio_seconds(path: &Path) -> Option<f64> {
+    let program = std::env::var("SCENEWORKS_FFMPEG")
+        .ok()
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| "ffmpeg".to_owned());
+    let out = std::process::Command::new(program)
+        .args([
+            "-hide_banner",
+            "-nostdin",
+            "-i",
+            &path.display().to_string(),
+            "-map",
+            "0:a:0",
+            "-f",
+            "null",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let hms = stderr.rsplit("time=").next()?.split_whitespace().next()?;
+    let mut parts = hms.split(':');
+    let h: f64 = parts.next()?.parse().ok()?;
+    let m: f64 = parts.next()?.parse().ok()?;
+    let s: f64 = parts.next()?.parse().ok()?;
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
+/// Run the production SeedVR2 timing path over a real `source` clip with the engine replaced by an
+/// identity "upscale": the probe command, the decode command, the renumbering the stream does (the
+/// decode writes `in_%05d.png` from 1, the engine side writes `frame_%05d.png` from 0),
+/// `encode_seedvr2_stream`, and the source-audio mux. Returns the source's measured timing, its frame
+/// count and the muxed output.
+async fn seedvr2_identity_round_trip(dir: &Path, source: &Path) -> (Seedvr2Timing, usize, PathBuf) {
+    let (frame_count, timing) = seedvr2_measure(source).await;
+    let count = frame_count as usize;
+    let decoded = dir.join("decoded");
+    let frames = dir.join("frames");
+    std::fs::create_dir_all(&decoded).expect("decode dir");
+    std::fs::create_dir_all(&frames).expect("frames dir");
+    run_ffmpeg(seedvr2_source_decode_args(source, &decoded), None)
+        .await
+        .expect("the SeedVR2 decode command");
+    for index in 0..count {
+        std::fs::rename(
+            decoded.join(format!("in_{:05}.png", index + 1)),
+            frames.join(format!("frame_{index:05}.png")),
+        )
+        .expect("the decode writes exactly the probed frames");
+    }
+    assert!(
+        !decoded.join(format!("in_{:05}.png", count + 1)).exists(),
+        "the decode must not write more frames than the probe counted"
+    );
+    let upscaled = dir.join("upscaled.mp4");
+    encode_seedvr2_stream(&upscaled, &frames, count, &timing, None, None)
+        .await
+        .expect("encode_seedvr2_stream");
+    let out = dir.join("out.mp4");
+    run_ffmpeg(
+        seedvr2_audio_mux_args(&upscaled, source, &out, count, &timing),
+        None,
+    )
+    .await
+    .expect("the source-audio mux");
+    (timing, count, out)
+}
+
+/// **sc-24391 AC1/AC2, measured.** An imported clip (no sidecar `fps` exists for one) upscales at its
+/// own exact rate with its own soundtrack still in sync. Before the fix every case here encoded at a
+/// 24 fps fallback: the 29.97 clip came out 25% longer than its audio (MEASURED on the identical
+/// command chain: 299 frames, 12.46 s of picture against 10 s of sound).
+///
+/// The output is re-measured with the same probe, so `Constant { 30000, 1001 }` back means every
+/// output frame sits on the exact NTSC grid, not on a rounded 30 (which drifts 0.1%).
+#[tokio::test]
+async fn seedvr2_upscale_keeps_an_imported_clips_exact_rate_and_audio_sync() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping seedvr2_upscale_keeps_an_imported_clips_exact_rate_and_audio_sync: no ffmpeg"
+        );
+        return;
+    }
+    let frames = 48usize;
+    for (rate, num, den) in [
+        ("30000/1001", 30000u64, 1001u64),
+        ("25", 25, 1),
+        ("24", 24, 1),
+    ] {
+        let dir_guard = tempfile::Builder::new()
+            .prefix("sw_seedvr2_timing_")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_guard.path();
+        let picture = frames as f64 * den as f64 / num as f64;
+        let one_frame = den as f64 / num as f64;
+        let source = dir.join("source.mp4");
+        run_ffmpeg(
+            [
+                "ffmpeg".to_owned(),
+                "-nostdin".to_owned(),
+                "-y".to_owned(),
+                "-f".to_owned(),
+                "lavfi".to_owned(),
+                "-i".to_owned(),
+                format!("testsrc=size=64x64:rate={rate}"),
+                "-f".to_owned(),
+                "lavfi".to_owned(),
+                "-t".to_owned(),
+                format!("{picture:.6}"),
+                "-i".to_owned(),
+                "sine=frequency=440:sample_rate=48000".to_owned(),
+                "-map".to_owned(),
+                "0:v".to_owned(),
+                "-map".to_owned(),
+                "1:a".to_owned(),
+                "-frames:v".to_owned(),
+                frames.to_string(),
+                "-c:v".to_owned(),
+                "libx264".to_owned(),
+                "-pix_fmt".to_owned(),
+                "yuv420p".to_owned(),
+                "-c:a".to_owned(),
+                "aac".to_owned(),
+                source.display().to_string(),
+            ]
+            .into(),
+            None,
+        )
+        .await
+        .expect("build the source clip");
+
+        let (timing, count, out) = seedvr2_identity_round_trip(dir, &source).await;
+        assert_eq!(
+            timing,
+            Seedvr2Timing::Constant { num, den },
+            "{rate}: the source's own rate"
+        );
+        assert_eq!(count, frames, "{rate}: every source frame");
+
+        let (out_frames, out_timing) = seedvr2_measure(&out).await;
+        assert_eq!(out_frames, frames as u64, "{rate}: every frame survives");
+        assert_eq!(
+            out_timing,
+            Seedvr2Timing::Constant { num, den },
+            "{rate}: the upscaled clip runs at the source's exact rate"
+        );
+        let video = probe_duration_seconds(&out).expect("a container duration");
+        assert!(
+            (video - picture).abs() < one_frame,
+            "{rate}: the clip is {video} s, the source picture {picture} s"
+        );
+        let audio = probe_audio_seconds(&out).expect("the source audio was muxed");
+        assert!(
+            (audio - video).abs() < one_frame,
+            "{rate}: {audio} s of audio under {video} s of picture"
+        );
+    }
+}
+
+/// **sc-24391 AC3, measured.** A genuinely variable-rate source keeps every frame at its own
+/// timestamp: the upscaled clip, re-measured, has exactly the source's per-frame offsets in the
+/// source's own time base, so its length matches the source's and the soundtrack lines up frame by
+/// frame rather than only at the ends.
+#[tokio::test]
+async fn seedvr2_upscale_keeps_every_frame_of_a_variable_rate_clip_at_its_own_time() {
+    if !ffmpeg_reachable() {
+        eprintln!(
+            "skipping seedvr2_upscale_keeps_every_frame_of_a_variable_rate_clip_at_its_own_time: no ffmpeg"
+        );
+        return;
+    }
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_seedvr2_vfr_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+    let source = dir.join("source.mp4");
+    // The sibling mux test's variable-rate recipe: an irregular subset of a 24 fps clip kept at its
+    // original presentation times.
+    run_ffmpeg(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-y",
+            "-f",
+            "lavfi",
+            "-t",
+            "3.0",
+            "-i",
+            "testsrc=size=64x64:rate=24",
+            "-f",
+            "lavfi",
+            "-t",
+            "3.0",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-map",
+            "0:v",
+            "-map",
+            "1:a",
+            "-vf",
+            "select='not(mod(n,3))+gt(mod(n,17),13)',setpts=PTS-STARTPTS",
+            "-fps_mode",
+            "vfr",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+        ]
+        .iter()
+        .map(|a| (*a).to_owned())
+        .chain(std::iter::once(source.display().to_string()))
+        .collect(),
+        None,
+    )
+    .await
+    .expect("build the variable-rate source clip");
+
+    let (timing, count, out) = seedvr2_identity_round_trip(dir, &source).await;
+    let Seedvr2Timing::Variable { offsets, .. } = &timing else {
+        panic!("the fixture must be variable-rate, or this case proves nothing: {timing:?}");
+    };
+    assert_eq!(offsets.len(), count);
+
+    let (out_frames, out_timing) = seedvr2_measure(&out).await;
+    assert_eq!(out_frames, count as u64, "every frame survives");
+    assert_eq!(
+        out_timing, timing,
+        "every upscaled frame sits at its source frame's exact time"
+    );
+    let picture = timing.picture_seconds(count);
+    let video = probe_duration_seconds(&out).expect("a container duration");
+    let longest_frame = offsets
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .max()
+        .expect("several frames") as f64
+        / match &timing {
+            Seedvr2Timing::Variable { timescale, .. } => *timescale as f64,
+            Seedvr2Timing::Constant { .. } => unreachable!(),
+        };
+    assert!(
+        (video - picture).abs() < longest_frame,
+        "the clip is {video} s, the source picture {picture} s"
+    );
+}
+
 #[tokio::test]
 async fn encode_media_rejects_malformed_raw_frame_before_starting_ffmpeg() {
     let dir_guard = tempfile::Builder::new()
