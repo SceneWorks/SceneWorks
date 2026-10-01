@@ -152,6 +152,31 @@ preflight_runpod_permissions() (
   scratch=""
 )
 
+mode_has_group_or_other_write() {
+  case "$1" in
+    [2367]|*[2367]?|*?[2367]) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+mode_has_sticky_bit() {
+  case "$1" in
+    1???|3???|5???|7???) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+mode_is_private_service() {
+  case "$1" in
+    *[67]00) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+mode_owner_executable() {
+  case "$1" in
+    *[1357]??) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Opt-in ownership setup never repairs existing network permissions. Only absent
 # path components are provisioned; legacy/mixed-owner trees retain the ACL path.
 private_owned_image_home() {
@@ -173,9 +198,9 @@ validate_private_owned_path() (
       [[ "${owner}" == 0 || "${owner}" == "${service_uid}" ]] || return 1
       # Root-owned sticky /tmp protects owned children. Other ancestors must
       # not permit an untrusted identity to rename/replace a managed path.
-      if (( (8#${mode} & 0022) != 0 )); then
+      if mode_has_group_or_other_write "${mode}"; then
         [[ "${parent}" == /tmp && "${owner}" == 0 ]] &&
-          (( (8#${mode} & 01000) != 0 )) || return 1
+          mode_has_sticky_bit "${mode}" || return 1
       fi
       timeout --signal=KILL 5 setpriv --reuid="${service_uid}" --regid="${service_gid}" \
         --clear-groups --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
@@ -189,7 +214,7 @@ validate_private_owned_path() (
       resolved="$(realpath -e -- "${path}")" || return 1
       inside=0
       for root in "${private_owned_roots[@]}"; do
-        case "${resolved}" in "${root}"/*) inside=1 ;; esac
+        if [[ "${resolved}" == "${root}/"* ]]; then inside=1; fi
       done
       [[ "${inside}" == 1 && -f "${resolved}" ]] || return 1
       path="${resolved}"
@@ -197,8 +222,8 @@ validate_private_owned_path() (
     [[ -d "${path}" || -f "${path}" ]] || return 1
     read -r owner mode < <(stat -c '%u %a' -- "${path}") || return 1
     [[ "${owner}" == "${service_uid}" ]] &&
-      (( (8#${mode} & 0077) == 0 && (8#${mode} & 0600) == 0600 )) || return 1
-    [[ ! -d "${path}" ]] || (( (8#${mode} & 0100) != 0 )) || return 1
+      mode_is_private_service "${mode}" || return 1
+    [[ ! -d "${path}" ]] || mode_owner_executable "${mode}" || return 1
   done
 )
 
@@ -310,8 +335,9 @@ initialize_private_owned_paths() (
     while IFS=' ' read -r -a mount_fields; do
       target="${mount_fields[4]}"
       printf -v target '%b' "${target//\\/\\0}" || return 1
-      case "${target}" in "${dir}"/*)
-        preflight_private_owned_permissions "${target}" || return 1 ;; esac
+      if [[ "${target}" == "${dir}/"* ]]; then
+        preflight_private_owned_permissions "${target}" || return 1
+      fi
     done < /proc/self/mountinfo
     # Actual existing-file opens do not change content. Pipefail also rejects a
     # failed tree walk rather than treating an empty producer as verified data.
@@ -394,9 +420,12 @@ initialize_runpod_service() {
     fi
   done
   local strategy="${SCENEWORKS_PERMISSION_STRATEGY:-acl}"
-  case "${strategy}" in acl|private-owned) ;; *)
-    log "SCENEWORKS_PERMISSION_STRATEGY must be acl or private-owned"
-    return 1 ;; esac
+  case "${strategy}" in
+    acl|private-owned) ;;
+    *)
+      log "SCENEWORKS_PERMISSION_STRATEGY must be acl or private-owned"
+      return 1 ;;
+  esac
   command -v setpriv >/dev/null || return 1
   if [[ "${strategy}" == acl ]]; then
   command -v setfacl >/dev/null || {
