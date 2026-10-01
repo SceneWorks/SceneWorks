@@ -201,6 +201,11 @@ const FIXTURE_SOURCES = Symbol("fixtureSources");
 // Quality contract v3: the only denominator of a compressed receipt's quality gate.
 const COMPRESSED_QUALITY_REFERENCE = "dense-kv-same-weights";
 const RUNTIME_GUARDED_ADMISSION = "runtime-guarded";
+// Mirrors inference campaign_supervisor::ESTIMATE_PLUS_RESERVE_RULE: a row starts only when host
+// available memory covers its estimated peak plus the reserve; a row without a static estimate
+// falls back to its cap (CAP_FALLBACK_ESTIMATE_SOURCE).
+const ESTIMATE_PLUS_RESERVE_RULE = "estimate-plus-reserve-v1";
+const CAP_FALLBACK_ESTIMATE_SOURCE = "child-footprint-cap-fallback";
 const DISCRIMINATION_FIELDS = ["needleDiscriminating", "toolDiscriminating"];
 const DISCRIMINATION_FIXTURES = {
   "long-context-needle": "needleDiscriminating",
@@ -1167,8 +1172,8 @@ const HOST_MEMORY_COUNTERS = [
 // cache the kernel reclaims without the compressor or swap; anonymous pages are never credited
 // (inactive, anonymous, throttled and active pages are recorded for audit only). File pages
 // another process has mapped count as available; the child's own mapped weights are bounded by its
-// phys_footprint cap. The receipt must recompute exactly and cover cap plus reserve, since the
-// row ran.
+// phys_footprint cap. The receipt must recompute exactly and cover the row's estimate plus the
+// reserve (estimate-plus-reserve-v1), since the row ran.
 function validateHostMemoryComponents(host, requiredBytes) {
   const name = "memory.admission.hostMemoryComponents";
   exactKeys(host, ["metric", "pageSizeBytes", ...HOST_MEMORY_COUNTERS, "reclaimableFilePages", "availableBytes"], name);
@@ -1182,29 +1187,41 @@ function validateHostMemoryComponents(host, requiredBytes) {
     || host.reclaimableFilePages !== reclaimable || host.availableBytes !== available) {
     fail(`${name} do not recompute the admission measure`);
   }
-  if (available < requiredBytes) fail(`${name}.availableBytes is below reserve plus child cap`);
+  if (available < requiredBytes) fail(`${name}.availableBytes is below reserve plus estimate`);
 }
 
 // Every row is admitted by its runtime guards (supervised worker, phys_footprint watchdog cap,
-// host reserve, deadline, sampling); the receipt records the stated cap, the static estimate, and
-// every component of the host measurement the row was admitted on.
+// host reserve, deadline, sampling) under estimate-plus-reserve-v1; the receipt records the rule,
+// the stated cap, the static floor, the admission estimate and its source, and every component of
+// the host measurement the row was admitted on.
 function validateAdmission(admission) {
   exactKeys(
     admission,
-    ["mode", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes", "hostMemoryComponents"],
+    ["mode", "rule", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes",
+      "estimateSource", "estimateBytes", "hostMemoryComponents"],
     "memory.admission",
   );
   if (admission.mode !== RUNTIME_GUARDED_ADMISSION) fail("memory.admission must be runtime-guarded");
-  for (const field of ["childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes"]) {
+  if (admission.rule !== ESTIMATE_PLUS_RESERVE_RULE) fail(`memory.admission.rule must be ${ESTIMATE_PLUS_RESERVE_RULE}`);
+  for (const field of ["childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes", "estimateBytes"]) {
     positiveInteger(admission[field], `memory.admission.${field}`);
   }
+  if (typeof admission.estimateSource !== "string" || admission.estimateSource.length === 0) {
+    fail("memory.admission.estimateSource must name the estimate");
+  }
   if (!Number.isSafeInteger(admission.childFootprintCapBytes + admission.hostFreeReserveBytes)
-    || admission.staticFootprintFloorBytes > admission.childFootprintCapBytes) {
+    || admission.staticFootprintFloorBytes > admission.childFootprintCapBytes
+    || admission.estimateBytes > admission.childFootprintCapBytes) {
     fail("memory.admission estimate exceeds the stated child cap");
+  }
+  if (admission.estimateBytes < admission.staticFootprintFloorBytes
+    || (admission.estimateSource === CAP_FALLBACK_ESTIMATE_SOURCE
+      && admission.estimateBytes !== admission.childFootprintCapBytes)) {
+    fail("memory.admission estimate contradicts its static floor or cap fallback");
   }
   validateHostMemoryComponents(
     admission.hostMemoryComponents,
-    admission.childFootprintCapBytes + admission.hostFreeReserveBytes,
+    admission.estimateBytes + admission.hostFreeReserveBytes,
   );
 }
 

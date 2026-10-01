@@ -136,7 +136,7 @@ function fixture(mode="dense", coordinate={}, extra={}) {
     provenance:{sceneWorksRepository:"github.com/SceneWorks/SceneWorks",inferenceRepository:"github.com/SceneWorks/inference",sceneWorksRevision:"a".repeat(40),inferenceRevision:"b".repeat(40),mlxVersion:"0.25.8",mlxSource:"git+https://github.com/michaeltrefry/mlx-rs?rev="+"1".repeat(40)+"#"+"1".repeat(40),mlxRevision:"1".repeat(40),dependencyLockSha256:"e".repeat(64),os:"macOS",xcode:"Xcode",hardware:"Apple",modelId:sealedModelId(family,"candidate","d".repeat(64)),modelFileSha256:"d".repeat(64),modelFileBytes:1000,referenceModelId:sealedModelId(family,"reference","9".repeat(64)),referenceModelSha256:"9".repeat(64),referenceModelBytes:2000,powerMode:"automatic",thermalState:"nominal",hostStates:[hostState("row-start","2026-08-29T11:59:59.000Z"),hostState("row-end","2026-08-29T12:00:09.000Z")],thermalChangedDuringRow:false,powerModeChangedDuringRow:false,commandTemplate:"runner --mode {mode}",command:"runner --mode "+mode,campaignSessionId, campaignCacheStateVersion:2,coordinateOperationSha256:"f".repeat(64)},
     matrix,
     geometry:{batch,queryHeads:8,kvHeads:8,headDimension:128,queryLength:1,kvLength:capacity,layers:2,elementBytes:2,capacity,contextWindowTokens,contextTargetTokens,contextPayloadTokens:contextTargetTokens},
-  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0,mlxActiveResidualBytes:0,mlxCacheResidualBytes:0},admission:{mode:"runtime-guarded",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)},denseKvShareBps:0,belowMemoryMaterialShare:false},
+  memory:{modelWeightsBytes:1000,persistentKvBytes:persistent,transientWorkspaceBytes:100,denseTheoreticalKvBytes:dense,phaseSamples:memoryPhases(persistent),prefillPeakWindow:{startedAt:"2026-08-29T12:00:01.500Z",baselineActiveBytes:1100,resetPeakBytes:0},allocationEvents:[{kind:"model-weights",role:"weights",lifetime:"persistent",phase:"weights-loaded",timestamp:"2026-08-29T12:00:01.100Z",bytes:1000},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.100Z",bytes:persistent},{kind:"attention-scratch",role:"attention-workspace",lifetime:"transient",phase:"prefill-peak",timestamp:"2026-08-29T12:00:02.200Z",bytes:100},{kind:"kv-cache",role:"cache",lifetime:"persistent",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.100Z",bytes:persistent},{kind:"product-cache_release",role:"cache",lifetime:"released",phase:"decode-steady",timestamp:"2026-08-29T12:00:04.500Z",bytes:persistent}],reconciliation:{expectedDenseKvBytes:dense,observedPersistentKvBytes:persistent,toleranceBytes:0},release:{verified:true,physFootprintToleranceBytes:POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES,mlxActiveToleranceBytes:0,mlxCacheToleranceBytes:0,mlxActiveResidualBytes:0,mlxCacheResidualBytes:0},admission:{mode:"runtime-guarded",rule:"estimate-plus-reserve-v1",childFootprintCapBytes:1<<30,hostFreeReserveBytes:1<<30,staticFootprintFloorBytes:1<<20,estimateSource:"sc20671-static-row-footprint-budget",estimateBytes:1<<20,hostMemoryComponents:hostMemoryFor(2**31)},denseKvShareBps:0,belowMemoryMaterialShare:false},
     timings:{loadMs:12,prefillMs:22,ttftMs:27,firstTokenMs:32,decodeTokensPerSecond:102,coldCompileMs:compileAttribution.firstDispatchExcessMs,warmCompileMs:compileAttribution.steadyDispatchMs,compileAttribution,samples,summary:{decodeTokensPerSecondMean:102,decodeTokensPerSecondP95:104,decodeTokensPerSecondVariance:2,decodeTokensPerSecondCoefficientOfVariation:Math.sqrt(2)/102,confidenceIntervalLow:100,confidenceIntervalHigh:104}},
     quality:gatedQuality(mode,{parityMaxError:0,perplexityDelta:-0.1,greedyTokenAgreement:1,greedyAgreementMethod:GREEDY_AGREEMENT_METHOD,freeRunningFirstDivergence:null,greedyTokenAgreementByRepeat:[1,1,1,1,1],structuredToolAgreement:1,needleRetrieval:1,needleDiscriminating:true,toolDiscriminating:true,multiTurnPromptCache:1,...MULTI_TURN_QUALITY,statistics:{repeats:5,warmups:2,confidenceInterval:"95% bootstrap",outlierPolicy:"report all samples; no silent deletion",variancePolicy:"all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",maxCoefficientOfVariation:0.05},fixtureEvidence:Object.fromEntries(qualityFixtures.map(f=>{const artifactName=`fixtures/${f}.json`,artifactSha256="f".repeat(64);return [f,{passed:true,artifactName,artifactSha256,artifactSidecarSha256:sha256(`${artifactSha256}  ${artifactName}\n`),independentReference:mode==="compressed"?sameWeightsFixtureReference(f,"d".repeat(64)):"ref"}];}))}),lifecycle,cancellation:{cleanupVerified:true},warmup:{required:matrix.processTemperature==="warm",completed:matrix.processTemperature==="warm",workerPid:9,suiteSha256:warmupSuiteSha256,sessionId:matrix.processTemperature==="warm"?campaignSessionId:"",cacheStateVersion:matrix.processTemperature==="warm"?1:0},...(mode==="compressed"?{compression:compressionFixture({persistent,kvLength:capacity})}:{}),...extra}));
 }
@@ -204,7 +204,8 @@ async function verifiedFixture(root, mode="dense", coordinate={}, { inferenceSha
       childFootprintCapBytes: policy.childFootprintCapBytes,
       hostFreeReserveBytes: policy.hostFreeReserveBytes,
       staticFootprintFloorBytes: Math.min(raw.memory.admission.staticFootprintFloorBytes, policy.childFootprintCapBytes),
-      hostMemoryComponents: hostMemoryFor(policy.childFootprintCapBytes + policy.hostFreeReserveBytes),
+      estimateBytes: Math.min(raw.memory.admission.estimateBytes, policy.childFootprintCapBytes),
+      hostMemoryComponents: hostMemoryFor(Math.min(raw.memory.admission.estimateBytes, policy.childFootprintCapBytes) + policy.hostFreeReserveBytes),
     };
   }
   raw.warmup.workerPid = pid;
@@ -654,7 +655,33 @@ test("rows record runtime-guarded admission with the stated cap and estimate",()
   assert.ok(admission);
   assert.throws(()=>fixture("dense",{}, {memory:unadmitted}),/schema validation|memory/);
 });
-test("admission records the macOS host measurement, which must recompute and cover cap plus reserve",()=>{
+test("rows record the estimate-plus-reserve decision and refuse records lacking it",()=>{
+  const memory=fixture().memory,admission=memory.admission;
+  assert.equal(admission.rule,"estimate-plus-reserve-v1");
+  const withAdmission=(changes)=>({memory:{...memory,admission:{...admission,...changes}}});
+  for (const field of ["rule","estimateSource","estimateBytes"]) {
+    const {[field]:_omitted,...missing}=admission;
+    assert.throws(()=>fixture("dense",{}, {memory:{...memory,admission:missing}}),/schema validation|memory\.admission/,field);
+  }
+  for (const changes of [
+    {rule:"cap-plus-reserve"},
+    {estimateSource:""},
+    {estimateBytes:admission.staticFootprintFloorBytes-1},
+    {estimateBytes:admission.childFootprintCapBytes+1},
+    // the cap fallback must be the cap itself
+    {estimateSource:"child-footprint-cap-fallback"},
+  ]) assert.throws(()=>fixture("dense",{}, withAdmission(changes)),/schema validation|memory\.admission/,JSON.stringify(changes));
+  // Exactly estimate plus reserve is admitted; one page less is not, although both are far below
+  // the former cap plus reserve. The cap fallback needs cap plus reserve.
+  const required=admission.estimateBytes+admission.hostFreeReserveBytes;
+  fixture("dense",{}, withAdmission({hostMemoryComponents:hostMemoryFor(required)}));
+  assert.ok(hostMemoryFor(required).availableBytes<admission.childFootprintCapBytes+admission.hostFreeReserveBytes);
+  assert.throws(()=>fixture("dense",{}, withAdmission({hostMemoryComponents:hostMemoryFor(required-16384)})),/below reserve plus estimate/);
+  const fallback={estimateSource:"child-footprint-cap-fallback",estimateBytes:admission.childFootprintCapBytes};
+  assert.throws(()=>fixture("dense",{}, withAdmission({...fallback,hostMemoryComponents:hostMemoryFor(required)})),/below reserve plus estimate/);
+  fixture("dense",{}, withAdmission({...fallback,hostMemoryComponents:hostMemoryFor(admission.childFootprintCapBytes+admission.hostFreeReserveBytes)}));
+});
+test("admission records the macOS host measurement, which must recompute and cover estimate plus reserve",()=>{
   const memory=fixture().memory,host=memory.admission.hostMemoryComponents;
   assert.equal(host.metric,"darwin-vm-stat-available-v3");
   const withHost=(changes)=>({memory:{...memory,admission:{...memory.admission,hostMemoryComponents:{...host,...changes}}}});
@@ -677,9 +704,9 @@ test("admission records the macOS host measurement, which must recompute and cov
     // speculative counted twice: file-backed not reduced by the speculative pages inside it
     {speculativePages:40,inactivePages:100,fileBackedPages:100,reclaimableFilePages:100,availableBytes:host.availableBytes+140*host.pageSizeBytes},
   ]) assert.throws(()=>fixture("dense",{}, withHost(changes)),/schema validation|hostMemoryComponents/);
-  // A measurement below cap plus reserve is not an admitted row.
-  const short=hostMemoryFor(2**31-16384);
-  assert.throws(()=>fixture("dense",{}, {memory:{...memory,admission:{...memory.admission,hostMemoryComponents:short}}}),/below reserve plus child cap/);
+  // A measurement below estimate plus reserve is not an admitted row.
+  const short=hostMemoryFor(memory.admission.estimateBytes+memory.admission.hostFreeReserveBytes-16384);
+  assert.throws(()=>fixture("dense",{}, {memory:{...memory,admission:{...memory.admission,hostMemoryComponents:short}}}),/below reserve plus estimate/);
 });
 test("fixture outcomes are bound to the same weights and re-derived, and flags AND across repeats",()=>{
   const dense=fixture(),compressed=fixture("compressed");

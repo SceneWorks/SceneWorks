@@ -223,11 +223,14 @@ pages are never credited. Known limitation: file pages another process has
 mapped count as available; the child's own mapped weights are bounded by its
 `phys_footprint` cap. The live watchdog compares the same
 available measure with the reserve, so page cache alone never aborts a row. Each receipt records
-`memory.admission` (`runtime-guarded`, the stated cap, reserve, the static
-estimate, and `hostMemoryComponents`: every `vm_stat` component (including the audit-only inactive, anonymous, throttled and active pages) and the derived
+`memory.admission` (`runtime-guarded`, `rule: estimate-plus-reserve-v1`, the stated cap,
+reserve, the static floor, the admission `estimateSource`/`estimateBytes` -- at least the floor,
+at most the cap, and exactly the cap for `child-footprint-cap-fallback` -- and
+`hostMemoryComponents`: every `vm_stat` component (including the audit-only inactive, anonymous, throttled and active pages) and the derived
 file-cache credit and available bytes); the reader recomputes the measure and
-requires it to cover cap plus reserve, and requires that cap and reserve to equal
-the captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as
+requires it to cover the row's estimate plus the reserve (the rule the inference supervisor
+admitted the row on; its cap and reserve watchdogs still abort a row that outgrows the
+estimate), and requires that cap and reserve to equal the captured safety policy. A pre-spawn refusal, watchdog abort, or failed worker is written as
 a sealed `logs/<row>.attempt-<n>.unaccepted.json` record with its reason and is
 never an accepted row.
 
