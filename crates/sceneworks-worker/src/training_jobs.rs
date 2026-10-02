@@ -1417,7 +1417,8 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
 /// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
 /// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
 /// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
-/// load at Bf16 or it dies at load.
+/// load at Bf16 or it dies at load. The engine id is shared by the MLX and Candle (sc-24160) 2.1
+/// trainers, so the one rule covers both native backends.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1592,7 +1593,8 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
 /// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
-/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and both Wan A14B MoE variants. The dense
+/// candle-trainable big-DiT families: Z-Image, LTX-2.3, both Wan A14B MoE variants, and Qwen Image
+/// 2.1 (sc-24160). The dense
 /// Wan TI2V-5B trainer can honor the submitted value and is not forced. Krea 2 Raw is a 12B DiT
 /// (epic 7565 P4, sc-8614) —
 /// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
@@ -1615,6 +1617,9 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
             plan.target.base_model.as_str(),
             "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b"
         ),
+        // Qwen Image 2.1 (sc-24160) trains LoRA/LoKr over its dense bf16 multi-billion-parameter
+        // MMDiT — the same frozen-weight-gradient OOM class, so force checkpointing on.
+        "qwen_image_2_1_lora" => true,
         _ => false,
     }
 }
@@ -1858,8 +1863,8 @@ pub(crate) async fn run_training_execution(
     //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
-    // forces gradient checkpointing on for them (Z-Image and both Wan A14B variants) regardless of
-    // the plan value.
+    // forces gradient checkpointing on for them (see `candle_requires_gradient_checkpointing`)
+    // regardless of the plan value.
     // On macOS this is the identity. See its doc comment for the why.
     let sample_config = prepared_run.request.config.clone();
     let total_steps = prepared_run.request.config.steps;
@@ -1888,6 +1893,7 @@ pub(crate) async fn run_training_execution(
             // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
             // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
             // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
+            // Qwen Image 2.1 is pinned to Bf16 on BOTH native backends (`training_load_precision`).
             let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
             let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
             spec.precision = load_precision;
@@ -3330,6 +3336,27 @@ mod tests {
         ));
         let ltx = finalize_training_config(map_training_config(&ltx_plan.config), &ltx_plan);
         assert_eq!(ltx.train_dtype, "f32", "candle LTX training requires f32");
+        // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
+        // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
+        // left alone (unlike LTX's f32 normalization).
+        for network_type in ["lora", "lokr"] {
+            let mut value = plan_json(
+                dir.path(),
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1",
+                network_type,
+                &[&image],
+            );
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
+            value["config"]["advanced"]["mixedPrecision"] = json!("bf16");
+            let plan = parse(value);
+            let config = finalize_training_config(map_training_config(&plan.config), &plan);
+            assert!(
+                config.gradient_checkpointing,
+                "Qwen Image 2.1 {network_type} forces gradient checkpointing on candle"
+            );
+            assert_eq!(config.train_dtype, "bf16", "{network_type}");
+        }
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
             !finalized_checkpointing("sdxl_lora", "sdxl"),

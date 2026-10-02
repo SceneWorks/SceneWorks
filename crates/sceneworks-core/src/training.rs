@@ -3449,9 +3449,10 @@ pub const QWEN_IMAGE_2_1_LICENSE_URL: &str =
 ///
 /// The `qwen_image_2_1_lora` kernel maps to the engine trainer registered under the inference
 /// generator id of the training base, `qwen_image_2_1` — the convention every native trainer follows
-/// (the worker's `engine_trainer_id_for`). MLX-only for now: the kernel is in
-/// `MLX_ROUTED_TRAINING_KERNELS` + `MLX_ONLY_TRAINING_KERNELS` and NOT the candle set until the
-/// Candle trainer story (sc-24160) moves it.
+/// (the worker's `engine_trainer_id_for`). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` (MLX trainer) and `CANDLE_ROUTED_TRAINING_KERNELS` (Candle trainer,
+/// sc-24160), and stays in the native-only `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses
+/// it. On candle the worker forces gradient checkpointing on (dense-backward OOM class).
 ///
 /// Licensing (E12): the base is governed by the Qwen RESEARCH LICENSE AGREEMENT (non-commercial —
 /// research/evaluation use only) and an adapter trained from it is a derivative that inherits it.
@@ -3530,7 +3531,7 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
         })),
         ui: object(json!({
             "label": "Qwen Image 2.1 LoRA",
-            "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX). Research/evaluation use only under the Qwen RESEARCH licence.",
+            "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
             "recommendedFor": ["character", "style"],
             "datasetModality": "image",
             "license": QWEN_IMAGE_2_1_LICENSE,

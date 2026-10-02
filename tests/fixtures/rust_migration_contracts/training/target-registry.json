@@ -1133,7 +1133,7 @@
       },
       "ui": {
         "datasetModality": "image",
-        "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX). Research/evaluation use only under the Qwen RESEARCH licence.",
+        "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
         "label": "Qwen Image 2.1 LoRA",
         "license": "Qwen RESEARCH LICENSE AGREEMENT",
         "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
