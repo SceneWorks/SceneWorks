@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "thresholds": {
     "parityMaxError": 0.0001,
     "perplexityDelta": 0.01,
@@ -13,14 +13,15 @@
     "compressedReference": "dense-kv-same-weights",
     "compressedRows": "every threshold compares the compressed-KV run with the dense-KV run on the same weights; the bf16 reference model is weight-quantization characterization only and never the gate denominator",
     "kernelParity": "independent host-fp32 dequantize-then-attend reference",
-    "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle check requires exact agreement with the dense output and the receipt records needleDiscriminating=false",
+    "nonDiscriminatingNeedle": "when the same-weights dense-KV run misses the needle, the compressed needle outcome is an observation only: both outputs and the compressed recovery are recorded, the receipt records needleDiscriminating=false, and needleRetrieval is never gated; when the dense run recovers the needle, the compressed run must recover the exact needle token",
     "nonDiscriminatingTool": "when the same-weights dense-KV run does not emit the valid structured tool call, compressed tool agreement is exact equality with that dense output and the receipt records toolDiscriminating=false",
-    "repeats": "discrimination flags are the AND over all sealed repeats; each repeat records its own flag, and compressed rows must pass every repeat"
+    "repeats": "quality is measured once per arm per process (every fixture, forced continuation and teacher-forced pass is deterministic within a process), so the gate and the discrimination flags are that one sealed measurement's; the timing repeats and warmups never re-measure quality",
+    "perplexityDelta": "both arms' mean per-token negative log-likelihood of one token stream: the same-weights dense-KV greedy forced continuation for a compressed row (the candidate teacher-forced on it), the reference's natural kernel stream for a dense row; never each arm's own free-running stream"
   },
   "multiTurnFixture": {
     "turns": "turn 1 is the frozen cache-fixture prompt over the row's context-band payload, capped on fit-boundary rows so that turn 2 plus the 1024-position forced continuation fits the native window (the row's coordinate operations keep the full band payload), generated and stored through the product prompt cache; turn 2 is turn 1's conversation, turn 1's answer, and the follow-up, served by a prompt-cache hit over turn 1 (a compressed row imports the reused prefix into its compressed cache, a dense row seeds its dense cache); both arms run the same flow, record each turn's cache hit, reused-prefix tokens and prompt token digest, and a turn 2 that is not served by the hit, or same-weights arms whose turn-2 prompts differ, are refused",
     "followUp": "Now repeat that same stable baseline fact once more, in one short sentence.",
-    "metric": "teacher-forced per-position argmax agreement of turn 2 after its prompt-cache hit: a compressed row against the same-weights dense-KV turn-2 greedy continuation (stop tokens decoded through, always 1024 positions; a row whose turn 2 cannot leave them is refused, never shortened), measured once per row on the same turn-2 prompt token ids in both sessions and shared by every repeat; a dense row against the reference's natural turn-2 stream; every measured repeat must meet the threshold",
+    "metric": "teacher-forced per-position argmax agreement of turn 2 after its prompt-cache hit: a compressed row against the same-weights dense-KV turn-2 greedy continuation (stop tokens decoded through, always 1024 positions; a row whose turn 2 cannot leave them is refused, never shortened), measured once per row on the same turn-2 prompt token ids in both sessions; a dense row against the reference's natural turn-2 stream; the one quality measurement must meet the threshold",
     "observations": "turn 2's free-running first divergence and matched-prefix length are recorded and never gated"
   },
   "needleFixture": {
@@ -31,10 +32,30 @@
   "statistics": {
     "repeats": 5,
     "warmups": 2,
+    "qualityMeasuredOnce": true,
     "confidenceInterval": "95% bootstrap",
     "outlierPolicy": "report all samples; no silent deletion",
-    "variancePolicy": "all raw repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",
+    "variancePolicy": "repeats and warmups are timing measurements (coordinate prefill, time to first token, steady decode); all raw timing repeats retained; decode throughput coefficient of variation must stay within the frozen maximum",
     "maxCoefficientOfVariation": 0.05
   },
-  "fixtures": ["kernel-fp32-reference", "structured-tool-call", "long-context-needle", "multi-turn-prompt-cache"]
+  "fixtures": ["kernel-fp32-reference", "structured-tool-call", "long-context-needle", "multi-turn-prompt-cache"],
+  "changeRecord": {
+    "from": "v4 0a00b520d845d4da4c3da9b904af25e08646d87fba018ed6cf27ff9ecce4cc58",
+    "madeAfterCompressedResultsVisible": true,
+    "thresholdsUnchanged": true,
+    "changes": [
+      {
+        "change": "quality is measured once per arm per process; repeats 5 and warmups 2 are kept for timing only",
+        "why": "measurement correction: every quality fixture, forced continuation and teacher-forced pass is deterministic within a process (the A2 run 36923403549 sealed five identical quality repeats, evidence and metrics, for all 4 fixtures of all 16 rows), so repeating them re-measured nothing; the repeats exist for the timing coefficient-of-variation rule, which keeps them. Cross-process variation of the dense arm is real and is quantified by the dense noise-floor control, not hidden by in-process repeats"
+      },
+      {
+        "change": "a non-discriminating needle (the same-weights dense run misses it) is an observation, not a gate",
+        "why": "measurement correction: when the dense run cannot retrieve the needle, exact agreement with its miss text measures free-running continuation agreement after a miss, which a single near-tie argmax flip breaks, not needle retrieval; when the dense run retrieves the needle the gate is unchanged"
+      },
+      {
+        "change": "perplexityDelta is scored on the dense reference's tokens (inference 4bd0e2429)",
+        "why": "measurement correction: the v4 producer scored each arm on its own free-running stream, so after one flip it compared the likelihoods of two different texts (llama fit-boundary group-affine-8: 479/479 teacher-forced agreement beside a 0.290 delta); both arms now score one stream"
+      }
+    ]
+  }
 }

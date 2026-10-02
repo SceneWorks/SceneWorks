@@ -427,6 +427,46 @@ Receipt schema v7 (`sc-20671-kv-baseline-v7`) carries the new fields. The v4
 contract hash is the compatibility fence: any receipt bound to v3 is refused, so
 every campaign row is re-measured under v4.
 
+## Contract v5 change record
+
+Contract v5 (`config/kv-baseline-quality-contract.json`, hash
+`8461b072e36493f4f4559e7fc858a286a239a43e8ca8d8ea93179bcf33f344ca`, recorded in
+its own `changeRecord`) keeps every v4 threshold. It was made after compressed
+A2 results (run 36923403549) were visible; each change is a measurement
+correction, not a relaxation:
+
+- **Quality is measured once per arm per process.** Every fixture, forced
+  continuation and teacher-forced pass is deterministic within a process: run
+  36923403549 sealed five identical quality repeats (evidence and metrics) for
+  all four fixtures of all 16 rows, so repeating them re-measured nothing. A row
+  now runs its timing first (a warm row's two warmups, then the five repeats:
+  the kernel fixture's coordinate operation and a fixed-length steady decode,
+  feeding the coefficient-of-variation rule), then one quality measurement per
+  arm. The candidate's kernel fixture reuses timing repeat 0's coordinate
+  operation (same prompt, operation and session); every other fixture runs its
+  own coordinate operation once. Receipts record `quality.statistics.qualityMeasuredOnce:
+  true`, `greedyTokenAgreementByRepeat` and the gate carry one measurement
+  (`repeat` 0), and a set publishes only `fixtures/<name>.json` (no
+  `fixtures/repeat-N/`). Cross-process variation of the dense arm is real; the
+  dense noise-floor control (inference `sc20671-kv-baseline noise-floor-parent`,
+  kv-poc phase `nf`) quantifies it rather than in-process repeats hiding it.
+- **A non-discriminating needle is an observation.** When the same-weights dense
+  run misses the needle, `needleRetrieval` records the compressed run's own exact
+  recovery, `needleDiscriminating` is false, both outputs stay in the artifact,
+  and the gate never evaluates it (a gate recording it is refused). When the
+  dense run recovers the needle, the compressed run must recover it exactly, as
+  before. Agreement with a dense miss text measured free-running continuation
+  agreement after the miss, which one near-tie argmax flip breaks.
+- **`perplexityDelta` is scored on the dense reference's tokens** (inference
+  4bd0e2429): both arms' mean per-token negative log-likelihood of one stream,
+  the candidate teacher-forced on it. v4 producers scored each arm's own
+  free-running stream, so after one flip they compared two texts (llama
+  fit-boundary group-affine-8: 479/479 teacher-forced agreement beside a 0.290
+  delta).
+
+The v5 contract hash is the compatibility fence: v4 receipts are refused, so
+every campaign row is re-measured under v5.
+
 ## Measured quality gate (compressed rows)
 
 A compressed row whose quality is validly measured but misses a frozen

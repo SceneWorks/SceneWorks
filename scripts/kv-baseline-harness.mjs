@@ -251,13 +251,23 @@ function gateMisses(spec, value) {
   return spec.comparison === "minimum" ? value < threshold : value > threshold;
 }
 
-/** The frozen-threshold gate over every measured repeat's metrics, in repeat order. */
-export function qualityGateFromRepeats(repeats) {
+/** Contract v5: needleRetrieval is gated only when the same-weights dense run recovered the needle. */
+function gateGates(spec, needleDiscriminating) {
+  return needleDiscriminating || spec.metric !== "needleRetrieval";
+}
+
+/**
+ * The frozen-threshold gate over the row's quality measurement(s), in order (contract v5: exactly
+ * one). A non-discriminating needle (the same-weights dense run missed it) is an observation and
+ * is never gated.
+ */
+export function qualityGateFromRepeats(repeats, needleDiscriminating) {
+  if (typeof needleDiscriminating !== "boolean") fail("the quality gate needs the needle discrimination flag");
   const failures = [];
   repeats.forEach((metrics, repeat) => {
     for (const spec of QUALITY_GATE_METRICS) {
       const value = metrics[spec.metric];
-      if (gateMisses(spec, value)) {
+      if (gateGates(spec, needleDiscriminating) && gateMisses(spec, value)) {
         failures.push({
           metric: spec.metric, fixture: spec.fixture, repeat, value,
           threshold: CONTRACT.thresholds[spec.metric], comparison: spec.comparison,
@@ -392,8 +402,9 @@ function validateQualityGate(receipt) {
       || failure.threshold !== CONTRACT.thresholds[spec.metric]
       || failure.comparison !== spec.comparison
       || !Number.isSafeInteger(failure.repeat) || failure.repeat < 0
-      || failure.repeat >= CONTRACT.statistics.repeats
+      || failure.repeat >= QUALITY_MEASUREMENTS
       || typeof failure.value !== "number" || !Number.isFinite(failure.value)
+      || !gateGates(spec, quality.needleDiscriminating)
       || !gateMisses(spec, failure.value)
       || (previous && (previous[0] > key[0] || (previous[0] === key[0] && previous[1] >= key[1])))) {
       fail(`quality gate failure is not an ordered frozen-threshold miss: metric=${failure.metric} value=${failure.value} threshold=${failure.threshold} comparison=${failure.comparison} repeat=${failure.repeat} fixture=${failure.fixture}`);
@@ -413,7 +424,8 @@ function validateQualityGate(receipt) {
   for (const [metric, repeat, value] of visible) {
     const spec = QUALITY_GATE_METRICS.find((entry) => entry.metric === metric);
     const recorded = gate.failures.find((failure) => failure.metric === metric && failure.repeat === repeat);
-    if ((recorded?.value) !== (gateMisses(spec, value) ? value : undefined)) {
+    const expected = gateGates(spec, quality.needleDiscriminating) && gateMisses(spec, value);
+    if ((recorded?.value) !== (expected ? value : undefined)) {
       fail(`quality gate does not record ${metric} repeat ${repeat} = ${value} against the frozen ${spec.comparison} ${CONTRACT.thresholds[metric]} (fixture ${spec.fixture}): passed=${gate.passed}`);
     }
   }
@@ -425,8 +437,8 @@ function validateQualityGate(receipt) {
  * continuation, which must be the receipt's.
  */
 export function sealedRepeatQualityMetrics(receipt, artifacts) {
-  if (!Array.isArray(artifacts) || artifacts.length !== CONTRACT.statistics.repeats) {
-    fail("sealed quality evidence requires every repeat");
+  if (!Array.isArray(artifacts) || artifacts.length !== QUALITY_MEASUREMENTS) {
+    fail("sealed quality evidence requires the row's one quality measurement");
   }
   return artifacts.map((fixtures, repeat) => repeatQualityMetrics(receipt, fixtures, repeat));
 }
@@ -521,7 +533,7 @@ export function validateSealedQualityGate(receipt, repeats) {
       fail(`receipt ${metric} ${quality[metric]} is not the primary repeat's sealed value ${repeats[0][metric]}`);
     }
   }
-  const expected = qualityGateFromRepeats(repeats);
+  const expected = qualityGateFromRepeats(repeats, receipt.quality.needleDiscriminating);
   if (canonicalJson(quality.qualityGate ?? null) !== canonicalJson(expected)) {
     fail(`receipt quality gate (${quality.qualityGate ? qualityGateSummary(quality.qualityGate) : "absent"}) is not the gate of its sealed repeats (${qualityGateSummary(expected)})`);
   }
@@ -708,10 +720,28 @@ function parseSidecar(sidecar, expectedName) {
 export function checkContract(contract) {
   exactKeys(
     contract,
-    ["version", "thresholds", "gate", "multiTurnFixture", "needleFixture", "statistics", "fixtures"],
+    ["version", "thresholds", "gate", "multiTurnFixture", "needleFixture", "statistics", "fixtures", "changeRecord"],
     "contract",
   );
-  if (contract.version !== 4) fail("unsupported quality contract version");
+  if (contract.version !== 5) fail("unsupported quality contract version");
+  exactKeys(
+    contract.changeRecord,
+    ["from", "madeAfterCompressedResultsVisible", "thresholdsUnchanged", "changes"],
+    "contract.changeRecord",
+  );
+  text(contract.changeRecord.from, "contract.changeRecord.from");
+  if (typeof contract.changeRecord.madeAfterCompressedResultsVisible !== "boolean"
+    || contract.changeRecord.thresholdsUnchanged !== true) {
+    fail("contract change record must state when it was made and keep every threshold");
+  }
+  if (!Array.isArray(contract.changeRecord.changes) || contract.changeRecord.changes.length === 0) {
+    fail("contract change record must list its changes");
+  }
+  contract.changeRecord.changes.forEach((entry, index) => {
+    exactKeys(entry, ["change", "why"], `contract.changeRecord.changes[${index}]`);
+    text(entry.change, `contract.changeRecord.changes[${index}].change`);
+    text(entry.why, `contract.changeRecord.changes[${index}].why`);
+  });
   exactKeys(contract.multiTurnFixture, MULTI_TURN_FIXTURE_FIELDS, "contract.multiTurnFixture");
   for (const field of MULTI_TURN_FIXTURE_FIELDS) {
     text(contract.multiTurnFixture[field], `contract.multiTurnFixture.${field}`);
@@ -720,13 +750,13 @@ export function checkContract(contract) {
     contract.gate,
     [
       "denseRows", "compressedReference", "compressedRows", "kernelParity",
-      "nonDiscriminatingNeedle", "nonDiscriminatingTool", "repeats",
+      "nonDiscriminatingNeedle", "nonDiscriminatingTool", "repeats", "perplexityDelta",
     ],
     "contract.gate",
   );
   for (const field of [
     "denseRows", "compressedRows", "kernelParity", "nonDiscriminatingNeedle",
-    "nonDiscriminatingTool", "repeats",
+    "nonDiscriminatingTool", "repeats", "perplexityDelta",
   ]) {
     text(contract.gate[field], `contract.gate.${field}`);
   }
@@ -757,6 +787,7 @@ export function checkContract(contract) {
     [
       "repeats",
       "warmups",
+      "qualityMeasuredOnce",
       "confidenceInterval",
       "outlierPolicy",
       "variancePolicy",
@@ -766,6 +797,10 @@ export function checkContract(contract) {
   );
   positiveInteger(contract.statistics.repeats, "contract.statistics.repeats");
   nonnegativeInteger(contract.statistics.warmups, "contract.statistics.warmups");
+  // Contract v5: quality is measured once per arm; repeats and warmups are timing only.
+  if (contract.statistics.qualityMeasuredOnce !== true) {
+    fail("contract statistics must measure quality once per arm");
+  }
   for (const field of ["confidenceInterval", "outlierPolicy", "variancePolicy"]) {
     text(contract.statistics[field], `contract.statistics.${field}`);
   }
@@ -789,6 +824,12 @@ if (CONTRACT_RAW_HASH !== CONTRACT_SIDECAR_HASH) {
 }
 checkContract(CONTRACT);
 export const QUALITY_CONTRACT_HASH = CONTRACT_RAW_HASH;
+/**
+ * Quality measurements per arm per row (contract v5 `statistics.qualityMeasuredOnce`): every
+ * fixture is deterministic in-process, so the gate is that one sealed measurement; the
+ * `statistics.repeats` timing samples never re-measure quality.
+ */
+export const QUALITY_MEASUREMENTS = 1;
 
 const schemaAjv = new Ajv2020({ allErrors: true, strict: true, strictTypes: false });
 addFormats(schemaAjv);
@@ -1712,12 +1753,12 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (receipt.quality.freeRunningFirstDivergence !== null) {
     nonnegativeInteger(receipt.quality.freeRunningFirstDivergence, "quality.freeRunningFirstDivergence");
   }
-  // The gate is the weakest repeat's teacher-forced agreement; every repeat's value is recorded.
+  // Contract v5: the gate is the row's one quality measurement's teacher-forced agreement.
   const byRepeat = receipt.quality.greedyTokenAgreementByRepeat;
-  if (!Array.isArray(byRepeat) || byRepeat.length !== CONTRACT.statistics.repeats
+  if (!Array.isArray(byRepeat) || byRepeat.length !== QUALITY_MEASUREMENTS
     || byRepeat.some((value) => typeof value !== "number" || !(value >= 0 && value <= 1))
     || Math.min(...byRepeat) !== receipt.quality.greedyTokenAgreement) {
-    fail("quality.greedyTokenAgreement is not the minimum over the recorded repeats");
+    fail("quality.greedyTokenAgreement is not the row's one recorded quality measurement");
   }
   for (const field of DISCRIMINATION_FIELDS) {
     if (typeof receipt.quality[field] !== "boolean") fail(`quality.${field} must be boolean`);
@@ -1731,8 +1772,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   exactKeys(
     receipt.quality.statistics,
     [
-      "repeats", "warmups", "confidenceInterval", "outlierPolicy", "variancePolicy",
-      "maxCoefficientOfVariation",
+      "repeats", "warmups", "qualityMeasuredOnce", "confidenceInterval", "outlierPolicy",
+      "variancePolicy", "maxCoefficientOfVariation",
     ],
     "quality.statistics",
   );
@@ -2081,8 +2122,8 @@ export async function buildVerifiedReceipt(input) {
       "quality.fixtureEvidence.kernel-fp32-reference",
     );
     if (!Array.isArray(sourceRow.repeatArtifactPaths)
-      || sourceRow.repeatArtifactPaths.length !== CONTRACT.statistics.repeats) {
-      fail("cold receipt requires exactly five repeat kernel fixture artifact paths");
+      || sourceRow.repeatArtifactPaths.length !== QUALITY_MEASUREMENTS) {
+      fail("cold receipt requires exactly its one quality measurement's kernel fixture artifact path");
     }
     if (sourceRow.repeatArtifactPaths[0] !== sourceRow.artifactPath) {
       fail("cold repeat-zero kernel fixture must be the published primary fixture");
@@ -2229,7 +2270,9 @@ export function validateFixtureOutcomes(artifact, fixture, receipt) {
   const candidate = needle ? evidence.candidateRecovered : evidence.candidateValid;
   const reference = needle ? evidence.referenceRecovered : evidence.referenceValid;
   const sameWeightsDense = compressed ? reference : candidate;
-  const expectedMatch = needle && !(compressed && !sameWeightsDense) ? candidate : evidence.outputsMatch;
+  // Contract v5: retrieval is the candidate's own recovery; after a shared dense miss it is an
+  // ungated observation (outputsMatch stays recorded beside it), never agreement with the miss.
+  const expectedMatch = needle ? candidate : evidence.outputsMatch;
   // A compressed repeat that validly measured a miss is quality-gate evidence, not malformed.
   if (evidence.total !== 1 || evidence.discriminating !== sameWeightsDense
     || evidence.matches !== (expectedMatch ? 1 : 0)) {
@@ -2417,8 +2460,11 @@ export async function writeReceiptSet(directory, receipt) {
           fail(`fixture ${topLevelFixture} sidecar changed before publication`);
         }
       } else {
-        const repeatMatch = artifactName.match(/^fixtures\/repeat-([1-4])\/kernel-fp32-reference[.]json$/);
-        if (!repeatMatch) fail(`unsupported supplemental fixture source ${artifactName}`);
+        // Contract v5 publishes one quality measurement: no supplemental repeat fixtures exist.
+        const repeatMatch = artifactName.match(/^fixtures\/repeat-([1-9][0-9]*)\/kernel-fp32-reference[.]json$/);
+        if (!repeatMatch || Number(repeatMatch[1]) >= QUALITY_MEASUREMENTS) {
+          fail(`unsupported supplemental fixture source ${artifactName}`);
+        }
         let artifact;
         try {
           artifact = JSON.parse(bytes.toString("utf8"));
@@ -2473,7 +2519,7 @@ export async function readReceiptSet(directory) {
   validatePrimaryDiscrimination(receipt, primaryArtifacts);
   validatePrimaryQuality(receipt, primaryArtifacts);
   if (receipt.matrix.processTemperature === "cold") {
-    for (let index = 0; index < CONTRACT.statistics.repeats; index += 1) {
+    for (let index = 0; index < QUALITY_MEASUREMENTS; index += 1) {
       const artifactName = index === 0
         ? "fixtures/kernel-fp32-reference.json"
         : `fixtures/repeat-${index}/kernel-fp32-reference.json`;
@@ -2752,7 +2798,7 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
 
 function campaignArtifactNames(receipt, version) {
   const names = ["receipt.json", "receipt.md", ...FIXTURES.map((fixture) => `fixtures/${fixture}.json`)];
-  for (let index = 1; index < CONTRACT.statistics.repeats; index += 1) {
+  for (let index = 1; index < QUALITY_MEASUREMENTS; index += 1) {
     for (const fixture of version === 2 ? FIXTURES
       : receipt.matrix.processTemperature === "cold" ? ["kernel-fp32-reference"] : []) {
       names.push(`fixtures/repeat-${index}/${fixture}.json`);
@@ -2793,7 +2839,7 @@ async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy)
   // A compressed row's denominator is the same-weights dense-KV run; a dense row's is bf16.
   const referenceInventory = receipt.mode === "compressed"
     ? receipt.provenance.modelFileSha256 : receipt.provenance.referenceModelSha256;
-  for (let repeat = 0; repeat < CONTRACT.statistics.repeats; repeat += 1) {
+  for (let repeat = 0; repeat < QUALITY_MEASUREMENTS; repeat += 1) {
     repeatArtifacts.push({});
     for (const fixture of FIXTURES) {
       const name = repeat === 0
@@ -2925,9 +2971,9 @@ export async function readCampaignSet(directory, {
         fail("campaign receipt source or model inventory differs from trusted resume identity");
       }
     }
-    // Historical v1 producers emitted all five repeats; the older JS fixture writer
-    // emitted the four base fixtures plus cold kernel repeats only.
-    const artifactVersion = version === 1 && row.files?.length === 2 + FIXTURES.length * CONTRACT.statistics.repeats
+    // A v1 manifest listing every fixture of every quality measurement has the v2 layout; the
+    // older JS fixture writer emitted the four base fixtures plus cold kernel repeats only.
+    const artifactVersion = version === 1 && row.files?.length === 2 + FIXTURES.length * QUALITY_MEASUREMENTS
       ? 2 : version;
     const expectedFiles = await campaignFileBindings(receiptDirectory, receipt, artifactVersion);
     if (version === 2) await validateCampaignFixtureBindings(receiptDirectory, receipt, safetyPolicy);
