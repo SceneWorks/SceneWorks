@@ -427,6 +427,19 @@ Receipt schema v7 (`sc-20671-kv-baseline-v7`) carries the new fields. The v4
 contract hash is the compatibility fence: any receipt bound to v3 is refused, so
 every campaign row is re-measured under v4.
 
+## Measurement paths (compressed rows)
+
+`compression.measurementPaths` (additive; absent on receipts produced before inference
+fix/sc-20669 measurement paths) names the KV path each block of a compressed row ran on:
+`memory` (memory, `compression` storage and `persistentKvRepresentation`) and
+`prefillFirstToken` (`timings.prefillMs`, `ttftMs`, `firstTokenMs`) are the coordinate operation
+(`supported-batch` with 2 sequences on a batch row, else `chunked-prefix-reuse` or
+`single-shot-generation`), whose `kvPath` is the row's `persistentKvRepresentation`;
+`decodeTiming` (`timings.decodeTokensPerSecond`, the fixed-length steady decode) and `quality`
+are always one sequence on the compressed reader. A supported-batch row therefore records a
+`dense-fallback` memory path beside a `compressed` decode and quality path. Readers refuse any
+other value.
+
 ## Contract v5 change record
 
 Contract v5 (`config/kv-baseline-quality-contract.json`, hash

@@ -1895,14 +1895,35 @@ const COMPRESSED_KV_METHODS = Object.freeze({
   "group-affine-8": Object.freeze({ bits: 8, representationIdentity: "sc-20676-packed-group-affine-b8-v1" }),
 });
 
+/** Mirrors the inference producer's `receipt_measurement_paths`. */
+export function measurementPaths(matrix, persistentKvRepresentation) {
+  const [operation, sequences] = matrix.requestMode === "supported-batch" ? ["supported-batch", 2]
+    : matrix.prefillMode === "chunked" ? ["chunked-prefix-reuse", 1] : ["single-shot-generation", 1];
+  const coordinate = { kvPath: persistentKvRepresentation, operation, sequences };
+  return {
+    memory: coordinate,
+    prefillFirstToken: coordinate,
+    decodeTiming: { kvPath: "compressed", operation: "steady-decode", sequences: 1 },
+    quality: { kvPath: "compressed", operation: "quality", sequences: 1 },
+  };
+}
+
 function validateCompression(receipt) {
   const compression = receipt.compression;
   exactKeys(compression, [
     "method", "representationIdentity", "representationVersion", "bits", "quantizationGroupSize",
     "kernelGpuFamily", "kernelPaths", "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
     "persistentKvRepresentation", "fusedCalls", "fallbackCalls", "fallbacks",
-    "fullCacheDequantizations", "failedDispatches",
+    "fullCacheDequantizations", "failedDispatches", "measurementPaths",
   ], "compression");
+  // Additive (absent on earlier receipts): the KV path each measurement block ran on. A
+  // supported-batch row's coordinate operation (memory, representation, prefill, first token) is
+  // the dense fallback; its steady decode and quality are single-sequence compressed.
+  if (Object.hasOwn(compression, "measurementPaths")
+    && canonicalJson(compression.measurementPaths) !== canonicalJson(
+      measurementPaths(receipt.matrix, compression.persistentKvRepresentation))) {
+    fail("compression.measurementPaths does not name the KV path each measurement ran on");
+  }
   if (!/^[a-z0-9-]+$/.test(compression.method)) fail("compression.method must be a method identifier");
   text(compression.representationIdentity, "compression.representationIdentity");
   for (const field of ["representationVersion", "bits", "quantizationGroupSize"]) {

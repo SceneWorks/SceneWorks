@@ -7,7 +7,7 @@ import path from "node:path";
 import test from "node:test";
 // Every receipt records the checked-in contract's statistics block verbatim (contract v5).
 const CONTRACT_STATISTICS=JSON.parse(readFileSync("config/kv-baseline-quality-contract.json","utf8")).statistics;
-import { FORCED_CONTINUATION_TOKENS, MULTI_TURN_PROMPT_CACHE_METHOD, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
+import { FORCED_CONTINUATION_TOKENS, MULTI_TURN_PROMPT_CACHE_METHOD, measurementPaths, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
 const run = promisify(execFile);
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
@@ -1022,6 +1022,30 @@ test("allocation accounting fails closed outside the safe integer range",()=>{
   assert.throws(()=>rebuildReceipt(fixture(),(raw)=>{raw.geometry.capacity=Number.MAX_SAFE_INTEGER;}),/overflow|schema validation/);
 });
 
+test("compressed receipts name the KV path each measurement block ran on", () => {
+  // A supported-batch row: dense-fallback coordinate operation, compressed single-sequence decode
+  // and quality.
+  assert.deepEqual(measurementPaths({ requestMode: "supported-batch", prefillMode: "single-shot" }, "dense-fallback"), {
+    memory: { kvPath: "dense-fallback", operation: "supported-batch", sequences: 2 },
+    prefillFirstToken: { kvPath: "dense-fallback", operation: "supported-batch", sequences: 2 },
+    decodeTiming: { kvPath: "compressed", operation: "steady-decode", sequences: 1 },
+    quality: { kvPath: "compressed", operation: "quality", sequences: 1 },
+  });
+  const compressed = fixture("compressed");
+  const honest = measurementPaths(compressed.matrix, compressed.compression.persistentKvRepresentation);
+  const named = rebuildReceipt(compressed, (raw) => { raw.compression.measurementPaths = honest; });
+  assert.deepEqual(named.compression.measurementPaths, honest);
+  // Receipts produced before the field still validate.
+  assert.equal(Object.hasOwn(compressed.compression, "measurementPaths"), false);
+  for (const edit of [
+    (paths) => { paths.decodeTiming.kvPath = "dense-fallback"; },
+    (paths) => { paths.memory.kvPath = "dense-fallback"; },
+    (paths) => { paths.prefillFirstToken.sequences = 2; },
+  ]) {
+    assert.throws(() => rebuildReceipt(named, (raw) => { edit(raw.compression.measurementPaths); }), /measurementPaths does not name|schema validation/);
+  }
+  assert.throws(() => rebuildReceipt(named, (raw) => { raw.compression.measurementPaths.quality.operation = "decode"; }), /schema validation/);
+});
 test("SC-20676 compressed receipts carry reasoned fused/fallback evidence and no dense reconstruction", () => {
   const accepted = fixture("compressed");
   assert.equal(accepted.compression.method, "group-affine");
