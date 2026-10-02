@@ -4,6 +4,8 @@
 set -euo pipefail
 api_image="${SCENEWORKS_CANDLE_SMOKE_API_IMAGE:-sceneworks-runpod-smoke:ci}"
 worker_image="${SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE:-sceneworks-candle-smoke:ci}"
+worker_entrypoint="${SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT:-}"
+worker_default_user="${SCENEWORKS_CANDLE_SMOKE_WORKER_USER:-}"
 # GPU-less CI must resolve the CUDA-linked executable before it can select CPU
 # mode. Use NVIDIA's real compatibility library only for this smoke; deployed
 # GPU containers still receive their driver through the NVIDIA runtime.
@@ -46,6 +48,13 @@ docker network create "${network}" >/dev/null
 for identity in default override; do
   uid=1000 gid=1000
   user_args=()
+  if [[ -n "${worker_default_user}" ]]; then
+    user_args=(--user "${worker_default_user}")
+  fi
+  worker_entrypoint_args=()
+  if [[ -n "${worker_entrypoint}" ]]; then
+    worker_entrypoint_args=(--entrypoint "${worker_entrypoint}")
+  fi
   home_args=()
   expected_home=/home/sceneworks
   if [[ "${identity}" == override ]]; then
@@ -75,10 +84,11 @@ for identity in default override; do
     sleep 0.5
   done
   [[ "${ready}" == 1 ]] || { docker logs "${api}"; exit 1; }
-  # No entrypoint/command or --user override for the default case: exercise the
-  # Dockerfile's actual default USER and CMD. Explicit CPU selection needs no GPU.
+  # Unless combined-image overrides are supplied, the default case exercises the
+  # worker image's actual USER and CMD. Explicit CPU selection needs no GPU.
   docker run -d --name "${worker}" --network "${network}" \
     ${user_args[@]+"${user_args[@]}"} ${home_args[@]+"${home_args[@]}"} ${driver_args[@]+"${driver_args[@]}"} "${common_args[@]}" \
+    ${worker_entrypoint_args[@]+"${worker_entrypoint_args[@]}"} \
     -e SCENEWORKS_API_URL=http://api:8010 -e SCENEWORKS_GPU_ID=cpu \
     -e SCENEWORKS_UTILITY_WORKERS=1 -e "SCENEWORKS_WORKER_ID=smoke-${identity}" \
     "${worker_image}" >/dev/null
@@ -105,5 +115,5 @@ for identity in default override; do
   docker stop -t 15 "${api}" >/dev/null
   [[ "$(docker inspect -f '{{.State.ExitCode}}' "${api}")" == 0 ]]
   docker rm "${api}" >/dev/null
-  printf 'Standalone candle %s identity %s:%s: real worker registered, bind writes passed, shutdown clean (CPU-only).\n' "${identity}" "${uid}" "${gid}"
+  printf 'Candle worker smoke %s identity %s:%s: real worker registered, bind writes passed, shutdown clean (CPU-only).\n' "${identity}" "${uid}" "${gid}"
 done

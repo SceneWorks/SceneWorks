@@ -113,6 +113,7 @@ jobs:
         run: |
           npm run check
           npm run check:runpod:image-contract
+          npm run check:ci:runpod-publish
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -139,21 +140,31 @@ jobs:
             type=raw,value=${{ steps.publication.outputs.release_tag }},enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=latest,enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=${{ steps.publication.outputs.manual_tag }},enable=${{ steps.publication.outputs.release != 'true' }}
-      # Build once into the shared Buildx cache; publication below reuses these
-      # exact stages after the standalone default/override runtime gate passes.
-      - name: Build combined RunPod candidate for runtime checks
-        id: build_candidate
+      # Push one unique candidate digest, test that exact artifact, then promote
+      # its AMD64 manifest to release/manual tags without rebuilding it.
+      - name: Build and stage combined RunPod image
+        id: build_staging
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           file: docker/rust.Dockerfile
           target: runpod
           platforms: linux/amd64
-          push: false
-          load: true
-          tags: sceneworks-runpod-smoke:ci
+          push: true
+          tags: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=runpod-amd64
+          cache-to: type=gha,mode=max,scope=runpod-amd64
+      - name: Pull and verify immutable staged RunPod image
+        id: verify_staging
+        env:
+          STAGED_DIGEST: ${{ steps.build_staging.outputs.digest }}
+        run: |
+          set -euo pipefail
+          test -n "$STAGED_DIGEST"
+          staged_ref="$IMAGE_NAME@$STAGED_DIGEST"
+          docker pull --platform linux/amd64 "$staged_ref"
+          node scripts/check-runpod-staged-image.mjs --image "$staged_ref" --revision "$GITHUB_SHA"
       - name: Build standalone candle runtime from shared stages
         id: build_candle_runtime
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -169,34 +180,27 @@ jobs:
         id: smoke_candle_runtime
         timeout-minutes: 5
         env:
-          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: sceneworks-runpod-smoke:ci
+          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
           SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci
           SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
         run: bash scripts/check-docker-candle-runtime.sh
-      - name: Build and publish combined RunPod image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          file: docker/rust.Dockerfile
-          target: runpod
-          platforms: linux/amd64
-          push: true
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          cache-from: type=gha,scope=runpod-amd64
-          cache-to: type=gha,mode=max,scope=runpod-amd64
-
-      - name: Publish summary
+      - name: Check staged combined-image Candle worker
+        id: smoke_published_runtime
+        timeout-minutes: 5
         env:
-          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          {
-            echo "### RunPod image published"
-            echo
-            echo '```text'
-            echo "${IMAGE_TAGS}"
-            echo "digest=${IMAGE_DIGEST}"
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
+          SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
+          SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
+          SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT: /usr/local/bin/sceneworks-rust-worker
+          SCENEWORKS_CANDLE_SMOKE_WORKER_USER: 1000:1000
+        run: bash scripts/check-docker-candle-runtime.sh
+      - name: Promote tested RunPod image without rebuilding
+        id: promote
+        if: success()
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          STAGED_DIGEST: ${{ steps.build_staging.outputs.digest }}
+          PUBLISH_TAGS: ${{ steps.metadata.outputs.tags }}
+          STANDALONE_SMOKE_RESULT: ${{ steps.smoke_candle_runtime.outcome }}
+          PUBLISHED_SMOKE_RESULT: ${{ steps.smoke_published_runtime.outcome }}
+        run: node scripts/promote-runpod-image.mjs

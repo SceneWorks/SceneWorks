@@ -37,7 +37,7 @@
     "check:onnxruntime-pins": "node scripts/check-onnxruntime-pins.mjs",
     "check:shell": "node scripts/check-shell-scripts.mjs",
     "check:shell:self-test": "node scripts/check-shell-scripts.mjs --self-test",
-    "check:ci:runpod-publish": "node scripts/check-runpod-publish-workflow.mjs",
+    "check:ci:runpod-publish": "node scripts/check-runpod-publish-workflow.mjs && node --test scripts/runpod-publication-artifacts.test.mjs",
     "check:runpod:template": "node scripts/check-runpod-template.mjs",
     "check:runpod:proxy:self-test": "node --test scripts/validate-runpod-proxy.test.mjs",
     "check:runpod:image-contract": "node scripts/check-runpod-image.mjs",
