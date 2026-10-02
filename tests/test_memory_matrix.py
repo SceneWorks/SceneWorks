@@ -774,7 +774,14 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
+    Last moved: sc-24158 (epic 24107, E9) adds the `lora` overlay / load profile to every
+    hand-authored `qwen_image_2_1` contract row on BOTH lanes (and `PLAIN_LORA` to both registry
+    rows), because both providers now apply user LoRA/LoKr. The same three lanes sc-24114 moved
+    move again and nothing else, each 9 -> 18 implemented of 18 — the `lora` half that stayed
+    missing below is now declared: `candle:staged_residency`, `candle:bounded_decode`,
+    `mlx:bounded_decode`.
+
+    Previously: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
     request-owned `memoryStrategyContract` on BOTH lanes whose `modes` cover the reference faces
     (`edit_image` / `image_to_image`, plus `character_image` which the catalog axis does not
     carry) as well as `text_to_image`, all over `none`. Three `qwen_image_2_1` lanes move and
