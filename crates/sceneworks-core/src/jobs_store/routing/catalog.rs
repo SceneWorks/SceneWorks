@@ -865,7 +865,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `candle_quant` goes false only because the combined column must not be duplicated into the
     // standalone ones (`capability_table_encodes_superset_invariant`); quant routing is unchanged.
     // Before this, a LoRA-carrying 2.1 text-to-image job was the typed `CandleImageRefusal::UserLora`
-    // and no Windows/Linux worker claimed it.
+    // and no Windows/Linux worker claimed it. (The worker's memory-route `lora` load profile for
+    // this provider is published in the engine capability dumps, so it lands with the epic's
+    // terminal pin bump and re-dump rather than here — see `memory_route_registry`.)
     ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.

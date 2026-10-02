@@ -602,10 +602,15 @@ const RULES: &[MemoryRouteRule] = &[
     // (what the matrix and the campaign key on) stays the request's own mode, while the provider
     // receives the one mode it implements.
     //
-    // `PLAIN_LORA` (sc-24158, E9), the same profile set as the 2512 `qwen_image` row: both providers
-    // now apply user LoRA/LoKr (MLX sc-24156, Candle sc-24157 — stacked additive residuals over the
-    // dense AND packed tiers), so a LoRA-carrying 2.1 request is a real coordinate on both lanes.
-    // Until then the provider refused adapters and the lora profile was absent rather than exempted.
+    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
+    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
+    // reachable at all — it is absent rather than exempted.
+    //
+    // sc-24158: the feature branch's providers DO apply LoRA/LoKr now (MLX sc-24156, Candle
+    // sc-24157), but these rows are published as `memoryRouteWitnesses` in the checked-in engine
+    // capability dumps, and the macOS lane's fresh-dump check reds on any witness the PINNED dump
+    // lacks. `PLAIN_LORA` (plus the `lora` overlay/profile on the manifest's hand-authored
+    // contract rows) therefore lands with the epic's terminal pin bump and its re-dump.
     //
     // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
     // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
@@ -616,7 +621,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
         modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -625,7 +630,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
         modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN_LORA,
+        load_profiles: PLAIN,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -10308,58 +10313,6 @@ mod tests {
             ),
             DeclaredCandleStrategyContract::Applied { .. }
         ));
-    }
-
-    /// SC-24158 (E9): a LoRA-carrying Qwen-Image 2.1 request is a declared coordinate on BOTH lanes
-    /// — the registry rows are `PLAIN_LORA` (the 2512 `qwen_image` shape) and the shipped Candle
-    /// request-owned rows declare the `lora` overlay/profile, so an adapter load on every tier
-    /// applies a declaration instead of falling to `NoRelevantDeclaration`.
-    ///
-    /// *Mutation that reds this:* reverting either registry row to `PLAIN`, or dropping `lora`
-    /// from the shipped rows' `loadProfiles`/`overlays`.
-    #[test]
-    fn qwen_image_2_1_lora_requests_are_declared_on_both_lanes() {
-        let witnesses = deferred_route_witnesses();
-        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
-            assert!(
-                witnesses.iter().any(|row| row.backend == backend
-                    && row.provider == "qwen_image_2_1"
-                    && row.load_profile == MemoryRouteLoadProfile::Lora
-                    && row.overlay == MemoryRouteOverlay::Lora),
-                "{backend:?} must witness a qwen_image_2_1 LoRA load"
-            );
-        }
-        let manifest = shipped_model("qwen_image_2_1");
-        for tier in [
-            MemoryRouteTier::Bf16,
-            MemoryRouteTier::Q8,
-            MemoryRouteTier::Q4,
-        ] {
-            for (mode, reference_count) in [
-                (MemoryRouteMode::TextToImage, 0),
-                (MemoryRouteMode::EditImage, 2),
-            ] {
-                let spec =
-                    spec(tier, MemoryRouteLoadProfile::Lora).with_resolved_route("qwen_image_2_1");
-                let declared = declared_candle_request_strategy_contract_with(
-                    "qwen_image_2_1",
-                    Some(tier.as_str()),
-                    &manifest,
-                    &spec,
-                    MemoryRouteRequestContext {
-                        mode,
-                        reference_count,
-                        use_pid: false,
-                        has_phases: false,
-                    },
-                    |_| Some(staged_contract("qwen_image_2_1")),
-                );
-                assert!(
-                    matches!(declared, DeclaredCandleStrategyContract::Applied { .. }),
-                    "{tier:?} {mode:?} LoRA load must be declared"
-                );
-            }
-        }
     }
 
     /// SC-24114: the restated reference bound is the linked provider's own.
