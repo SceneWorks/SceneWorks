@@ -1936,26 +1936,35 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // An adapter is handled DIFFERENTLY per backend, and both answers are deliberate:
-    //   * off-Mac the candle lane REFUSES it (`CandleImageRefusal::UserLora`), because the id's
-    //     `candle_lora` column is false — the provider declares `supports_lora`/`supports_lokr`
-    //     false, so the refusal names the missing adapter slot;
-    //   * on a Mac the MLX arm lets it through on purpose, so the engine answers with a typed
-    //     `Unsupported` instead of the job sitting unclaimable.
-    // On a Windows/Linux-only install there is no MLX worker to fall through to, so the candle
-    // refusal IS the terminal answer — which is why it has to carry the adapter-slot reason rather
-    // than a generic one.
-    assert!(!image_request_candle_eligible(
-        "qwen_image_2_1",
-        &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-    ));
-    assert_eq!(
-        candle_image_first_refusal(
-            "qwen_image_2_1",
-            &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-        ),
-        Some(CandleImageRefusal::UserLora),
-    );
+    // An adapter is CLAIMED off-Mac (sc-24158, E9). The candle provider applies user LoRA/LoKr as
+    // stacked additive residuals over the dense bf16 AND the packed q8/q4 DiT (inference sc-24157),
+    // so the row sits in the combined `candle_quant_lora` column like the 2512 `qwen_image` row: a
+    // LoRA alone, and a LoRA composed with a tier select, both reach the candle lane. Before this
+    // the lane refused it as `CandleImageRefusal::UserLora`, and a Windows/Linux-only install had no
+    // worker that would claim a LoRA-carrying 2.1 job at all.
+    for payload in [
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lokr" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 4 } }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 8 } }),
+    ] {
+        assert!(
+            image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the candle lane must claim a LoRA-carrying 2.1 job: {payload}"
+        );
+        assert_eq!(
+            candle_image_first_refusal("qwen_image_2_1", &object(payload.clone())),
+            None,
+            "{payload}"
+        );
+        let mut job_payload = object(payload.clone());
+        job_payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+        let job = image_generate_job(Value::Object(job_payload));
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+            "a candle worker must claim the LoRA job: {payload}"
+        );
+    }
 
     // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
     // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`
