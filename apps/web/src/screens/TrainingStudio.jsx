@@ -52,7 +52,10 @@ import {
   samplePromptsFromTrigger,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
+  trainingLicenseAckKey,
+  trainingTargetLicense,
 } from "../training/trainingConfig.js";
+import { readLicenseAck, writeLicenseAck } from "../licenseAcknowledgment.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
@@ -690,14 +693,30 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
   }, [models, selectedTarget?.outputKind, controlType]);
+  // A base whose licence binds the adapters trained from it (Qwen Image 2.1, epic 24107 E12) shows
+  // its notice in the panel and holds Start training until the user accepts it. The acceptance is
+  // remembered per target (fails closed when storage is unavailable) and asserted on the submit.
+  const selectedTargetLicense = trainingTargetLicense(selectedTarget);
+  const [licenseAcks, setLicenseAcks] = useState({});
+  const licenseTargetId = selectedTarget?.id ?? "";
+  const licenseAcknowledged = Boolean(
+    selectedTargetLicense &&
+      (licenseAcks[licenseTargetId] ?? readLicenseAck(trainingLicenseAckKey(licenseTargetId))),
+  );
+  const setLicenseAcknowledged = (acknowledged) => {
+    if (!licenseTargetId) return;
+    writeLicenseAck(trainingLicenseAckKey(licenseTargetId), acknowledged);
+    setLicenseAcks((acks) => ({ ...acks, [licenseTargetId]: acknowledged }));
+  };
   const configContext = useMemo(
     () => ({
       activeDataset,
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      licenseAcknowledged,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
+    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, licenseAcknowledged],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -1780,6 +1799,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         outputName: snapshot.outputName,
         dryRun,
         config: snapshot.config,
+        // Only reachable once the licence notice was accepted (configValidity holds Start until
+        // then); the API refuses an unacknowledged real run against a licence-bound base.
+        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
       });
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
@@ -1900,6 +1922,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
+                  targetLicense={selectedTargetLicense}
+                  licenseAcknowledged={licenseAcknowledged}
+                  onLicenseAcknowledgedChange={setLicenseAcknowledged}
                   controlModelDownloadJobs={trainingDownloadJobs}
                   onDownloadModel={createModelDownloadJob}
                   onOpenModels={() => setActiveView("Models")}

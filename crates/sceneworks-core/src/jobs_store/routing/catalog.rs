@@ -2142,6 +2142,9 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
+    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
+    // trainer. MLX-only until the Candle trainer story (sc-24160) adds it to the candle set.
+    "qwen_image_2_1_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2168,6 +2171,13 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "mage_flow_lora",
 ];
 
+/// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
+/// non-macOS host for a kernel that is NOT candle-routed has no worker that will ever claim it, so the
+/// submit path refuses it up front instead of leaving it queued forever (sc-24159).
+pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
+    CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+}
+
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than
@@ -2182,6 +2192,9 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     "krea_control",
     "mage_flow_lora",
+    // Qwen Image 2.1 (sc-24159): MLX-only today — no Candle trainer until sc-24160, so it is in
+    // neither the candle-routed set nor admitted by the candle exception; a generic worker refuses it.
+    "qwen_image_2_1_lora",
 ];
 
 #[cfg(test)]
@@ -2530,6 +2543,8 @@ mod tests {
         // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
         // and Mage training jobs queued forever.
         "mage_flow_lora",
+        // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
+        "qwen_image_2_1_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2554,6 +2569,8 @@ mod tests {
         "anima_lora",
         "krea_control",
         "mage_flow_lora",
+        // sc-24159: MLX-only until sc-24160 moves it into the candle-routed set.
+        "qwen_image_2_1_lora",
     ];
 
     #[test]

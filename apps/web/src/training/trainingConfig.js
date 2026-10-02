@@ -408,6 +408,29 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
   return merged;
 }
 
+// The licence a training target's base imposes on what you train from it, or null when the target
+// declares none (every target but Qwen Image 2.1 today). Read from the Rust-owned target contract
+// (`ui.requiresLicenseAcknowledgment` + `ui.license`/`licenseUrl`/`licenseNotice`, sc-24159) so the
+// studio never hardcodes which bases are restricted.
+export function trainingTargetLicense(target) {
+  const ui = target?.ui;
+  if (ui?.requiresLicenseAcknowledgment !== true) {
+    return null;
+  }
+  return {
+    name: asText(ui.license).trim() || "base model licence",
+    url: asText(ui.licenseUrl).trim(),
+    notice: asText(ui.licenseNotice).trim(),
+  };
+}
+
+// The per-target localStorage key (via `licenseAcknowledgment.js`) the studio persists a training
+// licence acceptance under. Namespaced apart from the per-MODEL download acceptance: accepting the
+// download terms is not accepting that trained adapters inherit them.
+export function trainingLicenseAckKey(targetId) {
+  return targetId ? `training:${targetId}` : "";
+}
+
 // The training config's rule set, in the shape `useValidation` wants: a pure
 // `(draft, ctx) => Issue[]` living beside the draft it validates (epic 10644).
 //
@@ -421,11 +444,25 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 // that distinction became the app's vocabulary rather than one screen's helper.
 export function configValidation(
   configDraft,
-  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+  {
+    activeDataset,
+    selectedTarget,
+    datasetNotReady = false,
+    missingControlModels = [],
+    licenseAcknowledged = false,
+  } = {},
 ) {
   const issues = [];
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
+  }
+  // A base whose licence binds what you train from it (Qwen Image 2.1's Qwen RESEARCH licence,
+  // epic 24107 E12) must have its notice accepted before the run can start. ConfigureJobPanel
+  // renders the notice + checkbox; this is what actually holds Start training, and the API refuses
+  // an unacknowledged real run as the backstop. field is null: the fix is the checkbox in the notice.
+  const license = trainingTargetLicense(selectedTarget);
+  if (license && !licenseAcknowledged) {
+    issues.push(issue.error(null, `Accept the ${license.name} notice to start training.`));
   }
   if (!activeDataset?.id) {
     issues.push(issue.requirement("dataset", "Select a saved dataset"));

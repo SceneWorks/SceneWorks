@@ -1326,6 +1326,11 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
+        // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
+        // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
+        // the 2.1 trainer over a different architecture.
+        "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -1406,6 +1411,23 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .unwrap_or(default)
+}
+
+/// The `LoadSpec.precision` a trainer is loaded with. Generally it tracks `train_dtype` (the MLX
+/// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
+/// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
+/// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
+/// load at Bf16 or it dies at load.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
+    if engine_id != "qwen_image_2_1" && train_dtype.trim().eq_ignore_ascii_case("f32") {
+        Precision::Fp32
+    } else {
+        Precision::Bf16
+    }
 }
 
 /// Normalize the advanced `mixedPrecision` string onto the engine's `train_dtype`
@@ -1866,16 +1888,7 @@ pub(crate) async fn run_training_execution(
             // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
             // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
             // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if request
-                .config
-                .train_dtype
-                .trim()
-                .eq_ignore_ascii_case("f32")
-            {
-                Precision::Fp32
-            } else {
-                Precision::Bf16
-            };
+            let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
             let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
             spec.precision = load_precision;
             // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
@@ -3655,6 +3668,34 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
+        // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
+        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
+        for dtype in ["f32", "F32", "bf16"] {
+            assert!(
+                matches!(
+                    training_load_precision("qwen_image_2_1", dtype),
+                    Precision::Bf16
+                ),
+                "{dtype}"
+            );
+        }
+        // Every other trainer keeps tracking train_dtype.
+        assert!(matches!(
+            training_load_precision("lens", "f32"),
+            Precision::Fp32
+        ));
+        assert!(matches!(
+            training_load_precision("lens", "bf16"),
+            Precision::Bf16
+        ));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
         let ltx_2_5_trainer = if cfg!(target_os = "macos") {
             "ltx_2_5"
@@ -3702,6 +3743,15 @@ mod tests {
             // the generation-only conditioning path (the Edit variants need reference tokens).
             ("mage_flow_lora", "mage_flow_edit_base", None),
             ("mage_flow_lora", "mage_flow_turbo", None),
+            // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
+            // The distinct 2512 `qwen_image` / Edit models never resolve to it.
+            (
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_lora", "qwen_image", None),
+            ("qwen_image_2_1_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
