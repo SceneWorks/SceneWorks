@@ -2143,7 +2143,7 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
     // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
-    // trainer. MLX-only until the Candle trainer story (sc-24160) adds it to the candle set.
+    // trainer. The Candle twin (sc-24160) is in the candle set too.
     "qwen_image_2_1_lora",
 ];
 
@@ -2169,6 +2169,10 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "anima_lora",
     "mage_flow_lora",
+    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S12, sc-24160): the `candle-gen-qwen-image-2-1`
+    // trainer, registered under the same engine id (`qwen_image_2_1`) as the MLX one. Base-gated to
+    // `qwen_image_2_1` by [`training_job_is_candle_eligible`].
+    "qwen_image_2_1_lora",
 ];
 
 /// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
@@ -2192,8 +2196,8 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     "krea_control",
     "mage_flow_lora",
-    // Qwen Image 2.1 (sc-24159): MLX-only today — no Candle trainer until sc-24160, so it is in
-    // neither the candle-routed set nor admitted by the candle exception; a generic worker refuses it.
+    // Qwen Image 2.1 (sc-24159/sc-24160): native MLX + Candle trainers and no generic one, so a
+    // generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_lora",
 ];
 
@@ -2560,6 +2564,8 @@ mod tests {
         "wan_moe_lora",
         "anima_lora",
         "mage_flow_lora",
+        // sc-24160: Qwen Image 2.1 T2I LoRA/LoKr on the native Candle trainer.
+        "qwen_image_2_1_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
@@ -2569,7 +2575,8 @@ mod tests {
         "anima_lora",
         "krea_control",
         "mage_flow_lora",
-        // sc-24159: MLX-only until sc-24160 moves it into the candle-routed set.
+        // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
+        // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
         "qwen_image_2_1_lora",
     ];
 

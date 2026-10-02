@@ -6814,9 +6814,14 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("mage_flow_lora", "mage_flow_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "lokr"),
         ("mage_flow_lora", "mage_flow_base", "full"),
+        // sc-24160: the Qwen Image 2.1 Candle trainer, both adapter kinds.
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lokr"),
     ];
     for (kernel, base_model, network_type) in cases {
-        let store = store(&format!("candle-training-{kernel}-{base_model}"));
+        let store = store(&format!(
+            "candle-training-{kernel}-{base_model}-{network_type}"
+        ));
         register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
         let job = store
             .create_job(mlx_training_job(
@@ -6847,6 +6852,10 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
         ("anima_lora", "anima_turbo", "lora"),
         ("mage_flow_lora", "mage_flow_edit_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "mystery"),
+        // sc-24160: the 2.1 trainer never takes the distinct 2512 bases nor a non-adapter run.
+        ("qwen_image_2_1_lora", "qwen_image", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_edit", "lokr"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "full"),
     ];
     for (kernel, base_model, network_type) in cases {
         let store = store(&format!(
@@ -6934,41 +6943,45 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
     }
 }
 
-/// sc-24159 (epic 24107 S11): a Qwen Image 2.1 T2I training job is MLX-only until the Candle trainer
-/// story (sc-24160). The mlx worker claims it for both network types; a generic descriptor and a
-/// candle worker both refuse it, so it never lands on a worker with no 2.1 trainer.
+/// sc-24159/sc-24160 (epic 24107 S11/S12): a Qwen Image 2.1 T2I training job is native-only — MLX
+/// on a Mac, Candle off-Mac — for both adapter kinds. A generic descriptor still refuses it (there is
+/// no generic 2.1 trainer), while BOTH the mlx and the candle worker claim it.
 #[test]
-fn qwen_image_2_1_training_is_mlx_only_until_the_candle_trainer_lands() {
-    for network_type in ["lora", "lokr"] {
-        let store = store(&format!("qwen-2-1-training-{network_type}"));
-        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
-        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
-        let job = store
-            .create_job(mlx_training_job(
-                "qwen_image_2_1_lora",
-                "qwen_image_2_1",
-                network_type,
-                false,
-                "auto",
-            ))
-            .expect("job creates");
-        for worker in ["worker-torch", "worker-candle"] {
+fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!("qwen-2-1-training-{native_worker}-{network_type}"));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
             assert!(
                 store
-                    .claim_next_job(worker)
-                    .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
                     .is_none(),
-                "{worker} must refuse qwen_image_2_1_lora/{network_type} — no 2.1 trainer there"
+                "a generic worker must refuse qwen_image_2_1_lora/{network_type} — no 2.1 trainer"
             );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
         }
-        register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
-        let claimed = store
-            .claim_next_job("worker-mlx")
-            .expect("mlx claim ok")
-            .unwrap_or_else(|| {
-                panic!("the mlx worker must claim qwen_image_2_1_lora/{network_type}")
-            });
-        assert_eq!(claimed.id, job.id, "{network_type}");
     }
 }
 

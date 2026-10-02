@@ -1015,9 +1015,11 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
 /// bump, paired with the engine trainer id SceneWorks maps them to. The committed runtime facts are
 /// dumped at the current pin, which predates the trainer, so their `trainerMappings` cannot carry
 /// the target yet; listing it here exempts it from the population check until they do (its matrix
-/// rows read false on both lanes meanwhile — the truth at this pin). The same self-deleting contract
-/// as phase 1's `PENDING_PIN_ENGINE_IDS`: the moment either pinned runtime registers the engine, the
-/// generator refuses until the entry is removed (epic 24107 S11/S15).
+/// rows read false on both lanes meanwhile — the truth at this pin, even though the scheduler routes
+/// it to both the MLX and the Candle worker since sc-24160). The same self-deleting contract as phase
+/// 1's `PENDING_PIN_ENGINE_IDS`: the moment EITHER pinned runtime registers the engine, the generator
+/// refuses until the entry is removed; after that, a routed backend whose runtime still lacks the
+/// trainer fails the "names no registered local trainer descriptor" check (epic 24107 S11/S12/S15).
 pub(crate) const PENDING_PIN_TRAINING_TARGETS: &[(&str, &str)] =
     &[("qwen_image_2_1_lora", "qwen_image_2_1")];
 
@@ -4110,22 +4112,55 @@ mod tests {
                 );
             }
 
-            let (mut mlx, candle) = valid_runtime_pair();
-            mlx.snapshot
-                .trainer_capabilities
-                .push(TrainerCapabilityFacts {
-                    id: (*engine).to_owned(),
-                    backend: "mlx".to_owned(),
-                    supports_lora: true,
-                    supports_lokr: true,
-                    supports_control: false,
-                    supports_full_finetune: false,
-                });
-            let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
-            assert!(
-                error.contains("remove") && error.contains(target),
-                "a registered pending trainer must retire the placeholder: {error}"
-            );
+            // sc-24160: the production scheduler routes the pending target on BOTH backends — so
+            // the only thing holding its rows false is the pinned runtimes not yet registering the
+            // engine trainer, and the moment they do the rows must flip (not stay silently false).
+            let target_contract = crate::training::builtin_training_targets()
+                .targets
+                .into_iter()
+                .find(|candidate| candidate.id == *target)
+                .expect("pending target ships");
+            for network_type in target_network_types(&target_contract).unwrap() {
+                let job = probe_job(
+                    JobType::LoraTrain,
+                    "",
+                    training_payload(&target_contract, &network_type),
+                )
+                .unwrap();
+                for facts in [&mlx, &candle] {
+                    assert!(
+                        backend_supports(&job, facts).unwrap(),
+                        "{} must route {target}/{network_type}",
+                        facts.snapshot.backend
+                    );
+                }
+            }
+
+            // Either pinned runtime registering the engine retires the placeholder, loudly.
+            for backend in ["mlx", "candle"] {
+                let (mut mlx, mut candle) = valid_runtime_pair();
+                let facts = if backend == "mlx" {
+                    &mut mlx
+                } else {
+                    &mut candle
+                };
+                facts
+                    .snapshot
+                    .trainer_capabilities
+                    .push(TrainerCapabilityFacts {
+                        id: (*engine).to_owned(),
+                        backend: backend.to_owned(),
+                        supports_lora: true,
+                        supports_lokr: true,
+                        supports_control: false,
+                        supports_full_finetune: false,
+                    });
+                let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
+                assert!(
+                    error.contains("remove") && error.contains(target),
+                    "a registered pending {backend} trainer must retire the placeholder: {error}"
+                );
+            }
         }
     }
 

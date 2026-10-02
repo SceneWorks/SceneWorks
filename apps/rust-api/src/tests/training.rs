@@ -5500,15 +5500,9 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
         );
     }
 
+    // sc-24160: both native backends train 2.1, so an accepted real run queues on every host (the
+    // off-Mac host refusal no longer applies to it).
     let (status, job) = request(app.clone(), "POST", &jobs_path, body_for(Some(true))).await;
-    if !cfg!(target_os = "macos") {
-        // Off-Mac there is no 2.1 trainer until sc-24160: the accepted run is refused up front
-        // instead of queuing forever. The adapter-record half is covered by the pure tests below.
-        assert_eq!(status, StatusCode::BAD_REQUEST, "{job}");
-        let detail = job["detail"].as_str().unwrap_or_default();
-        assert!(detail.contains("Apple Silicon"), "{detail}");
-        return;
-    }
     assert_eq!(status, StatusCode::CREATED, "{job}");
     assert_eq!(job["payload"]["licenseAcknowledged"], json!(true));
     assert_eq!(
@@ -5526,19 +5520,27 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
 }
 
 /// sc-24159: off-Mac only candle workers train, so a real run for a kernel with no candle trainer is
-/// refused at submit rather than queued forever. Generic over the candle-routed kernel list, so it
-/// lifts for 2.1 the moment sc-24160 adds the candle lane.
+/// refused at submit rather than queued forever. Generic over the candle-routed kernel list; sc-24160
+/// added the 2.1 candle lane, so Qwen Image 2.1 is now submittable off-Mac too.
 #[test]
 fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
     let targets = crate::builtin_training_targets().targets;
     let qwen = qwen_image_2_1_training_target();
-    let message = crate::training::training_host_unavailable_message(&qwen, false)
-        .expect("no candle trainer for 2.1 yet");
+    // sc-24160: the Candle trainer lifts the off-Mac refusal for 2.1.
     assert!(
-        message.contains("Apple Silicon") && message.contains(&qwen.name),
+        crate::training::training_host_unavailable_message(&qwen, false).is_none(),
+        "Qwen Image 2.1 has a candle trainer — it must be submittable off-Mac"
+    );
+    // The gate itself stays live for any kernel without a candle trainer.
+    let mut mlx_only = qwen.clone();
+    mlx_only.kernel = "hypothetical_mlx_only_lora".to_owned();
+    let message = crate::training::training_host_unavailable_message(&mlx_only, false)
+        .expect("a kernel with no candle trainer is refused off-Mac");
+    assert!(
+        message.contains("Apple Silicon") && message.contains(&mlx_only.name),
         "{message}"
     );
-    assert!(crate::training::training_host_unavailable_message(&qwen, true).is_none());
+    assert!(crate::training::training_host_unavailable_message(&mlx_only, true).is_none());
     // Every candle-routed target stays submittable off-Mac.
     for target in targets.iter().filter(|target| {
         sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)
