@@ -1423,9 +1423,7 @@ pub(crate) async fn run_prompt_refine_job(
             // loads the Qwen-VL snapshot, flips to vision, and examines the `Content::Image`. (The other
             // tasks carry no image, so their `from_request` reqs never set the vision filter anyway.)
             let output = {
-                use gen_core::core_llm::{
-                    Content, Message, Role, Sampling, StreamEvent, TextLlmRequest,
-                };
+                use gen_core::core_llm::{Content, Message, Role, Sampling, StreamEvent};
                 let mut messages = Vec::with_capacity(2);
                 if !system.trim().is_empty() {
                     messages.push(Message::system(system));
@@ -1450,58 +1448,58 @@ pub(crate) async fn run_prompt_refine_job(
                 } else {
                     messages.push(Message::user(prompt));
                 }
-                let request = TextLlmRequest {
-                    messages,
-                    // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
-                    // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
-                    //
-                    // sc-24113: the Qwen rewriters are the one task that does NOT take the house
-                    // sampler. Their model cards publish the full recipe the checkpoints were tuned
-                    // at (temperature 1.0, top_p 0.95, top_k 20), and it is frozen verbatim in
-                    // `qwen_prompt_rewrite` beside the template it belongs to.
-                    sampling: match qwen_rewriter {
-                        Some(_) => Sampling {
-                            temperature,
-                            top_p: crate::qwen_prompt_rewrite::REWRITE_TOP_P,
-                            top_k: crate::qwen_prompt_rewrite::REWRITE_TOP_K,
-                            ..Sampling::default()
-                        },
-                        None => Sampling {
-                            temperature,
-                            top_p: 0.9,
-                            ..Sampling::default()
-                        },
+                // The bespoke prompt-refine samplers were plain temperature/top-p (no repetition
+                // penalty / top-k); core-llm's defaults match (top_k 0, repetition_penalty 1.0).
+                //
+                // sc-24113: the Qwen rewriters are the one task that does NOT take the house
+                // sampler. Their model cards publish the full recipe the checkpoints were tuned
+                // at (temperature 1.0, top_p 0.95, top_k 20), and it is frozen verbatim in
+                // `qwen_prompt_rewrite` beside the template it belongs to.
+                let sampling = match qwen_rewriter {
+                    Some(_) => Sampling {
+                        temperature,
+                        top_p: crate::qwen_prompt_rewrite::REWRITE_TOP_P,
+                        top_k: crate::qwen_prompt_rewrite::REWRITE_TOP_K,
+                        ..Sampling::default()
                     },
-                    max_new_tokens,
-                    seed: None,
-                    // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
-                    // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
-                    // free-text rewrite is unconstrained. (On the candle lane this constraint actually
-                    // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
-                    // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
-                    // costs a whole repair round this prevents outright.
-                    //
-                    // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
-                    // JSON — and says nothing about the object's shape (core-llm has no schema or
-                    // grammar variant; `Json` is the only one). So a well-formed reply with a field
-                    // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
-                    // duly produced one: `startState` as an object on every shot. The plan schema is
-                    // enforced after the decode by `film_planner::parse_planner_output`, which is the
-                    // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
-                    // where the FilmPlan task should take it.
-                    // A reasoning-capable model must be allowed to close its `<think>` block before
-                    // emitting the answer. Its final answer is still parsed and validated strictly,
-                    // and the planner's existing bounded repair loop handles malformed plans.
-                    constraint: json_decode_constraint(
-                        emits_json,
-                        refiner.descriptor().capabilities.supports_thinking,
-                        thinking_mode,
-                    ),
-                    cancel: blocking_cancel.clone(),
-                    thinking: thinking_mode,
-                    kv_compression,
-                    ..Default::default()
+                    None => Sampling {
+                        temperature,
+                        top_p: 0.9,
+                        ..Sampling::default()
+                    },
                 };
+                // sc-6585 / sc-8105: a caption task (magic-prompt OR image-caption) must emit a
+                // structurally-valid JSON caption, so constrain its decode to the JSON grammar; the
+                // free-text rewrite is unconstrained. (On the candle lane this constraint actually
+                // steers + masks the decode — the sc-7404 parity gain over `candle-gen-prompt-refine`.)
+                // sc-22713 joins it: a shot plan is parsed field by field, so an unparseable reply
+                // costs a whole repair round this prevents outright.
+                //
+                // `Constraint::Json` guarantees VALIDITY ONLY — that the emitted text parses as
+                // JSON — and says nothing about the object's shape (core-llm has no schema or
+                // grammar variant; `Json` is the only one). So a well-formed reply with a field
+                // of the wrong type is exactly what this cannot prevent, and the sc-22713 smoke
+                // duly produced one: `startState` as an object on every shot. The plan schema is
+                // enforced after the decode by `film_planner::parse_planner_output`, which is the
+                // only guarantee — if a schema-shaped constraint ever lands in core-llm, this is
+                // where the FilmPlan task should take it.
+                // A reasoning-capable model must be allowed to close its `<think>` block before
+                // emitting the answer. Its final answer is still parsed and validated strictly,
+                // and the planner's existing bounded repair loop handles malformed plans.
+                let constraint = json_decode_constraint(
+                    emits_json,
+                    refiner.descriptor().capabilities.supports_thinking,
+                    thinking_mode,
+                );
+                let request = refine_text_request(
+                    messages,
+                    sampling,
+                    max_new_tokens,
+                    constraint,
+                    blocking_cancel.clone(),
+                    thinking_mode,
+                    kv_compression,
+                );
                 // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
                 // block) were built by the caller and folded into the cache key: only the request's output
                 // constraint — the JSON grammar for a caption task; NONE for the prose `image_describe` task
@@ -1668,11 +1666,13 @@ pub(crate) async fn run_prompt_refine_job(
             return Err(error);
         }
     };
-    // sc-20682: what the KV cache asked for and ran on, on the result and as telemetry.
-    let kv_cache = crate::llm_kv_cache::kv_cache_block(kv_compression, output.kv_cache.as_ref());
-    emit_event(
-        "llm_kv_cache",
-        crate::llm_kv_cache::kv_cache_event(&job.id, &model, kv_cache.clone()),
+    // sc-20682: what the KV cache asked for and ran on, on the result and as telemetry (under the
+    // engine lane, like every LLM generation's `llm_kv_cache` event).
+    let kv_cache = crate::llm_kv_cache::record_kv_cache(
+        &job.id,
+        backend,
+        kv_compression,
+        output.kv_cache.as_ref(),
     );
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
@@ -1895,6 +1895,36 @@ fn refine_progress(
         // Stamped by update_job before posting (sc-4172).
         worker_id: None,
         extra: BTreeMap::new(),
+    }
+}
+
+/// The prompt-refine generation request: the task's turn, sampler, budget and decode constraint,
+/// the job's cancel flag and reasoning mode, and its compressed-KV opt-in (sc-20682). Every other
+/// field keeps the contract default (no seed, no MTP).
+#[cfg(any(
+    test,
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn refine_text_request(
+    messages: Vec<gen_core::core_llm::Message>,
+    sampling: gen_core::core_llm::Sampling,
+    max_new_tokens: u32,
+    constraint: Option<gen_core::core_llm::Constraint>,
+    cancel: gen_core::core_llm::CancelFlag,
+    thinking: gen_core::core_llm::ThinkingMode,
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+) -> gen_core::core_llm::TextLlmRequest {
+    gen_core::core_llm::TextLlmRequest {
+        messages,
+        sampling,
+        max_new_tokens,
+        seed: None,
+        constraint,
+        cancel,
+        thinking,
+        kv_compression,
+        ..Default::default()
     }
 }
 
@@ -2408,6 +2438,36 @@ mod tests {
                 "below_minimum_context"
             );
             assert_eq!(result["generation"]["finishReason"], "stop");
+        }
+    }
+
+    /// sc-20682: the refine request carries the job's compressed-KV policy beside the task's
+    /// sampler, budget, constraint and reasoning mode.
+    #[test]
+    fn the_refine_request_carries_the_job_kv_policy() {
+        use gen_core::core_llm::{
+            CancelFlag, Constraint, KvCompressionPolicy, Message, Sampling, ThinkingMode,
+        };
+        for policy in [KvCompressionPolicy::Off, KvCompressionPolicy::Qualified] {
+            let request = refine_text_request(
+                vec![Message::user("idea")],
+                Sampling {
+                    temperature: 0.4,
+                    ..Sampling::default()
+                },
+                96,
+                Some(Constraint::Json),
+                CancelFlag::new(),
+                ThinkingMode::Disabled,
+                policy,
+            );
+            assert_eq!(request.kv_compression, policy);
+            assert_eq!(request.max_new_tokens, 96);
+            assert_eq!(request.sampling.temperature, 0.4);
+            assert_eq!(request.constraint, Some(Constraint::Json));
+            assert_eq!(request.thinking, ThinkingMode::Disabled);
+            assert_eq!(request.seed, None);
+            assert_eq!(request.messages.len(), 1);
         }
     }
 

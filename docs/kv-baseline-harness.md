@@ -579,9 +579,13 @@ in-process engine's, and it prices the cache the request actually runs on:
 - A mid-generation dense transition is admitted against fresh memory, failing
   typed (`RequestResourceExhausted`) rather than oversubscribing.
 
-Every prompt-refine result carries `generation.kvCache`, and the worker emits
-the same block as the `llm_kv_cache` telemetry event (with `jobId` and
-`engine`). It never includes prompt or output text.
+Every prompt-refine result carries `generation.kvCache`. The worker emits the
+same block as the `llm_kv_cache` telemetry event for every local LLM generation:
+prompt refine, catalog vision analysis and StarVector. The event carries
+`jobId` and `engine` (the lane, `mlx` or `candle`). It never includes prompt or
+output text. StarVector, JoyCaption and other multimodal-wrapped decoders have
+no qualification-table family, so they always report dense, with
+`policy_disabled` or `unqualified_model`.
 
 | Key | Meaning |
 |---|---|

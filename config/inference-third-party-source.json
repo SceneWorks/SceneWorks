@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision eb6758fe (story/sc-20682-kv-policy-admission on top of the epic-20669 sc-20679 compressed-KV branch), pinned on the SceneWorks story branch so the worker can pass the compressed-KV opt-in and record the engine's KV-cache report (sc-20682). The delta from the previously pinned revision d1c2c8cf is the compressed-KV qualification table, the provider's compressed-cache plan and its admission pricing (core-llm kv_compression, mlx-llm kv_policy/provider, candle-llm KV report). It adds no production crate and no new provenance-candidate file; the candle-audio-yue2 and candle-audio-sheetsage2 crates remain open, non-gating licensing worklist items (sc-19751) for the epic's compliance pass. Current reviewed population: 737 provenance candidates and 103 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
-  "inferenceRevision": "eb6758fe91e673c6c1c0ee3f911431e1bb63b976",
-  "auditDigest": "0b26bab05eb305e099cc4dbbe4f49fade52df2120a5ead145407db71b04b2755",
+  "_comment": "Audit of production include_str!/include_bytes! sites and known hand-ports at inference revision 3127f33b (story/sc-20682-kv-policy-admission on top of the epic-20669 sc-20679 compressed-KV branch, with sc-20683 merged), pinned on the SceneWorks story branch so the worker can pass the compressed-KV opt-in and record the engine's KV-cache report (sc-20682). The delta from the previously pinned revision d1c2c8cf is the compressed-KV qualification table and shared planner, the provider compressed-cache plan and its admission pricing, and the Candle/wrapper KV reports (core-llm kv_compression/starvector, mlx-llm kv_policy/provider/packed cache, candle-llm). It adds no production crate and no new provenance-candidate file; the candle-audio-yue2 and candle-audio-sheetsage2 crates remain open, non-gating licensing worklist items (sc-19751) for the epic's compliance pass. Current reviewed population: 737 provenance candidates and 103 production-Rust crate prefixes; read current counts from the checker output. Tests and fixtures are outside this production inventory.",
+  "inferenceRevision": "3127f33bb41e516f1c803cbaaa4e7fe21b1ee539",
+  "auditDigest": "3beafd66e44843b07ee6c46f4277491d5326f2b2896efa7937847369cee495fc",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "eb6758fe91e673c6c1c0ee3f911431e1bb63b976",
+    "revision": "3127f33bb41e516f1c803cbaaa4e7fe21b1ee539",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 737,
-    "populationSha256": "dbc0ce1b8aa01911ecd2b4044352777a8cb211829c16462a54140405691392e4"
+    "populationSha256": "5e0010e776a59518d77b38c6252516a43895375964a134ef4837b076a9411040"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "eb6758fe91e673c6c1c0ee3f911431e1bb63b976",
+    "revision": "3127f33bb41e516f1c803cbaaa4e7fe21b1ee539",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 103,
     "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"

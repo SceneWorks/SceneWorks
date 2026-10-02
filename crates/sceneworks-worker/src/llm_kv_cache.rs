@@ -110,6 +110,37 @@ pub(crate) fn kv_cache_event(job_id: &str, engine: &str, block: Value) -> Value 
     json!({ "jobId": job_id, "engine": engine, "kvCache": block })
 }
 
+/// The engine lane a native LLM generation runs on: the MLX twin on macOS, Candle elsewhere.
+#[cfg(target_os = "macos")]
+pub(crate) const NATIVE_LLM_ENGINE: &str = "mlx";
+#[cfg(not(target_os = "macos"))]
+pub(crate) const NATIVE_LLM_ENGINE: &str = "candle";
+
+/// The KV-cache diagnostics of one generation — its [`kv_cache_block`] and the `llm_kv_cache`
+/// telemetry event carrying it — from the job's policy and the engine's report.
+pub(crate) fn kv_cache_outcome(
+    job_id: &str,
+    engine: &str,
+    policy: KvCompressionPolicy,
+    report: Option<&KvCacheReport>,
+) -> (Value, Value) {
+    let block = kv_cache_block(policy, report);
+    let event = kv_cache_event(job_id, engine, block.clone());
+    (block, event)
+}
+
+/// Emit one generation's `llm_kv_cache` telemetry event and return its result block.
+pub(crate) fn record_kv_cache(
+    job_id: &str,
+    engine: &str,
+    policy: KvCompressionPolicy,
+    report: Option<&KvCacheReport>,
+) -> Value {
+    let (block, event) = kv_cache_outcome(job_id, engine, policy, report);
+    crate::emit_event("llm_kv_cache", event);
+    block
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,6 +271,30 @@ mod tests {
             kv_cache_block(KvCompressionPolicy::Off, None),
             json!({ "policy": "off", "reported": false })
         );
+    }
+
+    /// The result block and the telemetry event of one generation come from the job's policy and
+    /// the engine's report, and the event carries exactly that block under the engine lane.
+    #[test]
+    fn the_outcome_pairs_the_result_block_with_its_event() {
+        let report = KvCacheReport::dense(KvCacheFallbackReason::UnqualifiedModel, None);
+        let (block, event) = kv_cache_outcome(
+            "job-7",
+            NATIVE_LLM_ENGINE,
+            KvCompressionPolicy::Qualified,
+            Some(&report),
+        );
+        assert_eq!(
+            block,
+            kv_cache_block(KvCompressionPolicy::Qualified, Some(&report))
+        );
+        assert_eq!(block["fallbackReason"], "unqualified_model");
+        assert_eq!(block["policy"], "qualified");
+        assert_eq!(
+            event,
+            json!({ "jobId": "job-7", "engine": NATIVE_LLM_ENGINE, "kvCache": block })
+        );
+        assert!(matches!(NATIVE_LLM_ENGINE, "mlx" | "candle"));
     }
 
     #[test]
