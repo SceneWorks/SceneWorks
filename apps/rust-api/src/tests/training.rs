@@ -5617,6 +5617,64 @@ async fn raw_jobs_route_enforces_the_training_licence_gate() {
     }
 }
 
+/// sc-24161 review: the raw route refuses a hand-built plan whose edit-pair shape contradicts its
+/// kernel at submit — references under the T2I kernel, a reference-less item under the edit kernel —
+/// while a consistent plan passes this gate.
+#[tokio::test]
+async fn raw_jobs_route_refuses_edit_shape_kernel_mismatches() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |kernel: &str, items: Value| {
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": {
+            "dryRun": true,
+            "plan": {
+                "target": { "targetId": kernel, "kernel": kernel, "baseModel": "qwen_image_2_1" },
+                "dataset": { "items": items }
+            }
+        } })
+    };
+    let with_refs =
+        json!({ "imagePath": "/x/a.png", "caption": "edit", "referenceImagePaths": ["/x/r.png"] });
+    let plain = json!({ "imagePath": "/x/b.png", "caption": "plain" });
+    for (body, needle) in [
+        (
+            raw("qwen_image_2_1_lora", json!([with_refs.clone()])),
+            "captioned images only",
+        ),
+        (
+            raw(
+                "qwen_image_2_1_edit_lora",
+                json!([with_refs.clone(), plain.clone()]),
+            ),
+            "item 1",
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(needle),
+            "{body}: {response}"
+        );
+    }
+    for body in [
+        raw("qwen_image_2_1_edit_lora", json!([with_refs.clone()])),
+        raw("qwen_image_2_1_lora", json!([plain.clone()])),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert!(
+            !response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("referenceImagePaths"),
+            "{body}: {response}"
+        );
+    }
+}
+
 /// A target with no licence restriction is untouched by the gate, and its adapters carry no licence
 /// fields (the existing library entries keep their exact shape).
 #[test]

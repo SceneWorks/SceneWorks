@@ -3148,6 +3148,45 @@ pub fn max_training_reference_images() -> u32 {
         .unwrap_or(0)
 }
 
+/// Whether a worker kernel trains instruction-edit pairs: some builtin target routed to it declares a
+/// non-zero reference cap (sc-24161). Kernel-keyed, not target-keyed, because a raw job / resolved
+/// plan is dispatched by kernel — and the T2I and edit kernels share one engine trainer, so the
+/// kernel is the only thing that says which mode a plan may train. A future edit kernel inherits
+/// this by declaring `limits.maxReferenceImages` on its target.
+pub fn training_kernel_trains_edit_pairs(kernel: &str) -> bool {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .any(|target| target.kernel == kernel && training_target_trains_edit_pairs(target))
+}
+
+/// The kernel-level edit-pair shape floor (sc-24161) for an already-resolved plan, given each item's
+/// reference count in order: an edit kernel needs references on EVERY item, any other kernel on
+/// NONE. Returns the human-facing refusal, or `None`. The worker applies it to every plan and the
+/// API's raw job route to every hand-built one, so a plan that bypassed the typed route's
+/// target-level check can never train an edit adapter under the T2I target (or T2I under the edit
+/// target) just because both kernels share the `qwen_image_2_1` engine trainer.
+pub fn edit_pair_kernel_shape_error(
+    kernel: &str,
+    reference_counts: impl IntoIterator<Item = usize>,
+) -> Option<String> {
+    let edit_kernel = training_kernel_trains_edit_pairs(kernel);
+    reference_counts
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, count)| match (edit_kernel, count) {
+            (true, 0) => Some(format!(
+                "Training kernel '{kernel}' trains instruction-edit pairs, but plan item {index} \
+                 has no referenceImagePaths."
+            )),
+            (false, count) if count > 0 => Some(format!(
+                "Training kernel '{kernel}' trains captioned images only, but plan item {index} \
+                 carries {count} referenceImagePaths (an instruction-edit pair)."
+            )),
+            _ => None,
+        })
+}
+
 /// The dataset-shape floor for a target (sc-24161), mirroring the engine's
 /// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
 ///

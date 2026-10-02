@@ -1074,6 +1074,11 @@ async fn validate_raw_job_payload(
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }
+        // sc-24161: a hand-built plan whose edit-pair shape contradicts its kernel is refused here,
+        // not first discovered by the worker.
+        if let Some(error) = crate::training::raw_training_payload_edit_shape_error(payload) {
+            return Err(error);
+        }
     }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload

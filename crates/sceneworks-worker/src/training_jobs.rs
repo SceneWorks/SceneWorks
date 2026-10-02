@@ -102,6 +102,18 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
     // real run (both call this), so both reject the same forged filename before any join.
     safe_weight_filename(&plan.output.file_name, "Training fileName")?;
+    // sc-24161: the T2I and edit kernels share one engine trainer (cap 10), so the engine floor
+    // alone cannot tell an edit adapter trained under the T2I target from the intended one. The
+    // kernel decides: an edit kernel needs references on every item, any other kernel on none.
+    if let Some(message) = sceneworks_core::training::edit_pair_kernel_shape_error(
+        &plan.target.kernel,
+        plan.dataset
+            .items
+            .iter()
+            .map(|item| item.reference_image_paths.len()),
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -3264,6 +3276,55 @@ mod tests {
         escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
         assert!(training_request_from_plan(&settings, &escaping, &mut prepared_inputs).is_err());
         prepared_inputs.close().expect("close prepared inputs");
+    }
+
+    /// sc-24161 review: both 2.1 kernels map to the one `qwen_image_2_1` engine trainer, so the
+    /// worker itself refuses a plan whose edit shape contradicts its KERNEL — references under the
+    /// T2I kernel (would train an edit adapter as a T2I target) and a reference-less item under the
+    /// edit kernel (would train T2I as an edit target) — whatever route queued it.
+    #[test]
+    fn worker_refuses_plans_whose_edit_shape_contradicts_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let image = data_dir.join("datasets").join("ds-1").join("a.png");
+        let plan_for = |kernel: &str, refs: &[Value]| {
+            let mut value = plan_json(
+                &data_dir,
+                kernel,
+                "qwen_image_2_1",
+                "lora",
+                &[&image.display().to_string(), &image.display().to_string()],
+            );
+            value["dataset"]["items"][1]["referenceImagePaths"] = json!(refs);
+            parse(value)
+        };
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_lora") && error.contains("captioned images only"),
+            "{error}"
+        );
+        // Item 0 has no references under the edit kernel (item 1 does): mixed is refused too.
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_edit_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_edit_lora") && error.contains("item 0"),
+            "{error}"
+        );
+        // A plain T2I plan passes the shape floor (it then reports the missing images instead).
+        let error = validate_training_plan(&settings, &plan_for("qwen_image_2_1_lora", &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
     }
 
     /// A complete resolved plan as the API serializes it, parameterized by the

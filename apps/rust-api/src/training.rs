@@ -2747,6 +2747,33 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
         })
 }
 
+/// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose
+/// instruction-edit shape contradicts its kernel (sc-24161): references under a captioned-only kernel
+/// or a reference-less item under an edit kernel. The typed route's target-level check never sees
+/// these plans, and both Qwen Image 2.1 kernels share one engine trainer, so this is the submit-time
+/// twin of the worker's own floor (`sceneworks_core::training::edit_pair_kernel_shape_error`).
+pub(crate) fn raw_training_payload_edit_shape_error(payload: &JsonObject) -> Option<ApiError> {
+    let plan = payload.get("plan")?;
+    let kernel = plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)?
+        .trim();
+    let items = plan
+        .get("dataset")
+        .and_then(|dataset| dataset.get("items"))
+        .and_then(Value::as_array)?;
+    sceneworks_core::training::edit_pair_kernel_shape_error(
+        kernel,
+        items.iter().map(|item| {
+            item.get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }),
+    )
+    .map(ApiError::bad_request)
+}
+
 /// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
 /// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (the Qwen Image
 /// 2.1 instruction-EDIT kernel until its Candle trainer, sc-24162, lands — the T2I kernel got its

@@ -1176,6 +1176,21 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "kolors_lora"));
+    // sc-24161: the off-Mac twin lists exactly the candle-routed training kernels, so the MLX-only
+    // Qwen Image 2.1 edit kernel is not offered off-Mac while its T2I sibling is.
+    let candle_kernels: Vec<_> = caps["training"]["candleSupportedKernels"]
+        .as_array()
+        .expect("candleSupportedKernels")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(candle_kernels.contains(&"qwen_image_2_1_lora"));
+    assert!(!candle_kernels.contains(&"qwen_image_2_1_edit_lora"));
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "qwen_image_2_1_edit_lora"));
 }
 
 #[tokio::test]

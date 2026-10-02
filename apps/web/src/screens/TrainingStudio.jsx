@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
+import { candleTrainingKernelBlocked } from "../candleGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -580,7 +581,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
-  const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
+  // sc-24161: off-Mac the twin gate disables a target whose kernel has no candle trainer (the
+  // MLX-only Qwen Image 2.1 edit kernel until sc-24162) — from the server's candle-routed set — so
+  // it is neither selectable nor drives the dataset editor's edit-pair affordances.
+  const targetBlockReason = (target) => {
+    if (macTrainingKernelBlocked(macCapabilities, target?.kernel)) return "mac";
+    if (candleTrainingKernelBlocked(macCapabilities, target?.kernel)) return "candle";
+    return null;
+  };
+  const macTargetBlocked = (target) => Boolean(targetBlockReason(target));
+  const targetBlockedLabel = (target) =>
+    targetBlockReason(target) === "candle" ? " — Apple Silicon only" : " — not on Mac (Cuda only)";
   // Model-availability gate (sc-5947): training needs a trainable target whose base model is
   // downloaded. A target's base counts as missing only when it's present in the catalog AND
   // installState === "missing" (so a thin test context with no `models` stays ready, and a real
@@ -2038,6 +2049,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setSelectedTargetId={setSelectedTargetId}
                   trainingTargets={trainingTargets}
                   macTargetBlocked={macTargetBlocked}
+                  targetBlockedLabel={targetBlockedLabel}
                   updateSelectedPreset={updateSelectedPreset}
                   updateQualityTier={updateQualityTier}
                   selectedPreset={selectedPreset}

@@ -515,6 +515,42 @@ fn edit_plans_keep_reference_order_and_refuse_bad_shapes() {
     assert!(plan_for("qwen_image_2_1_edit_lora", &escaping).is_err());
 }
 
+/// sc-24161 review: the kernel-level edit floor the worker and the raw route share. Keyed off the
+/// targets' declared reference caps, so only the 2.1 edit kernel is an edit kernel.
+#[test]
+fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
+    use sceneworks_core::training::{
+        edit_pair_kernel_shape_error, training_kernel_trains_edit_pairs,
+    };
+    assert!(training_kernel_trains_edit_pairs(
+        "qwen_image_2_1_edit_lora"
+    ));
+    for target in builtin_training_targets().targets {
+        if target.kernel != "qwen_image_2_1_edit_lora" {
+            assert!(
+                !training_kernel_trains_edit_pairs(&target.kernel),
+                "{}",
+                target.kernel
+            );
+        }
+    }
+    assert_eq!(
+        edit_pair_kernel_shape_error("qwen_image_2_1_edit_lora", [1, 10]),
+        None
+    );
+    assert_eq!(
+        edit_pair_kernel_shape_error("qwen_image_2_1_lora", [0, 0]),
+        None
+    );
+    let error = edit_pair_kernel_shape_error("qwen_image_2_1_edit_lora", [2, 0]).expect("mixed");
+    assert!(error.contains("item 1"), "{error}");
+    let error = edit_pair_kernel_shape_error("qwen_image_2_1_lora", [0, 3]).expect("t2i refs");
+    assert!(
+        error.contains("captioned images only") && error.contains("3"),
+        "{error}"
+    );
+}
+
 #[test]
 #[ignore = "regen helper: run with REGEN_FIXTURE=1 to rewrite target-registry.json"]
 fn regen_target_registry_fixture() {

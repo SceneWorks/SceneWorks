@@ -115,7 +115,9 @@ export function DatasetEditorPanel({
     referenceCap = 0, referenceDraftById = {}, setItemReferences, addItemReferences,
     importItemReferences, editPairsMode = false, setEditPairsMode,
   } = editPairSession;
-  const hasEditPairs = Object.values(referenceDraftById).some((ids) => ids?.length);
+  // Only the CURRENT members count: drafts for removed items linger in the map (the save payload
+  // ignores them) and must not lock the toggle on.
+  const hasEditPairs = (memberAssets ?? []).some((asset) => referenceDraftById[asset.id]?.length);
   // The rails show once the user turns edit pairs on, or whenever the dataset already has some.
   const showEditPairs = referenceCap > 0 && (editPairsMode || hasEditPairs);
   const [referencePickerFor, setReferencePickerFor] = React.useState(null);

@@ -289,6 +289,15 @@ describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
     );
   });
 
+  it("ignores reference drafts left behind by items no longer in the dataset", async () => {
+    // "gone" was removed from the selection but its draft lingers in the map.
+    await act(async () => root.render(<Harness initial={{ gone: ["ref-a"] }} referenceCap={10} />));
+    const toggle = [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Edit pairs"));
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector(".training-edit-refs")).toBeNull();
+  });
+
   it("shows the rails only once edit pairs are turned on for a dataset without references", async () => {
     await act(async () => root.render(<Harness initial={{}} referenceCap={10} />));
     expect(container.querySelector(".training-edit-refs")).toBeNull();

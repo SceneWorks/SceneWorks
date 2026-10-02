@@ -386,6 +386,15 @@ export function editPairDatasetIssues(dataset, target, cap) {
       ),
     );
   }
+  const both = items.find((item) => count(item) > 0 && item?.controlImagePath);
+  if (both) {
+    issues.push(
+      issue.error(
+        "dataset",
+        `“${name(both)}” has both reference images (an edit pair) and a control image (a control pair); an item is one or the other.`,
+      ),
+    );
+  }
   const blank = items.find((item) => count(item) > 0 && !captionText(item));
   if (blank) {
     issues.push(issue.error("dataset", `“${name(blank)}” needs an edit instruction (its caption).`));

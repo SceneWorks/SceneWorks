@@ -271,3 +271,21 @@ describe("edit-pair dataset helpers (sc-24161)", () => {
     expect(messages({ items: [item("a", 0)] }, t2iTarget, 0)).toEqual([]);
   });
 });
+
+describe("edit-pair control conflict (sc-24161 review)", () => {
+  it("refuses an item that is both an edit pair and a control pair", () => {
+    const target = { id: "edit", limits: { maxReferenceImages: 10 }, ui: { label: "Edit" } };
+    const item = {
+      id: "a",
+      displayName: "a.png",
+      caption: { text: "edit it" },
+      references: [{ path: "images/refs/a_ref1.png" }],
+    };
+    expect(editPairDatasetIssues({ items: [item] }, target, 10)).toEqual([]);
+    const messages = editPairDatasetIssues({ items: [{ ...item, controlImagePath: "controls/a.png" }] }, target, 10).map(
+      (entry) => entry.message,
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("control image");
+  });
+});
