@@ -7893,8 +7893,8 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
 }
 
 /// A manifest that DECLARES `loraCompatibility.families: []` (as `qwen_image_2_1` did until
-/// sc-24156 gave it the `qwen-image-2-1` family) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
-/// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
+/// sc-24156 gave it the `qwen-image-2-1` family) is refused by `validate_lora_specs_for_model`
+/// with "has no declared LoRA families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
 /// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
 /// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on
 /// exactly the models the API refuses. An explicit `supported` already on the entry is kept.
@@ -13468,20 +13468,21 @@ mod imported_lora_advertisement_tests {
         );
     }
 
-    /// A manifest-declared `families: []` (Qwen Image 2.1) is refused by the LoRA validator, so the
-    /// catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers every
-    /// LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
+    /// A manifest-declared `families: []` (any model that ships without LoRA support; historically
+    /// Qwen Image 2.1, before sc-24156 gave it its own family) is refused by the LoRA validator, so
+    /// the catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers
+    /// every LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
     /// advertisements, and an explicit `supported`, are left alone.
     #[test]
     fn a_declared_empty_lora_advertisement_is_marked_unsupported() {
-        let mut qwen =
-            json!({ "id": "qwen_image_2_1", "loraCompatibility": { "families": [], "types": [] } })
+        let mut no_lora =
+            json!({ "id": "no_lora_model", "loraCompatibility": { "families": [], "types": [] } })
                 .as_object()
                 .expect("object")
                 .clone();
-        mark_empty_lora_advertisement_unsupported(&mut qwen);
+        mark_empty_lora_advertisement_unsupported(&mut no_lora);
         assert_eq!(
-            qwen["loraCompatibility"],
+            no_lora["loraCompatibility"],
             json!({ "families": [], "types": [], "supported": false })
         );
 
