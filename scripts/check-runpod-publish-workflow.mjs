@@ -124,6 +124,37 @@ function validateCandleRuntimeGate(candidate) {
   assert.equal(candidate.match(/uses: docker\/setup-buildx-action@/g)?.length, 1,
     "the standalone CUDA image and single combined image must share one builder");
 }
+
+function validateRuntimeFixture(script) {
+  requireText(script, "assert_service_identity_and_writes() {");
+  for (const contract of [
+    'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = "$3"',
+    'awk -v uid="$1" -v gid="$2"',
+    "/proc/1/status",
+    'for dir in "$HOME" /smoke/data /smoke/data/cache /smoke/config /smoke/credentials /smoke/hf;',
+    "! touch /etc/sceneworks-candle-smoke",
+  ]) requireText(script, contract);
+  requireText(script, 'assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data');
+  requireText(script, 'assert_service_identity_and_writes "${worker}" "${uid}" "${gid}" "${expected_home}"');
+  const apiHealthy = script.indexOf('[[ "${ready}" == 1 ]]');
+  const apiIdentity = script.indexOf('assert_service_identity_and_writes "${api}"');
+  const workerStart = script.indexOf('docker run -d --name "${worker}"');
+  const workerRegistered = script.indexOf('[[ "${registered}" == 1 ]]');
+  const workerIdentity = script.indexOf('assert_service_identity_and_writes "${worker}"');
+  const workerStop = script.indexOf('docker stop -t 15 "${worker}"');
+  assert.ok(apiHealthy >= 0 && apiIdentity > apiHealthy && workerStart > apiIdentity,
+    "API identity and bind checks must run after health and before worker startup");
+  assert.ok(workerRegistered >= 0 && workerIdentity > workerRegistered && workerStop > workerIdentity,
+    "worker identity and bind checks must run after registration and before clean stop");
+}
+
+validateRuntimeFixture(candleSmoke);
+for (const mutated of [
+  candleSmoke.replace('assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data', ""),
+  candleSmoke.replace('assert_service_identity_and_writes "${worker}" "${uid}" "${gid}" "${expected_home}"', ""),
+  candleSmoke.replace('! touch /etc/sceneworks-candle-smoke', "touch /etc/sceneworks-candle-smoke"),
+]) assert.throws(() => validateRuntimeFixture(mutated));
+
 validateCandleRuntimeGate(workflow);
 for (const mutated of [
   workflow.replace("target: rust-worker-candle", "target: rust-worker"),

@@ -32,6 +32,22 @@ smoke_root="$(mktemp -d)"
 network="sceneworks-candle-smoke-$$"
 api="${network}-api"
 worker="${network}-worker"
+assert_service_identity_and_writes() {
+  local container="$1" uid="$2" gid="$3" expected_home="$4"
+  docker exec "${container}" sh -ec '
+    test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = "$3"
+    awk -v uid="$1" -v gid="$2" "/^Uid:/ {if (\$2 != uid || \$3 != uid || \$4 != uid || \$5 != uid) exit 1} /^Gid:/ {if (\$2 != gid || \$3 != gid || \$4 != gid || \$5 != gid) exit 1}" /proc/1/status
+    for dir in "$HOME" /smoke/data /smoke/data/cache /smoke/config /smoke/credentials /smoke/hf; do
+      probe="$(mktemp "$dir/.candle-smoke.XXXXXX")"
+      printf smoke > "$probe"
+      renamed="${probe}.renamed"
+      mv "$probe" "$renamed"
+      test "$(cat "$renamed")" = smoke
+      rm "$renamed"
+    done
+    ! touch /etc/sceneworks-candle-smoke 2>/dev/null
+  ' sh "${uid}" "${gid}" "${expected_home}"
+}
 # Pass the temporary token by environment name, never in command arguments/logs.
 SCENEWORKS_ACCESS_TOKEN="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(24).toString("hex"))')"
 export SCENEWORKS_ACCESS_TOKEN
@@ -84,6 +100,7 @@ for identity in default override; do
     sleep 0.5
   done
   [[ "${ready}" == 1 ]] || { docker logs "${api}"; exit 1; }
+  assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data
   # Unless combined-image overrides are supplied, the default case exercises the
   # worker image's actual USER and CMD. Explicit CPU selection needs no GPU.
   docker run -d --name "${worker}" --network "${network}" \
@@ -101,14 +118,7 @@ for identity in default override; do
     sleep 0.5
   done
   [[ "${registered}" == 1 ]] || { docker logs "${worker}"; exit 1; }
-  docker exec "${worker}" sh -ec '
-    test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = "$3"
-    awk -v uid="$1" -v gid="$2" "/^Uid:/ {if (\$2 != uid) exit 1} /^Gid:/ {if (\$2 != gid) exit 1}" /proc/1/status
-    for dir in "$HOME" /smoke/data /smoke/data/cache /smoke/config /smoke/credentials /smoke/hf; do
-      probe="$(mktemp "$dir/.candle-smoke.XXXXXX")"; rm "$probe"
-    done
-    ! touch /etc/sceneworks-candle-smoke 2>/dev/null
-  ' sh "${uid}" "${gid}" "${expected_home}"
+  assert_service_identity_and_writes "${worker}" "${uid}" "${gid}" "${expected_home}"
   docker stop -t 15 "${worker}" >/dev/null
   [[ "$(docker inspect -f '{{.State.ExitCode}}' "${worker}")" == 0 ]]
   docker rm "${worker}" >/dev/null
