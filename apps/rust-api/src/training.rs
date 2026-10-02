@@ -2034,7 +2034,18 @@ pub(crate) fn resolve_base_model_path(target: &TrainingTarget, data_dir: &FsPath
             // snapshots/. Descend into the main snapshot so callers get a usable component
             // root, exactly as inference does. Fall back to the cache root when no snapshot is
             // materialized yet (the path need not exist at dry-run time).
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // Hand the LTX-2.3 trainer the snapshot that actually carries the packed `q4/` tier: on a
+            // cache split across two bundle revisions that is not always the ranked-first one, and the
+            // worker loads `plan.target.baseModelPath` verbatim, so the gate and the path it records
+            // must agree on one snapshot (#2953). With no complete tier anywhere — a dry run against an
+            // uninstalled base — this falls through to the shared resolution below unchanged.
+            if is_ltx23_packed_training_target(target) {
+                if let Some(snapshot) = ltx_q4_training_snapshot(&snapshots) {
+                    return snapshot.join("q4").display().to_string();
+                }
+            }
+            if let Some(snapshot) = snapshots.into_iter().next() {
                 return tiered_turnkey_train_dir(snapshot, target)
                     .display()
                     .to_string();
@@ -2103,11 +2114,10 @@ fn bf16_component_tree_present(bf16: &FsPath) -> bool {
 
 /// LTX is the packed-training exception to the dense-tier rule: both native trainers run QLoRA
 /// directly against the SceneWorks turnkey's `q4/` tier and its sibling Gemma encoder. Pin the exact
-/// LTX files plus every Gemma shard named by its index so a partial generation-only or torn
-/// co-requisite download cannot pass the run gate.
-fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
+/// LTX files so a partial, generation-only download cannot pass the run gate.
+fn ltx_q4_tier_files_present(snapshot: &FsPath) -> bool {
     let q4 = snapshot.join("q4");
-    let q4_present = [
+    [
         "quantize_config.json",
         "transformer.safetensors",
         "connector.safetensors",
@@ -2115,12 +2125,59 @@ fn ltx_q4_training_tier_present(snapshot: &FsPath) -> bool {
         "vae_encoder.safetensors",
     ]
     .iter()
-    .all(|file| q4.join(file).is_file());
-    if !q4_present {
-        return false;
-    }
+    .all(|file| q4.join(file).is_file())
+}
 
-    sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+/// Whether this target runs QLoRA against the FLAT packed `q4/` LTX-2.3 turnkey tier — as opposed to
+/// LTX-2.5's nested `dev/q4/` identity, or the dense `bf16/` tier every other tiered turnkey trains on.
+fn is_ltx23_packed_training_target(target: &TrainingTarget) -> bool {
+    target.kernel == "ltx_mlx_lora" && target.base_model != "ltx_2_5"
+}
+
+/// The LTX-2.3 turnkey snapshot whose packed `q4/` tier is complete, searched across EVERY
+/// materialized snapshot of the repo cache rather than only the ranked-first one.
+///
+/// Hugging Face keeps each filtered download under the revision it was fetched at, so a real install
+/// straddles two snapshots whenever the bundle pin moves: an install predating the sc-18853 bump
+/// keeps `q4/` under the parent revision while any later fetch materializes the bumped one.
+/// Generation tolerates exactly that split — the worker scans both bundle revisions for a complete
+/// tier (`ltx_bundle_subdir_across_revisions`, sc-18853) — so a gate that reads one snapshot refuses
+/// a real run whose weights the trainer would have loaded happily. That is the
+/// "installed for generation, but training needs the packed q4 tier" dead end in #2953. Ranked order
+/// is preserved, so the `refs/main` / fullest snapshot still wins when several carry the tier.
+fn ltx_q4_training_snapshot(snapshots: &[PathBuf]) -> Option<&PathBuf> {
+    snapshots
+        .iter()
+        .find(|snapshot| ltx_q4_tier_files_present(snapshot))
+}
+
+/// Whether a complete Gemma-3 co-requisite is reachable for an LTX-2.3 run: the snapshot the tier
+/// resolved from first, then its siblings.
+///
+/// The trainer resolves its `LoadSpec::text_encoder` through the worker's `bundled_ltx_gemma_dir`,
+/// which already scans sibling revisions for precisely this reason (sc-14377 — "Hugging Face can
+/// retain different filtered downloads in different snapshot revisions"). Requiring `gemma/` inside
+/// the tier's own snapshot made this gate stricter than the loader it exists to predict, so a
+/// split-cache install was refused at submit even though the trainer resolves it.
+fn ltx_gemma_co_requisite_present(snapshots: &[PathBuf], tier_snapshot: &FsPath) -> bool {
+    use sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete;
+    gemma_text_encoder_dir_is_complete(&tier_snapshot.join("gemma"))
+        || snapshots.iter().any(|snapshot| {
+            snapshot.as_path() != tier_snapshot
+                && gemma_text_encoder_dir_is_complete(&snapshot.join("gemma"))
+        })
+}
+
+/// Pre-flight status for the LTX-2.3 packed lane over a materialized turnkey cache: `Ready` only when
+/// a complete `q4/` tier AND a complete Gemma co-requisite are both reachable somewhere in it,
+/// otherwise `TrainingTierMissing` (the repo itself is on disk, so it is never `Missing`).
+fn ltx23_packed_training_status(snapshots: &[PathBuf]) -> TrainingBaseStatus {
+    match ltx_q4_training_snapshot(snapshots) {
+        Some(snapshot) if ltx_gemma_co_requisite_present(snapshots, snapshot) => {
+            TrainingBaseStatus::Ready
+        }
+        _ => TrainingBaseStatus::TrainingTierMissing,
+    }
 }
 
 /// LTX-2.5 is also packed-Q4 training, but its undistilled training identity is nested under
@@ -2163,7 +2220,13 @@ fn training_tier_present(snapshot: &FsPath, target: &TrainingTarget) -> bool {
     if target.base_model == "ltx_2_5" {
         ltx25_q4_training_tier_present(snapshot)
     } else if target.kernel == "ltx_mlx_lora" {
-        ltx_q4_training_tier_present(snapshot)
+        // Single-snapshot form. `training_base_model_status` routes the LTX-2.3 lane through
+        // `ltx23_packed_training_status` instead, which searches the whole repo cache (#2953); this
+        // arm remains the conservative fallback for a hypothetical packed target with no tier split.
+        ltx_q4_tier_files_present(snapshot)
+            && sceneworks_core::safetensors::gemma_text_encoder_dir_is_complete(
+                &snapshot.join("gemma"),
+            )
     } else {
         bf16_component_tree_present(&snapshot.join("bf16"))
     }
@@ -2573,12 +2636,21 @@ pub(crate) fn training_base_model_status(
         .filter(|repo| !repo.is_empty())
     {
         if let Some(cache_path) = huggingface_repo_cache_path(data_dir, repo) {
+            let snapshots = huggingface_snapshot_dirs(&cache_path);
+            // LTX-2.3 QLoRA reads the packed `q4/` tier plus the sibling Gemma encoder, and both can
+            // sit in a DIFFERENT snapshot than the ranked-first one on an install whose bundle pin has
+            // moved — a split the generation lane and the trainer's own text-encoder resolver both
+            // accommodate. Search the whole repo cache so this gate stops refusing installs the
+            // trainer would load (#2953).
+            if is_ltx23_packed_training_target(target) && !snapshots.is_empty() {
+                return ltx23_packed_training_status(&snapshots);
+            }
             // Tiered-turnkey re-host (epic 9992 Krea 2 Raw): training reads the DENSE `bf16/` tier, but
             // generation may have installed only the q4/q8 default. The repo-level completion marker does
             // NOT certify a tier (sc-9909), so require the bf16 component tree specifically — otherwise
             // the run-gate would green-light training on a repo that has no dense weights to train. A
             // turnkey on disk without that tier is `TrainingTierMissing`, not `Missing`.
-            if let Some(snapshot) = huggingface_snapshot_dirs(&cache_path).into_iter().next() {
+            if let Some(snapshot) = snapshots.into_iter().next() {
                 if target.base_model == "ltx_2_5" || snapshot_is_tiered_turnkey(&snapshot) {
                     return if training_tier_present(&snapshot, target) {
                         TrainingBaseStatus::Ready
