@@ -602,15 +602,14 @@ const RULES: &[MemoryRouteRule] = &[
     // (what the matrix and the campaign key on) stays the request's own mode, while the provider
     // receives the one mode it implements.
     //
-    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
-    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
-    // reachable at all — it is absent rather than exempted.
-    //
-    // sc-24158: the feature branch's providers DO apply LoRA/LoKr now (MLX sc-24156, Candle
-    // sc-24157), but these rows are published as `memoryRouteWitnesses` in the checked-in engine
-    // capability dumps, and the macOS lane's fresh-dump check reds on any witness the PINNED dump
-    // lacks. `PLAIN_LORA` (plus the `lora` overlay/profile on the manifest's hand-authored
-    // contract rows) therefore lands with the epic's terminal pin bump and its re-dump.
+    // `PLAIN` and not yet `PLAIN_LORA` (sc-24158). The feature branch's providers apply LoRA/LoKr
+    // (MLX sc-24156, Candle sc-24157), and since sc-24158 the routing catalog sends a
+    // LoRA-carrying 2.1 job to Candle (`candle_quant_lora`) — so that job DOES reach this registry,
+    // where the missing `lora` profile refuses it, as the PINNED engine's `supports_lora=false`
+    // would anyway. These rows are published as `memoryRouteWitnesses` in the checked-in engine
+    // capability dumps, and the macOS lane's fresh-dump check reds on any witness the pinned dump
+    // lacks, so `PLAIN_LORA` (plus the `lora` overlay/profile on the manifest's hand-authored
+    // contract rows) lands with the epic's terminal pin bump and its re-dump.
     //
     // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
     // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
