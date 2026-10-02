@@ -1259,6 +1259,12 @@ fn validate_runtime_pair(
                 &facts.snapshot.backend,
                 engine,
             )?;
+            // A pending-pin target reaching here has NO registered descriptor (the self-deleting
+            // check above refuses otherwise): a fresh dump at the pre-trainer pin carries its
+            // SceneWorks-derived mapping but not the engine. Its lanes stay false until the pin.
+            if pending_pin_training_engine(target).is_some() {
+                continue;
+            }
             let mut routed_network_types = Vec::new();
             for network_type in target_network_types(target_contract)? {
                 let job_type = if network_type == "control" {
@@ -4071,10 +4077,17 @@ mod tests {
     fn pending_pin_training_targets_are_exempt_until_the_pin_registers_them() {
         let (mlx, candle) = valid_runtime_pair();
         for (target, engine) in PENDING_PIN_TRAINING_TARGETS {
-            assert!(
-                !mlx.trainer_mappings.contains_key(*target),
-                "the committed facts already carry {target}: remove it from PENDING_PIN_TRAINING_TARGETS"
-            );
+            // A fresh dump at the pre-trainer pin carries the SceneWorks-derived mapping but no
+            // engine descriptor; that pair must validate too (and the committed one does).
+            let (mut fresh_mlx, mut fresh_candle) = valid_runtime_pair();
+            for facts in [&mut fresh_mlx, &mut fresh_candle] {
+                facts
+                    .trainer_mappings
+                    .insert((*target).to_owned(), (*engine).to_owned());
+            }
+            validate_runtime_pair(&fresh_mlx, &fresh_candle)
+                .unwrap_or_else(|error| panic!("pre-trainer dump carrying {target}: {error}"));
+            validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
             assert!(
                 crate::training::builtin_training_targets()
                     .targets
