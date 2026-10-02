@@ -7892,8 +7892,8 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
     }
 }
 
-/// A manifest that DECLARES `loraCompatibility.families: []` (e.g. `qwen_image_2_1`, whose engine
-/// refuses adapters) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
+/// A manifest that DECLARES `loraCompatibility.families: []` (as `qwen_image_2_1` did until
+/// sc-24156 gave it the `qwen-image-2-1` family) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
 /// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
 /// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
 /// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on

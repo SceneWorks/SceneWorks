@@ -2073,6 +2073,30 @@ fn contains_delimited_token(haystack: &str, needle: &str) -> bool {
     })
 }
 
+/// True when a lower-cased metadata value names Qwen-Image **2.1** rather than the 2512 Qwen-Image.
+///
+/// Every separator (`-`, `_`, `.`, `/`, whitespace) is dropped first, so `qwen_image_2_1`,
+/// `Qwen-Image-2.1`, `qwen-image-2-1`, `Qwen/Qwen-Image-2.1`, `qwen image 2.1` and the diffusers-style
+/// `QwenImage21Pipeline` all read as `qwenimage21…`. The token must then END there or continue with
+/// a non-digit: `qwen-image-2512` collapses to `qwenimage2512` (no `qwenimage21` at all), and a
+/// hypothetical `qwen-image-2-10…` / `-2-1024px` keeps a digit after the `21` and stays out. The
+/// 2.1 PE rewriters (`qwen_image_2_1_pe_*`) are LLM checkpoints that never carry a LoRA, so matching
+/// them here is harmless.
+fn is_qwen_image_2_1_metadata(normalized: &str) -> bool {
+    let compact: String = normalized
+        .chars()
+        .filter(|ch| !matches!(ch, '-' | '_' | '.' | '/' | ' ' | '\t'))
+        .collect();
+    compact
+        .match_indices("qwenimage21")
+        .any(|(position, matched)| {
+            compact[position + matched.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_ascii_digit())
+        })
+}
+
 fn metadata_value_to_family(value: &str) -> Option<String> {
     let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -2172,6 +2196,14 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     }
     if normalized.contains("zimage") || normalized.contains("z-image") {
         return Some("z-image".to_owned());
+    }
+    // Qwen-Image 2.1 (sc-24156, epic 24107) BEFORE the generic qwen+image arm below, which would
+    // otherwise swallow `qwen_image_2_1` / `Qwen-Image-2.1` into the 2512 `qwen-image` family. The
+    // two are different DiTs (2.1 is ~7.1B over a Qwen3 tower, 2512 ~20B over Qwen2.5-VL), so an
+    // adapter for one never loads on the other (E10): a mislabel here hard-routes a 2.1 LoRA onto
+    // the 2512 model and hard-rejects it from its own.
+    if is_qwen_image_2_1_metadata(&normalized) {
+        return Some("qwen-image-2-1".to_owned());
     }
     if normalized.contains("qwen") && normalized.contains("image") {
         return Some("qwen-image".to_owned());
@@ -3753,6 +3785,101 @@ mod tests {
             detect_lora_family(&Value::Object(object)).as_deref(),
             Some("z-image")
         );
+    }
+
+    /// sc-24156 (E10): Qwen-Image 2.1 metadata resolves to its OWN family, ahead of the generic
+    /// qwen+image arm, while every 2512 / Edit spelling stays `qwen-image`. The two DiTs are
+    /// unrelated, so a 2.1 adapter mislabelled `qwen-image` would be offered on — and refused
+    /// from — the wrong model.
+    #[test]
+    fn qwen_image_2_1_metadata_resolves_to_its_own_family_not_2512() {
+        for value in [
+            "qwen_image_2_1",
+            "qwen-image-2-1",
+            "qwen-image-2.1",
+            "Qwen-Image-2.1",
+            "Qwen/Qwen-Image-2.1",
+            "qwen_image_2.1",
+            "Qwen Image 2.1",
+            "qwenimage2.1",
+            "QwenImage21Pipeline",
+            "qwen-image-2.1-edit",
+            "SceneWorks/qwen-image-2-1-mlx",
+        ] {
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some("qwen-image-2-1"),
+                "{value:?} names Qwen-Image 2.1"
+            );
+        }
+        for value in [
+            "qwen-image",
+            "qwen_image",
+            "Qwen/Qwen-Image-2512",
+            "qwen-image-2512",
+            "Qwen-Image-Edit-2509",
+            "Qwen-Image-Edit-2511",
+            "qwen_image_flow",
+            "QwenImagePipeline",
+            // A digit after the `21` is not 2.1.
+            "qwen-image-2-1024px",
+        ] {
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some("qwen-image"),
+                "{value:?} is the 2512 Qwen-Image family"
+            );
+        }
+        // Whole-header, through the trainer stamp the importer actually reads.
+        for (stamp, expected) in [
+            ("qwen_image_2_1", "qwen-image-2-1"),
+            ("Qwen-Image-2512", "qwen-image"),
+        ] {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "__metadata__".to_owned(),
+                json!({ "ss_base_model_version": stamp }),
+            );
+            object.insert(
+                "transformer_blocks.0.attn.to_q.lora_A.weight".to_owned(),
+                json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+            );
+            assert_eq!(
+                detect_lora_family(&Value::Object(object)).as_deref(),
+                Some(expected),
+                "{stamp:?}"
+            );
+        }
+        // And the families never cross at the compatibility gate, in either direction.
+        assert_eq!(canonical_lora_family("qwen_image_2_1"), "qwen-image-2-1");
+        assert_eq!(
+            accepted_lora_families("qwen-image-2-1"),
+            vec!["qwen-image-2-1"]
+        );
+        assert_eq!(accepted_lora_families("qwen-image"), vec!["qwen-image"]);
+        let lora_2512 = json!({ "id": "q2512", "family": "qwen-image" });
+        let lora_21 = json!({ "id": "q21", "family": "qwen-image-2-1" });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_2512),
+            Some("qwen-image-2-1"),
+            "q2512",
+            Some("qwen_image_2_1")
+        )
+        .is_err());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_21),
+            Some("qwen-image"),
+            "q21",
+            Some("qwen_image")
+        )
+        .is_err());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_21),
+            Some("qwen-image-2-1"),
+            "q21",
+            Some("qwen_image_2_1")
+        )
+        .is_ok());
     }
 
     /// A Mage adapter is offered on Mage models and nowhere else: the detected token is the

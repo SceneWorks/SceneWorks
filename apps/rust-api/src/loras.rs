@@ -1552,8 +1552,14 @@ pub(crate) fn validate_lora_specs_for_model(
                 .iter()
                 .any(|model_family| model_family == family)
         }) {
+            // Name BOTH sides (sc-24156): sibling families such as `qwen-image` (2512) and
+            // `qwen-image-2-1` share a model name, so "not compatible" alone leaves the user
+            // guessing which adapter belongs to which model.
             return Err(ApiError::bad_request(format!(
-                "LoRA {lora_id} is not compatible with model {model_id}"
+                "LoRA {lora_id} is not compatible with model {model_id}: the LoRA is a {} adapter, \
+                 and {model_id} loads {} adapters",
+                families.join(" / "),
+                model_families.join(" / ")
             )));
         }
         // ── Declared-partition gating (sc-19563), the FAMILY-AGNOSTIC arm ──────────────────────
@@ -3449,5 +3455,122 @@ mod base_model_gating_tests {
             meta.is_empty(),
             "an adapter that declares no rank/alpha/type must record none: {meta:?}"
         );
+    }
+
+    // ---- Qwen-Image 2.1 vs 2512 (sc-24156, epic 24107 E10) ----------------------------------
+
+    /// The two SHIPPED Qwen rows, read out of the embedded `builtin.models.jsonc` — the exact
+    /// bytes the API seeds and serves — so the test fails if either advertisement drifts.
+    fn shipped_qwen_models() -> Vec<Value> {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc embedded");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let models: Vec<Value> = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| {
+                matches!(
+                    model["id"].as_str(),
+                    Some("qwen_image") | Some("qwen_image_2_1")
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(models.len(), 2, "both shipped Qwen rows are present");
+        models
+    }
+
+    /// 2.1 and 2512 adapters never cross, in either direction, and the refusal names BOTH
+    /// families — on the declared-family path (catalog stamp) AND the detected-family path (the
+    /// file's own trainer stamp), because the latter fires first whenever the file is readable.
+    #[test]
+    fn qwen_image_2_1_and_2512_loras_never_cross_and_the_refusal_names_both_families() {
+        let models = shipped_qwen_models();
+        let qwen_2_1 = models
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .unwrap();
+        assert_eq!(
+            qwen_2_1["loraCompatibility"]["families"],
+            json!(["qwen-image-2-1"])
+        );
+
+        // Declared-family path (no file header).
+        for (lora_family, model_id, model_family) in [
+            ("qwen-image", "qwen_image_2_1", "qwen-image-2-1"),
+            ("qwen-image-2-1", "qwen_image", "qwen-image"),
+        ] {
+            let lora = json!({
+                "id": "cross_style", "installState": "installed", "families": [lora_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a cross-version Qwen LoRA must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("a {lora_family} adapter"))
+                    && detail.contains(&format!("loads {model_family} adapters")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Detected-family path: the file itself carries the trainer stamp.
+        for (stamp, detected, model_id, model_family) in [
+            (
+                "Qwen-Image-2512",
+                "qwen-image",
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+            ),
+            (
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+                "qwen_image",
+                "qwen-image",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                &format!(r#"{{"ss_base_model_version":"{stamp}"}}"#),
+                &["transformer_blocks.0.attn.to_q.lora_A.weight".to_owned()],
+            );
+            // The catalog record claims the TARGET's family; the header must still win.
+            let lora = json!({
+                "id": "stamped_style",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [model_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a file stamped for the other Qwen version must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("appears to be a {detected} LoRA"))
+                    && detail.contains(&format!("({model_family})")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Same-version adapters still pass on both models.
+        for (family, model_id) in [
+            ("qwen-image-2-1", "qwen_image_2_1"),
+            ("qwen-image", "qwen_image"),
+        ] {
+            let lora = json!({
+                "id": "own_style", "installState": "installed", "families": [family],
+            });
+            validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                .unwrap_or_else(|error| panic!("{family} LoRA on {model_id}: {error:?}"));
+        }
     }
 }
