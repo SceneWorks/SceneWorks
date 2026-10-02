@@ -830,6 +830,7 @@ pub(crate) async fn materialize_catalog_results(
                     width: Some(acquired.width),
                     height: Some(acquired.height),
                     control_image_path: None,
+                    references: Vec::new(),
                     extra: Default::default(),
                 },
                 source_path: acquired.path,

@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 107,
     "importedFamilyCount": 4,
-    "cellCount": 1006,
+    "cellCount": 1008,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
@@ -25,11 +25,11 @@
     "manifest": "1f0f2e3a7ad383c4cd08ac3df1ef42dc1623bc610ac3b5416fa42cd9aac130c0",
     "modelImportDefaults": "9156c68c4ffa7571772fa43bbdf1ee1e5e8a27c665e1dc1cdff4287bdbaedda1",
     "routerCandle": "2ed1559b475505e761b382c8ce2e7589d815ea3009a4f4ddfb914f46653ab590",
-    "routerCatalog": "5b76adc4fabb60c0458d23dd13a542a0b634a562245eb8559dc61d91dd2221c8",
+    "routerCatalog": "8a3d50f6c25044e6f98a230acd5267e9287a0dd8ffce52aa3a2ede796d720c64",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
     "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
     "scheduler": "e1ef6a89b60ab1fb7645cc99c7f29196d092b203cdf9ffaadc11ae9e5a1e81aa",
-    "trainingCatalog": "e91f21c639a4eaca20f7871cb9d2c973120a0b108e67c68ada62fa51182b016c",
+    "trainingCatalog": "694ca594760f0db009a225e5d828daf1b57c0966241baad952265b724217325e",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -46,7 +46,7 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "2947298a3d2d63327ba981f180500c4cbce64a3077640813b28df33cbc4d54db",
     "workerDispatch": "9df9a88168d4e57db4495452ed6fc30fb951f8315bb8727fb268f84f767795f6",
-    "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
+    "workerEngineTable": "6216bc8f404d063efd3428099cc156a2bebe98be2a50d2519830e753c963e821",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "4c6abf0e436ec63c44040575b2ec2d41ece2fcae52fa0e6e260e95bec60935d8",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "6e79c427eb0b118e936bdc7b3d0f788b1bb3d2e9cb6b84ea1b78798e4d92ae18",
+    "workerTrainingDispatch": "f05f7784bfa30294592d271a7e427ed42baf120b3b54d4ecdf7fbbb979ef10ac",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -7857,6 +7857,28 @@
         "capability": "train",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": false,
+        "candle": false
       }
     },
     {

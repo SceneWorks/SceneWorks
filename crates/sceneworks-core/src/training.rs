@@ -170,6 +170,14 @@ pub struct TrainingDatasetItem {
     /// the plan item. A control-branch kernel (`krea_control`) requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161, epic 24107): the source
+    /// image(s) the item's caption — its edit INSTRUCTION — edits or composes, in the order the
+    /// instruction names them ("Image 1" first). The item's own image (`path`) is the edit TARGET.
+    /// Empty for every captioned/control item (the default, and the only shape before sc-24161).
+    /// The order is semantic — the engine numbers the references — so it is stored and threaded
+    /// verbatim into the engine `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<TrainingDatasetReference>,
     pub display_name: String,
     pub caption: Caption,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +199,24 @@ pub struct TrainingDatasetItem {
     pub added_at: String,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+/// One stored reference image of an instruction-edit dataset item (sc-24161). Materialized into the
+/// dataset's own media dir exactly like the item image, so the dataset stays self-contained.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReference {
+    /// Source SceneWorks asset, when the reference was picked from the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// Path relative to the dataset root.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 /// Caption text and provenance for a dataset item.
@@ -418,6 +444,12 @@ pub struct TrainingPlanItem {
     /// `control_image_path`; a control-branch kernel requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// Absolute paths of an instruction-edit pair's ORDERED reference images (sc-24161) — empty for
+    /// a captioned/control item. For an edit pair `image_path` is the edit target and `caption` the
+    /// instruction. Threaded verbatim (order preserved) into the engine
+    /// `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_image_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -492,6 +524,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_medium_lora_target(),
             anima_base_lora_target(),
             qwen_image_2_1_lora_target(),
+            qwen_image_2_1_edit_lora_target(),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -532,6 +565,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let krea_target = krea_raw_lora_target();
     let anima_target = anima_base_lora_target();
     let qwen_image_2_1_target = qwen_image_2_1_lora_target();
+    let qwen_image_2_1_edit_target = qwen_image_2_1_edit_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1159,6 +1193,38 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                 object(json!({
                     "description": "Higher-capacity Qwen Image 2.1 style LoRA for texture and look transfer.",
                     "order": 30
+                })),
+            ),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the target defaults carry the flow-match
+            // knobs, so these only pick capacity/LR for an edit-pair dataset.
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.balanced",
+                "Edit balanced",
+                &["edit"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 20-50 instruction-edit pairs (ordered references + target + instruction) on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.conservative",
+                "Edit conservative",
+                &["edit"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+                    "order": 20
                 })),
             ),
         ],
@@ -2764,6 +2830,10 @@ pub enum TrainingPlanError {
     /// client. Kept structured so the API can return a field-specific error
     /// without scraping a human-facing sentence.
     TargetLimit(TrainingTargetLimitError),
+    /// The dataset's shape does not fit the target — an instruction-edit dataset (items carrying
+    /// ordered reference images, sc-24161) on a target that cannot train edits, a mixed or
+    /// over-cap edit dataset, or a plain dataset on an edit-only target. Human-facing reason.
+    InvalidDataset(String),
 }
 
 /// A target-advertised limit rejected while normalizing a training request.
@@ -2859,7 +2929,9 @@ impl std::fmt::Display for TrainingPlanError {
             Self::EmptyDataset => {
                 formatter.write_str("Training dataset has no items. Add at least one image.")
             }
-            Self::InvalidConfig(detail) => formatter.write_str(detail),
+            Self::InvalidConfig(detail) | Self::InvalidDataset(detail) => {
+                formatter.write_str(detail)
+            }
             Self::TargetLimit(error) => error.fmt(formatter),
         }
     }
@@ -2877,6 +2949,7 @@ pub fn build_training_plan(
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
     }
+    validate_dataset_shape_for_target(input.target, input.dataset)?;
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
         Some(word) if !word.is_empty() => vec![word.to_owned()],
@@ -2909,6 +2982,13 @@ pub fn build_training_plan(
                     .as_deref()
                     .map(|path| resolve_item_path(input.dataset_root, path))
                     .transpose()?,
+                // Instruction-edit pairs (sc-24161): the ordered references resolve exactly like
+                // the target image, in stored order — the order is semantic to the engine.
+                reference_image_paths: item
+                    .references
+                    .iter()
+                    .map(|reference| resolve_item_path(input.dataset_root, &reference.path))
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;
@@ -3032,6 +3112,116 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
+/// The target limit naming how many ORDERED reference images one instruction-edit item may carry
+/// (sc-24161). A scalar, not a numeric range, so the advertised-numeric-limit validator skips it
+/// and [`validate_dataset_shape_for_target`] enforces it against the dataset instead.
+pub const MAX_REFERENCE_IMAGES_LIMIT: &str = "maxReferenceImages";
+
+/// How many ordered reference images one instruction-edit training item may carry for `target`
+/// (`limits.maxReferenceImages`), or `0` when the target cannot train on edit pairs at all — every
+/// target before sc-24161. For Qwen Image 2.1 this mirrors the base model's own
+/// `limits.maxReferenceAssets` (10) and the engine trainer's `max_reference_images`; the contract
+/// tests pin all three together so the cap is never a second, drifting number.
+pub fn training_target_max_reference_images(target: &TrainingTarget) -> u32 {
+    target
+        .limits
+        .get(MAX_REFERENCE_IMAGES_LIMIT)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// Whether `target` trains on instruction-edit pairs (its reference cap is non-zero, sc-24161).
+pub fn training_target_trains_edit_pairs(target: &TrainingTarget) -> bool {
+    training_target_max_reference_images(target) > 0
+}
+
+/// The largest per-item reference count any shipped training target accepts — the dataset store's
+/// storage ceiling (a dataset is target-agnostic until a run picks a target, so the per-target cap
+/// is enforced at plan time; this only stops a dataset from holding references no target could use).
+pub fn max_training_reference_images() -> u32 {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .map(training_target_max_reference_images)
+        .max()
+        .unwrap_or(0)
+}
+
+/// The dataset-shape floor for a target (sc-24161), mirroring the engine's
+/// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
+///
+/// - a target that cannot train edits refuses any item carrying references (never a text-to-image
+///   adapter silently trained on the edit targets);
+/// - an edit target refuses a mixed dataset (every item needs 1..=cap references), an item with
+///   more references than the cap (the message names the cap), an item that is both an edit and a
+///   control pair, and an edit pair with an empty instruction caption.
+fn validate_dataset_shape_for_target(
+    target: &TrainingTarget,
+    dataset: &TrainingDataset,
+) -> Result<(), TrainingPlanError> {
+    let cap = training_target_max_reference_images(target);
+    let label = |item: &TrainingDatasetItem| {
+        if item.display_name.trim().is_empty() {
+            item.id.clone()
+        } else {
+            item.display_name.clone()
+        }
+    };
+    if cap == 0 {
+        if let Some(item) = dataset
+            .items
+            .iter()
+            .find(|item| !item.references.is_empty())
+        {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on captioned images only, but dataset item '{}' is an \
+                 instruction-edit pair (it carries reference images). Pick an edit training target \
+                 or remove the references.",
+                target.id,
+                label(item)
+            )));
+        }
+        return Ok(());
+    }
+    for item in &dataset.items {
+        let count = item.references.len();
+        if count == 0 {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on instruction-edit pairs: every dataset item needs at \
+                 least one reference image, but '{}' has none. Add its references (the target is \
+                 the item's image and the caption is the edit instruction), or use a \
+                 text-to-image target for a captioned dataset.",
+                target.id,
+                label(item)
+            )));
+        }
+        if count > cap as usize {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries {count} reference images, but {} accepts at most {cap} \
+                 reference images per edit.",
+                label(item),
+                target.name
+            )));
+        }
+        if item.control_image_path.is_some() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries both reference images (an edit pair) and a control \
+                 image (a control pair); an item is one or the other.",
+                label(item)
+            )));
+        }
+        if item.caption.text.trim().is_empty() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' is an edit pair with an empty instruction: its caption is the \
+                 edit instruction.",
+                label(item)
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
@@ -3120,6 +3310,22 @@ fn validate_advertised_numeric_limits(
 ) -> Result<(), TrainingPlanError> {
     for (field, advertised) in &target.limits {
         if !contains_json_number(advertised) {
+            continue;
+        }
+        // A dataset-shape limit, not a request field: the edit-pair reference cap (sc-24161) is
+        // enforced against the dataset by `validate_dataset_shape_for_target`. It must still be a
+        // non-negative integer, so a malformed advertisement is refused rather than read as 0.
+        if field == MAX_REFERENCE_IMAGES_LIMIT {
+            if advertised
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .is_none()
+            {
+                return Err(invalid_advertised_limit(
+                    field,
+                    "the reference-image cap must be a non-negative integer",
+                ));
+            }
             continue;
         }
         let values = advertised.as_array().ok_or_else(|| {
@@ -3541,6 +3747,63 @@ fn qwen_image_2_1_lora_target() -> TrainingTarget {
         })),
         extra: ExtraFields::new(),
     }
+}
+
+/// How many ordered reference images one Qwen Image 2.1 instruction-edit training item may carry
+/// (sc-24161). The SAME fact as the base model's `limits.maxReferenceAssets` in the builtin manifest
+/// and the engine 2.1 trainer's `TrainerDescriptor::max_reference_images` — the contract tests pin
+/// the three together, so this is never a second, drifting number.
+pub const QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES: u32 = 10;
+
+/// Qwen Image 2.1 instruction-EDIT LoRA/LoKr training (epic 24107 S13, sc-24161).
+///
+/// The same dense bf16 base, licence gate, adapter family (`qwen-image-2-1`) and LoRA/LoKr network
+/// types as the text-to-image [`qwen_image_2_1_lora_target`], but trained on instruction-edit
+/// PAIRS: every dataset item is an edit TARGET image (the item image) + its edit INSTRUCTION (the
+/// item caption) + 1..=10 ORDERED reference images (`TrainingDatasetItem::references`). The cap
+/// (`limits.maxReferenceImages`) is enforced at plan time by `build_training_plan` (and again by the
+/// engine's `validate_edit_request` floor); a plain captioned dataset is refused here, and an edit
+/// dataset is refused by every non-edit target.
+///
+/// The `qwen_image_2_1_edit_lora` kernel maps to the SAME engine trainer as the T2I target,
+/// `qwen_image_2_1` (the engine trains edit mode when the items carry references, and stamps
+/// `trainingMode=edit` on the adapter). MLX-only for now — in `MLX_ROUTED_TRAINING_KERNELS` +
+/// `MLX_ONLY_TRAINING_KERNELS` and NOT the candle set — until the Candle edit trainer (sc-24162)
+/// lands; off-Mac the API refuses a real run with the generic no-trainer-on-this-host message, as
+/// it did for the T2I target before sc-24160.
+fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
+    let mut target = qwen_image_2_1_lora_target();
+    target.id = "qwen_image_2_1_edit_lora".to_owned();
+    target.name = "Qwen Image 2.1 Edit LoRA".to_owned();
+    target.kernel = "qwen_image_2_1_edit_lora".to_owned();
+    // In-training previews are text-only prompts; an edit adapter's preview needs references, so
+    // the default leaves them off rather than rendering misleading text-to-image samples.
+    target
+        .defaults
+        .advanced
+        .insert("sampleEvery".to_owned(), json!(0));
+    target.limits.insert(
+        MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
+        json!(QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES),
+    );
+    for (key, value) in [
+        ("label", json!("Qwen Image 2.1 Edit LoRA")),
+        (
+            "description",
+            json!(format!(
+                "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base \
+                 (install the bf16 tier). Each dataset item is an edit pair: the item image is the \
+                 edit target, its caption is the edit instruction, and it carries 1-{QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES} \
+                 ordered reference images. Apple Silicon (native MLX). Research/evaluation use \
+                 only under the Qwen RESEARCH licence."
+            )),
+        ),
+        ("recommendedFor", json!(["edit"])),
+        ("datasetKind", json!("editPairs")),
+    ] {
+        target.ui.insert(key.to_owned(), value);
+    }
+    target
 }
 
 /// Whether a training target's base model licence requires the user's explicit acceptance before

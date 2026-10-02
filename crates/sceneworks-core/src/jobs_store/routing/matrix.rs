@@ -379,6 +379,11 @@ struct TrainerCapabilityFacts {
     supports_lokr: bool,
     supports_control: bool,
     supports_full_finetune: bool,
+    /// Most ordered reference images one instruction-edit training item may carry (sc-24161);
+    /// `0` = the trainer refuses edit-pair datasets. Absent from dumps that predate the field, which
+    /// reads as `0` — exactly what every trainer before sc-24161 is.
+    #[serde(default)]
+    max_reference_images: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1020,8 +1025,11 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
 /// 1's `PENDING_PIN_ENGINE_IDS`: the moment EITHER pinned runtime registers the engine, the generator
 /// refuses until the entry is removed; after that, a routed backend whose runtime still lacks the
 /// trainer fails the "names no registered local trainer descriptor" check (epic 24107 S11/S12/S15).
-pub(crate) const PENDING_PIN_TRAINING_TARGETS: &[(&str, &str)] =
-    &[("qwen_image_2_1_lora", "qwen_image_2_1")];
+pub(crate) const PENDING_PIN_TRAINING_TARGETS: &[(&str, &str)] = &[
+    ("qwen_image_2_1_lora", "qwen_image_2_1"),
+    // sc-24161: the instruction-edit target maps to the SAME engine trainer (edit mode).
+    ("qwen_image_2_1_edit_lora", "qwen_image_2_1"),
+];
 
 fn pending_pin_training_engine(target: &str) -> Option<&'static str> {
     PENDING_PIN_TRAINING_TARGETS
@@ -1070,7 +1078,8 @@ fn expected_backend_local_trainer_id(
         ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
             ("mage_flow_base", "mage_flow_base")
         }
-        ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora") => {
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
+        | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
             ("qwen_image_2_1", "qwen_image_2_1")
         }
         _ => {
@@ -1175,7 +1184,7 @@ fn validate_runtime_pair(
         .collect();
     // Self-deleting placeholder: once the pinned runtime registers the pending trainer on either
     // backend, the exemption is stale and must be removed so the target's real lanes are derived.
-    for (target, engine) in PENDING_PIN_TRAINING_TARGETS {
+    for (_, engine) in PENDING_PIN_TRAINING_TARGETS {
         for facts in [mlx, candle] {
             if facts
                 .snapshot
@@ -1183,8 +1192,15 @@ fn validate_runtime_pair(
                 .iter()
                 .any(|descriptor| descriptor.id == *engine)
             {
+                // Several targets can share one engine trainer (Qwen Image 2.1 T2I + edit,
+                // sc-24161): name every placeholder the registration retires.
+                let retired: Vec<_> = PENDING_PIN_TRAINING_TARGETS
+                    .iter()
+                    .filter(|(_, pending_engine)| pending_engine == engine)
+                    .map(|(target, _)| *target)
+                    .collect();
                 return Err(format!(
-                    "{} runtime now registers trainer {engine:?}: remove {target:?} from \
+                    "{} runtime now registers trainer {engine:?}: remove {retired:?} from \
                      PENDING_PIN_TRAINING_TARGETS and regenerate the matrix from the re-dumped facts",
                     facts.snapshot.backend
                 ));
@@ -3474,10 +3490,18 @@ fn target_network_types(target: &crate::training::TrainingTarget) -> Result<Vec<
     Ok(types)
 }
 
-fn trainer_supports(facts: &RuntimeDescriptorFacts, target: &str, network_type: &str) -> bool {
-    let Some(engine) = facts.trainer_mappings.get(target) else {
+fn trainer_supports(
+    facts: &RuntimeDescriptorFacts,
+    target: &crate::training::TrainingTarget,
+    network_type: &str,
+) -> bool {
+    let Some(engine) = facts.trainer_mappings.get(&target.id) else {
         return false;
     };
+    // An instruction-edit target (sc-24161) needs a trainer that accepts at least the target's own
+    // reference cap — a T2I-only trainer under the same engine id (max_reference_images 0) would
+    // otherwise read as supporting the edit target and train text-to-image on the edit targets.
+    let required_references = crate::training::training_target_max_reference_images(target);
     facts
         .snapshot
         .trainer_capabilities
@@ -3485,6 +3509,7 @@ fn trainer_supports(facts: &RuntimeDescriptorFacts, target: &str, network_type: 
         .find(|descriptor| descriptor.id == *engine)
         .is_some_and(|descriptor| {
             descriptor.backend == facts.snapshot.backend
+                && descriptor.max_reference_images >= required_references
                 && match network_type {
                     "lora" => descriptor.supports_lora,
                     "lokr" => descriptor.supports_lokr,
@@ -3508,9 +3533,9 @@ fn training_rows(
                 JobType::LoraTrain
             };
             let job = probe_job(job_type, "", training_payload(&target, &network_type))?;
-            let mlx = trainer_supports(mlx_facts, &target.id, &network_type)
+            let mlx = trainer_supports(mlx_facts, &target, &network_type)
                 && backend_supports(&job, mlx_facts)?;
-            let candle = trainer_supports(candle_facts, &target.id, &network_type)
+            let candle = trainer_supports(candle_facts, &target, &network_type)
                 && backend_supports(&job, candle_facts)?;
             rows.push(TrainingCapabilityRow {
                 target: target.id.clone(),
@@ -3962,6 +3987,7 @@ mod tests {
                         supports_lokr: false,
                         supports_control: false,
                         supports_full_finetune: false,
+                        max_reference_images: 0,
                     });
             }
         }
@@ -4112,14 +4138,17 @@ mod tests {
                 );
             }
 
-            // sc-24160: the production scheduler routes the pending target on BOTH backends — so
-            // the only thing holding its rows false is the pinned runtimes not yet registering the
-            // engine trainer, and the moment they do the rows must flip (not stay silently false).
+            // sc-24160: the production scheduler routes the T2I pending target on BOTH backends —
+            // so the only thing holding its rows false is the pinned runtimes not yet registering
+            // the engine trainer, and the moment they do the rows must flip (not stay silently
+            // false). sc-24161: the instruction-edit target is routed to MLX ONLY until the Candle
+            // edit trainer (sc-24162) lands, so its candle row must stay false even then.
             let target_contract = crate::training::builtin_training_targets()
                 .targets
                 .into_iter()
                 .find(|candidate| candidate.id == *target)
                 .expect("pending target ships");
+            let candle_routed = *target != "qwen_image_2_1_edit_lora";
             for network_type in target_network_types(&target_contract).unwrap() {
                 let job = probe_job(
                     JobType::LoraTrain,
@@ -4127,13 +4156,15 @@ mod tests {
                     training_payload(&target_contract, &network_type),
                 )
                 .unwrap();
-                for facts in [&mlx, &candle] {
-                    assert!(
-                        backend_supports(&job, facts).unwrap(),
-                        "{} must route {target}/{network_type}",
-                        facts.snapshot.backend
-                    );
-                }
+                assert!(
+                    backend_supports(&job, &mlx).unwrap(),
+                    "mlx must route {target}/{network_type}"
+                );
+                assert_eq!(
+                    backend_supports(&job, &candle).unwrap(),
+                    candle_routed,
+                    "candle routing of {target}/{network_type}"
+                );
             }
 
             // Either pinned runtime registering the engine retires the placeholder, loudly.
@@ -4154,6 +4185,7 @@ mod tests {
                         supports_lokr: true,
                         supports_control: false,
                         supports_full_finetune: false,
+                        max_reference_images: 0,
                     });
                 let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
                 assert!(
@@ -6369,6 +6401,60 @@ mod tests {
         assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
     }
 
+    /// sc-24161: the instruction-edit target shares the T2I target's engine trainer id, so a trainer
+    /// that cannot take edit pairs (`max_reference_images` 0 — the T2I-only descriptor shape, and
+    /// every dump that predates the field) must NOT read as supporting the edit target; one that
+    /// accepts at least the target's own cap does.
+    #[test]
+    fn edit_targets_need_a_trainer_that_accepts_their_reference_cap() {
+        let targets = crate::training::builtin_training_targets().targets;
+        let edit = targets
+            .iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("edit target ships");
+        let t2i = targets
+            .iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("t2i target ships");
+        let cap = crate::training::training_target_max_reference_images(edit);
+        assert_eq!(cap, 10);
+        assert_eq!(
+            crate::training::training_target_max_reference_images(t2i),
+            0
+        );
+        for (max_reference_images, edit_supported) in
+            [(0, false), (cap - 1, false), (cap, true), (cap + 2, true)]
+        {
+            let (mut mlx, _) = valid_runtime_pair();
+            for target in [&edit.id, &t2i.id] {
+                mlx.trainer_mappings
+                    .insert(target.clone(), "qwen_image_2_1".to_owned());
+            }
+            mlx.snapshot
+                .trainer_capabilities
+                .push(TrainerCapabilityFacts {
+                    id: "qwen_image_2_1".to_owned(),
+                    backend: "mlx".to_owned(),
+                    supports_lora: true,
+                    supports_lokr: true,
+                    supports_control: false,
+                    supports_full_finetune: false,
+                    max_reference_images,
+                });
+            for network_type in ["lora", "lokr"] {
+                assert_eq!(
+                    trainer_supports(&mlx, edit, network_type),
+                    edit_supported,
+                    "edit/{network_type} with a trainer cap of {max_reference_images}"
+                );
+                assert!(
+                    trainer_supports(&mlx, t2i, network_type),
+                    "the T2I target needs no reference cap ({network_type})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn trainer_mappings_allow_native_engine_ids_and_fail_closed() {
         let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
@@ -6381,8 +6467,13 @@ mod tests {
             "the regression requires distinct native LTX 2.5 trainer engines"
         );
         validate_runtime_pair(&mlx, &candle).unwrap();
-        assert!(trainer_supports(&mlx, target, "lora"));
-        assert!(trainer_supports(&candle, target, "lora"));
+        let target_contract = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|candidate| candidate.id == target)
+            .expect("ltx 2.5 target ships");
+        assert!(trainer_supports(&mlx, &target_contract, "lora"));
+        assert!(trainer_supports(&candle, &target_contract, "lora"));
 
         let mut missing_target = candle.clone();
         missing_target.trainer_mappings.remove(target);

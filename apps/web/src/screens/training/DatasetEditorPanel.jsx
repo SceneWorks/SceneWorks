@@ -16,6 +16,7 @@ import {
   ReadinessBadge,
   ReadinessFlagDetails,
 } from "./DatasetDoctor.jsx";
+import { EditReferenceRail } from "./EditReferenceRail.jsx";
 import { datasetItemCount, datasetItemSelectionKey, imageAssetName } from "../../training/datasetHelpers.js";
 import { joyCaptionExtraOptions, joyCaptionLengths, joyCaptionTypes } from "../../training/joyCaptionPrompts.js";
 
@@ -85,6 +86,9 @@ export function DatasetEditorPanel({
   captionSession,
   doctorSession,
   config,
+  // Instruction-edit pairs (sc-24161): per-item ordered reference rails. Absent (or a 0 cap — no
+  // trainable edit target) leaves the editor exactly as it was.
+  editPairSession = {},
 }) {
   const {
     loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset, datasets,
@@ -107,6 +111,18 @@ export function DatasetEditorPanel({
     imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
     gpuOptions, onUploadPreparedBundle,
   } = config;
+  const {
+    referenceCap = 0, referenceDraftById = {}, setItemReferences, addItemReferences,
+    importItemReferences, editPairsMode = false, setEditPairsMode,
+  } = editPairSession;
+  const hasEditPairs = Object.values(referenceDraftById).some((ids) => ids?.length);
+  // The rails show once the user turns edit pairs on, or whenever the dataset already has some.
+  const showEditPairs = referenceCap > 0 && (editPairsMode || hasEditPairs);
+  const [referencePickerFor, setReferencePickerFor] = React.useState(null);
+  const assetsById = React.useMemo(
+    () => new Map((imageAssets ?? []).map((asset) => [asset.id, asset])),
+    [imageAssets],
+  );
   // Local aliases for the doctor readout's report/loading, still referenced directly by
   // the distributions block and the per-card readiness badges below.
   const { report: readiness = null, loading: readinessLoading = false } = datasetDoctor ?? {};
@@ -352,6 +368,23 @@ export function DatasetEditorPanel({
               <Icon.Folder size={14} />
               Import Parquet
             </button>
+            {referenceCap > 0 ? (
+              <button
+                aria-pressed={showEditPairs}
+                className={showEditPairs ? "secondary-action strong" : "secondary-action"}
+                disabled={hasEditPairs}
+                onClick={() => setEditPairsMode?.(!editPairsMode)}
+                title={
+                  hasEditPairs
+                    ? "This dataset has edit pairs — remove every reference to turn edit pairs off"
+                    : `Train an edit adapter: each image is an edit target, its caption the instruction, with 1-${referenceCap} ordered reference images`
+                }
+                type="button"
+              >
+                <Icon.Sliders size={14} />
+                Edit pairs
+              </button>
+            ) : null}
             <button
               className="secondary-action"
               disabled={!memberAssets.length}
@@ -516,6 +549,16 @@ export function DatasetEditorPanel({
                           : undefined
                       }
                     />
+                    {showEditPairs ? (
+                      <EditReferenceRail
+                        assetsById={assetsById}
+                        cap={referenceCap}
+                        itemName={name}
+                        onAdd={() => setReferencePickerFor({ selectionId: asset.id, name })}
+                        onChange={(ids) => setItemReferences?.(asset.id, ids)}
+                        referenceIds={referenceDraftById[asset.id] ?? []}
+                      />
+                    ) : null}
                     <textarea
                       aria-label={`Caption for ${name}`}
                       className={[
@@ -525,7 +568,11 @@ export function DatasetEditorPanel({
                         .filter(Boolean)
                         .join(" ")}
                       onChange={(event) => updateCaption(asset.id, event.target.value)}
-                      placeholder="Describe this image…"
+                      placeholder={
+                        showEditPairs
+                          ? "Edit instruction — e.g. put the hat from image 2 on the person in image 1"
+                          : "Describe this image…"
+                      }
                       rows={3}
                       value={draft.text ?? ""}
                     />
@@ -581,6 +628,30 @@ export function DatasetEditorPanel({
           onAdd={addAssets}
           onClose={() => setAddDialogOpen(false)}
           onImport={handleImport}
+        />
+      ) : null}
+      {referencePickerFor ? (
+        <DatasetAddDialog
+          assets={imageAssets}
+          characters={characters}
+          confirmLabel="Add"
+          eyebrow="Reference"
+          fileAccept="image/*"
+          fileHint="Drag reference images here, or"
+          importing={importingAssets}
+          // Never offer the item's own image or a reference it already has.
+          memberIds={[referencePickerFor.selectionId, ...(referenceDraftById[referencePickerFor.selectionId] ?? [])]}
+          onAdd={(ids) => {
+            addItemReferences?.(referencePickerFor.selectionId, ids);
+            setReferencePickerFor(null);
+          }}
+          onClose={() => setReferencePickerFor(null)}
+          onImport={async (files) => {
+            const { selectionId } = referencePickerFor;
+            setReferencePickerFor(null);
+            await importItemReferences?.(selectionId, files);
+          }}
+          title={`Add reference images to ${referencePickerFor.name}`}
         />
       ) : null}
       {captionDialog ? (

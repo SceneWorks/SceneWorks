@@ -1,7 +1,18 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "../validation/issues.js";
-import { datasetPayload, datasetSaveValidation, selectionAfterDuplicateRemoval } from "./datasetHelpers.js";
+import {
+  appendReferences,
+  datasetPayload,
+  datasetReferenceAssets,
+  datasetReferenceCap,
+  datasetSaveValidation,
+  editPairDatasetIssues,
+  referenceDraftsDiffer,
+  referenceDraftsFromDataset,
+  selectionAfterDuplicateRemoval,
+  trainingTargetReferenceCap,
+} from "./datasetHelpers.js";
 
 it("preserves prepared bundle extras and stable item ids across dataset saves", () => {
   const activeDataset = {
@@ -153,5 +164,110 @@ describe("datasetSaveValidation", () => {
   it("tolerates a missing health context", () => {
     expect(() => datasetSaveValidation(whole)).not.toThrow();
     expect(summarize(datasetSaveValidation(whole)).ready).toBe(true);
+  });
+});
+
+// sc-24161: instruction-edit pairs — ordered references round-trip through the save payload, the
+// cap is the model's own reference limit, and the training gate mirrors the API's refusals.
+describe("edit-pair dataset helpers (sc-24161)", () => {
+  const editTarget = {
+    id: "qwen_image_2_1_edit_lora",
+    baseModel: "qwen_image_2_1",
+    limits: { maxReferenceImages: 10 },
+    ui: { label: "Qwen Image 2.1 Edit LoRA" },
+  };
+  const t2iTarget = { id: "qwen_image_2_1_lora", baseModel: "qwen_image_2_1", limits: {}, ui: { label: "Qwen Image 2.1 LoRA" } };
+  const qwenModel = { id: "qwen_image_2_1", limits: { maxReferenceAssets: 10 } };
+
+  it("keeps reference order through draft seeding and the save payload", () => {
+    const dataset = {
+      id: "ds1",
+      items: [
+        {
+          id: "item_0001",
+          assetId: "target",
+          path: "images/item_0001.png",
+          caption: { text: "swap the sky", source: "manual", triggerWords: [] },
+          references: [
+            { assetId: "ref-c", path: "images/refs/item_0001_ref1.png" },
+            { path: "images/refs/item_0001_ref2.png", displayName: "upload.png" },
+            { assetId: "ref-a", path: "images/refs/item_0001_ref3.png" },
+          ],
+        },
+      ],
+    };
+    const catalog = [{ id: "target" }, { id: "ref-a" }, { id: "ref-c" }];
+    const drafts = referenceDraftsFromDataset(dataset, catalog);
+    expect(drafts).toEqual({ target: ["ref-c", "dataset-ref:ds1:item_0001:1", "ref-a"] });
+    const owned = datasetReferenceAssets(dataset, "p1", catalog);
+    expect(owned).toHaveLength(1);
+    expect(owned[0]).toMatchObject({
+      id: "dataset-ref:ds1:item_0001:1",
+      datasetOwned: true,
+      file: { path: "training/datasets/ds1/images/refs/item_0001_ref2.png" },
+    });
+
+    const assetsById = new Map(
+      [...catalog.map((asset) => ({ ...asset, type: "image", displayName: `${asset.id}.png` })), ...owned].map((asset) => [
+        asset.id,
+        asset,
+      ]),
+    );
+    // Reorder: the dataset-owned reference first.
+    const reordered = { target: ["dataset-ref:ds1:item_0001:1", "ref-a", "ref-c"] };
+    const payload = datasetPayload({
+      activeDataset: dataset,
+      assetsById,
+      name: "Edits",
+      selectedAssetIds: ["target"],
+      referenceDraftById: reordered,
+    });
+    expect(payload.items[0].references).toEqual([
+      { path: "training/datasets/ds1/images/refs/item_0001_ref2.png", displayName: "upload.png" },
+      { assetId: "ref-a", displayName: "ref-a.png" },
+      { assetId: "ref-c", displayName: "ref-c.png" },
+    ]);
+    expect(referenceDraftsDiffer(reordered, drafts, ["target"])).toBe(true);
+    expect(referenceDraftsDiffer(drafts, drafts, ["target"])).toBe(false);
+
+    // No drafts → no `references` key at all (plain items keep their exact payload shape), and a
+    // stale stored list never rides along through the forward-compatible extras.
+    const plain = datasetPayload({ activeDataset: dataset, assetsById, name: "Edits", selectedAssetIds: ["target"] });
+    expect(plain.items[0]).not.toHaveProperty("references");
+  });
+
+  it("takes the reference cap from the model and never exceeds the target contract", () => {
+    expect(trainingTargetReferenceCap(editTarget, [qwenModel])).toBe(10);
+    expect(trainingTargetReferenceCap(editTarget, [{ ...qwenModel, limits: { maxReferenceAssets: 4 } }])).toBe(4);
+    // A model that declares nothing falls back to the target's own cap.
+    expect(trainingTargetReferenceCap(editTarget, [])).toBe(10);
+    expect(trainingTargetReferenceCap(t2iTarget, [qwenModel])).toBe(0);
+    expect(datasetReferenceCap([t2iTarget, editTarget], [qwenModel])).toBe(10);
+    expect(datasetReferenceCap([t2iTarget], [qwenModel])).toBe(0);
+  });
+
+  it("appends picks in order, de-duplicated, and stops at the cap", () => {
+    expect(appendReferences(["a"], ["b", "a", "item", "c"], { cap: 3, itemId: "item" })).toEqual({
+      next: ["a", "b", "c"],
+      dropped: 0,
+    });
+    expect(appendReferences(["a", "b"], ["c", "d", "e"], { cap: 3 })).toEqual({ next: ["a", "b", "c"], dropped: 2 });
+  });
+
+  it("holds training with the API's reasons for a dataset that does not fit the target", () => {
+    const item = (id, refCount, text = "do the edit") => ({
+      id,
+      displayName: `${id}.png`,
+      caption: { text },
+      references: Array.from({ length: refCount }, (_, index) => ({ path: `images/refs/${id}_${index}.png` })),
+    });
+    const messages = (dataset, target, cap) => editPairDatasetIssues(dataset, target, cap).map((entry) => entry.message);
+
+    expect(messages({ items: [item("a", 2), item("b", 10)] }, editTarget, 10)).toEqual([]);
+    expect(messages({ items: [item("a", 2)] }, t2iTarget, 0)[0]).toContain("captioned images only");
+    expect(messages({ items: [item("a", 1), item("b", 0)] }, editTarget, 10)[0]).toContain("at least one reference image");
+    expect(messages({ items: [item("a", 11)] }, editTarget, 10)[0]).toContain("at most 10");
+    expect(messages({ items: [item("a", 1, "  ")] }, editTarget, 10)[0]).toContain("edit instruction");
+    expect(messages({ items: [item("a", 0)] }, t2iTarget, 0)).toEqual([]);
   });
 });

@@ -17,14 +17,19 @@ import {
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
+  appendReferences,
   captionDraftsFromDataset,
   datasetHealth,
   datasetItemSelectionKey,
   datasetOwnedAssets,
   datasetPayload,
+  datasetReferenceAssets,
+  datasetReferenceCap,
   datasetSaveValidation,
   imageAssetName,
   normalizeDatasetAssetIds,
+  referenceDraftsDiffer,
+  referenceDraftsFromDataset,
   selectionAfterDuplicateRemoval,
 } from "../training/datasetHelpers.js";
 import {
@@ -395,6 +400,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
   // save. Replaces the old importedCaptions + rename-caption draft split.
   const [captionDraftById, setCaptionDraftById] = useState({});
+  // Instruction-edit pairs (sc-24161): each item's ORDERED reference images, keyed by item
+  // selection id -> [reference selection id, ...]. Seeded from the saved dataset like captions and
+  // threaded into the save payload; the item image is the edit target and its caption the
+  // instruction. `editPairsMode` reveals the per-item reference rails for a dataset with none yet.
+  const [referenceDraftById, setReferenceDraftById] = useState({});
+  const [editPairsMode, setEditPairsMode] = useState(false);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -426,7 +437,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   customizedConfigFieldsRef.current = customizedConfigFields;
 
   const datasetAssets = useMemo(
-    () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+    () => [
+      ...datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+      // Stored edit-pair references that are not library assets render (and re-save) through
+      // synthetic dataset-owned assets, exactly like dataset-owned items (sc-24161).
+      ...datasetReferenceAssets(activeDataset, activeProject?.id, assets),
+    ],
     [activeDataset, activeProject?.id, assets],
   );
   const imageAssets = useMemo(() => {
@@ -489,13 +505,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }),
     [activeDataset, captionDraftById],
   );
+  // Reference edits (add / remove / reorder, sc-24161) also make the dataset dirty.
+  const savedReferenceDrafts = useMemo(
+    () => referenceDraftsFromDataset(activeDataset, assets),
+    [activeDataset, assets],
+  );
+  const referencesDirty =
+    Boolean(activeDataset) && referenceDraftsDiffer(referenceDraftById, savedReferenceDrafts, selectedAssetIds);
   const dirty =
     Boolean(activeDataset) &&
     (draftName.trim() !== activeDataset.name ||
       associatedCharacterId !== (activeDataset.characterId ?? "") ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
-      captionsDirty);
+      captionsDirty ||
+      referencesDirty);
   // Refresh awaits the catalog request. Read the current draft state after that
   // await so a rename begun while refresh is in flight is never overwritten by
   // the freshly loaded dataset object.
@@ -505,7 +529,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   activeDatasetIdRef.current = activeDataset?.id ?? "";
   useEffect(() => {
     datasetDraftRevisionRef.current += 1;
-  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById]);
+  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById, referenceDraftById]);
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -591,6 +615,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
+  // The most ordered references one edit-pair item may carry across the trainable targets (the
+  // model's own `maxReferenceAssets`, capped by the target contract — Qwen Image 2.1: 10). 0 hides
+  // the dataset editor's edit-pair affordances (sc-24161).
+  const datasetReferenceLimit = datasetReferenceCap(usableTrainingTargets, models);
   const selectedTarget = useMemo(
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
@@ -715,8 +743,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
       licenseAcknowledged,
+      models,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, licenseAcknowledged],
+    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, licenseAcknowledged, models],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -813,6 +842,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setRenamePrefix("");
     setCaptionTriggerWords("");
     setCaptionDraftById({});
+    setReferenceDraftById({});
+    setEditPairsMode(false);
     setCaptionSettings(defaultCaptionSettings);
     setSelectedPresetId("");
     setCustomizedConfigFields(new Set());
@@ -844,9 +875,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // Seed caption drafts from the (re)loaded dataset; switching datasets or
     // saving (which swaps activeDataset) resets edits to the persisted state.
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
     setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    // Seeded per (re)loaded dataset only — a catalog refresh must not wipe in-progress reference
+    // edits, so `assets` is read at seed time rather than tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1192,6 +1227,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setAssociatedCharacterId("");
     setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
+    setReferenceDraftById({});
+    setEditPairsMode(false);
   }
 
   // Starting a new dataset abandons the current draft — confirm before discarding unsaved
@@ -1222,6 +1259,63 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
     setAssociatedCharacterId(activeDataset.characterId ?? "");
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
+  }
+
+  // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
+  function setItemReferences(selectionId, referenceIds) {
+    setDatasetMessage("");
+    setReferenceDraftById((current) => {
+      const next = { ...current };
+      if (referenceIds?.length) {
+        next[selectionId] = [...referenceIds];
+      } else {
+        delete next[selectionId];
+      }
+      return next;
+    });
+  }
+
+  // Append picked references to an item, never past the reference cap — the picker cannot hand
+  // the item more than the model accepts, and the user is told how many did not fit.
+  function addItemReferences(selectionId, pickedIds) {
+    const { next, dropped } = appendReferences(referenceDraftById[selectionId] ?? [], pickedIds, {
+      cap: datasetReferenceLimit,
+      itemId: selectionId,
+    });
+    setItemReferences(selectionId, next);
+    if (dropped > 0) {
+      setDatasetMessage(
+        `Only ${datasetReferenceLimit} reference images fit one edit item; ${dropped} not added.`,
+      );
+    }
+  }
+
+  // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
+  // the same upload path dataset items use, so they re-save by project path like those do.
+  async function importItemReferences(selectionId, fileList) {
+    const files = Array.from(fileList ?? []).filter(isImageUpload);
+    if (!files.length) {
+      return;
+    }
+    setImportingAssets(true);
+    setDatasetError("");
+    try {
+      const imported = [];
+      for (const file of files) {
+        const asset = await uploadDatasetItem(file);
+        if (asset?.id) {
+          const datasetAsset = { ...asset, datasetOnly: true };
+          imported.push(datasetAsset.id);
+          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
+        }
+      }
+      addItemReferences(selectionId, imported);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setImportingAssets(false);
+    }
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1470,6 +1564,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
+      referenceDraftById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
@@ -1900,6 +1995,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   canSave, saveValidity, saveDataset, savingDataset, unavailableAssetIds,
                   removeUnavailableAsset, onImportParquet: importParquetDataset,
                   onDeleteDataset: handleDeleteDataset, deletingDataset,
+                }}
+                editPairSession={{
+                  referenceCap: datasetReferenceLimit, referenceDraftById, setItemReferences,
+                  addItemReferences, importItemReferences, editPairsMode, setEditPairsMode,
                 }}
                 captionSession={{
                   captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,

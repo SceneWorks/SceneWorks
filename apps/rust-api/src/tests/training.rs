@@ -5541,6 +5541,19 @@ fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
         "{message}"
     );
     assert!(crate::training::training_host_unavailable_message(&mlx_only, true).is_none());
+    // sc-24161: the 2.1 instruction-EDIT kernel has no Candle trainer until sc-24162, so a real run
+    // off-Mac is refused with the same generic message the T2I kernel got before sc-24160.
+    let edit = targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target ships");
+    let message = crate::training::training_host_unavailable_message(edit, false)
+        .expect("the MLX-only edit kernel is refused off-Mac");
+    assert!(
+        message.contains("Apple Silicon") && message.contains("qwen_image_2_1_edit_lora"),
+        "{message}"
+    );
+    assert!(crate::training::training_host_unavailable_message(edit, true).is_none());
     // Every candle-routed target stays submittable off-Mac.
     for target in targets.iter().filter(|target| {
         sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)
@@ -5618,4 +5631,228 @@ fn unrestricted_targets_need_no_licence_acknowledgment() {
             .is_none()
     );
     assert!(crate::training::trained_adapter_license_fields(&target).is_empty());
+}
+
+/// Upload `count` distinct image assets into `project_id`, returning their ids in upload order.
+async fn upload_distinct_assets(
+    app: &axum::Router,
+    project_id: &str,
+    stem: &str,
+    count: usize,
+) -> Vec<String> {
+    let mut ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("{stem}{index}.PNG"),
+            "image/png",
+            format!("png-bytes-{stem}-{index}").as_bytes(),
+        )
+        .await;
+        assert!(status.is_success(), "upload {stem}{index}: {asset}");
+        ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    ids
+}
+
+/// sc-24161: an instruction-edit dataset item stores its ORDERED references (target = item image,
+/// instruction = caption), a full-replacement save re-materializes them in the new order, and a dry
+/// run against the 2.1 edit target threads them into the plan in exactly that order — with the
+/// adapter recorded as an edit adapter. The API refuses an item above the reference cap (naming the
+/// cap), an edit dataset on a text-to-image target, and a plain dataset on the edit target.
+#[tokio::test]
+async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_over_cap() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Edit Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let targets = upload_distinct_assets(&app, &project_id, "Target", 2).await;
+    let refs = upload_distinct_assets(&app, &project_id, "Ref", 11).await;
+    let datasets_path = format!("/api/v1/projects/{project_id}/training/datasets");
+    let instruction = "Put the hat from image 2 on the person in image 1";
+
+    // Deliberately not upload order: the stored order is semantic.
+    let order = [&refs[2], &refs[0], &refs[1]];
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Hat edits",
+            "items": [{
+                "assetId": targets[0],
+                "caption": { "text": instruction },
+                "references": order.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let stored = dataset["items"][0]["references"]
+        .as_array()
+        .expect("stored references")
+        .clone();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        order.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        "references keep the order they were given"
+    );
+    for (index, reference) in stored.iter().enumerate() {
+        let path = reference["path"].as_str().expect("reference path");
+        assert!(
+            path.starts_with("images/refs/") && path.contains(&format!("_ref{}", index + 1)),
+            "reference {index} is materialized into the dataset: {path}"
+        );
+    }
+
+    // A full-replacement save (what the studio sends) re-orders them; GET returns the new order.
+    let reversed = [&refs[1], &refs[0], &refs[2]];
+    let mut items = dataset["items"].as_array().expect("items").clone();
+    items[0]["references"] = json!(reversed
+        .iter()
+        .map(|id| json!({ "assetId": id }))
+        .collect::<Vec<_>>());
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        &format!("{datasets_path}/{dataset_id}"),
+        json!({ "items": items }),
+    )
+    .await;
+    assert!(status.is_success(), "{updated}");
+    let (_, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("{datasets_path}/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        fetched["items"][0]["references"]
+            .as_array()
+            .expect("fetched references")
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        reversed.iter().map(|id| id.as_str()).collect::<Vec<_>>()
+    );
+
+    let edit = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let dry_run = |target: &sceneworks_core::training::TrainingTarget, dataset_id: &str| {
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Hat Edit",
+            "dryRun": true
+        })
+    };
+    let (status, job) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &dataset_id)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let plan_item = &job["payload"]["plan"]["dataset"]["items"][0];
+    assert_eq!(plan_item["caption"], json!(instruction));
+    let plan_refs = plan_item["referenceImagePaths"]
+        .as_array()
+        .expect("plan carries the ordered references")
+        .iter()
+        .map(|path| std::path::PathBuf::from(path.as_str().expect("path string")))
+        .collect::<Vec<_>>();
+    assert_eq!(plan_refs.len(), 3);
+    for (index, path) in plan_refs.iter().enumerate() {
+        assert!(path.is_absolute() && path.is_file(), "{}", path.display());
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&format!("_ref{}", index + 1))),
+            "plan reference {index} out of order: {}",
+            path.display()
+        );
+    }
+    // Byte identity: the plan's first reference is the asset the user put FIRST (refs[1]).
+    assert_eq!(
+        std::fs::read(&plan_refs[0]).expect("read first reference"),
+        b"png-bytes-Ref-1".to_vec()
+    );
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_edit_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["trainingMode"], "edit");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+
+    // An edit dataset on the text-to-image target is refused (never T2I trained on edit targets).
+    let t2i = qwen_image_2_1_training_target();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&t2i, &dataset_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("captioned images only"),
+        "{body}"
+    );
+
+    // A plain captioned dataset on the edit target is refused.
+    let (_, plain) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Plain",
+            "items": [{ "assetId": targets[1], "caption": { "text": "a portrait" } }]
+        }),
+    )
+    .await;
+    let plain_id = plain["id"].as_str().expect("plain dataset id").to_owned();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &plain_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at least one reference image"),
+        "{body}"
+    );
+
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Too many",
+            "items": [{
+                "assetId": targets[1],
+                "caption": { "text": instruction },
+                "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("11 reference images") && detail.contains("at most 10"),
+        "the refusal names the count and the cap: {detail}"
+    );
 }

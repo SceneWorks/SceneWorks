@@ -113,6 +113,19 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
         }
+        // An instruction-edit pair's ordered references (sc-24161) are dataset images too: confined
+        // under the dataset root and required on disk, exactly like the target.
+        for reference in &item.reference_image_paths {
+            let reference_path = resolve_dataset_item_path(
+                settings,
+                &plan.dataset.root_path,
+                reference,
+                "Training dataset referenceImagePaths",
+            )?;
+            if !reference_path.exists() {
+                missing.push(reference_path.display().to_string());
+            }
+        }
         // Resolve and validate the prepared-bundle contract here, but do not hash the source.
         // `preflight_training_run` materializes each distinct bundle exactly once into a private
         // verified snapshot and both dry-run validation and real training consume that snapshot.
@@ -913,6 +926,21 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
+                // Instruction-edit pairs (sc-24161): the ORDERED references resolve under the
+                // dataset root exactly like the target image, in plan order — the engine numbers
+                // them, so the order is semantic. Empty for every captioned/control item.
+                reference_image_paths: item
+                    .reference_image_paths
+                    .iter()
+                    .map(|path| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            path,
+                            "Training dataset referenceImagePaths",
+                        )
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -948,6 +976,11 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
+    // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
+    gen_core::train::validate_edit_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -1331,6 +1364,10 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
         // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
         // the 2.1 trainer over a different architecture.
         "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
+        // Qwen Image 2.1 instruction-edit LoRA/LoKr (epic 24107 S13, sc-24161): the SAME engine
+        // trainer — it trains edit mode when the items carry ordered references. Base-gated like
+        // the T2I kernel so no other base can load the 2.1 trainer.
+        "qwen_image_2_1_edit_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -3139,6 +3176,96 @@ mod tests {
         );
     }
 
+    /// sc-24161: the worker maps a plan's instruction-edit items onto engine `TrainingItem`s whose
+    /// `reference_image_paths` carry the references IN PLAN ORDER (resolved under the dataset root,
+    /// target = item image, instruction = caption), and a plain plan still builds items with no
+    /// references at all. A reference escaping the dataset root is refused, like the target.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_edit_references_in_order_and_plain_items_carry_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        let target = dataset_root.join("images").join("item_0001.png");
+        std::fs::write(&target, b"target").expect("write target");
+        // Deliberately NOT lexical order: the stored order is semantic and must survive verbatim.
+        let ordered = [
+            "item_0001_ref3.png",
+            "item_0001_ref1.png",
+            "item_0001_ref2.png",
+        ];
+        for name in ordered {
+            std::fs::write(refs_dir.join(name), name.as_bytes()).expect("write reference");
+        }
+
+        let mut value = plan_json(
+            &data_dir,
+            "qwen_image_2_1_edit_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        );
+        value["dataset"]["items"][0]["caption"] = json!("put the hat from image 2 on image 1");
+        value["dataset"]["items"][0]["referenceImagePaths"] = json!(ordered
+            .iter()
+            .map(|name| format!("images/refs/{name}"))
+            .collect::<Vec<_>>());
+        let plan = parse(value);
+        validate_training_plan(&settings, &plan).expect("edit plan validates");
+        let mut prepared_inputs = PreparedTrainingInputs::default();
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+            .expect("edit plan maps to a request");
+        let item = &request.items[0];
+        assert!(item.is_edit_pair());
+        assert_eq!(item.image_path, target.canonicalize().unwrap());
+        assert_eq!(item.caption, "put the hat from image 2 on image 1");
+        assert_eq!(
+            item.reference_image_paths,
+            ordered
+                .iter()
+                .map(|name| refs_dir.join(name).canonicalize().unwrap())
+                .collect::<Vec<_>>(),
+            "references must reach the engine in plan order"
+        );
+        assert_eq!(item.control_image_path, None);
+
+        // A plain T2I plan builds captioned items with NO references.
+        let plain = parse(plan_json(
+            &data_dir,
+            "qwen_image_2_1_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        ));
+        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs)
+            .expect("plain plan maps to a request");
+        assert!(request.items.iter().all(|item| !item.is_edit_pair()));
+        assert!(request.items[0].reference_image_paths.is_empty());
+
+        // A missing reference is reported like a missing target image, and one escaping the dataset
+        // root is refused outright.
+        let mut missing = plan.clone();
+        missing.dataset.items[0]
+            .reference_image_paths
+            .push("images/refs/absent.png".to_owned());
+        let error = validate_training_plan(&settings, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+        let mut escaping = plan.clone();
+        let outside = data_dir.join("outside.png");
+        std::fs::write(&outside, b"outside").expect("write outside");
+        escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
+        assert!(training_request_from_plan(&settings, &escaping, &mut prepared_inputs).is_err());
+        prepared_inputs.close().expect("close prepared inputs");
+    }
+
     /// A complete resolved plan as the API serializes it, parameterized by the
     /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
     /// so `baseModelInstalled` is false unless a test overrides it.
@@ -3779,6 +3906,15 @@ mod tests {
             ),
             ("qwen_image_2_1_lora", "qwen_image", None),
             ("qwen_image_2_1_lora", "qwen_image_edit", None),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the SAME engine trainer in edit mode,
+            // base-gated the same way.
+            (
+                "qwen_image_2_1_edit_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_edit_lora", "qwen_image", None),
+            ("qwen_image_2_1_edit_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -4969,6 +5105,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5082,6 +5219,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5198,6 +5336,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5352,6 +5491,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5536,6 +5676,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5776,6 +5917,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir,

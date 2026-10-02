@@ -2145,6 +2145,9 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
     // trainer. The Candle twin (sc-24160) is in the candle set too.
     "qwen_image_2_1_lora",
+    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
+    // edit mode. MLX-only until the Candle edit trainer (sc-24162) adds it to the candle set.
+    "qwen_image_2_1_edit_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2199,6 +2202,9 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 (sc-24159/sc-24160): native MLX + Candle trainers and no generic one, so a
     // generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_lora",
+    // Qwen Image 2.1 edit (sc-24161): MLX-only — no Candle edit trainer until sc-24162, so it is in
+    // neither the candle-routed set nor admitted by the candle exception; a generic worker refuses it.
+    "qwen_image_2_1_edit_lora",
 ];
 
 #[cfg(test)]
@@ -2549,6 +2555,8 @@ mod tests {
         "mage_flow_lora",
         // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
         "qwen_image_2_1_lora",
+        // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
+        "qwen_image_2_1_edit_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2578,6 +2586,8 @@ mod tests {
         // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
         // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
         "qwen_image_2_1_lora",
+        // sc-24161: MLX-only until sc-24162 moves the edit kernel into the candle-routed set.
+        "qwen_image_2_1_edit_lora",
     ];
 
     #[test]

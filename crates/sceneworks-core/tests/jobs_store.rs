@@ -6985,6 +6985,45 @@ fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
     }
 }
 
+/// sc-24161 (epic 24107 S13): a Qwen Image 2.1 instruction-EDIT training job is MLX-only until the
+/// Candle edit trainer (sc-24162). The mlx worker claims it for both network types; a generic
+/// descriptor and a candle worker both refuse it, so it never lands on a worker with no 2.1 edit
+/// trainer (the candle 2.1 trainer is T2I-only today).
+#[test]
+fn qwen_image_2_1_edit_training_is_mlx_only_until_the_candle_edit_trainer_lands() {
+    for network_type in ["lora", "lokr"] {
+        let store = store(&format!("qwen-2-1-edit-training-{network_type}"));
+        register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+        register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+        let job = store
+            .create_job(mlx_training_job(
+                "qwen_image_2_1_edit_lora",
+                "qwen_image_2_1",
+                network_type,
+                false,
+                "auto",
+            ))
+            .expect("job creates");
+        for worker in ["worker-torch", "worker-candle"] {
+            assert!(
+                store
+                    .claim_next_job(worker)
+                    .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                    .is_none(),
+                "{worker} must refuse qwen_image_2_1_edit_lora/{network_type} — no edit trainer there"
+            );
+        }
+        register_gpu_worker(&store, "worker-mlx", "mlx", training_caps());
+        let claimed = store
+            .claim_next_job("worker-mlx")
+            .expect("mlx claim ok")
+            .unwrap_or_else(|| {
+                panic!("the mlx worker must claim qwen_image_2_1_edit_lora/{network_type}")
+            });
+        assert_eq!(claimed.id, job.id, "{network_type}");
+    }
+}
+
 #[test]
 fn ltx_training_runs_on_candle_with_no_torch_fallback() {
     // The stable kernel name is historical: LTX is native-Rust-only and has both MLX and candle

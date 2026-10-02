@@ -1798,6 +1798,12 @@ pub(crate) async fn create_training_job(
     // recorded above; `register_trained_lora` keeps these descriptive fields verbatim.
     if let Some(entry) = manifest_entry.as_object_mut() {
         entry.extend(trained_adapter_license_fields(target));
+        // An instruction-edit target (sc-24161) produces an EDIT adapter: record it the way the
+        // engine stamps the adapter's own metadata (`trainingMode=edit`), so the library can tell
+        // an edit adapter from a text-to-image one under the same `qwen-image-2-1` family.
+        if sceneworks_core::training::training_target_trains_edit_pairs(target) {
+            entry.insert("trainingMode".to_owned(), Value::String("edit".to_owned()));
+        }
     }
 
     // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
@@ -2742,8 +2748,10 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
 }
 
 /// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
-/// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (none of the
-/// shipped targets since sc-24160 gave Qwen Image 2.1 its candle lane) would queue forever. `macos_host` is a parameter so both sides are testable.
+/// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (the Qwen Image
+/// 2.1 instruction-EDIT kernel until its Candle trainer, sc-24162, lands — the T2I kernel got its
+/// candle lane in sc-24160) would queue forever. `macos_host` is a parameter so both sides are
+/// testable.
 pub(crate) fn training_host_unavailable_message(
     target: &TrainingTarget,
     macos_host: bool,

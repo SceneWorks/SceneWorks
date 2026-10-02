@@ -630,3 +630,29 @@ describe("configValidation — missing control preprocessor", () => {
     ).toEqual(configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget, missingControlModels: [] }));
   });
 });
+
+// sc-24161: Start training is held when the saved dataset's edit-pair shape does not fit the
+// selected target, with the cap the base model declares.
+describe("configValidation edit-pair dataset shape", () => {
+  const editTarget = {
+    id: "qwen_image_2_1_edit_lora",
+    baseModel: "qwen_image_2_1",
+    limits: { maxReferenceImages: 10 },
+    ui: { label: "Qwen Image 2.1 Edit LoRA" },
+  };
+  const models = [{ id: "qwen_image_2_1", limits: { maxReferenceAssets: 2 } }];
+  const dataset = (refCount) => ({
+    id: "ds1",
+    items: [{ id: "a", displayName: "a.png", caption: { text: "edit it" }, references: Array(refCount).fill({ path: "r.png" }) }],
+  });
+  const messages = (refCount) =>
+    configValidation({ outputName: "x", triggerWord: "x" }, { activeDataset: dataset(refCount), selectedTarget: editTarget, models }).map(
+      (entry) => entry.message,
+    );
+
+  it("refuses more references than the model's cap and accepts up to it", () => {
+    expect(messages(3).some((message) => message.includes("at most 2"))).toBe(true);
+    expect(messages(2).some((message) => message.includes("reference"))).toBe(false);
+    expect(messages(0).some((message) => message.includes("at least one reference image"))).toBe(true);
+  });
+});
