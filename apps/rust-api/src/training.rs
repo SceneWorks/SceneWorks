@@ -1686,6 +1686,12 @@ pub(crate) async fn create_training_job(
     // model installed and room on disk. A dry run only resolves the plan, so it
     // is exempt — that is how you preview a plan before installing the model.
     if !payload.dry_run {
+        // A base whose licence binds derivatives (Qwen Image 2.1's Qwen RESEARCH licence, epic 24107
+        // E12) needs the user's explicit acceptance before a run starts. The Training Studio shows
+        // the notice and sends the assertion; this is the backstop for every other client.
+        if let Some(error) = training_license_acknowledgment_error(target, &payload.extra) {
+            return Err(error);
+        }
         if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
@@ -1780,6 +1786,12 @@ pub(crate) async fn create_training_job(
         .and_then(Value::as_object_mut)
     {
         provenance.retain(|_, value| !value.is_null());
+    }
+    // A trained adapter is a derivative of its base, so it records the base's licence (epic 24107
+    // E12 — a Qwen Image 2.1 adapter inherits the Qwen RESEARCH licence). `baseModel` is already
+    // recorded above; `register_trained_lora` keeps these descriptive fields verbatim.
+    if let Some(entry) = manifest_entry.as_object_mut() {
+        entry.extend(trained_adapter_license_fields(target));
     }
 
     // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
@@ -2602,7 +2614,30 @@ pub(crate) fn training_base_model_status(
     if model_is_installed(&managed) {
         return TrainingBaseStatus::Ready;
     }
+    // Split-repo bases (Qwen Image 2.1): the dense training base and the quantized generation tiers
+    // live in DIFFERENT repos, so "the training repo is absent" is not the same as "nothing is
+    // installed". A host that installed only the q8/q4 re-host for generation gets the actionable
+    // "install the bf16 tier" answer (QLoRA is a non-goal), not a bare "not installed".
+    if quantized_generation_repos(&target.base_model)
+        .iter()
+        .filter_map(|repo| huggingface_repo_cache_path(data_dir, repo))
+        .any(|cache_path| !huggingface_snapshot_dirs(&cache_path).is_empty())
+    {
+        return TrainingBaseStatus::TrainingTierMissing;
+    }
     TrainingBaseStatus::Missing
+}
+
+/// The quantized-tier generation repos of a base whose dense training tier is a SEPARATE repo (the
+/// target's `base_model_repo`). Qwen Image 2.1 ships bf16 as the upstream `Qwen/Qwen-Image-2.1`
+/// snapshot and q8/q4 as the `SceneWorks/qwen-image-2-1-mlx` re-host (epic 24107 S5), and its
+/// trainer runs only on the dense base (sc-24159; QLoRA is an epic non-goal). Pinned to the
+/// manifest by `quantized_generation_repos_match_the_manifest_tiers`.
+pub(crate) fn quantized_generation_repos(base_model: &str) -> &'static [&'static str] {
+    match base_model {
+        "qwen_image_2_1" => &["SceneWorks/qwen-image-2-1-mlx"],
+        _ => &[],
+    }
 }
 
 /// Thin boolean wrapper over [`training_base_model_status`]: `true` only when the dense training
@@ -2614,6 +2649,57 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
         training_base_model_status(data_dir, target),
         TrainingBaseStatus::Ready
     )
+}
+
+/// The refusal for a real run against a target whose base licence requires acceptance
+/// (`ui.requiresLicenseAcknowledgment`) when the request does not assert `licenseAcknowledged:
+/// true`, or `None` when the run may proceed. Same status + machine code as the pre-download gate
+/// (`models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE`), so a client handles both refusals one way.
+pub(crate) fn training_license_acknowledgment_error(
+    target: &TrainingTarget,
+    request_extra: &sceneworks_core::contracts::ExtraFields,
+) -> Option<ApiError> {
+    if !sceneworks_core::training::training_target_requires_license_acknowledgment(target) {
+        return None;
+    }
+    let acknowledged = request_extra
+        .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if acknowledged {
+        return None;
+    }
+    let license = target
+        .ui
+        .get("license")
+        .and_then(Value::as_str)
+        .unwrap_or("its base model's licence");
+    Some(ApiError {
+        status: StatusCode::FORBIDDEN,
+        detail: format!(
+            "Training '{}' requires accepting {license} first: adapters trained from '{}' are \
+             derivatives that inherit its restrictions. Accept the licence notice in the Training \
+             Studio, or send `licenseAcknowledged: true` to assert that the user has accepted it.",
+            target.name, target.base_model
+        ),
+        code: Some(crate::models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+        context: None,
+    })
+}
+
+/// The licence fields a trained adapter's library entry inherits from its target (`ui.license` /
+/// `ui.licenseUrl`). Empty for a target that declares no licence, so existing entries are unchanged.
+pub(crate) fn trained_adapter_license_fields(target: &TrainingTarget) -> JsonObject {
+    ["license", "licenseUrl"]
+        .into_iter()
+        .filter_map(|key| {
+            target
+                .ui
+                .get(key)
+                .filter(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+                .map(|value| (key.to_owned(), value.clone()))
+        })
+        .collect()
 }
 
 /// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.

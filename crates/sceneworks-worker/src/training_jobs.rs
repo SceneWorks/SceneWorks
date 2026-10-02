@@ -1326,6 +1326,11 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
+        // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
+        // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
+        // the 2.1 trainer over a different architecture.
+        "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -3702,6 +3707,15 @@ mod tests {
             // the generation-only conditioning path (the Edit variants need reference tokens).
             ("mage_flow_lora", "mage_flow_edit_base", None),
             ("mage_flow_lora", "mage_flow_turbo", None),
+            // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
+            // The distinct 2512 `qwen_image` / Edit models never resolve to it.
+            (
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_lora", "qwen_image", None),
+            ("qwen_image_2_1_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.

@@ -491,6 +491,7 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
+            qwen_image_2_1_lora_target(),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -530,6 +531,7 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let kolors_target = kolors_lora_target();
     let krea_target = krea_raw_lora_target();
     let anima_target = anima_base_lora_target();
+    let qwen_image_2_1_target = qwen_image_2_1_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1113,6 +1115,52 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 30
                 })),
             ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity Qwen Image 2.1 style LoRA for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
         ],
         extra: ExtraFields::new(),
     }
@@ -1274,6 +1322,9 @@ where
 /// Build a Krea 2 LoRA preset. The flow-matching knobs (timestep sampling, Raw-base preview
 /// settings, gradient checkpointing, target modules) live on the target defaults, so the preset only
 /// overrides the optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/LR).
+/// Build a native flow-match image LoRA/LoKr preset (Krea 2 and Qwen Image 2.1 share this shape):
+/// the sampling + caching knobs live on the target defaults, so the preset overrides only the
+/// optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/steps/LR).
 fn krea_preset<F>(
     target: &TrainingTarget,
     id: &str,
@@ -3376,6 +3427,133 @@ fn anima_base_lora_target() -> TrainingTarget {
         })),
         extra: ExtraFields::new(),
     }
+}
+
+/// The SceneWorks LoRA family a Qwen Image 2.1 adapter is labelled with (epic 24107 E10). Distinct
+/// from the 2512 `qwen-image` family on purpose: a 2.1 adapter is never offered to 2512 nor the
+/// reverse (`lora_family.rs`, sc-24156).
+pub const QWEN_IMAGE_2_1_LORA_FAMILY: &str = "qwen-image-2-1";
+
+/// The licence every Qwen Image 2.1 derivative — so every adapter trained from it — carries (epic
+/// 24107 E12). The API records it on the trained adapter's library entry.
+pub const QWEN_IMAGE_2_1_LICENSE: &str = "Qwen RESEARCH LICENSE AGREEMENT";
+
+/// The pinned licence text the 2.1 manifest entry links (same revision as its bf16 download).
+pub const QWEN_IMAGE_2_1_LICENSE_URL: &str =
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE";
+
+/// Qwen Image 2.1 text-to-image LoRA/LoKr training (epic 24107 S11, sc-24159).
+///
+/// Trains on the DENSE BF16 base only — the upstream `Qwen/Qwen-Image-2.1` diffusers snapshot, the
+/// same flat tree the catalog installs as the `bf16` tier. QLoRA against the SceneWorks q8/q4
+/// re-host (`SceneWorks/qwen-image-2-1-mlx`) is an epic non-goal, so a host with only a quantized
+/// tier installed is refused before the run with "install the bf16 tier" (the API's
+/// `TrainingTierMissing` arm), never a silent failure at load.
+///
+/// The `qwen_image_2_1_lora` kernel maps to the engine trainer registered under the inference
+/// generator id of the training base, `qwen_image_2_1` — the convention every native trainer follows
+/// (the worker's `engine_trainer_id_for`). MLX-only for now: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` + `MLX_ONLY_TRAINING_KERNELS` and NOT the candle set until the
+/// Candle trainer story (sc-24160) moves it.
+///
+/// Licensing (E12): the base is governed by the Qwen RESEARCH LICENSE AGREEMENT (non-commercial —
+/// research/evaluation use only) and an adapter trained from it is a derivative that inherits it.
+/// `ui.requiresLicenseAcknowledgment` makes the Training Studio show `ui.licenseNotice` and require
+/// an explicit acceptance before Start training; the API refuses a real run without
+/// `licenseAcknowledged: true`; and the trained adapter's library entry records the base model and
+/// `ui.license`.
+///
+/// No `loraTargetModules` default: the engine trainer's own default target set over the 2.1 adapter
+/// host applies (no other model's module list is borrowed). No training memory numbers are declared
+/// here either (E13) — the engine trainer's memory preflight owns that, from 2.1's own contract.
+fn qwen_image_2_1_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "qwen_image_2_1_lora".to_owned(),
+        name: "Qwen Image 2.1 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: QWEN_IMAGE_2_1_LORA_FAMILY.to_owned(),
+        base_model: "qwen_image_2_1".to_owned(),
+        // The bf16 tier IS the upstream snapshot (the converter refuses to emit a `bf16/` subdir), so
+        // the dense training base is this repo, flat — never the q8/q4 SceneWorks re-host.
+        base_model_repo: Some("Qwen/Qwen-Image-2.1".to_owned()),
+        kernel: "qwen_image_2_1_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            // MLX training aliases `adamw8bit` → AdamW (bitsandbytes 8-bit is CUDA-only); the label
+            // stays consistent with the other native image targets (the engine normalizes it).
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                // Latents and the Qwen3-VL caption features are cached once, then the text tower is
+                // dropped for the step loop.
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // 2.1 is an undistilled base trained over the full flow-match schedule, so noise
+                // sampling is neutral (no few-step high-noise tilt like the Turbo families).
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Previews render on the loaded base with 2.1's own catalog defaults (40 steps,
+                // guidance 1.0 — true CFG engages only with a negative prompt). Heavy, so a wide
+                // cadence by default.
+                "sampleEvery": 500,
+                "sampleSteps": 40,
+                "sampleGuidanceScale": 1.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both round-trip the 2.1 adapter host at inference (sc-24156).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Qwen Image 2.1 LoRA",
+            "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX). Research/evaluation use only under the Qwen RESEARCH licence.",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image",
+            "license": QWEN_IMAGE_2_1_LICENSE,
+            "licenseUrl": QWEN_IMAGE_2_1_LICENSE_URL,
+            "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
+            "requiresLicenseAcknowledgment": true
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// Whether a training target's base model licence requires the user's explicit acceptance before
+/// a run starts (`ui.requiresLicenseAcknowledgment`, epic 24107 E12). The API's real-run gate and
+/// the Training Studio's Start gate both key off this one field.
+pub fn training_target_requires_license_acknowledgment(target: &TrainingTarget) -> bool {
+    target
+        .ui
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Build an Anima image LoRA/LoKr preset. The flow-match sampling + caching knobs live on the target

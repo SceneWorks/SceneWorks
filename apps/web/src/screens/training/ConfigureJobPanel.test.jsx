@@ -2,7 +2,11 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { configDraftFromTarget, configValidation } from "../../training/trainingConfig.js";
+import {
+  configDraftFromTarget,
+  configValidation,
+  trainingTargetLicense,
+} from "../../training/trainingConfig.js";
 import { summarize } from "../../validation/issues.js";
 import { ConfigureJobPanel } from "./ConfigureJobPanel.jsx";
 
@@ -536,5 +540,73 @@ describe("ConfigureJobPanel — missing control preprocessor", () => {
   it("renders no notice for a LoRA target", () => {
     mount(<ConfigureJobPanel {...baseProps({ missingControlModels: [] })} />);
     expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+});
+
+// sc-24159 (epic 24107 E12): Qwen Image 2.1 is research/evaluation-only (Qwen RESEARCH licence) and
+// an adapter trained from it inherits that. The restriction must be SHOWN before a run can start —
+// a notice above the Start button with a required acceptance — not discovered afterwards.
+describe("ConfigureJobPanel base-licence notice", () => {
+  const LICENSED_TARGET = {
+    id: "qwen_image_2_1_lora",
+    name: "Qwen Image 2.1 LoRA",
+    baseModel: "qwen_image_2_1",
+    kernel: "qwen_image_2_1_lora",
+    ui: {
+      label: "Qwen Image 2.1 LoRA",
+      license: "Qwen RESEARCH LICENSE AGREEMENT",
+      licenseUrl: "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+      licenseNotice: "Non-commercial use only, meaning research or evaluation. Adapters inherit it.",
+      requiresLicenseAcknowledgment: true,
+    },
+  };
+
+  // `targetLicense` comes from the same helper the screen uses, so the fixture cannot drift from it.
+  function licensedProps(licenseAcknowledged, onLicenseAcknowledgedChange = noop) {
+    return baseProps({
+      selectedTarget: LICENSED_TARGET,
+      trainingTargets: [LICENSED_TARGET],
+      targetLicense: trainingTargetLicense(LICENSED_TARGET),
+      licenseAcknowledged,
+      onLicenseAcknowledgedChange,
+      configValidity: validityFor(VALID_DRAFT, {
+        activeDataset: DATASET,
+        selectedTarget: LICENSED_TARGET,
+        licenseAcknowledged,
+      }),
+    });
+  }
+
+  it("shows the research licence before Start training and holds Start until it is accepted", () => {
+    const changes = [];
+    mount(<ConfigureJobPanel {...licensedProps(false, (value) => changes.push(value))} />);
+    const notice = container.querySelector(".training-license-notice");
+    expect(notice).toBeTruthy();
+    expect(notice.textContent).toContain("Qwen RESEARCH LICENSE AGREEMENT");
+    expect(notice.textContent).toContain("research or evaluation");
+    expect(notice.querySelector("a")?.getAttribute("href")).toBe(LICENSED_TARGET.ui.licenseUrl);
+    // The notice precedes the Start button in document order — it is read before the run starts.
+    expect(
+      notice.compareDocumentPosition(submitButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(submitButton().disabled).toBe(true);
+    expect(chips()).toContain("Accept the Qwen RESEARCH LICENSE AGREEMENT notice to start training.");
+
+    const checkbox = notice.querySelector("input[type=checkbox]");
+    expect(checkbox.checked).toBe(false);
+    act(() => checkbox.click());
+    expect(changes).toEqual([true]);
+  });
+
+  it("enables Start once the licence is accepted", () => {
+    mount(<ConfigureJobPanel {...licensedProps(true)} />);
+    expect(container.querySelector(".training-license-notice input[type=checkbox]").checked).toBe(true);
+    expect(submitButton().disabled).toBe(false);
+  });
+
+  it("renders no licence notice for a target without a licence restriction", () => {
+    mount(<ConfigureJobPanel {...baseProps()} />);
+    expect(container.querySelector(".training-license-notice")).toBeNull();
+    expect(submitButton().disabled).toBe(false);
   });
 });

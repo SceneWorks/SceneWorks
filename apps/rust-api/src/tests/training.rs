@@ -5300,3 +5300,207 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
         "a torn checkpoint must not register a user model"
     );
 }
+
+/// Materialize a resolvable HF-cache snapshot for `repo` (refs/main → `revision`), returning its dir.
+fn seed_hf_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> std::path::PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+    snapshot
+}
+
+fn qwen_image_2_1_training_target() -> sceneworks_core::training::TrainingTarget {
+    crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("Qwen Image 2.1 training target")
+}
+
+/// sc-24159: 2.1 trains the dense bf16 base only (QLoRA is an epic non-goal). Its bf16 tier is the
+/// upstream `Qwen/Qwen-Image-2.1` snapshot and its q8/q4 tiers a SEPARATE SceneWorks re-host, so a
+/// host that installed only a quantized tier must hear "install the bf16 tier", not "not installed".
+#[test]
+fn qwen_image_2_1_training_needs_the_bf16_tier_not_a_quantized_one() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = qwen_image_2_1_training_target();
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Missing,
+        "nothing installed is the generic install message"
+    );
+
+    // Only the q4 generation tier from the re-host.
+    let rehost = seed_hf_snapshot(&data_dir, "SceneWorks/qwen-image-2-1-mlx", "rehost-rev");
+    std::fs::create_dir_all(rehost.join("q4").join("transformer")).expect("q4 tier");
+    let status = training_base_model_status(&data_dir, &target);
+    assert_eq!(status, TrainingBaseStatus::TrainingTierMissing);
+    let message = training_base_unavailable_message(status, &target.base_model)
+        .expect("a quantized-only install blocks a real run");
+    assert!(
+        message.contains("bf16") && message.contains("qwen_image_2_1"),
+        "the refusal must say to install the bf16 tier: {message}"
+    );
+
+    // The dense upstream snapshot is the training base, resolved flat (no `bf16/` subdir).
+    let dense = seed_hf_snapshot(&data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        dense.display().to_string(),
+        "training reads the dense upstream snapshot, never the q8/q4 re-host"
+    );
+}
+
+/// Pin the split-repo map to the manifest so the quantized-only detection cannot drift from what
+/// the catalog actually installs: the 2.1 quantized repos are exactly the manifest's non-bf16 tier
+/// repos, and the target's dense repo is exactly its `bf16` tier repo.
+#[test]
+fn quantized_generation_repos_match_the_manifest_tiers() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use std::collections::BTreeSet;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).expect("manifest parses");
+    let downloads = catalog["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == json!("qwen_image_2_1"))
+        .and_then(|model| model["downloads"].as_array())
+        .expect("qwen_image_2_1 downloads")
+        .clone();
+    let repos_for = |bf16: bool| -> BTreeSet<String> {
+        downloads
+            .iter()
+            .filter(|download| (download["variant"] == json!("bf16")) == bf16)
+            .filter_map(|download| download["repo"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let target = qwen_image_2_1_training_target();
+    assert_eq!(
+        repos_for(true),
+        BTreeSet::from([target.base_model_repo.clone().expect("dense repo")])
+    );
+    assert_eq!(
+        repos_for(false),
+        crate::training::quantized_generation_repos("qwen_image_2_1")
+            .iter()
+            .map(|repo| (*repo).to_owned())
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+/// sc-24159 (epic 24107 E12): the research-only restriction is shown before a 2.1 run starts, and the
+/// API is the backstop — a real run without the acknowledgment is refused with the same code as the
+/// pre-download gate. With it, the run queues and the adapter's library entry records the base model,
+/// the `qwen-image-2-1` family and the Qwen RESEARCH licence.
+#[tokio::test]
+async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the_adapter() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let dense = seed_hf_snapshot(&settings.data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Qwen set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "qwnStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = qwen_image_2_1_training_target();
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let body_for = |acknowledged: Option<bool>| {
+        let mut body = json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Qwen Style",
+            "dryRun": false
+        });
+        if let Some(acknowledged) = acknowledged {
+            body["licenseAcknowledged"] = json!(acknowledged);
+        }
+        body
+    };
+
+    for acknowledged in [None, Some(false)] {
+        let (status, body) = request(app.clone(), "POST", &jobs_path, body_for(acknowledged)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{acknowledged:?}: {body}");
+        assert_eq!(body["code"], json!("license_acknowledgment_required"));
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("Qwen RESEARCH LICENSE AGREEMENT"),
+            "the refusal names the licence: {detail}"
+        );
+    }
+
+    let (status, job) = request(app.clone(), "POST", &jobs_path, body_for(Some(true))).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    assert_eq!(
+        entry["licenseUrl"],
+        json!(sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL)
+    );
+}
+
+/// A target with no licence restriction is untouched by the gate, and its adapters carry no licence
+/// fields (the existing library entries keep their exact shape).
+#[test]
+fn unrestricted_targets_need_no_licence_acknowledgment() {
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z-image target");
+    assert!(
+        crate::training::training_license_acknowledgment_error(&target, &Default::default())
+            .is_none()
+    );
+    assert!(crate::training::trained_adapter_license_fields(&target).is_empty());
+}

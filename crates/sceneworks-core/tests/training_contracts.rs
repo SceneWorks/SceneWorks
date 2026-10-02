@@ -149,6 +149,9 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
+            // Qwen Image 2.1 (sc-24159): the native MLX trainer builds LoRA and LoKr over the 2.1
+            // adapter host, which applies both at inference (sc-24156).
+            "qwen_image_2_1_lora",
             // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
             // generated-matrix obligations remain LoRA-only.
             "wan_t2v_14b_lora",
@@ -161,6 +164,107 @@ fn builtin_targets_gate_network_types() {
             "mage_flow_base_lora"
         ]
     );
+}
+
+/// sc-24159 (epic 24107 S11): the Qwen Image 2.1 T2I target trains the DENSE bf16 base only (the
+/// upstream `Qwen/Qwen-Image-2.1` snapshot — never the q8/q4 re-host; QLoRA is a non-goal), labels its
+/// adapters `qwen-image-2-1` (never the 2512 `qwen-image` family), and carries the research-licence
+/// gate the Training Studio and API enforce before a run starts.
+#[test]
+fn qwen_image_2_1_target_trains_dense_bf16_under_the_research_licence() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("qwen_image_2_1_lora target registered");
+    assert_eq!(target.base_model, "qwen_image_2_1");
+    assert_eq!(target.kernel, "qwen_image_2_1_lora");
+    assert_eq!(target.family, "qwen-image-2-1");
+    assert_eq!(
+        target.family,
+        sceneworks_core::training::QWEN_IMAGE_2_1_LORA_FAMILY
+    );
+    assert!(matches!(target.output_kind, TrainingOutputKind::Lora));
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("Qwen/Qwen-Image-2.1"),
+        "trains the dense upstream bf16 snapshot, never the SceneWorks q8/q4 re-host"
+    );
+    assert_eq!(target.defaults.advanced["mixedPrecision"], "bf16");
+    assert_eq!(
+        target.limits["networkTypes"],
+        serde_json::json!(["lora", "lokr"])
+    );
+    // E13: no training footprint is declared here (never borrowed from Krea/2512); the engine
+    // trainer's memory preflight owns it.
+    for key in [
+        "memory",
+        "minMemoryGb",
+        "trainingMemoryGb",
+        "peakMemoryBytes",
+    ] {
+        assert!(target.limits.get(key).is_none(), "{key}");
+        assert!(target.ui.get(key).is_none(), "{key}");
+    }
+    // E12: the research-only restriction is declared on the contract the studio and API read.
+    assert!(sceneworks_core::training::training_target_requires_license_acknowledgment(target));
+    assert_eq!(
+        target.ui["license"],
+        sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE
+    );
+    assert_eq!(
+        target.ui["licenseUrl"],
+        sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL
+    );
+    let notice = target.ui["licenseNotice"].as_str().expect("licence notice");
+    for phrase in [
+        "Qwen RESEARCH LICENSE AGREEMENT",
+        "research or evaluation",
+        "derivative",
+    ] {
+        assert!(
+            notice.contains(phrase),
+            "licence notice must state {phrase:?}"
+        );
+    }
+    // Every other target is unrestricted, so the gate binds 2.1 alone.
+    for other in registry
+        .targets
+        .iter()
+        .filter(|other| other.id != target.id)
+    {
+        assert!(
+            !sceneworks_core::training::training_target_requires_license_acknowledgment(other),
+            "{}",
+            other.id
+        );
+    }
+
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let qwen_presets: Vec<_> = presets
+        .presets
+        .iter()
+        .filter(|preset| preset.target_id == target.id)
+        .collect();
+    assert_eq!(qwen_presets.len(), 3);
+    assert_eq!(
+        qwen_presets
+            .iter()
+            .filter(|preset| preset.ui.get("default") == Some(&Value::Bool(true)))
+            .count(),
+        1,
+        "exactly one default preset"
+    );
+    for preset in qwen_presets {
+        sceneworks_core::training::validate_training_config_for_target(target, &preset.config)
+            .unwrap_or_else(|error| panic!("{} violates its target: {error}", preset.id));
+        assert_eq!(
+            preset.config.advanced["mixedPrecision"], "bf16",
+            "{}",
+            preset.id
+        );
+    }
 }
 
 #[test]

@@ -9,7 +9,48 @@ import {
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
+  trainingLicenseAckKey,
+  trainingTargetLicense,
 } from "./trainingConfig.js";
+
+// sc-24159: the base-licence restriction is read from the Rust-owned target contract, never
+// hardcoded per base, and its acceptance is persisted apart from the per-model download acceptance.
+describe("trainingTargetLicense", () => {
+  it("reads a licence-bound target's notice and ignores targets without one", () => {
+    expect(
+      trainingTargetLicense({
+        id: "qwen_image_2_1_lora",
+        ui: {
+          license: "Qwen RESEARCH LICENSE AGREEMENT",
+          licenseUrl: "https://example.test/LICENSE",
+          licenseNotice: "Research only.",
+          requiresLicenseAcknowledgment: true,
+        },
+      }),
+    ).toEqual({
+      name: "Qwen RESEARCH LICENSE AGREEMENT",
+      url: "https://example.test/LICENSE",
+      notice: "Research only.",
+    });
+    // A licence NAME without the acknowledgment flag is informational, not a gate.
+    expect(trainingTargetLicense({ ui: { license: "Apache-2.0" } })).toBeNull();
+    expect(trainingTargetLicense(null)).toBeNull();
+  });
+
+  it("namespaces the training acceptance apart from the model download acceptance", () => {
+    expect(trainingLicenseAckKey("qwen_image_2_1_lora")).toBe("training:qwen_image_2_1_lora");
+    expect(trainingLicenseAckKey("")).toBe("");
+  });
+
+  it("holds Start until a licence-bound target's notice is accepted", () => {
+    const licensed = { id: "q", ui: { license: "Qwen RESEARCH LICENSE AGREEMENT", requiresLicenseAcknowledgment: true } };
+    const message = "Accept the Qwen RESEARCH LICENSE AGREEMENT notice to start training.";
+    const messages = (ack) =>
+      configValidation({}, { selectedTarget: licensed, licenseAcknowledged: ack }).map((entry) => entry.message);
+    expect(messages(false)).toContain(message);
+    expect(messages(true)).not.toContain(message);
+  });
+});
 
 const ltxWorkflows = [
   "i2v_lora", "t2v_lora", "v2a_lora", "a2v_lora", "t2a_lora",
