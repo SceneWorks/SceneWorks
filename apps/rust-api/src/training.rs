@@ -1692,6 +1692,12 @@ pub(crate) async fn create_training_job(
         if let Some(error) = training_license_acknowledgment_error(target, &payload.extra) {
             return Err(error);
         }
+        // A kernel with no candle trainer can never be claimed off-Mac, so a real run here would
+        // sit queued forever. Refuse it with the reason instead.
+        if let Some(message) = training_host_unavailable_message(target, cfg!(target_os = "macos"))
+        {
+            return Err(ApiError::bad_request(message));
+        }
         if let Some(message) = training_base_unavailable_message(
             training_base_model_status(&data_dir, target),
             &target.base_model,
@@ -1886,6 +1892,18 @@ pub(crate) async fn create_training_job(
     job_payload.insert("outputName".to_owned(), Value::String(output_name));
     job_payload.insert("plan".to_owned(), plan_value);
     job_payload.insert("manifestEntry".to_owned(), manifest_entry);
+    // The acceptance this route already enforced travels with the job, so a retry/duplicate (which
+    // re-validates the stored payload through the raw-job gate) of an accepted run still passes.
+    // Stamped only from an actual assertion (never for an unacknowledged dry run), so flipping a
+    // stored dry run to a real one through retry/duplicate still hits the gate.
+    if sceneworks_core::training::training_target_requires_license_acknowledgment(target)
+        && training_license_acknowledgment_error(target, &payload.extra).is_none()
+    {
+        job_payload.insert(
+            crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+            Value::Bool(true),
+        );
+    }
     // Route-owned DATA for the model-source seam: a real training run loads this base model, so
     // it must carry the same typed identity as generation. The seam resolves and preflights it.
     job_payload.insert(
@@ -2685,6 +2703,59 @@ pub(crate) fn training_license_acknowledgment_error(
         code: Some(crate::models::LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
         context: None,
     })
+}
+
+/// The raw-job twin of the typed route's licence gate (`POST /api/v1/jobs`, retry, duplicate): a
+/// `lora_train` / `control_training` payload whose plan names a licence-bound target — by target id
+/// OR by kernel, so a hand-built plan cannot dodge it with a made-up id — and is not an explicit dry
+/// run must carry `licenseAcknowledged: true`. The typed route stamps it on the jobs it accepted.
+pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option<ApiError> {
+    if payload.get("dryRun").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let plan_target = payload.get("plan").and_then(|plan| plan.get("target"));
+    let field = |key: &str| {
+        plan_target
+            .and_then(|target| target.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+    };
+    let (target_id, kernel) = (field("targetId"), field("kernel"));
+    builtin_training_targets()
+        .targets
+        .iter()
+        .filter(|target| {
+            target_id == Some(target.id.as_str()) || kernel == Some(target.kernel.as_str())
+        })
+        .find_map(|target| {
+            let extra = payload
+                .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                .map(|value| {
+                    sceneworks_core::contracts::ExtraFields::from([(
+                        crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY.to_owned(),
+                        value.clone(),
+                    )])
+                })
+                .unwrap_or_default();
+            training_license_acknowledgment_error(target, &extra)
+        })
+}
+
+/// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
+/// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (Qwen Image 2.1
+/// until sc-24160) would queue forever. `macos_host` is a parameter so both sides are testable.
+pub(crate) fn training_host_unavailable_message(
+    target: &TrainingTarget,
+    macos_host: bool,
+) -> Option<String> {
+    if macos_host || sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel) {
+        return None;
+    }
+    Some(format!(
+        "Training '{}' runs on Apple Silicon (native MLX) only; this host has no trainer for it \
+         (kernel '{}'), so the run would never start. Train it on a Mac.",
+        target.name, target.kernel
+    ))
 }
 
 /// The licence fields a trained adapter's library entry inherits from its target (`ui.license` /

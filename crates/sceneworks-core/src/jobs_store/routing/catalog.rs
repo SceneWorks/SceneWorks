@@ -2161,6 +2161,13 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "mage_flow_lora",
 ];
 
+/// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
+/// non-macOS host for a kernel that is NOT candle-routed has no worker that will ever claim it, so the
+/// submit path refuses it up front instead of leaving it queued forever (sc-24159).
+pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
+    CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+}
+
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
 /// training kernel". Despite the constant's historical name, this means native-Rust-only rather than

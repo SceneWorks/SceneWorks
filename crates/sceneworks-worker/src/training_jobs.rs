@@ -1413,6 +1413,23 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// The `LoadSpec.precision` a trainer is loaded with. Generally it tracks `train_dtype` (the MLX
+/// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
+/// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
+/// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
+/// load at Bf16 or it dies at load.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
+    if engine_id != "qwen_image_2_1" && train_dtype.trim().eq_ignore_ascii_case("f32") {
+        Precision::Fp32
+    } else {
+        Precision::Bf16
+    }
+}
+
 /// Normalize the advanced `mixedPrecision` string onto the engine's `train_dtype`
 /// domain, which is exactly `{"bf16", "f32"}` (sc-4887). Only an explicit `"bf16"`
 /// (case-insensitive) selects bf16; every other value — `"fp16"`, `"no"`, empty,
@@ -1871,16 +1888,7 @@ pub(crate) async fn run_training_execution(
             // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
             // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
             // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if request
-                .config
-                .train_dtype
-                .trim()
-                .eq_ignore_ascii_case("f32")
-            {
-                Precision::Fp32
-            } else {
-                Precision::Bf16
-            };
+            let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
             let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
             spec.precision = load_precision;
             // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
@@ -3653,6 +3661,34 @@ mod tests {
         assert_eq!(summary.get("fileName").unwrap(), "lora.safetensors");
         // The placeholder base path does not exist.
         assert_eq!(summary.get("baseModelInstalled").unwrap(), false);
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
+        // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
+        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
+        for dtype in ["f32", "F32", "bf16"] {
+            assert!(
+                matches!(
+                    training_load_precision("qwen_image_2_1", dtype),
+                    Precision::Bf16
+                ),
+                "{dtype}"
+            );
+        }
+        // Every other trainer keeps tracking train_dtype.
+        assert!(matches!(
+            training_load_precision("lens", "f32"),
+            Precision::Fp32
+        ));
+        assert!(matches!(
+            training_load_precision("lens", "bf16"),
+            Precision::Bf16
+        ));
     }
 
     #[cfg(any(

@@ -5448,19 +5448,46 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
     let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
     let target = qwen_image_2_1_training_target();
     let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
-    let body_for = |acknowledged: Option<bool>| {
+    let body_with = |acknowledged: Option<bool>, dry_run: bool| {
         let mut body = json!({
             "targetId": target.id,
             "datasetId": dataset_id,
             "config": target.defaults,
             "outputName": "Qwen Style",
-            "dryRun": false
+            "dryRun": dry_run
         });
         if let Some(acknowledged) = acknowledged {
             body["licenseAcknowledged"] = json!(acknowledged);
         }
         body
     };
+    let body_for = |acknowledged: Option<bool>| body_with(acknowledged, false);
+
+    // The acceptance travels with an accepted job (so retry/duplicate re-validate), and is never
+    // stamped onto one that did not assert it — flipping that stored dry run to a real run through
+    // duplicate is refused by the raw-job gate.
+    let (status, acked_dry) =
+        request(app.clone(), "POST", &jobs_path, body_with(Some(true), true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{acked_dry}");
+    assert_eq!(acked_dry["payload"]["licenseAcknowledged"], json!(true));
+    // E12 on every host: the adapter entry this job would register records base, family, licence.
+    let dry_entry = &acked_dry["payload"]["manifestEntry"];
+    assert_eq!(dry_entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(dry_entry["family"], "qwen-image-2-1");
+    assert_eq!(dry_entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    let (status, bare_dry) = request(app.clone(), "POST", &jobs_path, body_with(None, true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{bare_dry}");
+    assert!(bare_dry["payload"].get("licenseAcknowledged").is_none());
+    let bare_id = bare_dry["id"].as_str().expect("job id");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{bare_id}/duplicate"),
+        json!({ "payloadChanges": { "dryRun": false } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("license_acknowledgment_required"));
 
     for acknowledged in [None, Some(false)] {
         let (status, body) = request(app.clone(), "POST", &jobs_path, body_for(acknowledged)).await;
@@ -5474,7 +5501,16 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
     }
 
     let (status, job) = request(app.clone(), "POST", &jobs_path, body_for(Some(true))).await;
+    if !cfg!(target_os = "macos") {
+        // Off-Mac there is no 2.1 trainer until sc-24160: the accepted run is refused up front
+        // instead of queuing forever. The adapter-record half is covered by the pure tests below.
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{job}");
+        let detail = job["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("Apple Silicon"), "{detail}");
+        return;
+    }
     assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["licenseAcknowledged"], json!(true));
     assert_eq!(
         job["payload"]["plan"]["target"]["kernel"],
         "qwen_image_2_1_lora"
@@ -5487,6 +5523,83 @@ async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the
         entry["licenseUrl"],
         json!(sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL)
     );
+}
+
+/// sc-24159: off-Mac only candle workers train, so a real run for a kernel with no candle trainer is
+/// refused at submit rather than queued forever. Generic over the candle-routed kernel list, so it
+/// lifts for 2.1 the moment sc-24160 adds the candle lane.
+#[test]
+fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
+    let targets = crate::builtin_training_targets().targets;
+    let qwen = qwen_image_2_1_training_target();
+    let message = crate::training::training_host_unavailable_message(&qwen, false)
+        .expect("no candle trainer for 2.1 yet");
+    assert!(
+        message.contains("Apple Silicon") && message.contains(&qwen.name),
+        "{message}"
+    );
+    assert!(crate::training::training_host_unavailable_message(&qwen, true).is_none());
+    // Every candle-routed target stays submittable off-Mac.
+    for target in targets.iter().filter(|target| {
+        sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)
+    }) {
+        assert!(
+            crate::training::training_host_unavailable_message(target, false).is_none(),
+            "{}",
+            target.id
+        );
+    }
+}
+
+/// sc-24159: the raw `POST /api/v1/jobs` route cannot queue a licence-bound training plan around the
+/// typed route's gate — whether the plan names the target by id or only by kernel — while an
+/// acknowledged payload (what the typed route stores) and an explicit dry run still pass.
+#[tokio::test]
+async fn raw_jobs_route_enforces_the_training_licence_gate() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |target_id: &str, extra: Value| {
+        let mut payload = json!({
+            "dryRun": false,
+            "plan": { "target": {
+                "targetId": target_id,
+                "kernel": "qwen_image_2_1_lora",
+                "baseModel": "qwen_image_2_1"
+            } }
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": payload })
+    };
+    for body in [
+        raw("qwen_image_2_1_lora", json!({})),
+        raw("forged_target", json!({})),
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": false }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}: {response}");
+        assert_eq!(response["code"], json!("license_acknowledgment_required"));
+    }
+    for body in [
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": true }),
+        ),
+        raw("qwen_image_2_1_lora", json!({ "dryRun": true })),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_ne!(
+            response["code"],
+            json!("license_acknowledgment_required"),
+            "{body}: {response}"
+        );
+    }
 }
 
 /// A target with no licence restriction is untouched by the gate, and its adapters carry no licence

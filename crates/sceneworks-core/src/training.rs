@@ -1319,9 +1319,6 @@ where
     }
 }
 
-/// Build a Krea 2 LoRA preset. The flow-matching knobs (timestep sampling, Raw-base preview
-/// settings, gradient checkpointing, target modules) live on the target defaults, so the preset only
-/// overrides the optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/LR).
 /// Build a native flow-match image LoRA/LoKr preset (Krea 2 and Qwen Image 2.1 share this shape):
 /// the sampling + caching knobs live on the target defaults, so the preset overrides only the
 /// optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/steps/LR).
