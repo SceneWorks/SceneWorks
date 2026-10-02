@@ -4477,7 +4477,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
 
     for (expected, loras) in [
         (
-            "LoRA qwen_style is not compatible with model gate_image",
+            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
             json!([{ "id": "qwen_style" }]),
         ),
         (
@@ -4490,7 +4490,7 @@ async fn retry_and_duplicate_gate_a_merged_lora_set_the_create_path_refuses() {
         ),
         // A mixed set must be refused for its bad member, not silently pruned to the good one.
         (
-            "LoRA qwen_style is not compatible with model gate_image",
+            "LoRA qwen_style is not compatible with model gate_image: the LoRA is a qwen-image adapter, and gate_image loads z-image adapters",
             json!([{ "id": "good_style" }, { "id": "qwen_style" }]),
         ),
     ] {
@@ -4856,12 +4856,12 @@ async fn retry_and_duplicate_gate_a_merged_video_lora_set_the_create_path_refuse
 
     for (expected, loras) in [
         (
-            "LoRA qwen_style is not compatible with model ltx_2_3",
+            "LoRA qwen_style is not compatible with model ltx_2_3: the LoRA is a qwen-image adapter, and ltx_2_3 loads ltx-video adapters",
             json!([{ "id": "qwen_style" }]),
         ),
         // A z-image adapter is installed and well-formed, just wrong for THIS lane's model.
         (
-            "LoRA good_style is not compatible with model ltx_2_3",
+            "LoRA good_style is not compatible with model ltx_2_3: the LoRA is a z-image adapter, and ltx_2_3 loads ltx-video adapters",
             json!([{ "id": "good_style" }]),
         ),
         (
@@ -10020,7 +10020,7 @@ async fn generation_job_routes_reject_incompatible_loras() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         image_error["detail"],
-        "LoRA qwen_style is not compatible with model z_image_turbo"
+        "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters"
     );
 
     let (status, unknown_model_error) = request(
@@ -10056,7 +10056,7 @@ async fn generation_job_routes_reject_incompatible_loras() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
         preset_error["detail"],
-        "LoRA qwen_style is not compatible with model z_image_turbo"
+        "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters"
     );
 
     for (mode, extra) in [
@@ -10092,7 +10092,7 @@ async fn generation_job_routes_reject_incompatible_loras() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{mode}");
         assert_eq!(
             video_error["detail"],
-            "LoRA qwen_style is not compatible with model ltx_2_3"
+            "LoRA qwen_style is not compatible with model ltx_2_3: the LoRA is a qwen-image adapter, and ltx_2_3 loads ltx-video adapters"
         );
     }
 

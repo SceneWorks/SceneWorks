@@ -3453,12 +3453,16 @@
         "samplers": ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
         "schedulers": ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"]
       },
-      // The engine refuses adapters outright at this pin (`supports_lora`/`supports_lokr` false,
-      // typed Unsupported), so there is no LoRA family to advertise and the Studio's LoRA rail
-      // stays closed for this id.
+      // LoRA/LoKr (sc-24156, epic 24107). 2.1 is its OWN adapter family, `qwen-image-2-1`, and
+      // NEVER `qwen-image`: the 2512 entry above is a ~20B DiT over Qwen2.5-VL, this one a ~7.1B DiT
+      // over a Qwen3 tower, so an adapter for one cannot load on the other (E10). The API's
+      // `validate_lora_specs_for_model` refuses a cross-family pick with a 400 naming both
+      // families, in either direction. `types` mirror the 2512 / FLUX.2 rows. This advertisement is
+      // what makes the family KNOWN to the importer and the picker; whether a given backend serves
+      // the render is the engine descriptor's `supports_lora`/`supports_lokr` (inference half).
       "loraCompatibility": {
-        "families": [],
-        "types": []
+        "families": ["qwen-image-2-1"],
+        "types": ["style", "enhance", "character"]
       },
       // ── ADMISSION GEOMETRY (sc-24112) ────────────────────────────────────────────────────────
       //
