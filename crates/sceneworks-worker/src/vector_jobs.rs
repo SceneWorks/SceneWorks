@@ -706,6 +706,8 @@ fn native_starvector_request(
         max_new_tokens: request.detail_budget.max_new_tokens,
         seed: request.sampling.seed,
         cancel,
+        // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it).
+        kv_compression: crate::llm_kv_cache::worker_default_policy(),
         ..TextLlmRequest::default()
     };
     Ok(StarVectorRequest::new(

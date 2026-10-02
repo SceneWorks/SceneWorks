@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "d1c2c8cfba975080840d87cf7e257a257b8db628";
+pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "eb6758fe91e673c6c1c0ee3f911431e1bb63b976";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -708,6 +708,9 @@ async fn generate_vision_json(
                 max_new_tokens: 512,
                 constraint: Some(Constraint::Json),
                 cancel: blocking_cancel,
+                // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator
+                // enabled it); a multimodal request always runs dense, with that reason.
+                kv_compression: crate::llm_kv_cache::worker_default_policy(),
                 ..Default::default()
             };
             // sc-24029: the KV cache grows per token here too, and this closure is the only hook

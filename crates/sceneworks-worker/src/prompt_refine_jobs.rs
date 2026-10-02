@@ -1245,6 +1245,10 @@ pub(crate) async fn run_prompt_refine_job(
         gen_core::core_llm::ThinkingMode::Disabled => "disabled",
     };
     let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
+    // sc-20682: the job's compressed-KV opt-in (its payload's `kvCompression`, else the worker's
+    // `SCENEWORKS_LLM_KV_COMPRESSION`, else off). The engine runs compressed only where its
+    // qualification table admits this model and context, and reports what it ran on.
+    let kv_compression = crate::llm_kv_cache::job_policy(payload)?;
     let temperature = task.temperature();
     let work_message = task.work_message();
     let done_message = task.done_message();
@@ -1495,6 +1499,7 @@ pub(crate) async fn run_prompt_refine_job(
                     ),
                     cancel: blocking_cancel.clone(),
                     thinking: thinking_mode,
+                    kv_compression,
                     ..Default::default()
                 };
                 // The resolution requirements (WITHOUT the auto-vision `from_request` derives from an image
@@ -1663,6 +1668,12 @@ pub(crate) async fn run_prompt_refine_job(
             return Err(error);
         }
     };
+    // sc-20682: what the KV cache asked for and ran on, on the result and as telemetry.
+    let kv_cache = crate::llm_kv_cache::kv_cache_block(kv_compression, output.kv_cache.as_ref());
+    emit_event(
+        "llm_kv_cache",
+        crate::llm_kv_cache::kv_cache_event(&job.id, &model, kv_cache.clone()),
+    );
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
@@ -1682,6 +1693,7 @@ pub(crate) async fn run_prompt_refine_job(
             output.finish_reason,
             output.usage,
             max_new_tokens,
+            kv_cache,
         );
         let mut progress = refine_progress(
             JobStatus::Failed,
@@ -1765,6 +1777,7 @@ pub(crate) async fn run_prompt_refine_job(
         output.finish_reason,
         output.usage,
         max_new_tokens,
+        kv_cache,
     );
     if let Some(block) = rewrite_suggestion {
         result.insert("rewriteSuggestion".to_owned(), Value::Object(block));
@@ -1892,6 +1905,9 @@ fn refine_progress(
 /// but its text is truncated mid-sentence — and the caller that cannot tolerate that (the film
 /// planner's per-shot rewrite, whose output feeds a compiled request) has no other way to know.
 /// Purely additive: no existing key changes shape, so every current reader is unaffected.
+///
+/// sc-20682 adds `kvCache`: the KV cache the generation asked for and ran on
+/// ([`crate::llm_kv_cache::kv_cache_block`]) — whether it ran compressed and, if not, why.
 #[cfg(any(
     test,
     target_os = "macos",
@@ -1901,6 +1917,7 @@ fn generation_block(
     finish_reason: Option<gen_core::core_llm::FinishReason>,
     usage: gen_core::core_llm::Usage,
     max_new_tokens: u32,
+    kv_cache: Value,
 ) -> Value {
     json!({
         "finishReason": finish_reason_name(finish_reason),
@@ -1909,6 +1926,7 @@ fn generation_block(
             "generatedTokens": usage.generated_tokens,
         },
         "maxNewTokens": max_new_tokens,
+        "kvCache": kv_cache,
     })
 }
 
@@ -1928,6 +1946,7 @@ fn refine_result(
     finish_reason: Option<gen_core::core_llm::FinishReason>,
     usage: gen_core::core_llm::Usage,
     max_new_tokens: u32,
+    kv_cache: Value,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("originalPrompt".to_owned(), json!(original_prompt));
@@ -1937,7 +1956,7 @@ fn refine_result(
     }
     result.insert(
         "generation".to_owned(),
-        generation_block(finish_reason, usage, max_new_tokens),
+        generation_block(finish_reason, usage, max_new_tokens, kv_cache),
     );
     result.insert(
         "executionIdentity".to_owned(),
@@ -1996,6 +2015,7 @@ fn empty_refine_failure_detail(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+#[allow(clippy::too_many_arguments)]
 fn refine_failure_result(
     thinking: Option<&str>,
     model: &str,
@@ -2004,6 +2024,7 @@ fn refine_failure_result(
     finish_reason: Option<gen_core::core_llm::FinishReason>,
     usage: gen_core::core_llm::Usage,
     max_new_tokens: u32,
+    kv_cache: Value,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     if let Some(thinking) = thinking.filter(|value| !value.trim().is_empty()) {
@@ -2011,7 +2032,7 @@ fn refine_failure_result(
     }
     result.insert(
         "generation".to_owned(),
-        generation_block(finish_reason, usage, max_new_tokens),
+        generation_block(finish_reason, usage, max_new_tokens, kv_cache),
     );
     result.insert(
         "executionIdentity".to_owned(),
@@ -2286,6 +2307,7 @@ mod tests {
                 generated_tokens: 32,
             },
             4_096,
+            serde_json::Value::Null,
         );
         assert_eq!(result["refinedPrompt"], "{\"shots\":[]}");
         assert_eq!(result["thinking"], "private reasoning");
@@ -2324,6 +2346,7 @@ mod tests {
                 generated_tokens: 1_536,
             },
             1_536,
+            serde_json::Value::Null,
         );
         assert_eq!(result["generation"]["finishReason"], "length");
         assert_eq!(result["generation"]["usage"]["promptTokens"], 900);
@@ -2333,6 +2356,59 @@ mod tests {
         assert_eq!(result["originalPrompt"], "a courier sets a parcel down");
         assert!(result["refinedPrompt"].as_str().unwrap().ends_with("only"));
         assert_eq!(result["executionIdentity"]["backend"], "mlx");
+    }
+
+    /// sc-20682: both the success and the failure result carry the KV cache the generation asked
+    /// for and ran on under `generation.kvCache`, beside the keys every existing reader uses.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn refine_results_record_the_kv_cache_the_generation_ran_on() {
+        use gen_core::core_llm::{
+            FinishReason, KvCacheFallbackReason, KvCacheReport, KvCompressionPolicy, Usage,
+        };
+
+        let report = KvCacheReport::dense(KvCacheFallbackReason::BelowMinimumContext, None);
+        let block =
+            crate::llm_kv_cache::kv_cache_block(KvCompressionPolicy::Qualified, Some(&report));
+        let usage = Usage {
+            prompt_tokens: 12,
+            generated_tokens: 3,
+        };
+        let success = refine_result(
+            "idea",
+            "prompt",
+            None,
+            "TheDrummer/Anubis-Mini-8B-v1",
+            "mlx",
+            "auto",
+            Some(FinishReason::Stop),
+            usage,
+            64,
+            block.clone(),
+        );
+        let failure = refine_failure_result(
+            None,
+            "TheDrummer/Anubis-Mini-8B-v1",
+            "mlx",
+            "auto",
+            Some(FinishReason::Stop),
+            usage,
+            64,
+            block.clone(),
+        );
+        for result in [&success, &failure] {
+            assert_eq!(result["generation"]["kvCache"], block);
+            assert_eq!(result["generation"]["kvCache"]["policy"], "qualified");
+            assert_eq!(result["generation"]["kvCache"]["ranCompressed"], false);
+            assert_eq!(
+                result["generation"]["kvCache"]["fallbackReason"],
+                "below_minimum_context"
+            );
+            assert_eq!(result["generation"]["finishReason"], "stop");
+        }
     }
 
     #[test]
@@ -2350,6 +2426,7 @@ mod tests {
                 generated_tokens: 4_096,
             },
             4_096,
+            serde_json::Value::Null,
         );
         assert_eq!(result["thinking"], "private bounded reasoning");
         assert_eq!(result["generation"]["finishReason"], "length");
