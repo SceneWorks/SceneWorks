@@ -764,13 +764,13 @@ enum VideoEncodeProfile {
     UncalibratedConservative(VideoDecodeMemoryProfile),
 }
 
-/// The conditioning a request VAE-encodes before denoise, as the admission identity names it.
+/// The conditioning a request VAE-encodes before denoise, as the admission identity names it. What
+/// an uncalibrated encode covers is keyed on `(provider, mode)` ([`uncalibrated_encode_pass`]), never
+/// on the carrier-shape label, which names evidence identity rather than what the engine encodes.
 #[derive(Clone, Copy, Debug)]
 struct VideoEncodeRequest<'a> {
     mode: &'a str,
     reference_count: u32,
-    /// The input carrier shape (`"none"`, `"image"`, `"keyframe"`, `"video"`, ...).
-    reference_shape: &'a str,
 }
 
 /// Resolves the request's conditioning VAE-encode cost for one graded candidate: `(lane, provider,
@@ -819,18 +819,84 @@ fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
     request.reference_count > 0 || request.mode != "text_to_video"
 }
 
-/// The frames an uncalibrated encode VAE-encodes at once: one for still conditioning (images,
-/// keyframes, references -- stills encode one after another), the clip for a video carrier (a
-/// `video` shape, or a conditioning mode with no image reference, whose input is a clip).
+/// What one VAE-encode pass of a provider's conditioning covers: a single still, or a clip as long
+/// as the output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(any(target_os = "macos", feature = "backend-candle")),
     allow(dead_code)
 )]
-fn uncalibrated_encode_frames(request: VideoEncodeRequest<'_>, frames: u32) -> u32 {
-    if request.reference_shape == "none" || request.reference_shape.contains("video") {
-        frames.max(1)
-    } else {
-        1
+enum EncodePass {
+    /// Every conditioning input is a still, VAE-encoded one at a time: one frame.
+    Still,
+    /// The largest pass is a conditioning clip of the output length (`frames`).
+    Clip,
+}
+
+/// The largest single VAE-encode pass each `(provider, mode)` runs before denoise, read off the
+/// engines at the pinned inference rev (41c560b73). Every engine encodes its conditioning one
+/// carrier per `encode` call, so the working set is the largest pass, not the sum (the MLX
+/// calibration prices it the same way: `mlx-gen-wan/src/lib.rs:468`). Clip carriers are extracted
+/// at the output length (`video_jobs/bernini.rs` `wan_frame_count`), so a clip pass is `frames`.
+///
+/// | provider | mode | pass | engine source |
+/// | --- | --- | --- | --- |
+/// | `ltx_2_3[_distilled]`, `ltx_2_5[_distilled]` | `image_to_video`, `first_last_frame` | 1 | candle-gen-ltx/src/lib.rs:834-850 (`encode_image`, one still per call from `build_keyframes` :856); mlx-gen-ltx/src/model.rs:1811, :1970-1979 |
+/// | `ltx_2_3[_distilled]`, `ltx_2_5[_distilled]` | `extend_clip`, `video_bridge`, `replace_person` | F | candle-gen-ltx/src/lib.rs:912-955 (`build_clips`); mlx-gen-ltx/src/model.rs:1873-1949 |
+/// | `wan2_2_ti2v_5b` | `image_to_video`, `first_last_frame`, `extend_clip`, `video_bridge` | 1 | candle-gen-wan/src/lib.rs:463-488 (`prepare_ti2v`: each Reference/Keyframe still alone); mlx-gen-wan/src/lib.rs:513 |
+/// | `wan2_2_i2v_14b` | `image_to_video` | F | candle-gen-wan/src/wan14b.rs:437-457 (`build_i2v_y`: `[image, zeros…]` F-frame clip); mlx-gen-wan/src/lib.rs:514 |
+/// | `wan_vace`, `wan2_2_vace_fun_14b` | `extend_clip`, `video_bridge`, `replace_person` | F | candle-gen-wan/src/vace.rs:506-519 (`prepare_video_latents`: F-frame ControlClip inactive/reactive halves, then reference stills); mlx-gen-wan/src/lib.rs:514 |
+/// | `bernini`, `bernini_renderer` | `reference_to_video` | 1 | candle-gen-bernini/src/bernini.rs:855, :867, pipeline.rs:230, :240 (`encode_image` per still); mlx-gen-wan/src/lib.rs:471 |
+/// | `bernini`, `bernini_renderer` | `video_to_video`, `reference_video_to_video`, `multi_video_to_video`, `ads2v` | F | candle-gen-bernini/src/preprocess.rs:33-57 (`encode_videoclip`, one call per clip from bernini.rs:843 / pipeline.rs:221; ads2v's source and reference clips are two F passes); mlx-gen-wan/src/lib.rs:474 via mlx-gen-bernini/src/lib.rs:117 |
+/// | `scail2_14b` | `animate_character`, `replace_person` | F | candle-gen-scail2/src/generate.rs:460 (driving clip, per segment of at most F) |
+/// | `svd_xt` | `image_to_video` | 1 | candle-gen-svd/src/lib.rs:445 (the one conditioning image) |
+///
+/// A `(provider, mode)` this table does not name is priced as the full clip: an unknown encode is
+/// never assumed to be a still.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
+    use EncodePass::{Clip, Still};
+    match (provider_id, mode) {
+        (
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled",
+            "image_to_video" | "first_last_frame",
+        ) => Still,
+        (
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled",
+            "extend_clip" | "video_bridge" | "replace_person",
+        ) => Clip,
+        (
+            "wan2_2_ti2v_5b",
+            "image_to_video" | "first_last_frame" | "extend_clip" | "video_bridge",
+        ) => Still,
+        ("wan2_2_i2v_14b", "image_to_video") => Clip,
+        ("wan_vace" | "wan2_2_vace_fun_14b", "extend_clip" | "video_bridge" | "replace_person") => {
+            Clip
+        }
+        ("bernini" | "bernini_renderer", "reference_to_video") => Still,
+        (
+            "bernini" | "bernini_renderer",
+            "video_to_video" | "reference_video_to_video" | "multi_video_to_video" | "ads2v",
+        ) => Clip,
+        ("scail2_14b", "animate_character" | "replace_person") => Clip,
+        ("svd_xt", "image_to_video") => Still,
+        // Not in the table: price the full clip, never a still.
+        _ => Clip,
+    }
+}
+
+/// The frames the largest uncalibrated encode pass VAE-encodes ([`uncalibrated_encode_pass`]).
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32 {
+    match uncalibrated_encode_pass(provider_id, mode) {
+        EncodePass::Still => 1,
+        EncodePass::Clip => frames.max(1),
     }
 }
 
@@ -838,10 +904,10 @@ fn uncalibrated_encode_frames(request: VideoEncodeRequest<'_>, frames: u32) -> u
 ///
 /// * a calibrated profile, or a calibrated provider's "nothing", is taken as is;
 /// * an uncalibrated provider's request that encodes nothing is nothing;
-/// * on a bounded-decode candidate an uncalibrated encode keeps the generic floor, exactly as the
-///   decode resolver declines the single-pass profile there (it would erase the rung's saving);
 /// * otherwise the encode is priced at the provider's conservative single-pass VAE profile for
-///   the frames it actually encodes ([`uncalibrated_encode_frames`]), or refused without one.
+///   the frames its largest encode pass covers ([`uncalibrated_encode_frames`]), or refused
+///   without one. This holds on every rung: bounded decode tiles the decode, never the
+///   conditioning encode, so a bounded-decode candidate runs the same full encode.
 #[cfg_attr(
     not(any(target_os = "macos", feature = "backend-candle")),
     allow(dead_code)
@@ -850,7 +916,6 @@ fn classify_video_encode_profile(
     provider_id: &str,
     request: VideoEncodeRequest<'_>,
     frames: u32,
-    selection: MemorySelection,
     answer: ProviderEncodeAnswer,
     conservative: impl FnOnce(u32) -> Option<VideoDecodeMemoryProfile>,
 ) -> Result<VideoEncodeProfile, String> {
@@ -861,20 +926,23 @@ fn classify_video_encode_profile(
         ProviderEncodeAnswer::EncodesNothing => return Ok(VideoEncodeProfile::Nothing),
         ProviderEncodeAnswer::Uncalibrated => {}
     }
-    if !request_encodes_conditioning(request) || selection.strategy == MemoryStrategy::BoundedDecode
-    {
+    if !request_encodes_conditioning(request) {
         return Ok(VideoEncodeProfile::Nothing);
     }
-    conservative(uncalibrated_encode_frames(request, frames))
-        .map(VideoEncodeProfile::UncalibratedConservative)
-        .ok_or_else(|| {
-            format!(
-                "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
+    conservative(uncalibrated_encode_frames(
+        provider_id,
+        request.mode,
+        frames,
+    ))
+    .map(VideoEncodeProfile::UncalibratedConservative)
+    .ok_or_else(|| {
+        format!(
+            "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
                  publishes neither a calibrated encode cost nor a conservative VAE profile; \
                  refusing to admit the encode unpriced",
-                request.mode, request.reference_count
-            )
-        })
+            request.mode, request.reference_count
+        )
+    })
 }
 
 /// The pinned runtime bundle's conditioning-encode cost (sc-20686, epic E8). Image or video
@@ -887,7 +955,9 @@ fn packaged_video_encode_profile(
     provider_id: &str,
     request: VideoEncodeRequest<'_>,
     geometry: VideoAdmissionGeometry,
-    selection: MemorySelection,
+    // The conditioning encode runs whole on every rung: no memory strategy tiles it, so the
+    // candidate's selection never changes its price (sc-20688).
+    _selection: MemorySelection,
 ) -> Result<VideoEncodeProfile, String> {
     let frames = geometry.estimate_frames().max(1);
     #[cfg(target_os = "macos")]
@@ -914,7 +984,6 @@ fn packaged_video_encode_profile(
             provider_id,
             request,
             frames,
-            selection,
             answer,
             |encode_frames| {
                 runtime_macos::conservative_video_decode_memory_profile(
@@ -932,7 +1001,6 @@ fn packaged_video_encode_profile(
             provider_id,
             request,
             frames,
-            selection,
             ProviderEncodeAnswer::Uncalibrated,
             |encode_frames| {
                 runtime_cuda::conservative_video_decode_memory_profile(
@@ -946,7 +1014,7 @@ fn packaged_video_encode_profile(
     }
     // A lane this build links no runtime bundle for prices no provider profile at all (the decode
     // resolver returns `None` here too); its historical weights-plus-headroom floor stands.
-    let _ = (lane, provider_id, request, frames, selection);
+    let _ = (lane, provider_id, request, frames);
     Ok(VideoEncodeProfile::Nothing)
 }
 
@@ -1450,14 +1518,14 @@ fn profiled_floor_phase_peaks(
     }
     // sc-20686 (epic E8): the conditioning encode is its own phase. It never overlaps the decode, so
     // it raises the floor only where it is the larger composition. sc-20688: an encode the provider
-    // has not calibrated is priced at its conservative profile, or refused, never skipped.
+    // has not calibrated is priced at its conservative profile, or refused, never skipped -- on
+    // every rung, bounded decode included.
     let encode = match (selector.encode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
         VideoEncodeRequest {
             mode: selector.identity.mode,
             reference_count: selector.identity.reference_count,
-            reference_shape: selector.identity.reference_shape,
         },
         geometry,
         selection,
