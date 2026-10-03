@@ -913,6 +913,7 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
+                reference_image_paths: Vec::new(),
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -3077,6 +3078,13 @@ mod tests {
         });
         let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
             .expect("map request through verified snapshot");
+        assert!(
+            request
+                .items
+                .iter()
+                .all(|item| item.reference_image_paths.is_empty()),
+            "captioned training plans must remain captioned under the M4 edit-pair contract"
+        );
         assert_eq!(
             std::fs::read(&bundle).expect("read swapped source"),
             swapped,
@@ -4892,6 +4900,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5005,6 +5014,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5121,6 +5131,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5275,6 +5286,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5459,6 +5471,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5699,6 +5712,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir,
