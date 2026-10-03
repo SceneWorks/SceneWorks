@@ -51,6 +51,7 @@
 *.rs            text diff
 *.scss          text diff
 *.sh            text diff
+*.sha256        text diff
 *.snap          text diff
 *.sql           text diff
 *.svelte        text diff

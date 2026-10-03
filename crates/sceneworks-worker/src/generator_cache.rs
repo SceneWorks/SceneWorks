@@ -763,6 +763,24 @@ pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
     });
 }
 
+/// The MLX soft memory limit this worker applied (configured or derived default), or `None` when it
+/// left MLX on its own default. Every request-scoped guard only ever LOWERS it
+/// ([`apply_request_gpu_memory_limit`]), so it upper-bounds the free memory a provider measures at
+/// decode time (`limit − active`) -- the budget a budget-planned VAE decode tiles against.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    match EFFECTIVE_GPU_MEMORY_LIMIT.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        limit => Some(limit),
+    }
+}
+
+/// Tests never apply an MLX limit (see [`apply_gpu_memory_limit`]).
+#[cfg(any(not(target_os = "macos"), test))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    None
+}
+
 #[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn apply_gpu_memory_limit(_bytes: u64) {}
 

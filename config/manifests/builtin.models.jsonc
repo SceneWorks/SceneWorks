@@ -21674,6 +21674,39 @@
           "estimatedSizeBytes": 24197122980,
           "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // macOS Wan-VACE (sc-20686): the dense Wan2.1-VACE-1.3B transformer the native `wan_vace`
+        // engine serves `replace_person` and the tier-C extend_clip/video_bridge path with. Nothing
+        // else downloaded it, so `wan_vace` was unreachable from a clean install. Only `transformer/`
+        // is fetched: the worker assembles it with a base-Wan 14B tier's UMT5/z16-VAE/tokenizer
+        // (`resolve_wan_vace_model_dir`). Soft: extend/bridge falls back to the TI2V-5B keyframe
+        // path without it, so TI2V-5B stays usable when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+          "revision": "ec4d2cb062b548996b179d493fdd05340de702a1",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7146182696,
+          "footprint": { "diskSizeBytes": 7146182696, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ...and the shared base-Wan components that assembly links beside the transformer: the UMT5
+        // text encoder, z16 VAE and tokenizer from the T2V-A14B `q4/` tier (the TI2V-5B's own VAE is
+        // the z48 one, so it cannot stand in). Only these three files — not the 14B experts — so a
+        // TI2V-5B-only install can serve `wan_vace`; the worker's base resolver takes the first T2V/
+        // I2V tier holding all three (`wan_vace_base_dir_from`). Soft, for the same reason as above.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["q4/t5_encoder.safetensors", "q4/vae.safetensors", "q4/tokenizer.json"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11886274274,
+          "footprint": { "diskSizeBytes": 11886274274, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
         // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
         // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.
@@ -28255,7 +28288,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "1c4a8cdfd48754db4a08df939822bfa467a55ca08f49c98375fbe5c50dc8cec2",
+              "sha256": "62209c4f58ef6d70dceec2ef3747dd188686e5cec1d04c3b9b6afda7ff5941f3",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28274,13 +28307,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 252128,
-                  "sha256": "a074f504d858a6481a7ba1ce05ba72139708bae08e80e82ebc94a2517db1ae72"
+                  "byteSize": 253038,
+                  "sha256": "2905c3ec9246e031ce803c4010aa482fc11d559db6cab0f468dca6a09f86c76d"
                 },
                 {
                   "path": "Cargo.toml",
                   "byteSize": 9799,
-                  "sha256": "d211361f243d10d1e92da6964c9a093ccd628ec62ef8d488404077217ffdd89b"
+                  "sha256": "f5e904f26b11897c1357af0a7a569889d09d977293bc68d45433aef8fef7c692"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -28305,7 +28338,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 9161,
-                  "sha256": "89dc986c5e099b8cedff8ec26f779c1c64d9e31ef9ffab21fdda9034c6544b3e"
+                  "sha256": "51926cf859388ab41f5f531e6a91344fc611479cced111b944dfd60ee8b175b4"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -28369,8 +28402,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7557,
-                  "sha256": "4b41631f76bab152f8c5d8eb61c1133103c0653d3ea2ef5492c434f22b07ee7a"
+                  "byteSize": 7594,
+                  "sha256": "1ed203b1860781e2719ffa2c9d3e35efc55984db1a0318e01e05c9d44a5ef8c4"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

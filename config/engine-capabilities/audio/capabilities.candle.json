@@ -2,7 +2,7 @@
   "registry": "audio",
   "backend": "candle",
   "generatedFrom": {
-    "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
+    "inferenceRevision": "d1c2c8cfba975080840d87cf7e257a257b8db628",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities [--no-default-features --features backend-candle]"
   },
   "engines": [
@@ -73,6 +73,11 @@
     },
     {
       "id": "stable_audio_3_small_sfx_base",
+      "modality": "audio",
+      "supportsPreview": false
+    },
+    {
+      "id": "yue2",
       "modality": "audio",
       "supportsPreview": false
     },

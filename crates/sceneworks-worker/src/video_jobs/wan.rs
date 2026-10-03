@@ -57,7 +57,7 @@ pub(super) async fn generate_wan(
     } else {
         (
             resolve_wan_model_dir(settings, &request.model, engine_id)?,
-            resolve_wan_quant(request),
+            wan_load_quant(engine_id, request, false)?,
         )
     };
     let input = VideoGenInput {
@@ -345,6 +345,40 @@ pub(super) const WAN_TI2V_5B_REVISION: &str = "bb1b055249614cf9d7cf4373fbdbc184b
 ))]
 pub(super) const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef13ea16ce1e";
 
+/// The Wan Lightning product decisions: which engines bake the distill (default-on), its
+/// per-architecture LoRA subdir, and its forced recipe. On macOS these come straight from the MLX Wan
+/// provider crate (`product_load`), the single source the SC-20686 Metal campaign also loads through;
+/// the candle lane links no MLX crate and keeps the same facts here.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod lightning_policy {
+    #[cfg(target_os = "macos")]
+    pub(super) use runtime_macos::providers::wan::product_load::{
+        lightning_default, lightning_subdir, LIGHTNING_GUIDANCE, LIGHTNING_STEPS,
+    };
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn lightning_subdir(engine_id: &str) -> Option<&'static str> {
+        match engine_id {
+            "wan2_2_t2v_14b" => Some("Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"),
+            "wan2_2_i2v_14b" => Some("Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1"),
+            _ => None,
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) fn lightning_default(engine_id: &str) -> bool {
+        lightning_subdir(engine_id).is_some()
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    pub(super) const LIGHTNING_STEPS: u32 = 4;
+    #[cfg(not(target_os = "macos"))]
+    pub(super) const LIGHTNING_GUIDANCE: f32 = 1.0;
+}
+
 /// Architecture-specific directory in `lightx2v/Wan2.2-Lightning`.
 ///
 /// This mapping is shared by both backends and by both the cache-healing and resolution paths so a
@@ -354,11 +388,7 @@ pub(super) const WAN_LIGHTNING_REVISION: &str = "18bccf8884ec0a078eed79785eb4ef1
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn wan_lightning_subdir(engine_id: &str) -> Option<&'static str> {
-    match engine_id {
-        "wan2_2_t2v_14b" => Some("Wan2.2-T2V-A14B-4steps-lora-rank64-Seko-V1.1"),
-        "wan2_2_i2v_14b" => Some("Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1"),
-        _ => None,
-    }
+    lightning_policy::lightning_subdir(engine_id)
 }
 
 /// The files that make an **A14B** (dual-expert MoE) Wan tier subdir COMPLETE: both experts + the T5
@@ -482,10 +512,29 @@ pub(super) fn resolve_wan_tier_dir_and_quant(
     engine_id: &'static str,
 ) -> WorkerResult<(PathBuf, Option<Quant>)> {
     let root = resolve_wan_model_dir(settings, &request.model, engine_id)?;
-    match wan_tier_subdir(&root, request) {
-        Some(tier) => Ok((tier, None)),
-        None => Ok((root, resolve_wan_quant(request))),
-    }
+    // The load quant is the product's decision for (route, pick, packed tier?): a packed tier's
+    // config is authoritative, a legacy flat root takes the pick.
+    let (dir, packed_tier) = match wan_tier_subdir(&root, request) {
+        Some(tier) => (tier, true),
+        None => (root, false),
+    };
+    Ok((dir, wan_load_quant(engine_id, request, packed_tier)?))
+}
+
+/// The load-time quant for a Wan-family MLX route: the provider crate's `product_load` decision over
+/// the request's `advanced.mlxQuantize` pick ([`resolve_wan_quant`]).
+#[cfg(target_os = "macos")]
+pub(super) fn wan_load_quant(
+    engine_id: &str,
+    request: &VideoRequest,
+    packed_tier: bool,
+) -> WorkerResult<Option<Quant>> {
+    runtime_macos::providers::wan::product_load::load_quant(
+        engine_id,
+        resolve_wan_quant(request),
+        packed_tier,
+    )
+    .map_err(|error| crate::classify_engine_error("Wan load quantization", error.into()))
 }
 
 /// On-demand fetch of a non-default Wan2.2 quant-matrix tier subdir (sc-9941 TI2V-5B / sc-9942 T2V /
@@ -602,22 +651,31 @@ pub(super) fn resolve_lightning_loras(
                  downloaded — fetch it via the model manager"
             ))
         })?;
-    let base = wan_lightning_subdir(engine_id).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "{engine_id}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
-        ))
-    })?;
-    let high = snapshot.join(base).join("high_noise_model.safetensors");
-    let low = snapshot.join(base).join("low_noise_model.safetensors");
-    for file in [&high, &low] {
-        if !file.is_file() {
-            return Err(WorkerError::InvalidPayload(format!(
-                "{engine_id}: Lightning LoRA file missing: {}",
-                file.display()
-            )));
-        }
+    // macOS: the MLX provider crate names the per-architecture pair (the product's single source).
+    #[cfg(target_os = "macos")]
+    {
+        runtime_macos::providers::wan::product_load::lightning_lora_files(engine_id, &snapshot)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
     }
-    Ok((high, low))
+    #[cfg(not(target_os = "macos"))]
+    {
+        let base = wan_lightning_subdir(engine_id).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "{engine_id}: no Lightning distill LoRA — only the A14B MoE models bake Lightning"
+            ))
+        })?;
+        let high = snapshot.join(base).join("high_noise_model.safetensors");
+        let low = snapshot.join(base).join("low_noise_model.safetensors");
+        for file in [&high, &low] {
+            if !file.is_file() {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "{engine_id}: Lightning LoRA file missing: {}",
+                    file.display()
+                )));
+            }
+        }
+        Ok((high, low))
+    }
 }
 
 /// The `.low_noise.safetensors` sibling of a Wan A14B MoE high-noise LoRA file, or
@@ -671,18 +729,24 @@ pub(super) fn resolve_wan_adapters(
     // below are honored in both states. The subdir is resolved per architecture (not cross-compatible).
     if is_wan_a14b && wan_lightning_on(engine_id, request) {
         let (high, low) = resolve_lightning_loras(settings, engine_id)?;
-        specs.push(moe_adapter(
-            high,
-            1.0,
-            gen_core::AdapterKind::Lora,
-            gen_core::MoeExpert::High,
-        ));
-        specs.push(moe_adapter(
-            low,
-            1.0,
-            gen_core::AdapterKind::Lora,
-            gen_core::MoeExpert::Low,
-        ));
+        // macOS: the MLX provider crate builds the product's pair (strength 1.0, high/low experts).
+        #[cfg(target_os = "macos")]
+        specs.extend(runtime_macos::providers::wan::product_load::lightning_adapters(high, low));
+        #[cfg(not(target_os = "macos"))]
+        {
+            specs.push(moe_adapter(
+                high,
+                1.0,
+                gen_core::AdapterKind::Lora,
+                gen_core::MoeExpert::High,
+            ));
+            specs.push(moe_adapter(
+                low,
+                1.0,
+                gen_core::AdapterKind::Lora,
+                gen_core::MoeExpert::Low,
+            ));
+        }
     }
 
     for lora in &request.loras {
@@ -1128,8 +1192,7 @@ pub(super) fn advanced_opt_f32(request: &VideoRequest, key: &str) -> Option<f32>
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn wan_lightning_on(engine_id: &str, request: &VideoRequest) -> bool {
-    let is_moe = engine_id == "wan2_2_t2v_14b" || engine_id == "wan2_2_i2v_14b";
-    if !is_moe {
+    if !lightning_policy::lightning_default(engine_id) {
         return false;
     }
     // Absent ⇒ default-on for A14B; only an explicit strict-bool `false` opts out.
@@ -1160,7 +1223,10 @@ pub(super) fn wan_sampling(engine_id: &str, request: &VideoRequest) -> (Option<u
         if wan_lightning_on(engine_id, request) {
             // Lightning distill (default): 4 steps / CFG-off. The distill is applied as an
             // adapter (resolve_wan_adapters), so a user `steps`/`guidanceScale` can't break it.
-            return (Some(4), Some(1.0));
+            return (
+                Some(lightning_policy::LIGHTNING_STEPS),
+                Some(lightning_policy::LIGHTNING_GUIDANCE),
+            );
         }
         // Toggle off: native multi-step CFG. Honor an explicit user override, else `None` so the
         // engine's config.json A14B non-distill defaults (multi-step + CFG on) stand exactly.

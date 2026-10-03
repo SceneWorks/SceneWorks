@@ -178,12 +178,12 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned by sc-19383: `config/download-pattern-evidence.json` was re-recorded when the catalog
-// gained the YuE lyrics2song entries — six stage-1 re-hosts, the stage-2 re-host and the xcodec
-// re-host (117 repo@revision keys incl. the two frozen importer authorities; sc-24114 left 109).
+// Re-pinned by sc-20686: `config/download-pattern-evidence.json` was re-recorded when the catalog
+// gained Wan2.1-VACE-1.3B-diffusers (118 repo@revision keys; sc-19383's YuE re-hosts left 117,
+// incl. the two frozen importer authorities).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "e54da3132ca340d054da8ac138d5426963f52572edaf83dafbc64d7f6d31a1f0";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "469950e0de974e46972a323ab995805d549b19676737302a6b4e1b395a1e11fc";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

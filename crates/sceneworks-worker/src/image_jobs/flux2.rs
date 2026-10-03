@@ -774,7 +774,17 @@ async fn generate_flux2_edit_stream(
     let load_quant = quant;
     let mut spec = load_spec(weights_dir.clone(), load_quant, adapters, None);
     if engine_id != "flux2_dev_edit" {
-        spec = spec.with_resolved_route(request.model.clone());
+        // macOS: the MLX provider crate maps the catalog model onto this route (`product_load`),
+        // refusing a model the route does not serve rather than recording it as resolved.
+        #[cfg(target_os = "macos")]
+        let resolved_route = runtime_macos::providers::flux2::product_load::resolved_route(
+            engine_id,
+            &request.model,
+        )
+        .map_err(|error| crate::classify_engine_error("FLUX.2 edit resolved route", error.into()))?;
+        #[cfg(not(target_os = "macos"))]
+        let resolved_route = request.model.as_str();
+        spec = spec.with_resolved_route(resolved_route);
         if let Some(pid) = pid_weights {
             spec = spec.with_pid(pid.checkpoint, pid.gemma);
         }

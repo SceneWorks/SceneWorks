@@ -597,10 +597,11 @@ fn generation_request(arm: Arm, geometry: Geometry) -> GenerationRequest {
 /// packaged curve's id, else the resolved decode profile's revision, else this token.
 const WORKER_ESTIMATE_FLOOR_EVIDENCE: &str = "video-estimate-floor-v1";
 
-/// The two decode-profile revisions the same site can carry instead
-/// (`video_admission.rs:801`, `:819`, `:835`, read back at `:1152`).
-const WORKER_DECODE_PROFILE_EVIDENCE: [&str; 2] = [
+/// The decode-profile revisions the same site can carry instead (`video_admission.rs`
+/// `packaged_video_decode_profile`: selected carrier, planner-budgeted, conservative single pass).
+const WORKER_DECODE_PROFILE_EVIDENCE: [&str; 3] = [
     "video-provider-selected-decode-profile-v1",
+    "video-provider-budgeted-decode-profile-v1",
     "video-provider-conservative-decode-profile-v1",
 ];
 
@@ -623,7 +624,7 @@ fn engine_receipt_token(arm: Arm) -> &'static str {
 }
 
 /// Every evidence identity the worker's video admission can put on a `MemoryRunContext` for this
-/// arm's provider: the estimate floor, the two decode-profile revisions, and any packaged curve
+/// arm's provider: the estimate floor, the decode-profile revisions, and any packaged curve
 /// promoted for this provider. The curve list is READ from the shipped bundle rather than assumed
 /// empty, so a future promoted Wan or SCAIL-2 curve enters this vocabulary automatically.
 fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {

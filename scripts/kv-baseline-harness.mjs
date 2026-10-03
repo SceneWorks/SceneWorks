@@ -1,0 +1,3142 @@
+#!/usr/bin/env node
+
+import Ajv2020 from "ajv/dist/2020.js";
+import addFormats from "ajv-formats";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { createReadStream, readFileSync } from "node:fs";
+import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// v5 (sc-20671): per-repeat decode throughput is a dedicated fixed-length steady decode recorded
+// beside each timing sample, and provenance records power mode and thermal state at row start/end.
+// v6 (sc-20671 hardware audit): real-hardware observations are recorded instead of refused.
+export const SCHEMA_VERSION = 7;
+export const HARNESS_VERSION = "sc-20671-kv-baseline-v7";
+// Fixed decode length of every steady-decode sample (paired with the inference producer's
+// `STEADY_DECODE_TOKENS`): the first token is untimed, so 255 tokens are timed.
+export const STEADY_DECODE_TOKENS = 256;
+export const HOST_STATE_BOUNDARIES = Object.freeze(["row-start", "row-end"]);
+export const POWER_MODES = Object.freeze(["automatic", "low-power", "high-power"]);
+// NSProcessInfo.thermalState 0..3. Only serious/critical (or pmset CPU_Speed_Limit < 100)
+// throttle, and only a throttled row START refuses a row.
+export const THERMAL_STATES = Object.freeze(["nominal", "fair", "serious", "critical"]);
+export const TIMING_SAMPLE_HOST_BOUNDARY = "timing-sample";
+const HOST_STATE_FIELDS = [
+  "boundary", "capturedAt", "powerMode", "thermalState", "cpuSpeedLimit", "pmsetThermalRaw",
+  "throttled",
+];
+// Quality contract v3 greedy agreement is teacher-forced (decided before any compressed result).
+export const GREEDY_AGREEMENT_METHOD = "teacher-forced";
+// Quality contract v4: multiTurnPromptCache is teacher-forced agreement of turn 2 of a real
+// two-turn conversation whose turn 2 was served by a prompt-cache hit over turn 1.
+export const MULTI_TURN_PROMPT_CACHE_METHOD = "teacher-forced-turn-2-after-prompt-cache-hit";
+export const POST_RELEASE_MLX_SLACK_FLOOR_BYTES = 1024 * 1024;
+export const CONTRACT_PATH = "config/kv-baseline-quality-contract.json";
+export const POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES = 512 * 1024 * 1024;
+
+/** Post-release MLX active/cache slack over a weights-loaded baseline: max(1 MiB, ceil(0.1%)). */
+export function postReleaseMlxSlackBytes(baseline) {
+  return Math.max(POST_RELEASE_MLX_SLACK_FLOOR_BYTES, Math.ceil(baseline / 1000));
+}
+
+/** `pmset -g therm` CPU_Speed_Limit, or null when only note lines are printed (all recorded raw). */
+export function pmsetCpuSpeedLimit(raw) {
+  let limit = null;
+  for (const line of String(raw).split(/\r?\n/)) {
+    const separator = line.indexOf("=");
+    if (separator < 0 || line.slice(0, separator).trim().toLowerCase() !== "cpu_speed_limit") continue;
+    const value = line.slice(separator + 1).trim();
+    if (!/^[0-9]+$/.test(value)) fail(`pmset CPU_Speed_Limit is not a number: ${JSON.stringify(value)}`);
+    const parsed = Number(value);
+    if (limit !== null && limit !== parsed) fail("pmset reports contradictory CPU_Speed_Limit values");
+    limit = parsed;
+  }
+  return limit;
+}
+
+export function hostStateThrottled(thermalState, cpuSpeedLimit) {
+  return thermalState === "serious" || thermalState === "critical"
+    || (cpuSpeedLimit !== null && cpuSpeedLimit < 100);
+}
+
+/** Recorded in a campaign manifest: rows started in several host states, or one changed mid-row. */
+export function campaignHostStateVaried(receipts) {
+  const starts = new Set(receipts.map((receipt) => canonicalJson([
+    receipt.provenance.powerMode, receipt.provenance.thermalState,
+  ])));
+  return starts.size > 1 || receipts.some((receipt) => receipt.provenance.thermalChangedDuringRow
+    || receipt.provenance.powerModeChangedDuringRow);
+}
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const CONTRACT_FILE = path.join(ROOT, CONTRACT_PATH);
+const SCHEMA_FILE = path.join(ROOT, "packages/schemas/kv-baseline-receipt.schema.json");
+const CONTRACT_RAW = readFileSync(CONTRACT_FILE);
+const CONTRACT = JSON.parse(CONTRACT_RAW.toString("utf8"));
+const PHASES = [
+  "process-start",
+  "weights-loaded",
+  "prefill-peak",
+  "first-token",
+  "decode-steady",
+  "prompt-cache-reuse",
+  "cancellation-cleanup",
+  "post-run-release",
+];
+const LIFECYCLE = [
+  "append",
+  "chunkedPrefill",
+  "singleShotPrefill",
+  "promptCacheReuse",
+  "trim",
+  "rollback",
+  "clear",
+  "cancel",
+  "clone",
+  "batchSplit",
+  "batchMerge",
+  "prefixCopyOnWrite",
+  "pageImport",
+  "pageExport",
+  "serialization",
+  "restore",
+  "denseFallback",
+  "postRunRelease",
+];
+const CONTEXT_BANDS = ["short", "medium", "memory-material", "fit-boundary"];
+export const SC20671_COVERING_SCHEDULE = Object.freeze([
+  ["llama", "short", "single", "chunked", "cold"],
+  ["llama", "medium", "supported-batch", "single-shot", "warm"],
+  ["llama", "memory-material", "single", "single-shot", "warm"],
+  ["llama", "fit-boundary", "single", "chunked", "cold"],
+  ["qwen", "short", "single", "single-shot", "cold"],
+  ["qwen", "medium", "supported-batch", "chunked", "warm"],
+  ["qwen", "memory-material", "single", "single-shot", "warm"],
+  ["qwen", "fit-boundary", "single", "chunked", "cold"],
+].map((row) => Object.freeze(row)));
+const CAMPAIGN_POLICY_FIELDS = [
+  "rowDeadlineSeconds", "pollMillis", "termGraceMillis", "hostFreeReserveBytes",
+  "childFootprintCapBytes", "maxContextTokens", "maxRequestTokens", "stdoutCapBytes",
+  "stderrCapBytes",
+];
+export const MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS = 1_000;
+export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
+const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
+const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
+const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
+// Mirrored from inference commit c781c09d2789538d3cff459257274cbc22109b25.  These are
+// receipt identities, never caller-selectable model aliases or local paths.
+export const SC20671_MODEL_CONTRACTS = Object.freeze({
+  llama: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Llama-3.2-3B-Instruct-4bit", revision: "7f0dc925e0d0afb0322d96f9255cfddf2ba5636e", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+    reference: Object.freeze({ repository: "mlx-community/Llama-3.2-3B-Instruct-bf16", revision: "6d88ba43024fef71b10e52e101c7cd4598322601", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+  }),
+  qwen: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-4bit", revision: "3b1b1768f8f8cf8351c712464f906e86c2b8269e", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+    reference: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-bf16", revision: "9cd6692855d3e06772228e9a962b2606359b2d24", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+  }),
+});
+const TIMING_FIELDS = [
+  "loadMs",
+  "prefillMs",
+  "ttftMs",
+  "firstTokenMs",
+  "decodeTokensPerSecond",
+];
+const STEADY_DECODE_FIELDS = [
+  "steadyDecodePromptTokens",
+  "steadyDecodeGeneratedTokens",
+  "steadyDecodeTimedTokens",
+  "steadyDecodeMs",
+  "steadyDecodeForcedStopTokens",
+];
+const COMPILE_ATTRIBUTION_FIELDS = [
+  "method",
+  "operation",
+  "source",
+  "probeDurationsMs",
+  "probeEvidence",
+  "firstDispatchMs",
+  "steadyDispatchMs",
+  "firstDispatchExcessMs",
+];
+// sc-20671: -v2 records the first-dispatch excess against the steady-state noise band instead of
+// requiring it to be positive. (-v1 receipts are bound to an older inference revision and can never
+// be resumed into a v6 campaign.)
+const COMPILE_ATTRIBUTION_METHOD = "first-dispatch-minus-steady-v2";
+const COMPILE_NOISE_FIELDS = [
+  "noiseSamplesMs",
+  "noiseBandMs",
+  "compileCostResolved",
+];
+const COMPILE_COST_NOT_SLOWER = "first-dispatch-not-slower-than-steady";
+const COMPILE_COST_WITHIN_NOISE = "excess-within-steady-noise-band";
+// Phase samples: proc_pid_rusage since sc-20671; `footprint -p` receipts stay valid.
+const PHYS_FOOTPRINT_SOURCES = new Set(["proc_pid_rusage", "footprint -p"]);
+const COMPILE_PROBE_EVIDENCE_FIELDS = [
+  "index",
+  "operation",
+  "source",
+  "matrixCoordinate",
+  "setupMs",
+  "dispatchMs",
+  "operationEvidenceSha256",
+];
+const ERROR_QUALITY_FIELDS = ["parityMaxError", "perplexityDelta"];
+const AGREEMENT_QUALITY_FIELDS = [
+  "greedyTokenAgreement",
+  "structuredToolAgreement",
+  "needleRetrieval",
+  "multiTurnPromptCache",
+];
+const FIXTURES = [
+  "kernel-fp32-reference",
+  "structured-tool-call",
+  "long-context-needle",
+  "multi-turn-prompt-cache",
+];
+const FIXTURE_SOURCES = Symbol("fixtureSources");
+// Quality contract v3: the only denominator of a compressed receipt's quality gate.
+const COMPRESSED_QUALITY_REFERENCE = "dense-kv-same-weights";
+const RUNTIME_GUARDED_ADMISSION = "runtime-guarded";
+// Mirrors inference campaign_supervisor::ESTIMATE_PLUS_RESERVE_RULE: a row starts only when host
+// available memory covers its estimated peak plus the reserve; a row without a static estimate
+// falls back to its cap (CAP_FALLBACK_ESTIMATE_SOURCE).
+const ESTIMATE_PLUS_RESERVE_RULE = "estimate-plus-reserve-v1";
+const CAP_FALLBACK_ESTIMATE_SOURCE = "child-footprint-cap-fallback";
+const DISCRIMINATION_FIELDS = ["needleDiscriminating", "toolDiscriminating"];
+const DISCRIMINATION_FIXTURES = {
+  "long-context-needle": "needleDiscriminating",
+  "structured-tool-call": "toolDiscriminating",
+};
+
+/** Mirrors the inference producer's fixture reference for a same-weights dense-KV denominator. */
+export function sameWeightsFixtureReference(fixture, modelInventorySha256) {
+  const model = `${COMPRESSED_QUALITY_REFERENCE}:${modelInventorySha256}`;
+  return fixture === "kernel-fp32-reference" ? `host-fp32-dense-attention-v1;${model}` : model;
+}
+
+// Measured quality gate of a compressed row (mirrors the inference producer's
+// `QUALITY_GATE_METRICS`): each contract v3 threshold, evaluated for every measured repeat against
+// the same-weights dense-KV run. A miss is recorded evidence for the Go/No-Go decision, never a
+// refused row. Kernel parity (`parityMaxError`) is deliberately absent: it compares the fused
+// reader with its independent host-fp32 dequantize-then-attend reference, a kernel-correctness
+// check that still refuses the row.
+const QUALITY_GATE_METRICS = [
+  { metric: "greedyTokenAgreement", fixture: "kernel-fp32-reference", comparison: "minimum" },
+  { metric: "perplexityDelta", fixture: "kernel-fp32-reference", comparison: "maximum" },
+  { metric: "structuredToolAgreement", fixture: "structured-tool-call", comparison: "minimum" },
+  { metric: "needleRetrieval", fixture: "long-context-needle", comparison: "minimum" },
+  { metric: "multiTurnPromptCache", fixture: "multi-turn-prompt-cache", comparison: "minimum" },
+];
+export const FORCED_CONTINUATION_TOKENS = 1024;
+const FORCED_CONTINUATION_MIN_TOKENS = 256;
+const FORCED_CONTINUATION_RECORDED_FLIPS = 32;
+const FORCED_CONTINUATION_METHOD = "dense-kv-same-weights-greedy-continuation-eos-ignored-teacher-forced";
+const MULTI_TURN_FORCED_CONTINUATION_METHOD =
+  "dense-kv-same-weights-turn-2-prompt-cache-hit-greedy-continuation-eos-ignored-teacher-forced";
+const MULTI_TURN_FIXTURE_FIELDS = ["turns", "followUp", "metric", "observations"];
+const PROMPT_CACHE_TURN_FIELDS = ["promptTokens", "promptSha256", "cacheHit", "reusedPrefixTokens"];
+// Mirrors the inference producer's fixture answer budget (turn 1's stored answer bound).
+const FIXTURE_MAX_NEW_TOKENS = 64;
+const FORCED_CONTINUATION_FIELDS = [
+  "method", "tokens", "matches", "agreement", "flipCount", "firstFlipPositions",
+  "referenceStreamSha256", "candidateChoicesSha256",
+];
+
+function gateMisses(spec, value) {
+  const threshold = CONTRACT.thresholds[spec.metric];
+  return spec.comparison === "minimum" ? value < threshold : value > threshold;
+}
+
+/** Contract v5: needleRetrieval is gated only when the same-weights dense run recovered the needle. */
+function gateGates(spec, needleDiscriminating) {
+  return needleDiscriminating || spec.metric !== "needleRetrieval";
+}
+
+/**
+ * The frozen-threshold gate over the row's quality measurement(s), in order (contract v5: exactly
+ * one). A non-discriminating needle (the same-weights dense run missed it) is an observation and
+ * is never gated.
+ */
+export function qualityGateFromRepeats(repeats, needleDiscriminating) {
+  if (typeof needleDiscriminating !== "boolean") fail("the quality gate needs the needle discrimination flag");
+  const failures = [];
+  repeats.forEach((metrics, repeat) => {
+    for (const spec of QUALITY_GATE_METRICS) {
+      const value = metrics[spec.metric];
+      if (gateGates(spec, needleDiscriminating) && gateMisses(spec, value)) {
+        failures.push({
+          metric: spec.metric, fixture: spec.fixture, repeat, value,
+          threshold: CONTRACT.thresholds[spec.metric], comparison: spec.comparison,
+        });
+      }
+    }
+  });
+  return { passed: failures.length === 0, failures };
+}
+
+export function qualityGateSummary(gate) {
+  if (gate.passed) return "passed";
+  return `FAILED: ${gate.failures.map((failure) => `${failure.metric} repeat ${failure.repeat} = ${failure.value} (${failure.comparison} ${failure.threshold}, fixture ${failure.fixture})`).join("; ")}`;
+}
+
+function validateForcedContinuation(
+  continuation, contextBand, method = FORCED_CONTINUATION_METHOD, name = "quality.forcedContinuation",
+) {
+  exactKeys(continuation, FORCED_CONTINUATION_FIELDS, name);
+  const { tokens, matches, flipCount, firstFlipPositions } = continuation;
+  const lengthValid = tokens === FORCED_CONTINUATION_TOKENS
+    || (contextBand === "fit-boundary" && Number.isSafeInteger(tokens)
+      && tokens >= FORCED_CONTINUATION_MIN_TOKENS && tokens < FORCED_CONTINUATION_TOKENS);
+  if (continuation.method !== method || !lengthValid
+    || !Number.isSafeInteger(matches) || matches < 0 || matches > tokens
+    || flipCount !== tokens - matches || continuation.agreement !== matches / tokens
+    || !Array.isArray(firstFlipPositions)
+    || firstFlipPositions.length !== Math.min(flipCount, FORCED_CONTINUATION_RECORDED_FLIPS)
+    || firstFlipPositions.some((position, index) => !Number.isSafeInteger(position) || position < 0
+      || position >= tokens || (index > 0 && position <= firstFlipPositions[index - 1]))
+    || !/^[0-9a-f]{64}$/.test(continuation.referenceStreamSha256)
+    || !/^[0-9a-f]{64}$/.test(continuation.candidateChoicesSha256)) {
+    fail(`forced continuation evidence is inconsistent (${name}): method=${continuation.method}, tokens=${tokens} (band ${contextBand}), matches=${matches}, agreement=${continuation.agreement}, flipCount=${flipCount}, recordedFlips=${firstFlipPositions?.length}`);
+  }
+}
+
+/**
+ * One arm's multi-turn prompt-cache record (contract v4): turn 1 misses its fresh store, and turn
+ * 2 is served by a hit reusing part of its prompt (at most turn 1's stored prompt and answer).
+ */
+function validateMultiTurnTurns(turns, name) {
+  exactKeys(turns, ["turn1", "turn2"], name);
+  for (const turn of ["turn1", "turn2"]) {
+    exactKeys(object(turns[turn], `${name}.${turn}`), PROMPT_CACHE_TURN_FIELDS, `${name}.${turn}`);
+    positiveInteger(turns[turn].promptTokens, `${name}.${turn}.promptTokens`);
+    nonnegativeInteger(turns[turn].reusedPrefixTokens, `${name}.${turn}.reusedPrefixTokens`);
+    if (typeof turns[turn].cacheHit !== "boolean") fail(`${name}.${turn}.cacheHit must be boolean`);
+    digest(turns[turn].promptSha256, `${name}.${turn}.promptSha256`);
+  }
+  const { turn1, turn2 } = turns;
+  if (turn1.promptSha256 === turn2.promptSha256 || turn1.cacheHit || turn1.reusedPrefixTokens !== 0 || !turn2.cacheHit
+    || turn2.reusedPrefixTokens === 0 || turn2.reusedPrefixTokens >= turn2.promptTokens
+    || turn2.promptTokens <= turn1.promptTokens
+    || turn2.reusedPrefixTokens > turn1.promptTokens + FIXTURE_MAX_NEW_TOKENS) {
+    fail(`${name} multi-turn prompt cache did not serve turn 2 from turn 1's prefix`);
+  }
+}
+
+/**
+ * A compressed row's turn-2 forced-continuation pass: both sessions served turn 2 by a cache hit
+ * over the same turn-2 prompt token ids.
+ */
+function validateMultiTurnForcedPass(pass, name) {
+  exactKeys(pass, ["reference", "candidate"], name);
+  for (const session of ["reference", "candidate"]) {
+    validateMultiTurnTurns(object(pass[session], `${name}.${session}`), `${name}.${session}`);
+  }
+  if (pass.reference.turn2.promptSha256 !== pass.candidate.turn2.promptSha256) {
+    fail(`${name}: the turn-2 forced continuation's reference and candidate turn-2 prompts differ`);
+  }
+}
+
+/**
+ * A compressed receipt's measured quality gate must be exactly the frozen-threshold evaluation of
+ * the values it records; dense receipts carry neither a gate nor a forced continuation. Values of
+ * repeats 1-4 other than greedy agreement live in the sealed repeat artifacts and are bound by
+ * `validateSealedQualityGate`.
+ */
+function validateQualityGate(receipt) {
+  const quality = receipt.quality;
+  if (receipt.mode !== "compressed") {
+    if (Object.hasOwn(quality, "qualityGate") || Object.hasOwn(quality, "forcedContinuation")
+      || Object.hasOwn(quality, "multiTurnForcedContinuation")
+      || Object.hasOwn(quality, "multiTurnForcedPass")) {
+      fail("a quality gate and forced continuation are recorded only on compressed receipts");
+    }
+    return;
+  }
+  if (!Object.hasOwn(quality, "multiTurnForcedContinuation")) {
+    fail("compressed receipt has no turn-2 forced continuation for multiTurnPromptCache");
+  }
+  const multiTurn = object(quality.multiTurnForcedContinuation, "quality.multiTurnForcedContinuation");
+  // The multi-turn fixture is sized so its turn-2 continuation always has the full length.
+  validateForcedContinuation(
+    multiTurn, null, MULTI_TURN_FORCED_CONTINUATION_METHOD, "quality.multiTurnForcedContinuation",
+  );
+  if (!Object.hasOwn(quality, "multiTurnForcedPass")) {
+    fail("compressed receipt has no turn records for its turn-2 forced continuation");
+  }
+  validateMultiTurnForcedPass(object(quality.multiTurnForcedPass, "quality.multiTurnForcedPass"), "quality.multiTurnForcedPass");
+  if (quality.multiTurnForcedPass.reference.turn2.promptSha256
+    !== quality.multiTurnCache.reference.turn2.promptSha256
+    || quality.multiTurnCache.candidate.turn2.promptSha256
+      !== quality.multiTurnCache.reference.turn2.promptSha256) {
+    fail("the turn-2 forced continuation's prompt is not the multi-turn fixture's same-weights turn-2 prompt");
+  }
+  if (quality.multiTurnPromptCache !== multiTurn.agreement) {
+    fail(`multiTurnPromptCache ${quality.multiTurnPromptCache} is not the row's turn-2 forced-continuation agreement ${multiTurn.agreement}`);
+  }
+  if (!Object.hasOwn(quality, "forcedContinuation")) {
+    fail("compressed receipt has no forced-continuation greedy agreement");
+  }
+  const continuation = object(quality.forcedContinuation, "quality.forcedContinuation");
+  validateForcedContinuation(continuation, receipt.matrix.contextBand);
+  if ([...quality.greedyTokenAgreementByRepeat, quality.greedyTokenAgreement]
+    .some((value) => value !== continuation.agreement)) {
+    fail(`greedyTokenAgreement ${quality.greedyTokenAgreement} is not the row's forced-continuation agreement ${continuation.agreement}`);
+  }
+  if (!Object.hasOwn(quality, "qualityGate")) fail("compressed receipt has no measured quality-gate record");
+  const gate = object(quality.qualityGate, "quality.qualityGate");
+  exactKeys(gate, ["passed", "failures"], "quality.qualityGate");
+  if (typeof gate.passed !== "boolean" || !Array.isArray(gate.failures)) {
+    fail("quality.qualityGate must carry a boolean passed and a failures list");
+  }
+  let previous;
+  for (const failure of gate.failures) {
+    exactKeys(failure, ["metric", "fixture", "repeat", "value", "threshold", "comparison"], "quality gate failure");
+    const index = QUALITY_GATE_METRICS.findIndex((spec) => spec.metric === failure.metric);
+    const spec = QUALITY_GATE_METRICS[index];
+    const key = [failure.repeat, index];
+    if (!spec || failure.fixture !== spec.fixture
+      || failure.threshold !== CONTRACT.thresholds[spec.metric]
+      || failure.comparison !== spec.comparison
+      || !Number.isSafeInteger(failure.repeat) || failure.repeat < 0
+      || failure.repeat >= QUALITY_MEASUREMENTS
+      || typeof failure.value !== "number" || !Number.isFinite(failure.value)
+      || !gateGates(spec, quality.needleDiscriminating)
+      || !gateMisses(spec, failure.value)
+      || (previous && (previous[0] > key[0] || (previous[0] === key[0] && previous[1] >= key[1])))) {
+      fail(`quality gate failure is not an ordered frozen-threshold miss: metric=${failure.metric} value=${failure.value} threshold=${failure.threshold} comparison=${failure.comparison} repeat=${failure.repeat} fixture=${failure.fixture}`);
+    }
+    previous = key;
+  }
+  if (gate.passed !== (gate.failures.length === 0)) {
+    fail(`quality gate claims passed=${gate.passed} with ${gate.failures.length} recorded failure(s)`);
+  }
+  const visible = [
+    ...quality.greedyTokenAgreementByRepeat.map((value, repeat) => ["greedyTokenAgreement", repeat, value]),
+    ["perplexityDelta", 0, quality.perplexityDelta],
+    ["structuredToolAgreement", 0, quality.structuredToolAgreement],
+    ["needleRetrieval", 0, quality.needleRetrieval],
+    ["multiTurnPromptCache", 0, quality.multiTurnPromptCache],
+  ];
+  for (const [metric, repeat, value] of visible) {
+    const spec = QUALITY_GATE_METRICS.find((entry) => entry.metric === metric);
+    const recorded = gate.failures.find((failure) => failure.metric === metric && failure.repeat === repeat);
+    const expected = gateGates(spec, quality.needleDiscriminating) && gateMisses(spec, value);
+    if ((recorded?.value) !== (expected ? value : undefined)) {
+      fail(`quality gate does not record ${metric} repeat ${repeat} = ${value} against the frozen ${spec.comparison} ${CONTRACT.thresholds[metric]} (fixture ${spec.fixture}): passed=${gate.passed}`);
+    }
+  }
+}
+
+/**
+ * Re-derive every measured repeat's quality metrics from its sealed fixture artifacts
+ * (`artifacts[repeat][fixture]`). A compressed repeat's kernel evidence carries the row's forced
+ * continuation, which must be the receipt's.
+ */
+export function sealedRepeatQualityMetrics(receipt, artifacts) {
+  if (!Array.isArray(artifacts) || artifacts.length !== QUALITY_MEASUREMENTS) {
+    fail("sealed quality evidence requires the row's one quality measurement");
+  }
+  return artifacts.map((fixtures, repeat) => repeatQualityMetrics(receipt, fixtures, repeat));
+}
+
+/** A published receipt set's primary artifacts must derive the receipt's own quality values. */
+function validatePrimaryQuality(receipt, primaryArtifacts) {
+  if (receipt.mode !== "compressed") return;
+  const primary = repeatQualityMetrics(receipt, primaryArtifacts, 0);
+  const recorded = { ...receipt.quality, greedyTokenAgreement: receipt.quality.greedyTokenAgreementByRepeat[0] };
+  for (const [metric, value] of Object.entries(primary)) {
+    if (recorded[metric] !== value) {
+      fail(`receipt ${metric} ${recorded[metric]} is not the primary repeat's sealed value ${value}`);
+    }
+  }
+}
+
+function repeatQualityMetrics(receipt, fixtures, repeat) {
+  {
+    const ratio = (evidence, fixture, matches, total) => {
+      const [m, t] = [evidence[matches], evidence[total]];
+      if (typeof m !== "number" || typeof t !== "number" || !(t >= 1) || !(m >= 0) || m > t) {
+        fail(`fixture ${fixture} repeat ${repeat} evidence has ${m} of ${t} matches`);
+      }
+      return m / t;
+    };
+    const kernel = object(fixtures["kernel-fp32-reference"]?.evidence, `repeat ${repeat} kernel evidence`);
+    if (canonicalJson(kernel.forcedContinuation ?? null)
+      !== canonicalJson(receipt.quality.forcedContinuation ?? null)) {
+      fail(`repeat ${repeat} kernel fixture forced continuation is not the receipt's`);
+    }
+    if (kernel.forcedContinuation && (kernel.greedyMatches !== kernel.forcedContinuation.matches
+      || kernel.greedyTotal !== kernel.forcedContinuation.tokens)) {
+      fail(`repeat ${repeat} kernel greedy counts are not its forced continuation's`);
+    }
+    const cache = object(fixtures["multi-turn-prompt-cache"]?.evidence, `repeat ${repeat} cache evidence`);
+    if (canonicalJson(cache.forcedContinuation ?? null)
+      !== canonicalJson(receipt.quality.multiTurnForcedContinuation ?? null)) {
+      fail(`repeat ${repeat} multi-turn fixture forced continuation is not the receipt's`);
+    }
+    if (cache.forcedContinuation && (cache.matches !== cache.forcedContinuation.matches
+      || cache.total !== cache.forcedContinuation.tokens)) {
+      fail(`repeat ${repeat} multi-turn counts are not its turn-2 forced continuation's`);
+    }
+    if (cache.method !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+      fail(`repeat ${repeat} multi-turn fixture is not teacher-forced on a cache-hit turn 2`);
+    }
+    const turns = object(cache.turns, `repeat ${repeat} multi-turn turns`);
+    exactKeys(turns, ["candidate", "reference"], `repeat ${repeat} multi-turn turns`);
+    for (const arm of ["candidate", "reference"]) {
+      validateMultiTurnTurns(object(turns[arm], `repeat ${repeat} ${arm} turns`), `repeat ${repeat} ${arm}`);
+    }
+    // The receipt's per-turn records are the primary repeat's sealed ones.
+    if (repeat === 0 && canonicalJson(turns) !== canonicalJson(receipt.quality.multiTurnCache)) {
+      fail("receipt multiTurnCache is not the primary repeat's sealed turn records");
+    }
+    if (canonicalJson(cache.forcedPass ?? null) !== canonicalJson(receipt.quality.multiTurnForcedPass ?? null)) {
+      fail(`repeat ${repeat} multi-turn forced-pass turn records are not the receipt's`);
+    }
+    if (!Array.isArray(kernel.parityErrors) || kernel.parityErrors.length === 0
+      || kernel.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)) {
+      fail(`repeat ${repeat} kernel fixture lacks finite parity errors`);
+    }
+    return {
+      parityMaxError: Math.max(0, ...kernel.parityErrors),
+      perplexityDelta: kernel.candidatePerplexity - kernel.referencePerplexity,
+      greedyTokenAgreement: ratio(kernel, "kernel-fp32-reference", "greedyMatches", "greedyTotal"),
+      structuredToolAgreement: ratio(object(fixtures["structured-tool-call"]?.evidence, `repeat ${repeat} tool evidence`), "structured-tool-call", "matches", "total"),
+      needleRetrieval: ratio(object(fixtures["long-context-needle"]?.evidence, `repeat ${repeat} needle evidence`), "long-context-needle", "matches", "total"),
+      multiTurnPromptCache: ratio(cache, "multi-turn-prompt-cache", "matches", "total"),
+    };
+  }
+}
+
+/**
+ * A compressed receipt's recorded quality must be its sealed repeats': per-repeat greedy
+ * agreement, the primary repeat's receipt-level values, and a gate exactly equal to the
+ * frozen-threshold evaluation of every repeat (a failing value can never be recorded as a pass).
+ * Kernel parity still refuses.
+ */
+export function validateSealedQualityGate(receipt, repeats) {
+  const quality = receipt.quality;
+  repeats.forEach((metrics, repeat) => {
+    if (metrics.parityMaxError > CONTRACT.thresholds.parityMaxError) {
+      fail(`kernel parity failed: metric=parityMaxError value=${metrics.parityMaxError} threshold=${CONTRACT.thresholds.parityMaxError} comparison=maximum fixture=kernel-fp32-reference repeat=${repeat}`);
+    }
+    if (quality.greedyTokenAgreementByRepeat[repeat] !== metrics.greedyTokenAgreement) {
+      fail(`greedyTokenAgreement repeat ${repeat} is not its sealed agreement ${metrics.greedyTokenAgreement}`);
+    }
+  });
+  for (const metric of ["parityMaxError", "perplexityDelta", "structuredToolAgreement", "needleRetrieval", "multiTurnPromptCache"]) {
+    if (quality[metric] !== repeats[0][metric]) {
+      fail(`receipt ${metric} ${quality[metric]} is not the primary repeat's sealed value ${repeats[0][metric]}`);
+    }
+  }
+  const expected = qualityGateFromRepeats(repeats, receipt.quality.needleDiscriminating);
+  if (canonicalJson(quality.qualityGate ?? null) !== canonicalJson(expected)) {
+    fail(`receipt quality gate (${quality.qualityGate ? qualityGateSummary(quality.qualityGate) : "absent"}) is not the gate of its sealed repeats (${qualityGateSummary(expected)})`);
+  }
+}
+
+function fail(message) {
+  throw new Error(`KV baseline receipt: ${message}`);
+}
+
+function stable(value) {
+  if (Array.isArray(value)) return value.map(stable);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, stable(value[key])]),
+    );
+  }
+  return value;
+}
+
+export function canonicalJson(value) {
+  return JSON.stringify(stable(value), null, 2);
+}
+
+function f64SemanticValue(value) {
+  const bytes = new ArrayBuffer(8);
+  const view = new DataView(bytes);
+  view.setFloat64(0, value, false);
+  return `f64:${view.getBigUint64(0, false).toString(16).padStart(16, "0")}`;
+}
+
+function numericNormalized(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return f64SemanticValue(value);
+  if (Array.isArray(value)) return value.map(numericNormalized);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).sort().map((key) => [key, numericNormalized(value[key])]),
+    );
+  }
+  return value;
+}
+
+/** Cross-language semantic seal: every finite number is represented by its exact f64 bits. */
+export function numericSemanticSha256(value) {
+  return sha256(JSON.stringify(numericNormalized(value), null, 2));
+}
+
+export function sha256(value) {
+  const input = typeof value === "string" || Buffer.isBuffer(value)
+    ? value
+    : canonicalJson(value);
+  return createHash("sha256").update(input).digest("hex");
+}
+
+function object(value, name) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    fail(`${name} must be an object`);
+  }
+  return value;
+}
+
+function exactKeys(value, allowed, name) {
+  object(value, name);
+  const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+  if (unexpected.length) fail(`${name} has unexpected fields: ${unexpected.join(", ")}`);
+}
+
+function text(value, name) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    fail(`${name} must be non-empty text`);
+  }
+  return value;
+}
+
+function expectedModelId(spec, inventory) {
+  return `${spec.repository}@${spec.revision};architecture=${spec.architecture};inventory=${inventory}`;
+}
+
+function validatePinnedModelContract(receipt) {
+  const contract = SC20671_MODEL_CONTRACTS[receipt.matrix.family];
+  if (!contract) fail("receipt model family has no sealed SC-20671 contract");
+  const { candidate, reference } = contract;
+  if (receipt.provenance.modelId !== expectedModelId(candidate, receipt.provenance.modelFileSha256)) {
+    fail(`candidate model identity does not match the sealed ${receipt.matrix.family} contract`);
+  }
+  if (receipt.provenance.referenceModelId
+      !== expectedModelId(reference, receipt.provenance.referenceModelSha256)) {
+    fail(`reference model identity does not match the sealed ${receipt.matrix.family} contract`);
+  }
+  if (receipt.geometry.contextWindowTokens !== candidate.nativeContextTokens) {
+    fail(`context window does not match the sealed ${receipt.matrix.family} contract`);
+  }
+}
+
+function finite(value, name) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    fail(`${name} must be finite`);
+  }
+  return value;
+}
+
+function nonnegativeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    fail(`${name} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function positiveInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    fail(`${name} must be a positive safe integer`);
+  }
+  return value;
+}
+
+function checkedSum(values, name) {
+  const total = values.reduce((sum, value) => sum + BigInt(value), 0n);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) fail(`${name} overflows safe integer accounting`);
+  return Number(total);
+}
+
+function checkedProduct(values, name) {
+  const total = values.reduce((product, value) => product * BigInt(value), 1n);
+  if (total > BigInt(Number.MAX_SAFE_INTEGER)) fail(`${name} overflows safe integer accounting`);
+  return Number(total);
+}
+
+function positiveNumber(value, name) {
+  if (finite(value, name) <= 0) fail(`${name} must be positive`);
+  return value;
+}
+
+function nonnegativeNumber(value, name) {
+  if (finite(value, name) < 0) fail(`${name} must be nonnegative`);
+  return value;
+}
+
+function isoTimestamp(value, name) {
+  text(value, name);
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(value) || Number.isNaN(Date.parse(value))) {
+    fail(`${name} must be an ISO-8601 timestamp`);
+  }
+  return value;
+}
+
+function compareUtcTimestamps(left, right) {
+  const parse = (value) => {
+    const match = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?Z$/.exec(value);
+    if (!match) fail("receipt timestamps must use UTC RFC3339 form");
+    return { wholeSeconds: match[1], fraction: match[2] || "" };
+  };
+  const lhs = parse(left);
+  const rhs = parse(right);
+  if (lhs.wholeSeconds !== rhs.wholeSeconds) {
+    return lhs.wholeSeconds < rhs.wholeSeconds ? -1 : 1;
+  }
+  const width = Math.max(lhs.fraction.length, rhs.fraction.length);
+  const leftFraction = lhs.fraction.padEnd(width, "0");
+  const rightFraction = rhs.fraction.padEnd(width, "0");
+  if (leftFraction === rightFraction) return 0;
+  return leftFraction < rightFraction ? -1 : 1;
+}
+
+function gitRevision(value, name) {
+  if (typeof value !== "string" || !/^[0-9a-f]{40}$/.test(value)) {
+    fail(`${name} must be an immutable 40-character git revision`);
+  }
+}
+
+function digest(value, name) {
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) {
+    fail(`${name} must be SHA-256`);
+  }
+}
+
+function parseSidecar(sidecar, expectedName) {
+  const fields = sidecar.trim().split(/\s+/);
+  if (fields.length !== 2 || fields[1] !== expectedName) {
+    fail(`invalid sidecar identity for ${expectedName}`);
+  }
+  digest(fields[0], `${expectedName} sidecar`);
+  return fields[0];
+}
+
+export function checkContract(contract) {
+  exactKeys(
+    contract,
+    ["version", "thresholds", "gate", "multiTurnFixture", "needleFixture", "statistics", "fixtures", "changeRecord"],
+    "contract",
+  );
+  if (contract.version !== 5) fail("unsupported quality contract version");
+  exactKeys(
+    contract.changeRecord,
+    ["from", "madeAfterCompressedResultsVisible", "thresholdsUnchanged", "changes"],
+    "contract.changeRecord",
+  );
+  text(contract.changeRecord.from, "contract.changeRecord.from");
+  if (typeof contract.changeRecord.madeAfterCompressedResultsVisible !== "boolean"
+    || contract.changeRecord.thresholdsUnchanged !== true) {
+    fail("contract change record must state when it was made and keep every threshold");
+  }
+  if (!Array.isArray(contract.changeRecord.changes) || contract.changeRecord.changes.length === 0) {
+    fail("contract change record must list its changes");
+  }
+  contract.changeRecord.changes.forEach((entry, index) => {
+    exactKeys(entry, ["change", "why"], `contract.changeRecord.changes[${index}]`);
+    text(entry.change, `contract.changeRecord.changes[${index}].change`);
+    text(entry.why, `contract.changeRecord.changes[${index}].why`);
+  });
+  exactKeys(contract.multiTurnFixture, MULTI_TURN_FIXTURE_FIELDS, "contract.multiTurnFixture");
+  for (const field of MULTI_TURN_FIXTURE_FIELDS) {
+    text(contract.multiTurnFixture[field], `contract.multiTurnFixture.${field}`);
+  }
+  exactKeys(
+    contract.gate,
+    [
+      "denseRows", "compressedReference", "compressedRows", "kernelParity",
+      "nonDiscriminatingNeedle", "nonDiscriminatingTool", "repeats", "perplexityDelta",
+    ],
+    "contract.gate",
+  );
+  for (const field of [
+    "denseRows", "compressedRows", "kernelParity", "nonDiscriminatingNeedle",
+    "nonDiscriminatingTool", "repeats", "perplexityDelta",
+  ]) {
+    text(contract.gate[field], `contract.gate.${field}`);
+  }
+  if (contract.gate.compressedReference !== COMPRESSED_QUALITY_REFERENCE) {
+    fail("contract compressed quality reference must be the same-weights dense-KV run");
+  }
+  exactKeys(contract.needleFixture, ["statement", "question", "match"], "contract.needleFixture");
+  for (const field of ["statement", "question", "match"]) {
+    text(contract.needleFixture[field], `contract.needleFixture.${field}`);
+  }
+  if (!contract.needleFixture.statement.includes("{needle}")) {
+    fail("contract needle statement must place the exact needle token");
+  }
+  exactKeys(
+    contract.thresholds,
+    [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS],
+    "contract.thresholds",
+  );
+  for (const field of ERROR_QUALITY_FIELDS) {
+    finite(contract.thresholds[field], `contract.thresholds.${field}`);
+  }
+  for (const field of AGREEMENT_QUALITY_FIELDS) {
+    const value = finite(contract.thresholds[field], `contract.thresholds.${field}`);
+    if (value < 0 || value > 1) fail(`contract.thresholds.${field} must be in [0,1]`);
+  }
+  exactKeys(
+    contract.statistics,
+    [
+      "repeats",
+      "warmups",
+      "qualityMeasuredOnce",
+      "confidenceInterval",
+      "outlierPolicy",
+      "variancePolicy",
+      "maxCoefficientOfVariation",
+    ],
+    "contract.statistics",
+  );
+  positiveInteger(contract.statistics.repeats, "contract.statistics.repeats");
+  nonnegativeInteger(contract.statistics.warmups, "contract.statistics.warmups");
+  // Contract v5: quality is measured once per arm; repeats and warmups are timing only.
+  if (contract.statistics.qualityMeasuredOnce !== true) {
+    fail("contract statistics must measure quality once per arm");
+  }
+  for (const field of ["confidenceInterval", "outlierPolicy", "variancePolicy"]) {
+    text(contract.statistics[field], `contract.statistics.${field}`);
+  }
+  const maxCv = finite(
+    contract.statistics.maxCoefficientOfVariation,
+    "contract.statistics.maxCoefficientOfVariation",
+  );
+  if (maxCv <= 0 || maxCv >= 1) fail("contract maxCoefficientOfVariation must be in (0,1)");
+  if (canonicalJson(contract.fixtures) !== canonicalJson(FIXTURES)) {
+    fail("quality contract fixture surface mismatch");
+  }
+}
+
+const CONTRACT_RAW_HASH = sha256(CONTRACT_RAW);
+const CONTRACT_SIDECAR_HASH = parseSidecar(
+  readFileSync(`${CONTRACT_FILE}.sha256`, "utf8"),
+  path.basename(CONTRACT_FILE),
+);
+if (CONTRACT_RAW_HASH !== CONTRACT_SIDECAR_HASH) {
+  throw new Error("KV baseline receipt: quality contract sidecar does not match raw bytes");
+}
+checkContract(CONTRACT);
+export const QUALITY_CONTRACT_HASH = CONTRACT_RAW_HASH;
+/**
+ * Quality measurements per arm per row (contract v5 `statistics.qualityMeasuredOnce`): every
+ * fixture is deterministic in-process, so the gate is that one sealed measurement; the
+ * `statistics.repeats` timing samples never re-measure quality.
+ */
+export const QUALITY_MEASUREMENTS = 1;
+
+const schemaAjv = new Ajv2020({ allErrors: true, strict: true, strictTypes: false });
+addFormats(schemaAjv);
+const validateReceiptSchema = schemaAjv.compile(
+  JSON.parse(readFileSync(SCHEMA_FILE, "utf8")),
+);
+
+function footprintBytes(value) {
+  const match = String(value).trim().match(/^([0-9]+(?:[.][0-9]+)?)[ \t]*(B|KB|MB|GB)$/i);
+  if (!match) fail(`invalid phys_footprint value ${value}`);
+  const bytes = Number(match[1]) * ({ B: 1, KB: 1024, MB: 1024 ** 2, GB: 1024 ** 3 })[
+    match[2].toUpperCase()
+  ];
+  if (!Number.isSafeInteger(bytes)) fail("phys_footprint is not an exact safe integer");
+  return bytes;
+}
+
+export function readDarwinMemory(
+  pid = process.pid,
+  runner = execFileSync,
+  phase = "process-start",
+  timestamp = new Date().toISOString(),
+) {
+  if (process.platform !== "darwin") {
+    return { supported: false, reason: "Darwin phys_footprint is unavailable" };
+  }
+  positiveInteger(pid, "pid");
+  text(phase, "phase");
+  isoTimestamp(timestamp, "timestamp");
+  let output;
+  try {
+    output = runner("footprint", ["-p", String(pid)], { encoding: "utf8" });
+  } catch (error) {
+    fail(`cannot read Darwin phys_footprint: ${error.message}`);
+  }
+  const currentMatch = String(output).match(
+    /phys_footprint[ \t]*:[ \t]*([0-9]+(?:[.][0-9]+)?[ \t]*(?:KB|MB|GB|B)(?![A-Za-z]))/i,
+  );
+  const peakMatch = String(output).match(
+    /phys_footprint_peak[ \t]*:[ \t]*([0-9]+(?:[.][0-9]+)?[ \t]*(?:KB|MB|GB|B)(?![A-Za-z]))/i,
+  );
+  if (!currentMatch || !peakMatch) {
+    fail("footprint output omitted unit-bearing phys_footprint or phys_footprint_peak");
+  }
+  const physFootprintBytes = footprintBytes(currentMatch[1]);
+  const physFootprintPeakBytes = footprintBytes(peakMatch[1]);
+  if (physFootprintPeakBytes < physFootprintBytes) {
+    fail("phys_footprint_peak is below phys_footprint");
+  }
+  return {
+    phase,
+    pid,
+    source: "footprint -p",
+    timestamp,
+    physFootprintBytes,
+    physFootprintPeakBytes,
+  };
+}
+
+function validateAllocationEvent(event, index) {
+  const name = `memory.allocationEvents[${index}]`;
+  exactKeys(event, ["kind", "role", "lifetime", "phase", "timestamp", "bytes"], name);
+  text(event.kind, `${name}.kind`);
+  if (!["cache", "attention-workspace", "weights", "output"].includes(event.role)) {
+    fail(`${name}.role is unsupported`);
+  }
+  if (!["persistent", "transient", "released"].includes(event.lifetime)) {
+    fail(`${name}.lifetime is unsupported`);
+  }
+  if (event.lifetime === "released"
+    && (event.role !== "cache" || event.kind !== "product-cache_release")) {
+    fail(`${name} is not a cache release lifecycle event`);
+  }
+  if (!PHASES.includes(event.phase)) fail(`${name}.phase is unsupported`);
+  isoTimestamp(event.timestamp, `${name}.timestamp`);
+  positiveInteger(event.bytes, `${name}.bytes`);
+}
+
+export function detectFullCacheTemporary(events, denseBytes) {
+  if (!Array.isArray(events) || events.length === 0) fail("typed allocation events are required");
+  positiveInteger(denseBytes, "denseTheoreticalKvBytes");
+  const thresholdBytes = Number((BigInt(denseBytes) * 9n + 9n) / 10n);
+  const witnesses = [];
+  events.forEach((event, index) => {
+    validateAllocationEvent(event, index);
+    const relevantRole = event.role === "cache" || event.role === "attention-workspace" || event.role === "output";
+    const explicit = event.kind === "dense_cache_temporary"
+      || event.kind === "full_cache_materialization";
+    if (event.lifetime === "transient" && explicit) {
+      witnesses.push(event);
+    }
+    if (event.lifetime === "transient" && relevantRole) {
+      if (event.bytes >= thresholdBytes) witnesses.push(event);
+    }
+  });
+  return { detected: witnesses.length > 0, thresholdBytes, witnesses };
+}
+
+function maxRoleBytes(events, role, lifetime) {
+  return Math.max(0, ...events
+    .filter((event) => event.role === role && event.lifetime === lifetime)
+    .map((event) => event.bytes));
+}
+
+function maxClassifiedTransientBytes(events) {
+  return Math.max(0, ...events
+    .filter((event) => event.lifetime === "transient"
+      && ["cache", "attention-workspace", "output"].includes(event.role))
+    .map((event) => event.bytes));
+}
+
+function validateCacheRelease(events) {
+  let liveCache;
+  let releases = 0;
+  for (const event of events) {
+    if (event.role === "cache" && event.lifetime === "persistent") {
+      liveCache = event.bytes;
+    } else if (event.lifetime === "released") {
+      if (liveCache !== event.bytes) fail("cache release bytes do not match retained KV ownership");
+      liveCache = undefined;
+      releases += 1;
+      if (!Number.isSafeInteger(releases)) fail("cache release event count overflow");
+    }
+  }
+  if (releases === 0 || liveCache !== undefined) {
+    fail("persistent KV ownership was not explicitly released");
+  }
+}
+
+function validatePhaseSample(sample, index, expectedPid) {
+  const name = `memory.phaseSamples[${index}]`;
+  exactKeys(
+    sample,
+    ["phase", "pid", "source", "timestamp", "physFootprintBytes", "physFootprintPeakBytes", "mlx"],
+    name,
+  );
+  if (sample.phase !== PHASES[index]) fail(`${name}.phase must be ${PHASES[index]}`);
+  positiveInteger(sample.pid, `${name}.pid`);
+  if (expectedPid !== undefined && sample.pid !== expectedPid) fail("phase samples span multiple PIDs");
+  if (!PHYS_FOOTPRINT_SOURCES.has(sample.source)) {
+    fail(`${name}.source must be proc_pid_rusage or footprint -p`);
+  }
+  isoTimestamp(sample.timestamp, `${name}.timestamp`);
+  nonnegativeInteger(sample.physFootprintBytes, `${name}.physFootprintBytes`);
+  nonnegativeInteger(sample.physFootprintPeakBytes, `${name}.physFootprintPeakBytes`);
+  if (sample.physFootprintPeakBytes < sample.physFootprintBytes) {
+    fail(`${name}.physFootprintPeakBytes is below physFootprintBytes`);
+  }
+  exactKeys(sample.mlx, ["source", "activeBytes", "cacheBytes", "peakBytes"], `${name}.mlx`);
+  if (sample.mlx.source !== "mlx_rs::memory") fail(`${name}.mlx.source must be mlx_rs::memory`);
+  for (const field of ["activeBytes", "cacheBytes", "peakBytes"]) {
+    nonnegativeInteger(sample.mlx[field], `${name}.mlx.${field}`);
+  }
+  if (sample.mlx.peakBytes < sample.mlx.activeBytes) fail(`${name}.mlx.peakBytes is below activeBytes`);
+  return sample.pid;
+}
+
+function timingMean(samples, field) {
+  return samples.reduce((sum, sample) => sum + sample[field], 0) / samples.length;
+}
+
+function timingVariance(samples, field, mean) {
+  return samples.reduce((sum, sample) => sum + (sample[field] - mean) ** 2, 0) / samples.length;
+}
+
+function nearlyEqual(actual, expected) {
+  return Math.abs(actual - expected) <= Math.max(1e-9, Math.abs(expected) * 1e-9);
+}
+
+function validateTimingSample(sample, index, contextWindowTokens) {
+  const name = `timings.samples[${index}]`;
+  exactKeys(sample, [...TIMING_FIELDS, ...STEADY_DECODE_FIELDS, "hostState"], name);
+  for (const field of TIMING_FIELDS) positiveNumber(sample[field], `${name}.${field}`);
+  // Decode throughput is exactly the repeat's fixed-length steady decode: STEADY_DECODE_TOKENS
+  // greedy tokens after the row context, stop tokens forced through, first token untimed.
+  positiveInteger(sample.steadyDecodePromptTokens, `${name}.steadyDecodePromptTokens`);
+  positiveInteger(sample.steadyDecodeGeneratedTokens, `${name}.steadyDecodeGeneratedTokens`);
+  positiveInteger(sample.steadyDecodeTimedTokens, `${name}.steadyDecodeTimedTokens`);
+  positiveNumber(sample.steadyDecodeMs, `${name}.steadyDecodeMs`);
+  nonnegativeInteger(sample.steadyDecodeForcedStopTokens, `${name}.steadyDecodeForcedStopTokens`);
+  if (sample.steadyDecodeGeneratedTokens !== STEADY_DECODE_TOKENS
+    || sample.steadyDecodeTimedTokens !== STEADY_DECODE_TOKENS - 1
+    || sample.steadyDecodeForcedStopTokens > sample.steadyDecodeGeneratedTokens) {
+    fail(`${name} is not a ${STEADY_DECODE_TOKENS}-token fixed-length steady decode`);
+  }
+  if (sample.steadyDecodePromptTokens + sample.steadyDecodeGeneratedTokens > contextWindowTokens) {
+    fail(`${name} steady decode exceeds the native context window`);
+  }
+  if (!nearlyEqual(
+    sample.decodeTokensPerSecond,
+    (sample.steadyDecodeTimedTokens * 1000) / sample.steadyDecodeMs,
+  )) {
+    fail(`${name}.decodeTokensPerSecond does not derive from its steady decode`);
+  }
+}
+
+function validateHostState(state, boundary, name) {
+  exactKeys(state, HOST_STATE_FIELDS, name);
+  if (state.boundary !== boundary) fail(`${name}.boundary must be ${boundary}`);
+  isoTimestamp(state.capturedAt, `${name}.capturedAt`);
+  if (!POWER_MODES.includes(state.powerMode)) fail(`${name}.powerMode is not a normalized energy mode`);
+  if (!THERMAL_STATES.includes(state.thermalState)) fail(`${name}.thermalState is unknown`);
+  text(state.pmsetThermalRaw, `${name}.pmsetThermalRaw`);
+  if (state.cpuSpeedLimit !== null) nonnegativeInteger(state.cpuSpeedLimit, `${name}.cpuSpeedLimit`);
+  if (pmsetCpuSpeedLimit(state.pmsetThermalRaw) !== state.cpuSpeedLimit
+    || state.throttled !== hostStateThrottled(state.thermalState, state.cpuSpeedLimit)) {
+    fail(`${name} does not recompute from its raw probes`);
+  }
+}
+
+// Host power/thermal state at row start, after each timing sample, and at row end. Only a
+// throttled row start refuses the row; later changes are recorded as provenance flags.
+function validateHostStates(receipt) {
+  const { provenance } = receipt;
+  if (!Array.isArray(provenance.hostStates)
+    || provenance.hostStates.length !== HOST_STATE_BOUNDARIES.length) {
+    fail("provenance.hostStates must record row start and row end");
+  }
+  const [start, end] = provenance.hostStates;
+  validateHostState(start, HOST_STATE_BOUNDARIES[0], "provenance.hostStates[0]");
+  validateHostState(end, HOST_STATE_BOUNDARIES[1], "provenance.hostStates[1]");
+  if (start.throttled) fail("row-start host is thermally throttled; the row must be refused");
+  if (provenance.powerMode !== start.powerMode || provenance.thermalState !== start.thermalState) {
+    fail("provenance power/thermal state is not the row-start state");
+  }
+  const samples = receipt.timings.samples.map((sample) => sample.hostState);
+  samples.forEach((state, index) => {
+    validateHostState(state, TIMING_SAMPLE_HOST_BOUNDARY, `timings.samples[${index}].hostState`);
+  });
+  const ordered = [start, ...samples, end];
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (compareUtcTimestamps(ordered[index - 1].capturedAt, ordered[index].capturedAt) >= 0) {
+      fail("host states are not ordered row start, timing samples, row end");
+    }
+  }
+  const later = [...samples, end];
+  if (provenance.thermalChangedDuringRow
+      !== later.some((state) => state.thermalState !== start.thermalState || state.throttled)
+    || provenance.powerModeChangedDuringRow
+      !== later.some((state) => state.powerMode !== start.powerMode)) {
+    fail("provenance host-state change flags do not recompute");
+  }
+  const phases = receipt.memory.phaseSamples;
+  if (compareUtcTimestamps(start.capturedAt, phases[0].timestamp) >= 0
+    || compareUtcTimestamps(phases[phases.length - 1].timestamp, end.capturedAt) >= 0) {
+    fail("provenance.hostStates do not bracket the row's measured phases");
+  }
+}
+
+function compileOperation(matrix) {
+  if (matrix.requestMode === "supported-batch") return "supported-batch";
+  if (matrix.prefillMode === "chunked") return "chunked-prefix-reuse";
+  return "single-shot-generation";
+}
+
+function matrixCoordinate(matrix) {
+  return [
+    matrix.family,
+    matrix.contextBand,
+    matrix.requestMode,
+    matrix.prefillMode,
+    matrix.processTemperature,
+  ].join("-");
+}
+
+function validateCompileAttribution(attribution, matrix) {
+  if (attribution?.method !== COMPILE_ATTRIBUTION_METHOD) {
+    fail("timings.compileAttribution.method is not the frozen attribution method");
+  }
+  const resolvedKey = attribution?.compileCostResolved === true
+    ? "compileCostMs"
+    : "compileCostUnresolvedReason";
+  exactKeys(
+    attribution,
+    [...COMPILE_ATTRIBUTION_FIELDS, ...COMPILE_NOISE_FIELDS, resolvedKey],
+    "timings.compileAttribution",
+  );
+  const expectedOperation = compileOperation(matrix);
+  if (attribution.operation !== expectedOperation) {
+    fail("timings.compileAttribution.operation disagrees with the matrix coordinate");
+  }
+  const cold = matrix.processTemperature === "cold";
+  const expectedSource = cold ? "measured-repeats" : "warmup-suites";
+  const expectedProbes = cold ? 5 : 2;
+  if (attribution.source !== expectedSource) {
+    fail("timings.compileAttribution.source disagrees with process temperature");
+  }
+  if (!Array.isArray(attribution.probeDurationsMs)
+    || attribution.probeDurationsMs.length !== expectedProbes) {
+    fail(`timings.compileAttribution requires exactly ${expectedProbes} probe durations`);
+  }
+  attribution.probeDurationsMs.forEach((duration, index) => {
+    positiveNumber(duration, `timings.compileAttribution.probeDurationsMs[${index}]`);
+  });
+  if (!Array.isArray(attribution.probeEvidence)
+    || attribution.probeEvidence.length !== expectedProbes) {
+    fail(`timings.compileAttribution requires exactly ${expectedProbes} probe evidence rows`);
+  }
+  const expectedCoordinate = matrixCoordinate(matrix);
+  attribution.probeEvidence.forEach((evidence, index) => {
+    const name = `timings.compileAttribution.probeEvidence[${index}]`;
+    exactKeys(evidence, COMPILE_PROBE_EVIDENCE_FIELDS, name);
+    nonnegativeInteger(evidence.index, `${name}.index`);
+    if (evidence.index !== index) fail(`${name}.index is not sequential`);
+    if (evidence.operation !== attribution.operation) fail(`${name}.operation is not bound to attribution`);
+    if (evidence.source !== attribution.source) fail(`${name}.source is not bound to attribution`);
+    if (evidence.matrixCoordinate !== expectedCoordinate) fail(`${name}.matrixCoordinate is not bound to matrix`);
+    nonnegativeNumber(evidence.setupMs, `${name}.setupMs`);
+    positiveNumber(evidence.dispatchMs, `${name}.dispatchMs`);
+    if (evidence.dispatchMs !== attribution.probeDurationsMs[index]) {
+      fail(`${name}.dispatchMs is not bound to its raw probe duration`);
+    }
+    digest(evidence.operationEvidenceSha256, `${name}.operationEvidenceSha256`);
+  });
+  const firstDispatchMs = attribution.probeDurationsMs[0];
+  let steadyDispatchMs;
+  if (cold) {
+    const steadyProbes = attribution.probeDurationsMs.slice(1).sort((left, right) => left - right);
+    steadyDispatchMs = (steadyProbes[1] + steadyProbes[2]) / 2;
+  } else {
+    steadyDispatchMs = attribution.probeDurationsMs[1];
+  }
+  const firstDispatchExcessMs = firstDispatchMs - steadyDispatchMs;
+  for (const field of ["firstDispatchMs", "steadyDispatchMs"]) {
+    positiveNumber(attribution[field], `timings.compileAttribution.${field}`);
+  }
+  if (typeof attribution.firstDispatchExcessMs !== "number"
+    || !Number.isFinite(attribution.firstDispatchExcessMs)) {
+    fail("timings.compileAttribution.firstDispatchExcessMs must be a finite number");
+  }
+  if (Math.abs(attribution.firstDispatchMs - firstDispatchMs) > 1e-9
+    || Math.abs(attribution.steadyDispatchMs - steadyDispatchMs) > 1e-9
+    || Math.abs(attribution.firstDispatchExcessMs - firstDispatchExcessMs) > 1e-9) {
+    fail("timings.compileAttribution derived values do not match the raw probes");
+  }
+  // The steady noise samples: a cold row's four post-first repeats, or the five measured repeats
+  // after a warm row's warmups. Compile cost is resolved only when the excess clears their spread.
+  const samples = attribution.noiseSamplesMs;
+  if (!Array.isArray(samples) || samples.length !== (cold ? 4 : 5)) {
+    fail("timings.compileAttribution.noiseSamplesMs has the wrong sample count");
+  }
+  samples.forEach((sample, index) => {
+    positiveNumber(sample, `timings.compileAttribution.noiseSamplesMs[${index}]`);
+  });
+  if (cold && samples.some((sample, index) => sample !== attribution.probeDurationsMs[index + 1])) {
+    fail("timings.compileAttribution.noiseSamplesMs are not the cold steady probes");
+  }
+  const noiseBandMs = Math.max(...samples) - Math.min(...samples);
+  const resolved = firstDispatchExcessMs > noiseBandMs;
+  const expectedReason = resolved
+    ? undefined
+    : firstDispatchExcessMs <= 0 ? COMPILE_COST_NOT_SLOWER : COMPILE_COST_WITHIN_NOISE;
+  if (typeof attribution.noiseBandMs !== "number"
+    || Math.abs(attribution.noiseBandMs - noiseBandMs) > 1e-9
+    || attribution.compileCostResolved !== resolved
+    || (resolved && !(Math.abs(attribution.compileCostMs - firstDispatchExcessMs) <= 1e-9))
+    || (!resolved && attribution.compileCostUnresolvedReason !== expectedReason)) {
+    fail("timings.compileAttribution compile cost does not recompute from its noise band");
+  }
+}
+
+function coldCompileAlias(attribution) {
+  return attribution.compileCostResolved ? attribution.compileCostMs : null;
+}
+
+function compileCostSummary(attribution) {
+  return attribution.compileCostResolved
+    ? `${attribution.compileCostMs} ms (noise band ${attribution.noiseBandMs} ms)`
+    : `unresolved: ${attribution.compileCostUnresolvedReason} (noise band ${attribution.noiseBandMs} ms)`;
+}
+
+const DARWIN_AVAILABLE_METRIC = "darwin-vm-stat-available-v3";
+const HOST_MEMORY_COUNTERS = [
+  "freePages", "speculativePages", "purgeablePages", "inactivePages", "fileBackedPages",
+  "anonymousPages", "throttledPages", "activePages",
+];
+
+// The inference supervisor's pre-spawn macOS host measurement (campaign_supervisor::HostMemory):
+// availableBytes = (free + speculative + purgeable + R) * page size, with
+// R = max(0, file-backed - speculative) -- Activity Monitor's "Cached Files": file-backed page
+// cache the kernel reclaims without the compressor or swap; anonymous pages are never credited
+// (inactive, anonymous, throttled and active pages are recorded for audit only). File pages
+// another process has mapped count as available; the child's own mapped weights are bounded by its
+// phys_footprint cap. The receipt must recompute exactly and cover the row's estimate plus the
+// reserve (estimate-plus-reserve-v1), since the row ran.
+function validateHostMemoryComponents(host, requiredBytes) {
+  const name = "memory.admission.hostMemoryComponents";
+  exactKeys(host, ["metric", "pageSizeBytes", ...HOST_MEMORY_COUNTERS, "reclaimableFilePages", "availableBytes"], name);
+  if (host.metric !== DARWIN_AVAILABLE_METRIC) fail(`${name}.metric must be ${DARWIN_AVAILABLE_METRIC}`);
+  const page = positiveInteger(host.pageSizeBytes, `${name}.pageSizeBytes`);
+  if (page < 4096 || !Number.isInteger(Math.log2(page))) fail(`${name}.pageSizeBytes must be a power of two >= 4096`);
+  const pages = Object.fromEntries(HOST_MEMORY_COUNTERS.map((key) => [key, nonnegativeInteger(host[key], `${name}.${key}`)]));
+  const reclaimable = Math.max(0, pages.fileBackedPages - pages.speculativePages);
+  const available = (pages.freePages + pages.speculativePages + pages.purgeablePages + reclaimable) * page;
+  if (!Number.isSafeInteger(available)
+    || host.reclaimableFilePages !== reclaimable || host.availableBytes !== available) {
+    fail(`${name} do not recompute the admission measure`);
+  }
+  if (available < requiredBytes) fail(`${name}.availableBytes is below reserve plus estimate`);
+}
+
+// Every row is admitted by its runtime guards (supervised worker, phys_footprint watchdog cap,
+// host reserve, deadline, sampling) under estimate-plus-reserve-v1; the receipt records the rule,
+// the stated cap, the static floor, the admission estimate and its source, and every component of
+// the host measurement the row was admitted on.
+function validateAdmission(admission) {
+  exactKeys(
+    admission,
+    ["mode", "rule", "childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes",
+      "estimateSource", "estimateBytes", "hostMemoryComponents"],
+    "memory.admission",
+  );
+  if (admission.mode !== RUNTIME_GUARDED_ADMISSION) fail("memory.admission must be runtime-guarded");
+  if (admission.rule !== ESTIMATE_PLUS_RESERVE_RULE) fail(`memory.admission.rule must be ${ESTIMATE_PLUS_RESERVE_RULE}`);
+  for (const field of ["childFootprintCapBytes", "hostFreeReserveBytes", "staticFootprintFloorBytes", "estimateBytes"]) {
+    positiveInteger(admission[field], `memory.admission.${field}`);
+  }
+  if (typeof admission.estimateSource !== "string" || admission.estimateSource.length === 0) {
+    fail("memory.admission.estimateSource must name the estimate");
+  }
+  if (!Number.isSafeInteger(admission.childFootprintCapBytes + admission.hostFreeReserveBytes)
+    || admission.staticFootprintFloorBytes > admission.childFootprintCapBytes
+    || admission.estimateBytes > admission.childFootprintCapBytes) {
+    fail("memory.admission estimate exceeds the stated child cap");
+  }
+  if (admission.estimateBytes < admission.staticFootprintFloorBytes
+    || (admission.estimateSource === CAP_FALLBACK_ESTIMATE_SOURCE
+      && admission.estimateBytes !== admission.childFootprintCapBytes)) {
+    fail("memory.admission estimate contradicts its static floor or cap fallback");
+  }
+  validateHostMemoryComponents(
+    admission.hostMemoryComponents,
+    admission.estimateBytes + admission.hostFreeReserveBytes,
+  );
+}
+
+function validateFixtureEvidence(evidence) {
+  exactKeys(evidence, FIXTURES, "quality.fixtureEvidence");
+  for (const fixture of FIXTURES) {
+    const row = evidence[fixture];
+    exactKeys(row, ["passed", "artifactName", "artifactSha256", "artifactSidecarSha256", "independentReference"], `quality.fixtureEvidence.${fixture}`);
+    if (row.passed !== true) fail(`quality fixture ${fixture} did not pass`);
+    if (row.artifactName !== `fixtures/${fixture}.json`) fail(`quality fixture ${fixture} artifact name mismatch`);
+    digest(row.artifactSha256, `quality.fixtureEvidence.${fixture}.artifactSha256`);
+    digest(row.artifactSidecarSha256, `quality.fixtureEvidence.${fixture}.artifactSidecarSha256`);
+    if (row.artifactSidecarSha256 !== sha256(`${row.artifactSha256}  ${row.artifactName}\n`)) {
+      fail(`quality fixture ${fixture} artifact sidecar binding mismatch`);
+    }
+    text(row.independentReference, `quality.fixtureEvidence.${fixture}.independentReference`);
+  }
+}
+
+function contextBandTarget(contextWindowTokens, contextBand) {
+  positiveInteger(contextWindowTokens, "geometry.contextWindowTokens");
+  if (contextWindowTokens < 1_024) fail("context window is below the frozen minimum");
+  const medium = Math.min(1_024, Math.max(128, Math.floor(contextWindowTokens / 16)));
+  const memoryMaterial = Math.floor(contextWindowTokens / 4);
+  const fitBoundary = Math.max(
+    contextWindowTokens - 512,
+    Math.ceil(contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS / 10_000),
+  );
+  const targets = { short: 32, medium, "memory-material": memoryMaterial, "fit-boundary": fitBoundary };
+  if (!(32 < medium && medium < memoryMaterial && memoryMaterial < fitBoundary)) {
+    fail("context window cannot represent four distinct frozen bands");
+  }
+  return targets[contextBand];
+}
+
+function receiptCore(receipt) {
+  return Object.fromEntries(Object.entries(receipt).filter(([key]) => key !== "receiptSha256"));
+}
+
+export function validateReceipt(receipt, { verifyHash = true } = {}) {
+  if (!validateReceiptSchema(receipt)) {
+    fail(`schema validation failed: ${schemaAjv.errorsText(validateReceiptSchema.errors)}`);
+  }
+  exactKeys(
+    receipt,
+    [
+      "schemaVersion", "harnessVersion", "runId", "capturedAt", "mode", "status",
+      "contractHash", "receiptSha256", "provenance", "matrix", "geometry", "memory",
+      "timings", "quality", "lifecycle", "cancellation", "warmup", "compression",
+    ],
+    "receipt",
+  );
+  if (receipt.schemaVersion !== SCHEMA_VERSION || receipt.harnessVersion !== HARNESS_VERSION) {
+    fail("unsupported schema or harness version");
+  }
+  text(receipt.runId, "receipt.runId");
+  isoTimestamp(receipt.capturedAt, "receipt.capturedAt");
+  if (!["dense", "compressed"].includes(receipt.mode) || receipt.status !== "complete") {
+    fail("receipt must be complete and have dense or compressed mode");
+  }
+  if (receipt.contractHash !== QUALITY_CONTRACT_HASH) fail("quality contract hash mismatch");
+  if (verifyHash) {
+    digest(receipt.receiptSha256, "receipt.receiptSha256");
+    if (receipt.receiptSha256 !== numericSemanticSha256(receiptCore(receipt))) {
+      fail("receiptSha256 mismatch");
+    }
+  }
+
+  exactKeys(
+    receipt.provenance,
+    [
+      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision", "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
+      "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
+      "referenceModelId", "referenceModelSha256", "referenceModelBytes",
+      "thermalState", "hostStates", "thermalChangedDuringRow", "powerModeChangedDuringRow",
+      "commandTemplate", "command", "campaignSessionId", "campaignCacheStateVersion", "coordinateOperationSha256",
+    ],
+    "provenance",
+  );
+  gitRevision(receipt.provenance.sceneWorksRevision, "provenance.sceneWorksRevision");
+  gitRevision(receipt.provenance.inferenceRevision, "provenance.inferenceRevision");
+  if (receipt.provenance.sceneWorksRepository !== SCENEWORKS_REPOSITORY
+    || receipt.provenance.inferenceRepository !== INFERENCE_REPOSITORY) {
+    fail("provenance repository identity is not the paired SceneWorks repositories");
+  }
+  for (const field of [
+    "mlxVersion", "mlxSource", "mlxRevision", "os", "xcode", "hardware", "modelId",
+    "referenceModelId", "powerMode", "thermalState",
+    "commandTemplate", "command",
+  ]) {
+    text(receipt.provenance[field], `provenance.${field}`);
+  }
+  digest(receipt.provenance.dependencyLockSha256, "provenance.dependencyLockSha256");
+  gitRevision(receipt.provenance.mlxRevision, "provenance.mlxRevision");
+  if (receipt.provenance.mlxSource
+    !== `git+${PMETAL_MLX_REPOSITORY}?rev=${receipt.provenance.mlxRevision}#${receipt.provenance.mlxRevision}`) {
+    fail("MLX dependency source does not bind its exact Git revision");
+  }
+  digest(receipt.provenance.modelFileSha256, "provenance.modelFileSha256");
+  digest(receipt.provenance.referenceModelSha256, "provenance.referenceModelSha256");
+  digest(receipt.provenance.campaignSessionId, "provenance.campaignSessionId");
+  digest(receipt.provenance.coordinateOperationSha256, "provenance.coordinateOperationSha256");
+  positiveInteger(receipt.provenance.modelFileBytes, "provenance.modelFileBytes");
+  positiveInteger(receipt.provenance.referenceModelBytes, "provenance.referenceModelBytes");
+  positiveInteger(receipt.provenance.campaignCacheStateVersion, "provenance.campaignCacheStateVersion");
+  if (!THERMAL_STATES.includes(receipt.provenance.thermalState)) {
+    fail("provenance.thermalState is unknown");
+  }
+  for (const field of ["thermalChangedDuringRow", "powerModeChangedDuringRow"]) {
+    if (typeof receipt.provenance[field] !== "boolean") fail(`provenance.${field} must be boolean`);
+  }
+  if (!receipt.provenance.commandTemplate.includes("{mode}")
+    || receipt.provenance.command
+      !== receipt.provenance.commandTemplate.replaceAll("{mode}", receipt.mode)) {
+    fail("command must be the mode-substitution of commandTemplate");
+  }
+
+  exactKeys(
+    receipt.matrix,
+    ["family", "contextBand", "requestMode", "prefillMode", "processTemperature"],
+    "matrix",
+  );
+  if (!["llama", "qwen"].includes(receipt.matrix.family)
+    || !CONTEXT_BANDS.includes(receipt.matrix.contextBand)
+    || !["single", "supported-batch"].includes(receipt.matrix.requestMode)
+    || !["chunked", "single-shot"].includes(receipt.matrix.prefillMode)
+    || !["cold", "warm"].includes(receipt.matrix.processTemperature)) {
+    fail("receipt matrix coordinate is incomplete");
+  }
+
+  exactKeys(
+    receipt.geometry,
+    ["batch", "queryHeads", "kvHeads", "headDimension", "queryLength", "kvLength", "layers", "elementBytes", "capacity", "contextWindowTokens", "contextTargetTokens", "contextPayloadTokens"],
+    "geometry",
+  );
+  for (const field of Object.keys(receipt.geometry)) positiveInteger(receipt.geometry[field], `geometry.${field}`);
+  if (receipt.geometry.contextTargetTokens
+      !== contextBandTarget(receipt.geometry.contextWindowTokens, receipt.matrix.contextBand)
+    || receipt.geometry.contextPayloadTokens > receipt.geometry.contextTargetTokens
+    || receipt.geometry.contextPayloadTokens < Math.floor(receipt.geometry.contextTargetTokens / 2)) {
+    fail("context payload token count is outside its producer-measured band");
+  }
+  if (receipt.geometry.queryHeads % receipt.geometry.kvHeads !== 0) {
+    fail("geometry queryHeads must be divisible by kvHeads");
+  }
+  if (receipt.geometry.capacity < receipt.geometry.kvLength) fail("geometry capacity is below kvLength");
+  if ((receipt.matrix.requestMode === "single" && receipt.geometry.batch !== 1)
+    || (receipt.matrix.requestMode === "supported-batch" && receipt.geometry.batch <= 1)) {
+    fail("matrix requestMode disagrees with geometry.batch");
+  }
+  validatePinnedModelContract(receipt);
+
+  exactKeys(
+    receipt.memory,
+    [
+      "modelWeightsBytes", "persistentKvBytes", "transientWorkspaceBytes",
+      "denseTheoreticalKvBytes", "phaseSamples", "prefillPeakWindow", "allocationEvents",
+      "reconciliation", "release", "admission", "denseKvShareBps", "belowMemoryMaterialShare",
+    ],
+    "memory",
+  );
+  validateAdmission(receipt.memory.admission);
+  positiveInteger(receipt.memory.modelWeightsBytes, "memory.modelWeightsBytes");
+  positiveInteger(receipt.memory.persistentKvBytes, "memory.persistentKvBytes");
+  nonnegativeInteger(receipt.memory.transientWorkspaceBytes, "memory.transientWorkspaceBytes");
+  positiveInteger(receipt.memory.denseTheoreticalKvBytes, "memory.denseTheoreticalKvBytes");
+  if (!Array.isArray(receipt.memory.phaseSamples) || receipt.memory.phaseSamples.length !== PHASES.length) {
+    fail(`exactly ${PHASES.length} phase samples are required`);
+  }
+  let workerPid;
+  let priorTimestamp;
+  let priorFootprintPeak = -Infinity;
+  let priorMlxPeak = -Infinity;
+  receipt.memory.phaseSamples.forEach((sample, index) => {
+    workerPid = validatePhaseSample(sample, index, workerPid);
+    if (priorTimestamp !== undefined
+      && compareUtcTimestamps(sample.timestamp, priorTimestamp) <= 0) {
+      fail("phase sample timestamps are not strictly increasing");
+    }
+    if (sample.physFootprintPeakBytes < priorFootprintPeak) {
+      fail("phys_footprint_peak decreased within one worker process");
+    }
+    if (sample.mlx.peakBytes < priorMlxPeak && sample.phase !== "prefill-peak") {
+      fail("MLX peak memory decreased without a declared reset boundary");
+    }
+    if (sample.physFootprintBytes < sample.mlx.activeBytes) {
+      fail("process physical footprint is below MLX live tensor bytes");
+    }
+    priorTimestamp = sample.timestamp;
+    priorFootprintPeak = sample.physFootprintPeakBytes;
+    priorMlxPeak = sample.mlx.peakBytes;
+  });
+  validateHostStates(receipt);
+  if (!Array.isArray(receipt.memory.allocationEvents) || receipt.memory.allocationEvents.length === 0) {
+    fail("memory allocation events are required");
+  }
+  receipt.memory.allocationEvents.forEach((event) => {
+    validateAllocationEvent(event);
+    const phaseIndex = PHASES.indexOf(event.phase);
+    const phaseStart = receipt.memory.phaseSamples[phaseIndex].timestamp;
+    const nextPhase = receipt.memory.phaseSamples[phaseIndex + 1];
+    if (compareUtcTimestamps(event.timestamp, phaseStart) <= 0
+      || (nextPhase && compareUtcTimestamps(event.timestamp, nextPhase.timestamp) >= 0)) {
+      fail("allocation event timestamp is outside its declared phase");
+    }
+  });
+  validateCacheRelease(receipt.memory.allocationEvents);
+  if (receipt.mode === "compressed" && detectFullCacheTemporary(
+    receipt.memory.allocationEvents,
+    receipt.memory.denseTheoreticalKvBytes,
+  ).detected) fail("full-cache temporary detected");
+  if (maxRoleBytes(receipt.memory.allocationEvents, "cache", "persistent")
+      !== receipt.memory.persistentKvBytes
+    || maxRoleBytes(receipt.memory.allocationEvents, "weights", "persistent")
+      !== receipt.memory.modelWeightsBytes
+    || maxClassifiedTransientBytes(receipt.memory.allocationEvents)
+      !== receipt.memory.transientWorkspaceBytes) {
+    fail("typed allocation events do not reconcile with memory attribution totals");
+  }
+  const processStart = receipt.memory.phaseSamples[0];
+  const weightsLoaded = receipt.memory.phaseSamples[1];
+  const prefillPeak = receipt.memory.phaseSamples[2];
+  const decodeSteady = receipt.memory.phaseSamples[4];
+  exactKeys(
+    receipt.memory.prefillPeakWindow,
+    ["startedAt", "baselineActiveBytes", "resetPeakBytes"],
+    "memory.prefillPeakWindow",
+  );
+  isoTimestamp(receipt.memory.prefillPeakWindow.startedAt, "memory.prefillPeakWindow.startedAt");
+  positiveInteger(
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
+    "memory.prefillPeakWindow.baselineActiveBytes",
+  );
+  nonnegativeInteger(
+    receipt.memory.prefillPeakWindow.resetPeakBytes,
+    "memory.prefillPeakWindow.resetPeakBytes",
+  );
+  if (receipt.memory.prefillPeakWindow.resetPeakBytes !== 0) {
+    fail("memory.prefillPeakWindow.resetPeakBytes must be zero");
+  }
+  const prefillWindowStartedAt = receipt.memory.prefillPeakWindow.startedAt;
+  if (compareUtcTimestamps(prefillWindowStartedAt, weightsLoaded.timestamp) <= 0
+    || compareUtcTimestamps(prefillWindowStartedAt, prefillPeak.timestamp) >= 0) {
+    fail("prefill peak window must start strictly after weights-loaded and before prefill-peak");
+  }
+  if (receipt.memory.prefillPeakWindow.baselineActiveBytes < weightsLoaded.mlx.activeBytes) {
+    fail("prefill peak window baseline is below weights-loaded MLX active bytes");
+  }
+  const phaseRoleBytes = (phase, role, lifetime) => Math.max(0, ...receipt.memory.allocationEvents
+    .filter((event) => event.phase === phase
+      && event.role === role
+      && event.lifetime === lifetime)
+    .map((event) => event.bytes));
+  const phaseTransientBytes = (phase) => Math.max(0, ...receipt.memory.allocationEvents
+    .filter((event) => event.phase === phase
+      && event.lifetime === "transient"
+      && ["cache", "attention-workspace", "output"].includes(event.role))
+    .map((event) => event.bytes));
+  const prefillPersistentKvBytes = phaseRoleBytes("prefill-peak", "cache", "persistent");
+  const decodePersistentKvBytes = phaseRoleBytes("decode-steady", "cache", "persistent");
+  if (prefillPersistentKvBytes === 0
+    || prefillPersistentKvBytes > receipt.memory.persistentKvBytes
+    || decodePersistentKvBytes !== receipt.memory.persistentKvBytes) {
+    fail("phase-local persistent KV snapshots do not reconcile");
+  }
+  const prefillTransientBytes = phaseTransientBytes("prefill-peak");
+  const decodeTransientBytes = phaseTransientBytes("decode-steady");
+  const prefillActiveFloor = checkedSum([
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
+    prefillPersistentKvBytes,
+  ], "prefill active memory floor");
+  const prefillPeakFloor = checkedSum([
+    prefillActiveFloor,
+    prefillTransientBytes,
+  ], "prefill peak memory floor");
+  const decodeActiveFloor = checkedSum([
+    receipt.memory.prefillPeakWindow.baselineActiveBytes,
+    decodePersistentKvBytes,
+  ], "decode active memory floor");
+  const decodePeakFloor = checkedSum([
+    decodeActiveFloor,
+    decodeTransientBytes,
+  ], "decode peak memory floor");
+  if (weightsLoaded.mlx.activeBytes < processStart.mlx.activeBytes
+    || weightsLoaded.mlx.activeBytes - processStart.mlx.activeBytes
+      < receipt.memory.modelWeightsBytes) {
+    fail("weights-loaded MLX active bytes do not contain the attributed model weights");
+  }
+  if (prefillPeak.mlx.activeBytes < prefillActiveFloor) {
+    fail("prefill MLX active bytes do not contain the window baseline and persistent KV bytes");
+  }
+  if (prefillPeak.mlx.peakBytes < prefillPeakFloor) {
+    fail("prefill MLX peak bytes do not contain the window baseline, persistent KV, and transient workspace bytes");
+  }
+  if (decodeSteady.mlx.activeBytes < decodeActiveFloor) {
+    fail("decode MLX active bytes do not contain the window baseline and persistent KV bytes");
+  }
+  if (decodeSteady.mlx.peakBytes < decodePeakFloor) {
+    fail("decode MLX peak bytes do not contain the window baseline, persistent KV, and transient workspace bytes");
+  }
+  for (const phase of PHASES.filter((name) => !["prefill-peak", "decode-steady"].includes(name))) {
+    const transient = phaseTransientBytes(phase);
+    if (transient === 0) continue;
+    const persistent = phaseRoleBytes(phase, "cache", "persistent");
+    if (persistent === 0) {
+      fail(`${phase} transient evidence has no phase-local persistent KV snapshot`);
+    }
+    const peakFloor = checkedSum([
+      receipt.memory.prefillPeakWindow.baselineActiveBytes,
+      persistent,
+      transient,
+    ], `${phase} peak memory floor`);
+    const sample = receipt.memory.phaseSamples[PHASES.indexOf(phase)];
+    if (sample.mlx.peakBytes < peakFloor) {
+      fail(`${phase} MLX peak bytes do not contain phase-local attributed allocations`);
+    }
+  }
+
+  exactKeys(
+    receipt.memory.reconciliation,
+    ["expectedDenseKvBytes", "observedPersistentKvBytes", "toleranceBytes"],
+    "memory.reconciliation",
+  );
+  for (const field of ["expectedDenseKvBytes", "observedPersistentKvBytes", "toleranceBytes"]) {
+    nonnegativeInteger(receipt.memory.reconciliation[field], `memory.reconciliation.${field}`);
+  }
+  const expectedDenseKvBytes = checkedProduct([
+    receipt.geometry.batch,
+    receipt.geometry.layers,
+    receipt.geometry.kvHeads,
+    receipt.geometry.capacity,
+    receipt.geometry.headDimension,
+    receipt.geometry.elementBytes,
+    2,
+  ], "dense KV byte attribution");
+  if (receipt.memory.denseTheoreticalKvBytes !== expectedDenseKvBytes
+    || receipt.memory.reconciliation.expectedDenseKvBytes !== expectedDenseKvBytes
+    || receipt.memory.reconciliation.observedPersistentKvBytes !== receipt.memory.persistentKvBytes) {
+    fail("dense KV byte attribution does not reconcile with geometry");
+  }
+  // The memory-material band is defined by geometry: a low dense-KV share of the prefill
+  // footprint is recorded and flagged, never refused.
+  if (prefillPeak.physFootprintBytes <= 0) fail("prefill-peak footprint is zero");
+  const denseShareBps = Number(BigInt(expectedDenseKvBytes) * 10_000n
+    / BigInt(prefillPeak.physFootprintBytes));
+  const belowShare = receipt.matrix.contextBand === "memory-material"
+    && BigInt(expectedDenseKvBytes) * 10_000n
+      < BigInt(prefillPeak.physFootprintBytes) * BigInt(MEMORY_MATERIAL_MIN_DENSE_SHARE_BPS);
+  if (receipt.memory.denseKvShareBps !== denseShareBps
+    || receipt.memory.belowMemoryMaterialShare !== belowShare) {
+    fail("dense KV share of the prefill footprint does not recompute");
+  }
+  if (receipt.matrix.contextBand === "fit-boundary"
+    && (receipt.geometry.kvLength > receipt.geometry.contextWindowTokens
+      || receipt.geometry.kvLength * 10_000
+        < receipt.geometry.contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS)) {
+    fail("fit-boundary live context is outside the frozen admission ratio");
+  }
+  if (receipt.mode === "dense" && receipt.memory.reconciliation.toleranceBytes !== 0) {
+    fail("dense persistent KV reconciliation tolerance must be zero");
+  }
+  if (receipt.mode === "dense" && receipt.memory.persistentKvBytes !== expectedDenseKvBytes) {
+    fail("dense persistent KV bytes do not equal allocated capacity bytes");
+  }
+
+  const releaseFields = [
+    "physFootprintToleranceBytes", "mlxActiveToleranceBytes", "mlxCacheToleranceBytes",
+    "mlxActiveResidualBytes", "mlxCacheResidualBytes",
+  ];
+  exactKeys(receipt.memory.release, ["verified", ...releaseFields], "memory.release");
+  if (receipt.memory.release.verified !== true) fail("post-run release is not verified");
+  for (const field of releaseFields) {
+    nonnegativeInteger(receipt.memory.release[field], `memory.release.${field}`);
+  }
+  const start = receipt.memory.phaseSamples.find((sample) => sample.phase === "weights-loaded");
+  const released = receipt.memory.phaseSamples.at(-1);
+  // A small recorded MLX allocator residual is slack, not a leak (sc-20671).
+  if (receipt.memory.release.physFootprintToleranceBytes !== POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES
+    || receipt.memory.release.mlxActiveToleranceBytes !== postReleaseMlxSlackBytes(start.mlx.activeBytes)
+    || receipt.memory.release.mlxCacheToleranceBytes !== postReleaseMlxSlackBytes(start.mlx.cacheBytes)
+    || receipt.memory.release.mlxActiveResidualBytes
+      !== Math.max(0, released.mlx.activeBytes - start.mlx.activeBytes)
+    || receipt.memory.release.mlxCacheResidualBytes
+      !== Math.max(0, released.mlx.cacheBytes - start.mlx.cacheBytes)) {
+    fail("memory.release tolerances or residuals differ from the platform contract");
+  }
+  if (released.physFootprintBytes > start.physFootprintBytes + receipt.memory.release.physFootprintToleranceBytes
+    || released.mlx.activeBytes > start.mlx.activeBytes + receipt.memory.release.mlxActiveToleranceBytes
+    || released.mlx.cacheBytes > start.mlx.cacheBytes + receipt.memory.release.mlxCacheToleranceBytes) {
+    fail("post-run footprint or MLX allocator state did not return within tolerance");
+  }
+
+  exactKeys(
+    receipt.timings,
+    [...TIMING_FIELDS, "coldCompileMs", "warmCompileMs", "compileAttribution", "samples", "summary"],
+    "timings",
+  );
+  for (const field of [...TIMING_FIELDS, "warmCompileMs"]) {
+    positiveNumber(receipt.timings[field], `timings.${field}`);
+  }
+  // Null when the compile cost is below the steady noise band (sc-20671).
+  if (receipt.timings.coldCompileMs !== null) {
+    positiveNumber(receipt.timings.coldCompileMs, "timings.coldCompileMs");
+  }
+  if (!Array.isArray(receipt.timings.samples)
+    || receipt.timings.samples.length !== CONTRACT.statistics.repeats) {
+    fail("raw timing sample count differs from the frozen repeat policy");
+  }
+  receipt.timings.samples.forEach((sample, index) => {
+    validateTimingSample(sample, index, receipt.geometry.contextWindowTokens);
+  });
+  for (const field of TIMING_FIELDS) {
+    const mean = timingMean(receipt.timings.samples, field);
+    if (!nearlyEqual(receipt.timings[field], mean)) fail(`timings.${field} does not derive from raw samples`);
+  }
+  validateCompileAttribution(receipt.timings.compileAttribution, receipt.matrix);
+  const coldAlias = coldCompileAlias(receipt.timings.compileAttribution);
+  if ((coldAlias === null) !== (receipt.timings.coldCompileMs === null)
+    || (coldAlias !== null && Math.abs(receipt.timings.coldCompileMs - coldAlias) > 1e-9)
+    || Math.abs(receipt.timings.warmCompileMs
+      - receipt.timings.compileAttribution.steadyDispatchMs) > 1e-9) {
+    fail("top-level compile timing aliases do not match compile attribution");
+  }
+  exactKeys(
+    receipt.timings.summary,
+    [
+      "decodeTokensPerSecondMean", "decodeTokensPerSecondP95",
+      "decodeTokensPerSecondVariance", "decodeTokensPerSecondCoefficientOfVariation",
+      "confidenceIntervalLow", "confidenceIntervalHigh",
+    ],
+    "timings.summary",
+  );
+  for (const field of Object.keys(receipt.timings.summary)) {
+    finite(receipt.timings.summary[field], `timings.summary.${field}`);
+  }
+  const decodeMean = timingMean(receipt.timings.samples, "decodeTokensPerSecond");
+  const decodeVariance = timingVariance(receipt.timings.samples, "decodeTokensPerSecond", decodeMean);
+  const sortedDecode = receipt.timings.samples
+    .map((sample) => sample.decodeTokensPerSecond)
+    .sort((left, right) => left - right);
+  const decodeP95 = sortedDecode[Math.ceil(sortedDecode.length * 0.95) - 1];
+  const coefficient = Math.sqrt(decodeVariance) / decodeMean;
+  if (!nearlyEqual(receipt.timings.summary.decodeTokensPerSecondMean, decodeMean)
+    || !nearlyEqual(receipt.timings.summary.decodeTokensPerSecondP95, decodeP95)
+    || !nearlyEqual(receipt.timings.summary.decodeTokensPerSecondVariance, decodeVariance)
+    || !nearlyEqual(receipt.timings.summary.decodeTokensPerSecondCoefficientOfVariation, coefficient)) {
+    fail("timing summary does not derive from raw samples");
+  }
+  if (receipt.timings.summary.confidenceIntervalLow > decodeMean
+    || receipt.timings.summary.confidenceIntervalHigh < decodeMean
+    || receipt.timings.summary.confidenceIntervalLow > receipt.timings.summary.confidenceIntervalHigh) {
+    fail("timing confidence interval does not contain the decode mean");
+  }
+  if (coefficient > CONTRACT.statistics.maxCoefficientOfVariation) {
+    fail("dense baseline variance exceeds the frozen band");
+  }
+
+  exactKeys(
+    receipt.quality,
+    [
+      ...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS,
+      "greedyAgreementMethod", "freeRunningFirstDivergence", "greedyTokenAgreementByRepeat",
+      "statistics", "fixtureEvidence", "qualityGate", "forcedContinuation",
+      "multiTurnPromptCacheMethod", "multiTurnFreeRunningFirstDivergence",
+      "multiTurnMatchedPrefixTokens", "multiTurnCache", "multiTurnForcedContinuation",
+      "multiTurnForcedPass",
+    ],
+    "quality",
+  );
+  if (receipt.quality.greedyAgreementMethod !== GREEDY_AGREEMENT_METHOD) {
+    fail("quality.greedyAgreementMethod must be teacher-forced");
+  }
+  if (receipt.quality.multiTurnPromptCacheMethod !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+    fail("quality.multiTurnPromptCacheMethod must be teacher-forced on a cache-hit turn 2");
+  }
+  const multiTurnCache = object(receipt.quality.multiTurnCache, "quality.multiTurnCache");
+  exactKeys(multiTurnCache, ["candidate", "reference"], "quality.multiTurnCache");
+  for (const arm of ["candidate", "reference"]) {
+    validateMultiTurnTurns(object(multiTurnCache[arm], `quality.multiTurnCache.${arm}`), `quality.multiTurnCache.${arm}`);
+  }
+  nonnegativeInteger(receipt.quality.multiTurnMatchedPrefixTokens, "quality.multiTurnMatchedPrefixTokens");
+  if (receipt.quality.multiTurnFreeRunningFirstDivergence !== null) {
+    nonnegativeInteger(receipt.quality.multiTurnFreeRunningFirstDivergence, "quality.multiTurnFreeRunningFirstDivergence");
+    if (receipt.quality.multiTurnMatchedPrefixTokens > receipt.quality.multiTurnFreeRunningFirstDivergence) {
+      fail("quality.multiTurnMatchedPrefixTokens extends past its first free-running divergence");
+    }
+  }
+  if (receipt.quality.freeRunningFirstDivergence !== null) {
+    nonnegativeInteger(receipt.quality.freeRunningFirstDivergence, "quality.freeRunningFirstDivergence");
+  }
+  // Contract v5: the gate is the row's one quality measurement's teacher-forced agreement.
+  const byRepeat = receipt.quality.greedyTokenAgreementByRepeat;
+  if (!Array.isArray(byRepeat) || byRepeat.length !== QUALITY_MEASUREMENTS
+    || byRepeat.some((value) => typeof value !== "number" || !(value >= 0 && value <= 1))
+    || Math.min(...byRepeat) !== receipt.quality.greedyTokenAgreement) {
+    fail("quality.greedyTokenAgreement is not the row's one recorded quality measurement");
+  }
+  for (const field of DISCRIMINATION_FIELDS) {
+    if (typeof receipt.quality[field] !== "boolean") fail(`quality.${field} must be boolean`);
+  }
+  for (const field of ERROR_QUALITY_FIELDS) finite(receipt.quality[field], `quality.${field}`);
+  if (receipt.quality.parityMaxError < 0) fail("quality.parityMaxError must be non-negative");
+  for (const field of AGREEMENT_QUALITY_FIELDS) {
+    const value = finite(receipt.quality[field], `quality.${field}`);
+    if (value < 0 || value > 1) fail(`quality.${field} must be in [0,1]`);
+  }
+  exactKeys(
+    receipt.quality.statistics,
+    [
+      "repeats", "warmups", "qualityMeasuredOnce", "confidenceInterval", "outlierPolicy",
+      "variancePolicy", "maxCoefficientOfVariation",
+    ],
+    "quality.statistics",
+  );
+  if (canonicalJson(receipt.quality.statistics) !== canonicalJson(CONTRACT.statistics)) {
+    fail("quality statistics policy differs from the frozen contract");
+  }
+  // Kernel parity against the host-fp32 dequantize-then-attend reference is a correctness check
+  // of the fused reader, not a quality-versus-dense metric: a miss still refuses the row. The
+  // other thresholds are the measured quality gate (validateQualityGate).
+  if (receipt.mode === "compressed"
+    && receipt.quality.parityMaxError > CONTRACT.thresholds.parityMaxError) {
+    fail(`kernel parity failed: metric=parityMaxError value=${receipt.quality.parityMaxError} threshold=${CONTRACT.thresholds.parityMaxError} comparison=maximum fixture=kernel-fp32-reference repeat=all`);
+  }
+  validateFixtureEvidence(receipt.quality.fixtureEvidence);
+  // Contract v3: compressed quality is gated against the same-weights dense-KV run, never the
+  // bf16 model; dense fixtures are characterization and must not claim to be that denominator.
+  for (const fixture of FIXTURES) {
+    const sameWeights = receipt.quality.fixtureEvidence[fixture].independentReference
+      === sameWeightsFixtureReference(fixture, receipt.provenance.modelFileSha256);
+    if ((receipt.mode === "compressed") !== sameWeights) {
+      fail(`quality fixture ${fixture} reference is not the contract v3 denominator for a ${receipt.mode} receipt`);
+    }
+  }
+  // Discrimination is the AND over all repeats: a dense row whose primary repeat missed the
+  // needle cannot claim that every repeat recovered it.
+  if (receipt.mode === "dense" && receipt.quality.needleDiscriminating
+    && receipt.quality.needleRetrieval !== 1) {
+    fail("dense needle discrimination claims recovery the dense run did not show");
+  }
+
+  const allowedLifecycleKeys = [...LIFECYCLE, ...LIFECYCLE.map((field) => `${field}FallbackReason`)];
+  exactKeys(receipt.lifecycle, allowedLifecycleKeys, "lifecycle");
+  for (const field of LIFECYCLE) {
+    if (typeof receipt.lifecycle[field] !== "boolean") fail(`lifecycle.${field} must be boolean`);
+    if (!receipt.lifecycle[field]) {
+      text(receipt.lifecycle[`${field}FallbackReason`], `lifecycle.${field}FallbackReason`);
+    } else if (`${field}FallbackReason` in receipt.lifecycle) {
+      fail(`lifecycle.${field}FallbackReason is present for a passing operation`);
+    }
+  }
+  exactKeys(receipt.cancellation, ["cleanupVerified"], "cancellation");
+  if (receipt.cancellation.cleanupVerified !== true) fail("cancellation cleanup is not verified");
+  exactKeys(
+    receipt.warmup,
+    ["required", "completed", "workerPid", "suiteSha256", "sessionId", "cacheStateVersion"],
+    "warmup",
+  );
+  positiveInteger(receipt.warmup.workerPid, "warmup.workerPid");
+  nonnegativeInteger(receipt.warmup.cacheStateVersion, "warmup.cacheStateVersion");
+  const warmRequired = receipt.matrix.processTemperature === "warm";
+  if (receipt.warmup.required !== warmRequired
+    || (warmRequired && (!receipt.warmup.completed
+      || !/^[0-9a-f]{64}$/.test(receipt.warmup.suiteSha256)
+      || receipt.warmup.sessionId !== receipt.provenance.campaignSessionId
+      || receipt.warmup.cacheStateVersion === 0
+      || receipt.warmup.cacheStateVersion > receipt.provenance.campaignCacheStateVersion))
+    || (!warmRequired && (receipt.warmup.completed || receipt.warmup.suiteSha256 !== ""
+      || receipt.warmup.sessionId !== "" || receipt.warmup.cacheStateVersion !== 0))) {
+    fail("warmup session/cache-state evidence is inconsistent with the coordinate");
+  }
+  if (warmRequired) {
+    const expectedSuiteSha256 = numericSemanticSha256({
+      sessionId: receipt.warmup.sessionId,
+      workerPid: receipt.warmup.workerPid,
+      probeEvidence: receipt.timings.compileAttribution.probeEvidence,
+    });
+    if (receipt.warmup.suiteSha256 !== expectedSuiteSha256) {
+      fail("warmup suite seal is not bound to compile probe operation evidence");
+    }
+  }
+  if ((receipt.mode === "compressed") !== Object.hasOwn(receipt, "compression")) {
+    fail("compression evidence must be present exactly on compressed receipts");
+  }
+  if (receipt.mode === "compressed") validateCompression(receipt);
+  // Last: integrity, identity, safety, and fixture checks above refuse first.
+  validateQualityGate(receipt);
+  return receipt;
+}
+
+// The inference packed reader's kernels and selection tokens (`packed_metal.rs`
+// `packed_kernel_path_valid`): the NAX kernel appears exactly with the NAX selection and 16-bit
+// queries, the fp32 tiled kernel only with a NAX rejection its dtype allows, and the per-row kernel
+// only below the multi-row threshold (qualified family) or on the conservative family.
+const PER_ROW_KERNEL = "sc20676_split_kv_simdgroup";
+const TILED_KERNEL = "sc20676_tiled_multi_row_simdgroup_matrix";
+const NAX_KERNEL = "sc20676_nax_tiled_matmul2d";
+const QUALIFIED_FAMILY = "apple7-or-newer";
+const CONSERVATIVE_FAMILY = "conservative-unknown-apple";
+
+export function kernelPathValid(gpuFamily, kernel, selection, queryDtype) {
+  const sixteenBit = queryDtype === "float16" || queryDtype === "bfloat16";
+  if (!sixteenBit && queryDtype !== "float32") return false;
+  const qualified = gpuFamily === QUALIFIED_FAMILY;
+  const conservative = gpuFamily === CONSERVATIVE_FAMILY;
+  switch (`${kernel}|${selection}`) {
+    case `${NAX_KERNEL}|nax-selected`: return qualified && sixteenBit;
+    case `${TILED_KERNEL}|nax-unavailable`: return qualified;
+    case `${TILED_KERNEL}|f32-query`: return qualified && queryDtype === "float32";
+    case `${TILED_KERNEL}|nax-head-dimension`: return qualified && sixteenBit;
+    case `${PER_ROW_KERNEL}|below-multi-row-threshold`: return qualified;
+    case `${PER_ROW_KERNEL}|conservative-family`: return conservative;
+    default: return false;
+  }
+}
+
+/**
+ * Mirrors the inference producer's SC-20676 compressed-row rules: fused execution happened, every
+ * dense fallback is reasoned and counted, physical bytes are the sum of their measured
+ * components, and no dense full-cache reconstruction survived. The representation describes the
+ * coordinate operation only: a `compressed` coordinate's persistent KV is exactly its storage's
+ * device share at the receipt's KV length and its whole physical representation (device + host
+ * copy + staged tail) is below the dense geometry; a `dense-fallback` coordinate claims no
+ * compressed storage.
+ */
+/** Compressed KV methods the producer runs: code width and reader identity of each. */
+const COMPRESSED_KV_METHODS = Object.freeze({
+  "group-affine": Object.freeze({ bits: 2, representationIdentity: "sc-20676-packed-group-affine-v1" }),
+  "group-affine-4": Object.freeze({ bits: 4, representationIdentity: "sc-20676-packed-group-affine-b4-v1" }),
+  "group-affine-8": Object.freeze({ bits: 8, representationIdentity: "sc-20676-packed-group-affine-b8-v1" }),
+});
+
+/** Mirrors the inference producer's `receipt_measurement_paths`. */
+export function measurementPaths(matrix, persistentKvRepresentation) {
+  const [operation, sequences] = matrix.requestMode === "supported-batch" ? ["supported-batch", 2]
+    : matrix.prefillMode === "chunked" ? ["chunked-prefix-reuse", 1] : ["single-shot-generation", 1];
+  const coordinate = { kvPath: persistentKvRepresentation, operation, sequences };
+  return {
+    memory: coordinate,
+    prefillFirstToken: coordinate,
+    decodeTiming: { kvPath: "compressed", operation: "steady-decode", sequences: 1 },
+    quality: { kvPath: "compressed", operation: "quality", sequences: 1 },
+  };
+}
+
+function validateCompression(receipt) {
+  const compression = receipt.compression;
+  exactKeys(compression, [
+    "method", "representationIdentity", "representationVersion", "bits", "quantizationGroupSize",
+    "kernelGpuFamily", "kernelPaths", "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
+    "persistentKvRepresentation", "fusedCalls", "fallbackCalls", "fallbacks",
+    "fullCacheDequantizations", "failedDispatches", "measurementPaths",
+  ], "compression");
+  // Additive (absent on earlier receipts): the KV path each measurement block ran on. A
+  // supported-batch row's coordinate operation (memory, representation, prefill, first token) is
+  // the dense fallback; its steady decode and quality are single-sequence compressed.
+  if (Object.hasOwn(compression, "measurementPaths")
+    && canonicalJson(compression.measurementPaths) !== canonicalJson(
+      measurementPaths(receipt.matrix, compression.persistentKvRepresentation))) {
+    fail("compression.measurementPaths does not name the KV path each measurement ran on");
+  }
+  if (!/^[a-z0-9-]+$/.test(compression.method)) fail("compression.method must be a method identifier");
+  text(compression.representationIdentity, "compression.representationIdentity");
+  for (const field of ["representationVersion", "bits", "quantizationGroupSize"]) {
+    positiveInteger(compression[field], `compression.${field}`);
+  }
+  // Each method names exactly one representation (mirrors the producer's CompressedKvMethod).
+  const representation = Object.hasOwn(COMPRESSED_KV_METHODS, compression.method)
+    ? COMPRESSED_KV_METHODS[compression.method] : fail(`unknown compressed KV method ${compression.method}`);
+  if (compression.bits !== representation.bits
+    || compression.representationIdentity !== representation.representationIdentity) {
+    fail(`compressed method ${compression.method} is ${representation.bits}-bit ${representation.representationIdentity} but the receipt records ${compression.bits}-bit ${compression.representationIdentity}`);
+  }
+  for (const field of [
+    "deviceCodeBytes", "deviceMetadataBytes", "hostPayloadBytes", "physicalKvBytes", "storageTokens",
+    "fusedCalls", "fallbackCalls", "fullCacheDequantizations", "failedDispatches",
+  ]) {
+    nonnegativeInteger(compression[field], `compression.${field}`);
+  }
+  const deviceBytes = BigInt(compression.deviceCodeBytes) + BigInt(compression.deviceMetadataBytes);
+  if (deviceBytes + BigInt(compression.hostPayloadBytes) !== BigInt(compression.physicalKvBytes)) {
+    fail("compressed physical KV bytes do not reconcile with measured storage");
+  }
+  if (compression.fusedCalls === 0) {
+    fail("compressed row never executed the fused compressed-domain reader");
+  }
+  // Every fused call is attributed to the kernel path it actually ran, so NAX and non-NAX runs
+  // can never produce the same receipt.
+  if (!Array.isArray(compression.kernelPaths)) fail("compression.kernelPaths must be an array");
+  let pathCalls = 0n;
+  compression.kernelPaths.forEach((path, index) => {
+    exactKeys(path, ["kernel", "selection", "reason", "queryDtype", "calls"], `compression.kernelPaths[${index}]`);
+    const prior = compression.kernelPaths[index - 1];
+    const key = (p) => [p.kernel, p.selection, p.queryDtype];
+    const ordered = !prior || (() => {
+      const [a, b] = [key(prior), key(path)];
+      for (let i = 0; i < 3; i += 1) if (a[i] !== b[i]) return a[i] < b[i];
+      return false;
+    })();
+    if (!kernelPathValid(compression.kernelGpuFamily, path.kernel, path.selection, path.queryDtype)
+      || typeof path.reason !== "string" || path.reason.trim() === ""
+      || !Number.isSafeInteger(path.calls) || path.calls <= 0 || !ordered) {
+      fail("compressed kernel path disagrees with its selection or is unordered");
+    }
+    pathCalls += BigInt(path.calls);
+  });
+  if (pathCalls !== BigInt(compression.fusedCalls)) {
+    fail("compressed fused calls are not all attributed to a kernel path");
+  }
+  if (!Array.isArray(compression.fallbacks)) fail("compression.fallbacks must be an array");
+  let calls = 0n;
+  compression.fallbacks.forEach((fallback, index) => {
+    exactKeys(fallback, ["operation", "reason", "calls"], `compression.fallbacks[${index}]`);
+    const prior = compression.fallbacks[index - 1];
+    if (typeof fallback.operation !== "string" || fallback.operation.trim() === ""
+      || typeof fallback.reason !== "string" || fallback.reason.trim() === ""
+      || !Number.isSafeInteger(fallback.calls) || fallback.calls <= 0
+      || (prior && !(prior.operation < fallback.operation
+        || (prior.operation === fallback.operation && prior.reason < fallback.reason)))) {
+      fail("compressed dense fallback is unreasoned, empty, or unordered");
+    }
+    calls += BigInt(fallback.calls);
+  });
+  if (calls !== BigInt(compression.fallbackCalls)
+    || (compression.failedDispatches !== 0 && compression.fallbackCalls === 0)
+    || (compression.fallbackCalls !== 0 && receipt.lifecycle.denseFallback !== true)) {
+    fail("compressed fallback calls are not fully reasoned");
+  }
+  if (compression.persistentKvRepresentation === "compressed") {
+    if (compression.deviceCodeBytes === 0
+      || deviceBytes !== BigInt(receipt.memory.persistentKvBytes)
+      || compression.storageTokens !== receipt.geometry.kvLength) {
+      fail("compressed persistent KV does not reconcile with the coordinate's measured storage");
+    }
+    if (compression.physicalKvBytes >= receipt.memory.denseTheoreticalKvBytes) {
+      fail("compressed persistent KV representation disagrees with its evidence");
+    }
+  } else if (compression.persistentKvRepresentation !== "dense-fallback"
+    || compression.fallbackCalls === 0
+    || compression.physicalKvBytes !== 0
+    || compression.storageTokens !== 0) {
+    fail("compressed persistent KV representation disagrees with its evidence");
+  }
+  if (compression.fullCacheDequantizations !== 0) {
+    fail("compressed row reconstructed a dense full cache");
+  }
+}
+
+export function buildReceipt(input) {
+  const receipt = {
+    ...input,
+    schemaVersion: SCHEMA_VERSION,
+    harnessVersion: HARNESS_VERSION,
+    contractHash: QUALITY_CONTRACT_HASH,
+  };
+  delete receipt.receiptSha256;
+  receipt.receiptSha256 = numericSemanticSha256(receipt);
+  return validateReceipt(receipt);
+}
+
+async function sha256File(file) {
+  const hash = createHash("sha256");
+  await new Promise((resolve, reject) => {
+    const stream = createReadStream(file);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", resolve);
+  });
+  return hash.digest("hex");
+}
+
+export async function inventoryModelArtifact(artifactPath) {
+  let metadata;
+  try {
+    metadata = await stat(artifactPath);
+  } catch (error) {
+    fail(`model artifact is unavailable: ${error.message}`);
+  }
+  if (metadata.isFile()) {
+    if (metadata.size <= 0) fail("model artifact must be non-empty");
+    return { bytes: metadata.size, sha256: await sha256File(artifactPath), files: 1 };
+  }
+  if (!metadata.isDirectory()) fail("model artifact must be a file or snapshot directory");
+
+  const root = path.resolve(artifactPath);
+  const files = [];
+  async function visit(directory) {
+    const entries = await readdir(directory, { withFileTypes: true });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      const resolved = await stat(absolute);
+      if (resolved.isDirectory()) {
+        if (entry.isSymbolicLink()) fail(`model snapshot contains a directory symlink: ${absolute}`);
+        await visit(absolute);
+        continue;
+      }
+      if (!resolved.isFile() || resolved.size <= 0) {
+        fail(`model snapshot contains an empty or unsupported entry: ${absolute}`);
+      }
+      files.push({
+        path: path.relative(root, absolute).split(path.sep).join("/"),
+        bytes: resolved.size,
+        sha256: await sha256File(absolute),
+      });
+    }
+  }
+  await visit(root);
+  if (files.length === 0) fail("model snapshot is empty");
+  files.sort((left, right) => left.path.localeCompare(right.path));
+  const bytes = files.reduce((total, file) => total + file.bytes, 0);
+  if (!Number.isSafeInteger(bytes)) fail("model snapshot byte count exceeds safe integer range");
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file.path);
+    hash.update("\0");
+    hash.update(String(file.bytes));
+    hash.update("\0");
+    hash.update(file.sha256);
+    hash.update("\n");
+  }
+  return { bytes, sha256: hash.digest("hex"), files: files.length };
+}
+
+export async function buildVerifiedReceipt(input) {
+  object(input?.provenance, "provenance");
+  const modelFilePath = text(input.provenance.modelFilePath, "provenance.modelFilePath");
+  const inventory = await inventoryModelArtifact(modelFilePath);
+  if (input.provenance.modelFileBytes !== inventory.bytes) fail("model artifact byte count mismatch");
+  if (inventory.sha256 !== input.provenance.modelFileSha256) {
+    fail("model artifact SHA-256 mismatch");
+  }
+  const verifiedInput = structuredClone(input);
+  delete verifiedInput.provenance.modelFilePath;
+  const fixtureSources = {};
+  const primaryArtifacts = {};
+  object(verifiedInput.quality?.fixtureEvidence, "quality.fixtureEvidence");
+  for (const fixture of FIXTURES) {
+    const sourceRow = object(input.quality?.fixtureEvidence?.[fixture], `quality.fixtureEvidence.${fixture}`);
+    const artifactPath = text(
+      sourceRow.artifactPath,
+      `quality.fixtureEvidence.${fixture}.artifactPath`,
+    );
+    let artifactMetadata;
+    try {
+      artifactMetadata = await stat(artifactPath);
+    } catch (error) {
+      fail(`quality fixture ${fixture} artifact is unavailable: ${error.message}`);
+    }
+    if (!artifactMetadata.isFile() || artifactMetadata.size <= 0) {
+      fail(`quality fixture ${fixture} artifact must be a non-empty file`);
+    }
+    const artifactSha256 = await sha256File(artifactPath);
+    if (artifactSha256 !== sourceRow.artifactSha256) {
+      fail(`quality fixture ${fixture} artifact SHA-256 mismatch`);
+    }
+    let artifact;
+    try {
+      artifact = JSON.parse(await readFile(artifactPath, "utf8"));
+    } catch (error) {
+      fail(`quality fixture ${fixture} artifact is not valid JSON: ${error.message}`);
+    }
+    validateFixtureArtifact(artifact, fixture, sourceRow);
+    primaryArtifacts[fixture] = artifact;
+    const artifactName = `fixtures/${fixture}.json`;
+    fixtureSources[artifactName] = artifactPath;
+    verifiedInput.quality.fixtureEvidence[fixture] = {
+      passed: sourceRow.passed,
+      artifactName,
+      artifactSha256,
+      artifactSidecarSha256: sha256(`${artifactSha256}  ${artifactName}\n`),
+      independentReference: sourceRow.independentReference,
+    };
+  }
+  if (verifiedInput.matrix?.processTemperature === "cold") {
+    const sourceRow = object(
+      input.quality?.fixtureEvidence?.["kernel-fp32-reference"],
+      "quality.fixtureEvidence.kernel-fp32-reference",
+    );
+    if (!Array.isArray(sourceRow.repeatArtifactPaths)
+      || sourceRow.repeatArtifactPaths.length !== QUALITY_MEASUREMENTS) {
+      fail("cold receipt requires exactly its one quality measurement's kernel fixture artifact path");
+    }
+    if (sourceRow.repeatArtifactPaths[0] !== sourceRow.artifactPath) {
+      fail("cold repeat-zero kernel fixture must be the published primary fixture");
+    }
+    for (let index = 0; index < sourceRow.repeatArtifactPaths.length; index += 1) {
+      const artifactPath = text(
+        sourceRow.repeatArtifactPaths[index],
+        `quality.fixtureEvidence.kernel-fp32-reference.repeatArtifactPaths[${index}]`,
+      );
+      let bytes;
+      try {
+        bytes = await readFile(artifactPath);
+      } catch (error) {
+        fail(`repeat ${index} kernel fixture is unavailable: ${error.message}`);
+      }
+      let artifact;
+      try {
+        artifact = JSON.parse(bytes.toString("utf8"));
+      } catch (error) {
+        fail(`repeat ${index} kernel fixture is not valid JSON: ${error.message}`);
+      }
+      validateFixtureArtifact(artifact, "kernel-fp32-reference", sourceRow);
+      validateCompileProbeFixtureBinding(verifiedInput, artifact, index);
+      const artifactName = index === 0
+        ? "fixtures/kernel-fp32-reference.json"
+        : `fixtures/repeat-${index}/kernel-fp32-reference.json`;
+      fixtureSources[artifactName] = artifactPath;
+    }
+  }
+  const receipt = buildReceipt(verifiedInput);
+  validatePrimaryDiscrimination(receipt, primaryArtifacts);
+  validatePrimaryQuality(receipt, primaryArtifacts);
+  Object.defineProperty(receipt, FIXTURE_SOURCES, {
+    value: fixtureSources,
+    enumerable: false,
+  });
+  return receipt;
+}
+
+export function validateFixtureArtifact(artifact, fixture, sourceRow) {
+  const keys = ["fixture", "independentReference", "evidence", "metrics"];
+  if (Object.hasOwn(artifact, "binding")) keys.push("binding");
+  exactKeys(artifact, keys, `fixture artifact ${fixture}`);
+  if (artifact.fixture !== fixture) fail(`fixture artifact name mismatch for ${fixture}`);
+  if (artifact.independentReference !== sourceRow.independentReference) {
+    fail(`fixture artifact reference mismatch for ${fixture}`);
+  }
+  object(artifact.evidence, `fixture artifact ${fixture}.evidence`);
+  object(artifact.metrics, `fixture artifact ${fixture}.metrics`);
+  if (Object.hasOwn(artifact, "binding")) object(artifact.binding, `fixture artifact ${fixture}.binding`);
+  for (const field of ["parityMaxError", "perplexityDelta", "greedyTokenAgreement", "structuredToolAgreement", "needleRetrieval", "multiTurnPromptCache"]) {
+    if (typeof artifact.metrics[field] !== "number" || !Number.isFinite(artifact.metrics[field])) {
+      fail(`fixture artifact ${fixture}.metrics.${field} must be finite`);
+    }
+  }
+  const outcomeEvidence = {
+    "structured-tool-call": ["candidateValid", "referenceValid", "outputsMatch", "discriminating"],
+    "long-context-needle": ["candidateRecovered", "referenceRecovered", "outputsMatch", "discriminating"],
+  }[fixture] ?? [];
+  const requiredEvidence = {
+    "kernel-fp32-reference": ["candidatePerplexity", "referencePerplexity", "parityErrors", "greedyMatches", "greedyTotal", "freeRunningFirstDivergence"],
+    "structured-tool-call": ["matches", "total", ...outcomeEvidence],
+    "long-context-needle": ["matches", "total", ...outcomeEvidence],
+    "multi-turn-prompt-cache": ["matches", "total", "method", "freeRunningFirstDivergence", "matchedPrefixTokens", "turns"],
+  }[fixture];
+  // A compressed row's kernel and multi-turn evidence also carry their forced continuations.
+  exactKeys(
+    artifact.evidence,
+    fixture === "kernel-fp32-reference" && Object.hasOwn(artifact.evidence, "forcedContinuation")
+      ? [...requiredEvidence, "forcedContinuation"]
+      : fixture === "multi-turn-prompt-cache" ? [...requiredEvidence, "forcedContinuation", "forcedPass"]
+        : requiredEvidence,
+    `fixture artifact ${fixture}.evidence`,
+  );
+  if (fixture === "multi-turn-prompt-cache") {
+    for (const field of requiredEvidence) {
+      if (!Object.hasOwn(artifact.evidence, field)) fail(`fixture artifact ${fixture}.evidence lacks ${field}`);
+    }
+    if (artifact.evidence.method !== MULTI_TURN_PROMPT_CACHE_METHOD) {
+      fail(`fixture artifact ${fixture} is not teacher-forced on a cache-hit turn 2`);
+    }
+    nonnegativeInteger(artifact.evidence.matchedPrefixTokens, `fixture artifact ${fixture}.matchedPrefixTokens`);
+    if (artifact.evidence.freeRunningFirstDivergence !== null) {
+      nonnegativeInteger(artifact.evidence.freeRunningFirstDivergence, `fixture artifact ${fixture}.freeRunningFirstDivergence`);
+    }
+    const turns = object(artifact.evidence.turns, `fixture artifact ${fixture}.turns`);
+    exactKeys(turns, ["candidate", "reference"], `fixture artifact ${fixture}.turns`);
+    for (const arm of ["candidate", "reference"]) {
+      validateMultiTurnTurns(object(turns[arm], `fixture artifact ${fixture}.turns.${arm}`), `fixture artifact ${fixture} ${arm}`);
+    }
+    if (Object.hasOwn(artifact.evidence, "forcedContinuation") !== Object.hasOwn(artifact.evidence, "forcedPass")) {
+      fail(`fixture artifact ${fixture} seals a turn-2 forced continuation with both sessions' turn records`);
+    }
+    if (Object.hasOwn(artifact.evidence, "forcedPass")) {
+      validateMultiTurnForcedPass(object(artifact.evidence.forcedPass, `fixture artifact ${fixture}.forcedPass`), `fixture artifact ${fixture}.forcedPass`);
+    }
+  }
+  // Both arms' tool/needle behaviour is recorded as raw observation, never as a pass flag.
+  for (const field of outcomeEvidence) {
+    if (typeof artifact.evidence[field] !== "boolean") {
+      fail(`fixture artifact ${fixture}.${field} must be boolean`);
+    }
+  }
+  if (fixture === "kernel-fp32-reference") {
+    for (const field of ["candidatePerplexity", "referencePerplexity", "greedyMatches", "greedyTotal"]) {
+      if (typeof artifact.evidence[field] !== "number" || !Number.isFinite(artifact.evidence[field])) fail(`fixture artifact ${fixture}.${field} must be finite`);
+    }
+    if (artifact.evidence.freeRunningFirstDivergence !== null) {
+      nonnegativeInteger(artifact.evidence.freeRunningFirstDivergence, `fixture artifact ${fixture}.freeRunningFirstDivergence`);
+    }
+    if (!Array.isArray(artifact.evidence.parityErrors) || artifact.evidence.parityErrors.length === 0
+      || artifact.evidence.parityErrors.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
+      fail(`fixture artifact ${fixture}.parityErrors must contain finite values`);
+    }
+  } else {
+    // A dense candidate and its higher-precision model reference may legitimately disagree on
+    // every item. The artifact is raw characterization evidence, so zero matches is valid shape;
+    // compressed receipts are still rejected by validateReceipt when the derived agreement falls
+    // below the frozen acceptance threshold. The denominator must remain positive.
+    nonnegativeInteger(artifact.evidence.matches, `fixture artifact ${fixture}.matches`);
+    positiveInteger(artifact.evidence.total, `fixture artifact ${fixture}.total`);
+    if (artifact.evidence.matches > artifact.evidence.total) fail(`fixture artifact ${fixture} matches exceed total`);
+  }
+}
+
+/**
+ * Bind one fixture artifact to its receipt beyond the label: a compressed row's reference arm must
+ * be the candidate's own weights, and tool/needle metrics and discrimination flags are re-derived
+ * from the raw outcomes. Returns the artifact's flag.
+ */
+export function validateFixtureOutcomes(artifact, fixture, receipt) {
+  const compressed = receipt.mode === "compressed";
+  if (compressed) {
+    const reference = object(object(artifact.binding, `fixture ${fixture} binding`).reference,
+      `fixture ${fixture} reference binding`);
+    if (reference.coordinateInventorySha256 !== receipt.provenance.modelFileSha256
+      || reference.qualityInventorySha256 !== receipt.provenance.modelFileSha256) {
+      fail(`fixture ${fixture} compressed reference is not bound to the same weights`);
+    }
+  }
+  if (!Object.hasOwn(DISCRIMINATION_FIXTURES, fixture)) return undefined;
+  const evidence = artifact.evidence;
+  const needle = fixture === "long-context-needle";
+  const candidate = needle ? evidence.candidateRecovered : evidence.candidateValid;
+  const reference = needle ? evidence.referenceRecovered : evidence.referenceValid;
+  const sameWeightsDense = compressed ? reference : candidate;
+  // Contract v5: retrieval is the candidate's own recovery; after a shared dense miss it is an
+  // ungated observation (outputsMatch stays recorded beside it), never agreement with the miss.
+  const expectedMatch = needle ? candidate : evidence.outputsMatch;
+  // A compressed repeat that validly measured a miss is quality-gate evidence, not malformed.
+  if (evidence.total !== 1 || evidence.discriminating !== sameWeightsDense
+    || evidence.matches !== (expectedMatch ? 1 : 0)) {
+    fail(`fixture ${fixture} outcome evidence does not derive its metric and discrimination`);
+  }
+  return evidence.discriminating;
+}
+
+/**
+ * A receipt set publishes only the primary repeat: validate its outcomes, and a receipt may claim
+ * discrimination (the AND over all repeats) only if that repeat discriminates.
+ */
+export function validatePrimaryDiscrimination(receipt, artifacts) {
+  for (const fixture of FIXTURES) {
+    if (validateFixtureOutcomes(artifacts[fixture], fixture, receipt) === false
+      && receipt.quality[DISCRIMINATION_FIXTURES[fixture]]) {
+      fail(`quality.${DISCRIMINATION_FIXTURES[fixture]} is not the AND of its sealed repeats`);
+    }
+  }
+}
+
+/** Receipt discrimination flags must be exactly the AND over every sealed repeat's flag. */
+export function validateRepeatDiscrimination(receipt, flags) {
+  for (const [fixture, field] of Object.entries(DISCRIMINATION_FIXTURES)) {
+    if (receipt.quality[field] !== flags[fixture].every(Boolean)) {
+      fail(`quality.${field} is not the AND of its sealed repeats`);
+    }
+  }
+}
+
+function validateCompileProbeFixtureBinding(receipt, artifact, index) {
+  const binding = object(artifact.binding, `repeat ${index} kernel fixture binding`);
+  if (binding.coordinate !== matrixCoordinate(receipt.matrix) || binding.repeat !== index) {
+    fail(`repeat ${index} kernel fixture coordinate/repeat binding mismatch`);
+  }
+  const candidate = object(binding.candidate, `repeat ${index} kernel fixture candidate binding`);
+  const evidence = receipt.timings.compileAttribution.probeEvidence[index];
+  if (candidate.operation !== evidence.operation
+    || candidate.compileSetupMs !== evidence.setupMs
+    || candidate.compileDispatchMs !== evidence.dispatchMs
+    || candidate.operationEvidenceSha256 !== evidence.operationEvidenceSha256) {
+    fail(`repeat ${index} kernel fixture candidate compile evidence mismatch`);
+  }
+}
+
+async function removeIfPresent(file) {
+  try {
+    await unlink(file);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+async function writeSealedText(file, bytes) {
+  const hash = sha256(bytes);
+  const nonce = `${process.pid}-${randomUUID()}`;
+  const temporaryFile = `${file}.tmp-${nonce}`;
+  const sidecarFile = `${file}.sha256`;
+  const temporarySidecar = `${sidecarFile}.tmp-${nonce}`;
+  try {
+    await writeFile(temporaryFile, bytes, { flag: "wx" });
+    await writeFile(temporarySidecar, `${hash}  ${path.basename(file)}\n`, { flag: "wx" });
+    await rename(temporaryFile, file);
+    await rename(temporarySidecar, sidecarFile);
+  } finally {
+    await removeIfPresent(temporaryFile);
+    await removeIfPresent(temporarySidecar);
+  }
+  return hash;
+}
+
+export async function writeSealedJson(file, value) {
+  return writeSealedText(file, `${canonicalJson(value)}\n`);
+}
+
+function humanPath(jsonPath) {
+  return jsonPath.endsWith(".json") ? `${jsonPath.slice(0, -5)}.md` : `${jsonPath}.md`;
+}
+
+export function renderReceiptMarkdown(receipt) {
+  validateReceipt(receipt);
+  const peak = Math.max(...receipt.memory.phaseSamples.map((sample) => sample.physFootprintPeakBytes));
+  const supportedLifecycle = LIFECYCLE.filter((field) => receipt.lifecycle[field]).length;
+  const fallbackLifecycle = LIFECYCLE
+    .filter((field) => !receipt.lifecycle[field])
+    .map((field) => `${field}: ${receipt.lifecycle[`${field}FallbackReason`]}`);
+  const releasedCacheBytes = maxRoleBytes(receipt.memory.allocationEvents, "cache", "released");
+  return `# ${receipt.mode === "dense" ? "Dense" : "Compressed"} KV receipt\n\n`
+    + `- Run: ${receipt.runId}\n`
+    + `- Mode: ${receipt.mode}\n`
+    + `- Captured: ${receipt.capturedAt}\n`
+    + `- Model: ${receipt.provenance.modelId} (${receipt.provenance.modelFileSha256})\n`
+    + `- SceneWorks: ${receipt.provenance.sceneWorksRevision}\n`
+    + `- Inference: ${receipt.provenance.inferenceRevision}\n`
+    + `- Matrix: ${Object.values(receipt.matrix).join(" / ")}\n`
+    + `- Persistent KV bytes: ${receipt.memory.persistentKvBytes}\n`
+    + `- Released cache ownership bytes: ${releasedCacheBytes}\n`
+    + `- Theoretical dense KV bytes: ${receipt.memory.denseTheoreticalKvBytes}\n`
+    + `- Process footprint peak bytes: ${peak}\n`
+    + `- Decode throughput: ${receipt.timings.decodeTokensPerSecond} tok/s\n`
+    + `- TTFT: ${receipt.timings.ttftMs} ms\n`
+    + `- Compile attribution: ${receipt.timings.compileAttribution.method} / ${receipt.timings.compileAttribution.operation} / ${receipt.timings.compileAttribution.source}\n`
+    + `- Compile probes: ${receipt.timings.compileAttribution.probeDurationsMs.join(", ")} ms\n`
+    + `- First dispatch excess: ${receipt.timings.compileAttribution.firstDispatchExcessMs} ms\n`
+    + `- Compile cost: ${compileCostSummary(receipt.timings.compileAttribution)}\n`
+    + `- Steady dispatch: ${receipt.timings.warmCompileMs} ms\n`
+    + (receipt.quality.qualityGate ? `- Quality gate: ${qualityGateSummary(receipt.quality.qualityGate)}\n` : "")
+    + `- Quality contract: ${receipt.contractHash}\n`
+    + `- Receipt hash: ${receipt.receiptSha256}\n`
+    + `- Lifecycle checks: ${supportedLifecycle}/${LIFECYCLE.length} supported\n`
+    + `- Cancellation cleanup: verified\n`
+    + (fallbackLifecycle.length ? `- Explicit dense fallbacks: ${fallbackLifecycle.join("; ")}\n` : "");
+}
+
+function assertMarkdownBound(markdown, receipt) {
+  if (!markdown.includes(`- Receipt hash: ${receipt.receiptSha256}\n`)) {
+    fail("human receipt is not bound to the sealed JSON receipt");
+  }
+}
+
+export function renderComparisonMarkdown(comparison) {
+  return `# Dense/compressed KV comparison\n\n`
+    + `- Dense run: ${comparison.denseRunId}\n`
+    + `- Compressed run: ${comparison.compressedRunId}\n`
+    + (comparison.persistentKvReductionEligible
+      ? `- Persistent KV reduction: ${(comparison.persistentKvReduction * 100).toFixed(2)}%\n`
+      : `- Persistent KV reduction: not claimed (${comparison.persistentKvReductionIneligibleReason})\n`)
+    + `- Decode steady footprint delta: ${comparison.decodeSteadyPhysFootprintDeltaBytes} bytes\n`
+    + `- Process footprint peak delta: ${comparison.peakPhysFootprintDeltaBytes} bytes\n`
+    + `- Decode MLX live/cache deltas: ${comparison.decodeSteadyMlxActiveDeltaBytes} / ${comparison.decodeSteadyMlxCacheDeltaBytes} bytes\n`
+    + `- MLX peak delta: ${comparison.mlxPeakDeltaBytes} bytes\n`
+    + `- Decode throughput ratio: ${comparison.decodeThroughputRatio.toFixed(6)}\n`
+    + (comparison.quality.needleDiscriminating === false
+      ? "- Needle check: NON-DISCRIMINATING (same-weights dense run missed the needle; compressed matched dense output only)\n"
+      : "")
+    + (comparison.quality.toolDiscriminating === false
+      ? "- Tool check: NON-DISCRIMINATING (same-weights dense run emitted no valid tool call; compressed matched dense output only)\n"
+      : "")
+    + `- Quality gate: ${qualityGateSummary(comparison.qualityGate)}\n`
+    + `- Quality contract: ${comparison.contractHash}\n`;
+}
+
+export async function readSealedJson(file) {
+  const bytes = await readFile(file, "utf8");
+  const expected = parseSidecar(await readFile(`${file}.sha256`, "utf8"), path.basename(file));
+  if (sha256(bytes) !== expected) fail(`sidecar hash mismatch for ${file}`);
+  return JSON.parse(bytes);
+}
+
+async function readSealedText(file) {
+  const bytes = await readFile(file, "utf8");
+  const expected = parseSidecar(await readFile(`${file}.sha256`, "utf8"), path.basename(file));
+  if (sha256(bytes) !== expected) fail(`sidecar hash mismatch for ${file}`);
+  return bytes;
+}
+
+/** Publish JSON, human receipt, and both sidecars as one directory rename. */
+export async function writeReceiptSet(directory, receipt) {
+  validateReceipt(receipt);
+  if (!receipt[FIXTURE_SOURCES]) fail("published receipt requires exact fixture source bytes");
+  const parent = path.dirname(directory);
+  const base = path.basename(directory);
+  const staging = path.join(parent, `.${base}.staging-${process.pid}-${randomUUID()}`);
+  try {
+    await mkdir(staging, { recursive: false });
+    const json = `${canonicalJson(receipt)}\n`;
+    const markdown = `${renderReceiptMarkdown(receipt)}\n`;
+    assertMarkdownBound(markdown, receipt);
+    await Promise.all([
+      writeFile(path.join(staging, "receipt.json"), json, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.md"), markdown, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.json.sha256"), `${sha256(json)}  receipt.json\n`, { flag: "wx" }),
+      writeFile(path.join(staging, "receipt.md.sha256"), `${sha256(markdown)}  receipt.md\n`, { flag: "wx" }),
+    ]);
+    await mkdir(path.join(staging, "fixtures"), { recursive: false });
+    for (const [artifactName, source] of Object.entries(receipt[FIXTURE_SOURCES])) {
+      const bytes = await readFile(source);
+      const sidecar = `${sha256(bytes)}  ${artifactName}\n`;
+      const topLevelFixture = FIXTURES.find((fixture) => artifactName === `fixtures/${fixture}.json`);
+      if (topLevelFixture) {
+        if (sha256(bytes) !== receipt.quality.fixtureEvidence[topLevelFixture].artifactSha256) {
+          fail(`fixture ${topLevelFixture} changed before publication`);
+        }
+        if (sha256(sidecar) !== receipt.quality.fixtureEvidence[topLevelFixture].artifactSidecarSha256) {
+          fail(`fixture ${topLevelFixture} sidecar changed before publication`);
+        }
+      } else {
+        // Contract v5 publishes one quality measurement: no supplemental repeat fixtures exist.
+        const repeatMatch = artifactName.match(/^fixtures\/repeat-([1-9][0-9]*)\/kernel-fp32-reference[.]json$/);
+        if (!repeatMatch || Number(repeatMatch[1]) >= QUALITY_MEASUREMENTS) {
+          fail(`unsupported supplemental fixture source ${artifactName}`);
+        }
+        let artifact;
+        try {
+          artifact = JSON.parse(bytes.toString("utf8"));
+        } catch (error) {
+          fail(`repeat kernel fixture is not valid JSON: ${error.message}`);
+        }
+        validateFixtureArtifact(
+          artifact,
+          "kernel-fp32-reference",
+          receipt.quality.fixtureEvidence["kernel-fp32-reference"],
+        );
+        validateCompileProbeFixtureBinding(receipt, artifact, Number(repeatMatch[1]));
+      }
+      const target = path.join(staging, artifactName);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, bytes, { flag: "wx" });
+      await writeFile(`${target}.sha256`, sidecar, { flag: "wx" });
+    }
+    await rename(staging, directory);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function readReceiptSet(directory) {
+  const receipt = await readSealedJson(path.join(directory, "receipt.json"));
+  validateReceipt(receipt);
+  const primaryArtifacts = {};
+  const markdown = await readSealedText(path.join(directory, "receipt.md"));
+  assertMarkdownBound(markdown, receipt);
+  const fixtureDirectory = path.join(directory, "fixtures");
+  for (const fixture of FIXTURES) {
+    const file = path.join(fixtureDirectory, `${fixture}.json`);
+    const bytes = await readFile(file);
+    const sidecar = await readFile(`${file}.sha256`, "utf8");
+    const row = receipt.quality.fixtureEvidence[fixture];
+    if (sha256(bytes) !== row.artifactSha256
+      || parseSidecar(sidecar, row.artifactName) !== row.artifactSha256
+      || sha256(sidecar) !== row.artifactSidecarSha256) {
+      fail(`published fixture ${fixture} is not bound to the receipt`);
+    }
+    let artifact;
+    try {
+      artifact = JSON.parse(bytes.toString("utf8"));
+    } catch (error) {
+      fail(`published fixture ${fixture} is not valid JSON: ${error.message}`);
+    }
+    validateFixtureArtifact(artifact, fixture, row);
+    primaryArtifacts[fixture] = artifact;
+  }
+  validatePrimaryDiscrimination(receipt, primaryArtifacts);
+  validatePrimaryQuality(receipt, primaryArtifacts);
+  if (receipt.matrix.processTemperature === "cold") {
+    for (let index = 0; index < QUALITY_MEASUREMENTS; index += 1) {
+      const artifactName = index === 0
+        ? "fixtures/kernel-fp32-reference.json"
+        : `fixtures/repeat-${index}/kernel-fp32-reference.json`;
+      const file = path.join(directory, artifactName);
+      const bytes = await readFile(file);
+      const sidecar = await readFile(`${file}.sha256`, "utf8");
+      if (parseSidecar(sidecar, artifactName) !== sha256(bytes)) {
+        fail(`published repeat ${index} kernel fixture sidecar mismatch`);
+      }
+      let artifact;
+      try {
+        artifact = JSON.parse(bytes.toString("utf8"));
+      } catch (error) {
+        fail(`published repeat ${index} kernel fixture is not valid JSON: ${error.message}`);
+      }
+      validateFixtureArtifact(
+        artifact,
+        "kernel-fp32-reference",
+        receipt.quality.fixtureEvidence["kernel-fp32-reference"],
+      );
+      validateCompileProbeFixtureBinding(receipt, artifact, index);
+    }
+  }
+  return receipt;
+}
+
+function phaseByName(receipt, phase) {
+  return receipt.memory.phaseSamples.find((sample) => sample.phase === phase);
+}
+
+export function compareReceipts(dense, compressed) {
+  validateReceipt(dense);
+  validateReceipt(compressed);
+  if (dense.mode !== "dense" || compressed.mode !== "compressed") {
+    fail("comparison requires dense then compressed receipts");
+  }
+  for (const field of [
+    "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
+    "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256",
+    "os", "xcode", "hardware", "modelId", "modelFileSha256", "modelFileBytes", "powerMode",
+    "referenceModelId", "referenceModelSha256", "referenceModelBytes", "thermalState", "commandTemplate",
+  ]) {
+    if (dense.provenance[field] !== compressed.provenance[field]) {
+      fail(`comparison identity differs at provenance.${field}`);
+    }
+  }
+  if (dense.contractHash !== compressed.contractHash
+    || canonicalJson(dense.matrix) !== canonicalJson(compressed.matrix)
+    || canonicalJson(dense.geometry) !== canonicalJson(compressed.geometry)) {
+    fail("comparison matrix, geometry, or contract differs");
+  }
+  // Only a coordinate that itself ran on the compressed representation may claim a reduction, and
+  // the claim is the whole physical representation (device arrays + host copy + staged tail),
+  // never the MLX device share alone.
+  const representation = compressed.compression.persistentKvRepresentation;
+  const reductionEligible = representation === "compressed";
+  const denseDecode = phaseByName(dense, "decode-steady");
+  const compressedDecode = phaseByName(compressed, "decode-steady");
+  const densePeak = Math.max(...dense.memory.phaseSamples.map((sample) => sample.physFootprintPeakBytes));
+  const compressedPeak = Math.max(...compressed.memory.phaseSamples.map((sample) => sample.physFootprintPeakBytes));
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    complete: true,
+    denseRunId: dense.runId,
+    compressedRunId: compressed.runId,
+    contractHash: dense.contractHash,
+    persistentKvRepresentation: representation,
+    persistentKvReductionEligible: reductionEligible,
+    persistentKvReductionIneligibleReason: reductionEligible
+      ? null
+      : `coordinate operation ran on a ${representation} representation`,
+    persistentKvReduction: reductionEligible
+      ? (dense.memory.persistentKvBytes - compressed.compression.physicalKvBytes)
+        / dense.memory.persistentKvBytes
+      : null,
+    decodeSteadyPhysFootprintDeltaBytes:
+      compressedDecode.physFootprintBytes - denseDecode.physFootprintBytes,
+    peakPhysFootprintDeltaBytes: compressedPeak - densePeak,
+    decodeSteadyMlxActiveDeltaBytes:
+      compressedDecode.mlx.activeBytes - denseDecode.mlx.activeBytes,
+    decodeSteadyMlxCacheDeltaBytes:
+      compressedDecode.mlx.cacheBytes - denseDecode.mlx.cacheBytes,
+    mlxPeakDeltaBytes:
+      Math.max(...compressed.memory.phaseSamples.map((sample) => sample.mlx.peakBytes))
+      - Math.max(...dense.memory.phaseSamples.map((sample) => sample.mlx.peakBytes)),
+    decodeThroughputRatio:
+      compressed.timings.decodeTokensPerSecond / dense.timings.decodeTokensPerSecond,
+    quality: Object.fromEntries(
+      [...ERROR_QUALITY_FIELDS, ...AGREEMENT_QUALITY_FIELDS, ...DISCRIMINATION_FIELDS]
+        .map((field) => [field, compressed.quality[field]]),
+    ),
+    // The compressed row's measured gate outcome: a failed gate is reported, never a pass.
+    qualityGatePassed: compressed.quality.qualityGate.passed,
+    qualityGate: compressed.quality.qualityGate,
+    forcedContinuation: compressed.quality.forcedContinuation,
+    multiTurnForcedContinuation: compressed.quality.multiTurnForcedContinuation,
+  };
+}
+
+function campaignCoordinate(receipt, separator = "/") {
+  return [
+    receipt.matrix.family, receipt.matrix.contextBand, receipt.matrix.requestMode,
+    receipt.matrix.prefillMode, receipt.matrix.processTemperature,
+  ].join(separator);
+}
+
+function campaignSchedule(version) {
+  if (version === 2) return SC20671_COVERING_SCHEDULE;
+  if (version === 1) {
+    return ["llama", "qwen"].flatMap((family) => CONTEXT_BANDS.flatMap((band) =>
+      ["single", "supported-batch"].flatMap((request) =>
+        ["chunked", "single-shot"].flatMap((prefill) =>
+          ["cold", "warm"].map((temperature) =>
+            [family, band, request, prefill, temperature])))));
+  }
+  fail("unsupported campaign schedule version");
+}
+
+export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
+  if (!Array.isArray(receipts) || receipts.length === 0) fail("campaign has no sealed receipts");
+  const schedule = campaignSchedule(scheduleVersion);
+  const coordinates = new Set();
+  const familyModels = new Map();
+  const coldPids = new Set();
+  let campaignIdentity;
+  let campaignMode;
+  for (const receipt of receipts) {
+    validateReceipt(receipt);
+    // A campaign is uniformly the dense baseline or one compressed method (SC-20676).
+    const receiptMode = receipt.mode === "compressed" ? `compressed:${receipt.compression.method}` : "dense";
+    if (campaignMode !== undefined && campaignMode !== receiptMode) {
+      fail("campaign mixes dense and compressed (or compressed-method) receipts");
+    }
+    campaignMode ??= receiptMode;
+    const coordinate = campaignCoordinate(receipt);
+    if (coordinates.has(coordinate)) fail(`duplicate campaign coordinate ${coordinate}`);
+    coordinates.add(coordinate);
+    if (receipt.matrix.processTemperature === "cold") {
+      const pid = receipt.memory.phaseSamples[0].pid;
+      if (coldPids.has(pid)) fail("cold campaign coordinates reused a worker PID");
+      coldPids.add(pid);
+    }
+    const globalIdentity = canonicalJson(Object.fromEntries([
+      "sceneWorksRepository", "inferenceRepository", "sceneWorksRevision", "inferenceRevision",
+      "mlxVersion", "mlxSource", "mlxRevision", "dependencyLockSha256", "os", "xcode",
+      "hardware", "commandTemplate",
+    ].map((field) => [field, receipt.provenance[field]])));
+    // Power/thermal state is recorded per row and flagged across the campaign, never a drift.
+    if (campaignIdentity && campaignIdentity !== globalIdentity) {
+      fail("campaign source, dependency, toolchain, or hardware identity drift");
+    }
+    campaignIdentity ??= globalIdentity;
+    const identity = canonicalJson({
+      modelId: receipt.provenance.modelId,
+      modelFileSha256: receipt.provenance.modelFileSha256,
+      modelFileBytes: receipt.provenance.modelFileBytes,
+      referenceModelId: receipt.provenance.referenceModelId,
+      referenceModelSha256: receipt.provenance.referenceModelSha256,
+      referenceModelBytes: receipt.provenance.referenceModelBytes,
+      queryHeads: receipt.geometry.queryHeads,
+      kvHeads: receipt.geometry.kvHeads,
+      headDimension: receipt.geometry.headDimension,
+      layers: receipt.geometry.layers,
+      elementBytes: receipt.geometry.elementBytes,
+      contextWindowTokens: receipt.geometry.contextWindowTokens,
+    });
+    const prior = familyModels.get(receipt.matrix.family);
+    if (prior && prior !== identity) fail(`model identity drift within ${receipt.matrix.family}`);
+    familyModels.set(receipt.matrix.family, identity);
+  }
+  if (receipts.length !== schedule.length) {
+    fail(`campaign incomplete; expected exactly ${schedule.length} scheduled receipts`);
+  }
+  const expected = new Set(schedule.map((row) => row.join("/")));
+  if (coordinates.size !== expected.size || [...coordinates].some((coordinate) => !expected.has(coordinate))) {
+    fail("campaign coordinates differ from the frozen schedule");
+  }
+  for (const family of ["llama", "qwen"]) {
+    const bands = new Map(receipts
+      .filter((receipt) => receipt.matrix.family === family)
+      .map((receipt) => [receipt.matrix.contextBand, receipt.geometry.contextPayloadTokens]));
+    if (bands.size !== CONTEXT_BANDS.length
+      || CONTEXT_BANDS.some((band, index) => index > 0
+        && bands.get(band) <= bands.get(CONTEXT_BANDS[index - 1]))) {
+      fail(`context-band tokenizer measurements are not strictly increasing for ${family}`);
+    }
+  }
+  // A compressed campaign reports every row's measured gate outcome; it passes only when every
+  // row passed. Dense campaigns are characterization and carry no gate.
+  const compressed = campaignMode.startsWith("compressed:");
+  const qualityGates = compressed
+    ? receipts.map((receipt) => ({
+      coordinate: campaignCoordinate(receipt, "-"),
+      passed: receipt.quality.qualityGate.passed,
+      failures: receipt.quality.qualityGate.failures,
+    }))
+    : undefined;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    scheduleVersion,
+    mode: campaignMode.split(":")[0],
+    ...(compressed ? { kvMethod: campaignMode.slice("compressed:".length) } : {}),
+    complete: true,
+    receipts: receipts.length,
+    coordinates: coordinates.size,
+    contractHash: QUALITY_CONTRACT_HASH,
+    ...(compressed ? {
+      qualityGatePassed: qualityGates.every((row) => row.passed),
+      qualityGates,
+    } : {}),
+  };
+}
+
+/** A compressed campaign's gate verdict (every row passed); undefined for a dense campaign. */
+export function campaignQualityGatePassed(receipts) {
+  const gates = receipts.map((receipt) => receipt.quality.qualityGate);
+  if (gates.every((gate) => gate === undefined)) return undefined;
+  if (gates.some((gate) => gate === undefined)) fail("campaign mixes gated and ungated rows");
+  return gates.every((gate) => gate.passed);
+}
+
+export function campaignPolicySha256(policy) {
+  exactKeys(policy, ["schemaVersion", ...CAMPAIGN_POLICY_FIELDS], "campaign safety policy");
+  if (policy.schemaVersion !== 1) fail("unsupported campaign safety policy version");
+  for (const field of CAMPAIGN_POLICY_FIELDS) {
+    if (!Number.isSafeInteger(policy[field]) || policy[field] <= 0) {
+      fail(`campaign safety policy ${field} must be a positive safe integer`);
+    }
+  }
+  const deadlineMillis = BigInt(policy.rowDeadlineSeconds) * 1_000n;
+  if (BigInt(policy.pollMillis) >= deadlineMillis
+    || BigInt(policy.termGraceMillis) >= deadlineMillis) {
+    fail("campaign safety policy poll and grace must be below row deadline");
+  }
+  return sha256(canonicalJson(policy));
+}
+
+export function campaignResumeIdentitySha256(identity, policySha256) {
+  exactKeys(identity, [
+    "schemaVersion", "kind", "scheduleVersion", "coordinates", "inferenceRevision",
+    "sceneWorksRevision", "executableSha256", "promptSha256", "policySha256",
+    "llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference",
+    "mode", "kvMethod",
+  ], "campaign resume identity");
+  // A compressed campaign binds its mode and method; dense identities carry neither key.
+  if (Object.hasOwn(identity, "mode") || Object.hasOwn(identity, "kvMethod")) {
+    if (identity.mode !== "compressed" || typeof identity.kvMethod !== "string"
+      || !/^[a-z0-9-]+$/.test(identity.kvMethod)) {
+      fail("campaign resume identity has a malformed compressed mode binding");
+    }
+  }
+  if (identity.schemaVersion !== 1 || identity.kind !== "sc-20671-resume-identity"
+    || identity.scheduleVersion !== 2
+    || canonicalJson(identity.coordinates) !== canonicalJson(SC20671_COVERING_SCHEDULE.map((row) => row.join("-")))) {
+    fail("campaign resume identity has a mismatched version or schedule");
+  }
+  for (const field of ["inferenceRevision", "sceneWorksRevision"]) {
+    gitRevision(identity[field], `campaign resume ${field}`);
+  }
+  for (const field of ["executableSha256", "promptSha256", "policySha256"]) {
+    digest(identity[field], `campaign resume ${field}`);
+  }
+  if (identity.policySha256 !== policySha256) {
+    fail("campaign resume identity safety policy differs from the trusted policy");
+  }
+  for (const field of ["llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference"]) {
+    const inventory = identity[field];
+    exactKeys(inventory, ["sha256", "bytes"], `campaign resume ${field}`);
+    digest(inventory.sha256, `campaign resume ${field} inventory`);
+    if (!Number.isSafeInteger(inventory.bytes) || inventory.bytes <= 0) {
+      fail(`campaign resume ${field} bytes must be a positive safe integer`);
+    }
+  }
+  return sha256(canonicalJson(identity));
+}
+
+function campaignArtifactNames(receipt, version) {
+  const names = ["receipt.json", "receipt.md", ...FIXTURES.map((fixture) => `fixtures/${fixture}.json`)];
+  for (let index = 1; index < QUALITY_MEASUREMENTS; index += 1) {
+    for (const fixture of version === 2 ? FIXTURES
+      : receipt.matrix.processTemperature === "cold" ? ["kernel-fp32-reference"] : []) {
+      names.push(`fixtures/repeat-${index}/${fixture}.json`);
+    }
+  }
+  return names;
+}
+
+async function campaignFileBindings(directory, receipt, version) {
+  return Promise.all(campaignArtifactNames(receipt, version).map(async (name) => {
+    const file = path.join(directory, name);
+    const bytes = await readFile(file);
+    const sidecar = await readFile(`${file}.sha256`, "utf8");
+    if (sidecar !== `${sha256(bytes)}  ${name}\n`) {
+      fail(`campaign artifact sidecar differs from exact bytes for ${name}`);
+    }
+    return {
+      name,
+      sha256: sha256(bytes),
+      sidecarSha256: sha256(sidecar),
+    };
+  }));
+}
+
+/** A row's recorded cap and reserve must be the captured campaign policy's. */
+export function validateAdmissionPolicy(receipt, safetyPolicy) {
+  if (receipt.memory.admission.childFootprintCapBytes !== safetyPolicy.childFootprintCapBytes
+    || receipt.memory.admission.hostFreeReserveBytes !== safetyPolicy.hostFreeReserveBytes) {
+    fail(`campaign row ${campaignCoordinate(receipt, "-")} admission cap/reserve differs from the captured safety policy`);
+  }
+}
+
+async function validateCampaignFixtureBindings(directory, receipt, safetyPolicy) {
+  const coordinate = campaignCoordinate(receipt, "-");
+  validateAdmissionPolicy(receipt, safetyPolicy);
+  const flags = Object.fromEntries(Object.keys(DISCRIMINATION_FIXTURES).map((fixture) => [fixture, []]));
+  const repeatArtifacts = [];
+  // A compressed row's denominator is the same-weights dense-KV run; a dense row's is bf16.
+  const referenceInventory = receipt.mode === "compressed"
+    ? receipt.provenance.modelFileSha256 : receipt.provenance.referenceModelSha256;
+  for (let repeat = 0; repeat < QUALITY_MEASUREMENTS; repeat += 1) {
+    repeatArtifacts.push({});
+    for (const fixture of FIXTURES) {
+      const name = repeat === 0
+        ? `fixtures/${fixture}.json`
+        : `fixtures/repeat-${repeat}/${fixture}.json`;
+      const artifact = JSON.parse(await readFile(path.join(directory, name), "utf8"));
+      validateFixtureArtifact(artifact, fixture, receipt.quality.fixtureEvidence[fixture]);
+      repeatArtifacts[repeat][fixture] = artifact;
+      const flag = validateFixtureOutcomes(artifact, fixture, receipt);
+      if (flag !== undefined) flags[fixture].push(flag);
+      const binding = object(artifact.binding, `campaign fixture ${name} binding`);
+      const candidate = object(binding.candidate, `campaign fixture ${name} candidate`);
+      const reference = object(binding.reference, `campaign fixture ${name} reference`);
+      if (binding.coordinate !== coordinate || binding.repeat !== repeat
+        || candidate.coordinateInventorySha256 !== receipt.provenance.modelFileSha256
+        || reference.coordinateInventorySha256 !== referenceInventory) {
+        fail(`campaign fixture ${name} producer coordinate or model binding differs`);
+      }
+      for (const arm of [candidate, reference]) {
+        if (!Number.isSafeInteger(arm.operationPromptTokens)
+          || arm.operationPromptTokens <= 0
+          || arm.operationPromptTokens > safetyPolicy.maxRequestTokens) {
+          fail(`campaign fixture ${name} prompt exceeds mandatory safety policy`);
+        }
+        if (arm.secondaryOperation !== null && arm.secondaryOperation !== undefined) {
+          const secondary = object(arm.secondaryOperation, `campaign fixture ${name} secondary operation`);
+          if (!Number.isSafeInteger(secondary.promptTokens)
+            || secondary.promptTokens <= 0
+            || secondary.promptTokens > safetyPolicy.maxRequestTokens) {
+            fail(`campaign fixture ${name} secondary prompt exceeds mandatory safety policy`);
+          }
+        }
+      }
+    }
+  }
+  validateRepeatDiscrimination(receipt, flags);
+  if (receipt.mode === "compressed") {
+    validateSealedQualityGate(receipt, sealedRepeatQualityMetrics(receipt, repeatArtifacts));
+  }
+}
+
+/** Read a producer campaign only after binding its manifest to every sealed receipt artifact. */
+export async function readCampaignSet(directory, {
+  safetyPolicy,
+  resumeIdentity,
+  allowLegacy = false,
+} = {}) {
+  const manifest = await readSealedJson(path.join(directory, "campaign.json"));
+  object(manifest, "campaign manifest");
+  const version = manifest.schemaVersion;
+  if (version === 2) {
+    exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates", "qualityGatePassed"], "campaign manifest");
+    if (typeof manifest.hostStateVaried !== "boolean") fail("campaign manifest hostStateVaried must be boolean");
+    if (manifest.kind !== "sc-20671-complete-covering-set" || manifest.scheduleVersion !== 2) {
+      fail("campaign v2 manifest has a mismatched kind or schedule");
+    }
+    if (safetyPolicy === undefined) fail("campaign v2 requires a safety policy");
+    digest(manifest.policySha256, "campaign policy seal");
+    if (manifest.policySha256 !== campaignPolicySha256(safetyPolicy)) {
+      fail("campaign safety policy identity differs from the manifest");
+    }
+    digest(manifest.resumeIdentitySha256, "campaign resume identity seal");
+    if (resumeIdentity === undefined) fail("campaign v2 requires a trusted resume identity");
+    if (manifest.resumeIdentitySha256 !== campaignResumeIdentitySha256(resumeIdentity, manifest.policySha256)) {
+      fail("campaign resume identity differs from the expected immutable inputs");
+    }
+    const publishedPolicy = await readFile(path.join(directory, "safety-policy.json"), "utf8");
+    const publishedIdentity = await readSealedJson(path.join(directory, "resume-identity.json"));
+    if (publishedPolicy !== canonicalJson(safetyPolicy)
+      || canonicalJson(publishedIdentity) !== canonicalJson(resumeIdentity)) {
+      fail("published campaign safety policy or resume identity differs from trusted inputs");
+    }
+  } else if (version === 1 && allowLegacy) {
+    exactKeys(manifest, ["schemaVersion", "kind", "coordinates"], "legacy campaign manifest");
+    if (manifest.kind !== "sc-20671-complete-coordinate-set") {
+      fail("legacy campaign manifest kind is invalid");
+    }
+  } else {
+    fail("unsupported or unapproved legacy campaign manifest version");
+  }
+  const schedule = campaignSchedule(version);
+  if (!Array.isArray(manifest.coordinates) || manifest.coordinates.length !== schedule.length) {
+    fail(`campaign manifest requires exactly ${schedule.length} scheduled rows`);
+  }
+  const allowed = new Set(schedule.map((row) => row.join("-")));
+  const seen = new Set();
+  const receipts = [];
+  for (const row of manifest.coordinates) {
+    exactKeys(row, ["coordinate", "receiptSha256", "workerPid", "files", "qualityGatePassed"], "campaign row");
+    if (typeof row.coordinate !== "string" || !allowed.has(row.coordinate)) {
+      fail("campaign manifest contains an unscheduled coordinate");
+    }
+    if (seen.has(row.coordinate)) fail("campaign manifest repeats a coordinate");
+    seen.add(row.coordinate);
+    digest(row.receiptSha256, "campaign receipt seal");
+    if (!Number.isSafeInteger(row.workerPid) || row.workerPid <= 0) {
+      fail("campaign manifest worker PID is invalid");
+    }
+    const receiptDirectory = path.join(directory, row.coordinate);
+    const receipt = await readReceiptSet(receiptDirectory);
+    if (campaignCoordinate(receipt, "-") !== row.coordinate
+      || receipt.receiptSha256 !== row.receiptSha256
+      || receipt.memory.phaseSamples[0].pid !== row.workerPid) {
+      fail("campaign manifest coordinate, receipt seal, or worker PID differs from the receipt");
+    }
+    if (row.qualityGatePassed !== receipt.quality.qualityGate?.passed) {
+      fail(`campaign manifest row ${row.coordinate} qualityGatePassed does not recompute from its receipt`);
+    }
+    if (version === 2
+      && (receipt.geometry.contextTargetTokens > safetyPolicy.maxContextTokens
+        || receipt.geometry.contextTargetTokens > safetyPolicy.maxRequestTokens
+        || receipt.geometry.queryLength > safetyPolicy.maxRequestTokens)) {
+      fail("campaign receipt geometry exceeds mandatory safety policy");
+    }
+    if (version === 2) {
+      const candidate = resumeIdentity[`${receipt.matrix.family}Candidate`];
+      const reference = resumeIdentity[`${receipt.matrix.family}Reference`];
+      const identityMode = resumeIdentity.mode === "compressed" ? "compressed" : "dense";
+      if (receipt.mode !== identityMode
+        || (receipt.compression?.method ?? undefined) !== resumeIdentity.kvMethod) {
+        fail("campaign receipt dense/compressed mode differs from trusted resume identity");
+      }
+      if (receipt.provenance.inferenceRevision !== resumeIdentity.inferenceRevision
+        || receipt.provenance.sceneWorksRevision !== resumeIdentity.sceneWorksRevision
+        || receipt.provenance.modelFileSha256 !== candidate.sha256
+        || receipt.provenance.modelFileBytes !== candidate.bytes
+        || receipt.provenance.referenceModelSha256 !== reference.sha256
+        || receipt.provenance.referenceModelBytes !== reference.bytes) {
+        fail("campaign receipt source or model inventory differs from trusted resume identity");
+      }
+    }
+    // A v1 manifest listing every fixture of every quality measurement has the v2 layout; the
+    // older JS fixture writer emitted the four base fixtures plus cold kernel repeats only.
+    const artifactVersion = version === 1 && row.files?.length === 2 + FIXTURES.length * QUALITY_MEASUREMENTS
+      ? 2 : version;
+    const expectedFiles = await campaignFileBindings(receiptDirectory, receipt, artifactVersion);
+    if (version === 2) await validateCampaignFixtureBindings(receiptDirectory, receipt, safetyPolicy);
+    if (!Array.isArray(row.files) || row.files.length !== expectedFiles.length) {
+      fail("campaign manifest has an incomplete artifact inventory");
+    }
+    const files = new Map();
+    for (const file of row.files) {
+      exactKeys(file, ["name", "sha256", "sidecarSha256"], "campaign artifact");
+      if (typeof file.name !== "string" || files.has(file.name)) {
+        fail("campaign manifest repeats or omits an artifact name");
+      }
+      digest(file.sha256, "campaign artifact seal");
+      digest(file.sidecarSha256, "campaign artifact sidecar seal");
+      files.set(file.name, file);
+    }
+    for (const expected of expectedFiles) {
+      const actual = files.get(expected.name);
+      if (!actual || actual.sha256 !== expected.sha256
+        || actual.sidecarSha256 !== expected.sidecarSha256) {
+        fail("campaign artifact bytes or sidecar differ from the manifest");
+      }
+    }
+    receipts.push(receipt);
+  }
+  const actualEntries = (await readdir(directory)).sort();
+  const expectedEntries = [
+    "campaign.json", "campaign.json.sha256", ...seen,
+    ...(version === 2 ? ["safety-policy.json", "resume-identity.json", "resume-identity.json.sha256"] : []),
+  ].sort();
+  if (canonicalJson(actualEntries) !== canonicalJson(expectedEntries)) {
+    fail("campaign directory contains missing or unexpected entries");
+  }
+  if (version === 2 && manifest.hostStateVaried !== campaignHostStateVaried(receipts)) {
+    fail("campaign manifest host-state variation flag does not recompute");
+  }
+  if (manifest.qualityGatePassed !== campaignQualityGatePassed(receipts)) {
+    fail("campaign manifest qualityGatePassed does not recompute from its rows");
+  }
+  return { manifest, summary: validateCampaign(receipts, { scheduleVersion: version }), receipts };
+}
+
+/** Publish a historical v1 64-row set; new v2 publication belongs to the guarded producer. */
+export async function writeCampaignSet(directory, receiptSetDirectories) {
+  if (!Array.isArray(receiptSetDirectories) || receiptSetDirectories.length !== 64) {
+    fail("complete campaign publication requires exactly 64 receipt-set directories");
+  }
+  const receipts = await Promise.all(receiptSetDirectories.map((source) => readReceiptSet(source)));
+  validateCampaign(receipts, { scheduleVersion: 1 });
+  const coordinates = receipts.map((receipt) => campaignCoordinate(receipt, "-"));
+  if (new Set(coordinates).size !== 64) fail("complete campaign has duplicate coordinate directories");
+  const parent = path.dirname(directory);
+  const base = path.basename(directory);
+  const staging = path.join(parent, `.${base}.campaign-staging-${process.pid}-${randomUUID()}`);
+  try {
+    await mkdir(staging, { recursive: false });
+    const rows = [];
+    for (let index = 0; index < receipts.length; index += 1) {
+      await cp(receiptSetDirectories[index], path.join(staging, coordinates[index]), {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+      rows.push({
+        coordinate: coordinates[index],
+        receiptSha256: receipts[index].receiptSha256,
+        workerPid: receipts[index].memory.phaseSamples[0].pid,
+        files: await campaignFileBindings(path.join(staging, coordinates[index]), receipts[index], 1),
+      });
+    }
+    const manifest = {
+      schemaVersion: 1,
+      kind: "sc-20671-complete-coordinate-set",
+      coordinates: rows,
+    };
+    await Promise.all([
+      writeFile(path.join(staging, "campaign.json"), `${canonicalJson(manifest)}\n`, { flag: "wx" }),
+      writeFile(path.join(staging, "campaign.json.sha256"), `${sha256(`${canonicalJson(manifest)}\n`)}  campaign.json\n`, { flag: "wx" }),
+    ]);
+    await rename(staging, directory);
+  } catch (error) {
+    await rm(staging, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function cancellationSafe(work, cleanup, signal) {
+  try {
+    if (signal?.aborted) fail("cancelled before start");
+    return await work(signal);
+  } finally {
+    await cleanup();
+  }
+}
+
+function usage() {
+  console.error(
+    "usage: kv-baseline-harness.mjs record <input> <receipt-set-directory> | "
+      + "compare <dense-set> <compressed-set> <comparison> | "
+      + "campaign <producer-campaign-directory> <summary.json> --safety-policy <policy.json> "
+      + "--resume-identity <trusted-resume-dir/identity.json> | "
+      + "campaign-legacy <v1-campaign-directory> <summary.json>",
+  );
+}
+
+async function main() {
+  const [command, first, second, third, ...extra] = process.argv.slice(2);
+  if (command === "record" && first && second && !third && extra.length === 0) {
+    const input = JSON.parse(await readFile(first, "utf8"));
+    const receipt = await buildVerifiedReceipt(input);
+    await writeReceiptSet(second, receipt);
+    return;
+  }
+  if (command === "compare" && first && second && third && extra.length === 0) {
+    const dense = await readReceiptSet(first);
+    const compressed = await readReceiptSet(second);
+    const comparison = compareReceipts(dense, compressed);
+    await writeSealedText(humanPath(third), `${renderComparisonMarkdown(comparison)}\n`);
+    await writeSealedJson(third, comparison);
+    return;
+  }
+  if (command === "campaign" && first && second && third === "--safety-policy"
+    && extra.length === 3 && extra[1] === "--resume-identity") {
+    if (path.basename(extra[2]) !== "identity.json") {
+      fail("campaign requires the producer's sealed resume identity.json");
+    }
+    const safetyPolicy = JSON.parse(await readFile(extra[0], "utf8"));
+    const resumeIdentity = await readSealedJson(extra[2]);
+    const { summary } = await readCampaignSet(first, {
+      safetyPolicy,
+      resumeIdentity,
+    });
+    await writeSealedJson(second, summary);
+    return;
+  }
+  if (command === "campaign-legacy" && first && second && !third && extra.length === 0) {
+    const { summary } = await readCampaignSet(first, { allowLegacy: true });
+    await writeSealedJson(second, summary);
+    return;
+  }
+  usage();
+  process.exitCode = 2;
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) await main();

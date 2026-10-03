@@ -749,6 +749,50 @@ type VideoDecodeProfileResolver = fn(
     MemorySelection,
 ) -> Result<Option<ResolvedVideoDecodeProfile>, String>;
 
+/// Resolves the provider's conservative VAE **encode** working set for the request's conditioning
+/// (sc-20686, epic E8): `(lane, provider, mode, reference_count, geometry)`. `None` = the request
+/// encodes nothing (or the lane publishes no encode cost).
+type VideoEncodeProfileResolver =
+    fn(VideoLane, &str, &str, u32, VideoAdmissionGeometry) -> Option<VideoDecodeMemoryProfile>;
+
+fn no_video_encode_profile(
+    _lane: VideoLane,
+    _provider_id: &str,
+    _mode: &str,
+    _reference_count: u32,
+    _geometry: VideoAdmissionGeometry,
+) -> Option<VideoDecodeMemoryProfile> {
+    None
+}
+
+/// The pinned MLX bundle's conservative conditioning-encode working set (sc-20686, epic E8). Image
+/// or video conditioning is VAE-encoded before denoise; the encode and decode phases never overlap,
+/// so the floor takes the larger of the two compositions rather than their sum.
+fn packaged_video_encode_profile(
+    lane: VideoLane,
+    provider_id: &str,
+    mode: &str,
+    reference_count: u32,
+    geometry: VideoAdmissionGeometry,
+) -> Option<VideoDecodeMemoryProfile> {
+    #[cfg(target_os = "macos")]
+    if lane == VideoLane::Mlx {
+        return runtime_macos::conservative_video_encode_memory_profile(
+            provider_id,
+            mode,
+            geometry.width,
+            geometry.height,
+            geometry.estimate_frames().max(1),
+            reference_count,
+        );
+    }
+    let _ = (lane, provider_id, mode, reference_count, geometry);
+    None
+}
+
+/// Evidence revision a candidate carries when the conditioning encode is its binding phase.
+const ENCODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-conservative-encode-profile-v1";
+
 #[derive(Clone, Copy, Debug)]
 struct ResolvedVideoDecodeProfile {
     profile: VideoDecodeMemoryProfile,
@@ -764,18 +808,44 @@ fn no_video_decode_profile(
     Ok(None)
 }
 
+/// Evidence revision of a decode priced at the provider planner's budgeted decision.
+#[cfg(target_os = "macos")]
+const BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-budgeted-decode-profile-v1";
+
 /// Resolve the exact provider-owned decode working set for the candidate being graded.
 ///
 /// The selected MLX Wan rung-2 carrier has a narrower profile derived from the same provider planner
-/// that executes the request. Every other supported candidate uses the provider's conservative
-/// single-pass profile. A runtime bundle that exposes no profile returns `None`, preserving the
-/// historical weights-plus-headroom floor; provider validation errors fail closed instead of being
-/// rewritten as an unprofiled estimate.
+/// that executes the request. Every other supported candidate is priced at the decision the
+/// provider will actually make (sc-20686, epic E8): an MLX provider whose decode plans its tiling
+/// from the free memory it measures at decode time (the Wan family's `auto_tiling_budgeted`) is
+/// priced at that planner's decision for the worker's applied MLX limit -- an upper bound of that
+/// free memory, so never a smaller tile than the run picks -- instead of the single pass it would
+/// tile away from. Without an applied limit, or for a provider without a budget-planned decode, the
+/// provider's conservative single-pass profile. A runtime bundle that exposes no profile returns
+/// `None`, preserving the historical weights-plus-headroom floor; provider validation errors fail
+/// closed instead of being rewritten as an unprofiled estimate.
 fn packaged_video_decode_profile(
     lane: VideoLane,
     provider_id: &str,
     geometry: VideoAdmissionGeometry,
     selection: MemorySelection,
+) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
+    video_decode_profile_at_mlx_limit(
+        lane,
+        provider_id,
+        geometry,
+        selection,
+        crate::generator_cache::applied_mlx_memory_limit_bytes(),
+    )
+}
+
+/// [`packaged_video_decode_profile`] with the worker's applied MLX limit injected.
+fn video_decode_profile_at_mlx_limit(
+    lane: VideoLane,
+    provider_id: &str,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+    mlx_limit_bytes: Option<u64>,
 ) -> Result<Option<ResolvedVideoDecodeProfile>, String> {
     let frames = geometry.estimate_frames().max(1);
     #[cfg(target_os = "macos")]
@@ -811,6 +881,20 @@ fn packaged_video_decode_profile(
             // the rung selects. The unchanged generic floor remains the honest fallback.
             return Ok(None);
         }
+        if let Some((profile, _decision)) = mlx_limit_bytes.and_then(|limit| {
+            runtime_macos::budgeted_video_decode_memory_profile(
+                provider_id,
+                geometry.width,
+                geometry.height,
+                frames,
+                limit,
+            )
+        }) {
+            return Ok(Some(ResolvedVideoDecodeProfile {
+                profile,
+                evidence_revision: BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION,
+            }));
+        }
         return Ok(runtime_macos::conservative_video_decode_memory_profile(
             provider_id,
             geometry.width,
@@ -840,6 +924,7 @@ fn packaged_video_decode_profile(
     }
     #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
     let _ = (lane, provider_id, selection, frames);
+    let _ = mlx_limit_bytes;
     Ok(None)
 }
 
@@ -897,6 +982,8 @@ pub(crate) struct LadderVideoSelector<'a> {
     /// Backend bundle resolver for the provider's load-bearing decode working set. Tests default to
     /// `None` so focused curve/floor fixtures do not accidentally inherit a real provider profile.
     decode_profile: VideoDecodeProfileResolver,
+    /// Backend bundle resolver for the conditioning VAE-encode working set (sc-20686, epic E8).
+    encode_profile: VideoEncodeProfileResolver,
     /// Provider-resident bytes captured as the conservative committed delta around the exact cold
     /// load. Fitted/floor laws model the complete run peak, while the post-load budget is
     /// incremental, so every estimate candidate is reduced by this fixed attribution exactly once.
@@ -965,6 +1052,7 @@ impl<'a> LadderVideoSelector<'a> {
             curves,
             anchors: sceneworks_core::memory_anchor::packaged_memory_anchors(),
             decode_profile: no_video_decode_profile,
+            encode_profile: no_video_encode_profile,
             attributable_resident_bytes,
             accounting_error: None,
             profile_error: std::cell::RefCell::new(None),
@@ -1140,29 +1228,51 @@ fn profiled_floor_phase_peaks(
             return (generic, None);
         }
     };
-    let Some(resolved) = resolved else {
-        return (generic, None);
-    };
-    let Some(profiled) = resolved
-        .profile
-        .checked_composed_peak(weights, selector.contract.asset_facts.decoder_bytes)
-    else {
-        *selector.profile_error.borrow_mut() = Some(format!(
-            "{} decode profile cannot compose contract weights {} with decoder bytes {}; refusing inconsistent provider accounting",
-            selector.contract.provider_id,
-            weights,
-            selector.contract.asset_facts.decoder_bytes,
-        ));
-        return (generic, None);
-    };
-    let floor = generic.peak_bytes().max(profiled);
+    let decoder_bytes = selector.contract.asset_facts.decoder_bytes;
+    let mut floor = generic.peak_bytes();
+    let mut revision = None;
+    if let Some(resolved) = resolved {
+        let Some(profiled) = resolved
+            .profile
+            .checked_composed_peak(weights, decoder_bytes)
+        else {
+            *selector.profile_error.borrow_mut() = Some(format!(
+                "{} decode profile cannot compose contract weights {} with decoder bytes {}; refusing inconsistent provider accounting",
+                selector.contract.provider_id, weights, decoder_bytes,
+            ));
+            return (generic, None);
+        };
+        floor = floor.max(profiled);
+        revision = Some(resolved.evidence_revision);
+    }
+    // sc-20686 (epic E8): the conditioning encode is its own phase. It never overlaps the decode, so
+    // it raises the floor only where it is the larger composition.
+    if let Some(encode) = (selector.encode_profile)(
+        selector.identity.lane,
+        &selector.contract.provider_id,
+        selector.identity.mode,
+        selector.identity.reference_count,
+        geometry,
+    ) {
+        let Some(encoded) = encode.checked_composed_peak(weights, decoder_bytes) else {
+            *selector.profile_error.borrow_mut() = Some(format!(
+                "{} encode profile cannot compose contract weights {} with decoder bytes {}; refusing inconsistent provider accounting",
+                selector.contract.provider_id, weights, decoder_bytes,
+            ));
+            return (generic, None);
+        };
+        if encoded > floor {
+            floor = encoded;
+            revision = Some(ENCODE_PROFILE_EVIDENCE_REVISION);
+        }
+    }
     (
         PhasePeaks {
             conditioning_bytes: floor,
             denoise_bytes: floor,
             decode_bytes: floor,
         },
-        Some(resolved.evidence_revision),
+        revision,
     )
 }
 
@@ -1762,6 +1872,7 @@ pub(crate) fn admit_video_generation(
         request,
         sceneworks_core::video_memory_curves::packaged_video_memory_curves(),
         packaged_video_decode_profile,
+        packaged_video_encode_profile,
         true,
     )
 }
@@ -2054,6 +2165,7 @@ fn admit_video_generation_with_curves(
         request,
         curves,
         no_video_decode_profile,
+        no_video_encode_profile,
         false,
     )
 }
@@ -2063,6 +2175,7 @@ fn admit_video_generation_with_curves_and_profiles(
     request: VideoAdmissionInputs<'_>,
     curves: Option<&VideoMemoryCurveBundle>,
     decode_profile: VideoDecodeProfileResolver,
+    encode_profile: VideoEncodeProfileResolver,
     require_request_evidence: bool,
 ) -> VideoAdmissionOutcome {
     if request.reference_shape.trim().is_empty()
@@ -2158,6 +2271,7 @@ fn admit_video_generation_with_curves_and_profiles(
         curves,
         decode_profile,
     );
+    selector.encode_profile = encode_profile;
     let verdict = sceneworks_core::video_request::video_admission(
         request.model_id,
         request.lane,

@@ -1452,6 +1452,7 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
         inputs(241, budget(host_gb), 18 * GIB),
         None,
         tiered_decode_profile,
+        no_video_encode_profile,
         false,
     );
     let memory = outcome
@@ -1472,6 +1473,64 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
     assert!(outcome.refusal.is_none());
 }
 
+/// A 40 GiB conditioning-encode working set for image/video-conditioned requests only.
+fn conditioning_encode_profile(
+    _lane: VideoLane,
+    _provider_id: &str,
+    mode: &str,
+    reference_count: u32,
+    _geometry: VideoAdmissionGeometry,
+) -> Option<VideoDecodeMemoryProfile> {
+    (mode != "text_to_video" && reference_count > 0)
+        .then(|| VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile"))
+}
+
+fn image_conditioned<'a>(mut request: VideoAdmissionInputs<'a>) -> VideoAdmissionInputs<'a> {
+    request.mode = "image_to_video";
+    request.reference_count = 1;
+    request.reference_shape = "image";
+    request
+}
+
+/// sc-20686 (epic E8): an image-conditioned request is admitted only with its VAE-encode working
+/// set. The 20 GiB weights + 18 GiB generic floor (38 GiB) fits this host; weights + the 40 GiB
+/// encode (60 GiB) does not, so the conditioned request is refused while the same T2V request, which
+/// encodes nothing, is admitted.
+#[test]
+fn an_image_conditioned_request_is_admitted_with_its_encode_working_set() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
+    let host_gb = mlx_widened_gb(38, 0.5);
+    let admit = |request| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            None,
+            no_video_decode_profile,
+            conditioning_encode_profile,
+            false,
+        )
+    };
+    let text = admit(inputs(241, budget(host_gb), 18 * GIB));
+    assert!(text.refusal.is_none(), "{:?}", text.refusal);
+    let image = admit(image_conditioned(inputs(241, budget(host_gb), 18 * GIB)));
+    let refusal = image
+        .refusal
+        .expect("the conditioning encode must be priced into admission");
+    let widened = format!("needs about {:.1} GB", mlx_widened_floor_gb(60, 40, 0.0));
+    assert!(refusal.contains(&widened), "{refusal}");
+
+    // On a host that fits it, the encode is the binding phase and carries its own revision.
+    let roomy = admit(image_conditioned(inputs(
+        241,
+        budget(mlx_widened_floor_gb(60, 40, 0.5)),
+        18 * GIB,
+    )));
+    assert!(roomy.refusal.is_none(), "{:?}", roomy.refusal);
+    let context = roomy.context.expect("contract-backed admission");
+    assert_eq!(context.predicted_peak_bytes, 60 * GIB);
+    assert_eq!(context.evidence_revision, ENCODE_PROFILE_EVIDENCE_REVISION);
+}
+
 #[test]
 fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
     let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
@@ -1483,6 +1542,7 @@ fn provider_profile_refusal_is_not_suppressed_by_the_smaller_generic_floor() {
         inputs(241, budget(39.0), 18 * GIB),
         None,
         tiered_decode_profile,
+        no_video_encode_profile,
         false,
     );
     let refusal = outcome
@@ -1536,6 +1596,7 @@ fn provider_profile_composition_and_warm_residency_are_each_accounted_once() {
         request,
         None,
         decoder_substitution_profile,
+        no_video_encode_profile,
         false,
     );
     let context = outcome.context.expect("the 6 GiB incremental peak fits");
@@ -1604,6 +1665,98 @@ fn packaged_mlx_wan_profiles_expose_conservative_and_selected_sources() {
     assert!(
         selected.profile.working_set_bytes() <= resident.profile.working_set_bytes(),
         "the selected bounded carrier must not exceed the conservative single-pass profile"
+    );
+}
+
+/// sc-20686 (E8): a candidate the provider decodes with its budget-planned automatic tiling is
+/// priced at the planner's decision for the worker's applied MLX limit, not the single pass it would
+/// tile away from; without an applied limit it keeps the conservative single pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn mlx_wan_decode_is_priced_at_the_planner_decision_for_the_applied_limit() {
+    let geometry = VideoAdmissionGeometry {
+        width: 768,
+        height: 512,
+        frames: 33,
+        decode_pass_frames: 33,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    let resident = MemorySelection {
+        strategy: MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: tier(),
+    };
+    let profile = |limit| {
+        video_decode_profile_at_mlx_limit(
+            VideoLane::Mlx,
+            "wan2_2_t2v_14b",
+            geometry,
+            resident,
+            limit,
+        )
+        .expect("profile lookup succeeds")
+        .expect("MLX Wan publishes a decode profile")
+    };
+    let conservative = profile(None);
+    assert_eq!(
+        conservative.evidence_revision,
+        "video-provider-conservative-decode-profile-v1"
+    );
+    let single_pass = conservative.profile.working_set_bytes();
+    // A 72 GiB applied limit leaves the z16 planner a ~61 GiB safe budget: it tiles, and the
+    // admission prices that tile -- exactly the provider's own budgeted profile.
+    let limit = 72 * GIB;
+    let budgeted = profile(Some(limit));
+    assert_eq!(
+        budgeted.evidence_revision,
+        "video-provider-budgeted-decode-profile-v1"
+    );
+    let (expected, decision) =
+        runtime_macos::budgeted_video_decode_memory_profile("wan2_2_t2v_14b", 768, 512, 33, limit)
+            .expect("Wan plans its decode from a budget");
+    assert_eq!(decision, "tiled");
+    assert_eq!(
+        budgeted.profile.working_set_bytes(),
+        expected.working_set_bytes()
+    );
+    assert!(budgeted.profile.working_set_bytes() < single_pass);
+    // A limit the single pass fits prices the single pass; the selected carrier is untouched.
+    assert_eq!(
+        profile(Some(512 * GIB)).profile.working_set_bytes(),
+        single_pass
+    );
+    // The selected z48 carrier is checked against this machine's live safe budget, so it uses the
+    // small geometry every host fits (as the packaged-profiles test does); the 768x512x33 carrier
+    // needs ~21 GB even at the smallest tile and fails closed on a small CI runner.
+    let small = VideoAdmissionGeometry {
+        width: 480,
+        height: 480,
+        frames: 1,
+        decode_pass_frames: 1,
+        ..geometry
+    };
+    let selected = video_decode_profile_at_mlx_limit(
+        VideoLane::Mlx,
+        "wan2_2_ti2v_5b",
+        small,
+        MemorySelection {
+            strategy: MemoryStrategy::BoundedDecode,
+            parameters: gen_core::MemoryStrategyParameters {
+                decode_tile_edge: Some(448),
+                decode_overlap: Some(64),
+                ..Default::default()
+            },
+            tier: tier(),
+        },
+        Some(limit),
+    )
+    .expect("selected profile lookup succeeds")
+    .expect("MLX Wan publishes the exact bounded-decode carrier profile");
+    assert_eq!(
+        selected.evidence_revision,
+        "video-provider-selected-decode-profile-v1"
     );
 }
 
@@ -1699,6 +1852,7 @@ fn request_scoped_selection_refuses_crossed_identity_and_out_of_envelope_evidenc
             request,
             Some(&curves),
             no_video_decode_profile,
+            no_video_encode_profile,
             true,
         )
     };
