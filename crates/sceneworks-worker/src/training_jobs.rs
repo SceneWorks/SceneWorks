@@ -3908,8 +3908,8 @@ mod tests {
             .ancestors()
             .nth(4)
             .expect("inference checkout root");
-        let snapshot =
-            checkout.join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
+        let snapshot = checkout
+            .join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
         assert!(
             snapshot.join("transformer").join("config.json").is_file(),
             "pinned Qwen-Image 2.1 tiny snapshot missing at {}",

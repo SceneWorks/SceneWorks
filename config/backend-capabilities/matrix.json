@@ -15,17 +15,17 @@
     "apiGeneration": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4",
     "apiValidation": "9059ba74f7e500e457a8e4d5854f63d10207a8f5d8c480fbaf4dfe0b5f9933ee",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "c7c7b72a067e59bfaeca3699c88bd73475d82b77231fc7a09e5ce293f467efb9",
-    "descriptorCandleFacts": "0a595c7420af68c029bfd60888838224e5c9e4e367706e35878fdef3be3bd3d0",
-    "descriptorCandleRuntime": "c34ae0e2c52d6302c0a7f5d04c20e49475439c8ac8594c03fa4d7ed53d72488a",
-    "descriptorMlxFacts": "b2a0033f7427c6e89b697410d623f4a53b137703fdbeee896431139382ad2deb",
-    "descriptorMlxRuntime": "197f7346873849461bd9fdb5875e998b229df95a2a8baa632cd673015ed18f91",
-    "descriptorPreviewFacts": "d7195a5005fef9ff583da7db55ddb6da497bac8d5b96de93d04df2eb837977b1",
+    "descriptorAudioFacts": "70808d26f403e987820d699d16178ec764621e6627fede8374b4acb0586b3860",
+    "descriptorCandleFacts": "c64db7cc36053c46241063a32d4a3d0328c313404ba7f82fa1ef6caa030c5346",
+    "descriptorCandleRuntime": "093232cfe8a7b894f7dff91569b9a5625228251e8121972e550a42a87ef64860",
+    "descriptorMlxFacts": "6d491c537f423d0fee25a301dca992156c35906308837d7c8e66866ad724ea0d",
+    "descriptorMlxRuntime": "1d95154afac6d55e4b64eaf6a2b7b5070f16e32cd0f583191ced02d4ef151d8e",
+    "descriptorPreviewFacts": "7c85cbaafe33fb58f29f2c07e99b2288763768fbc26dc5c767e0c121f058672f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "1f0f2e3a7ad383c4cd08ac3df1ef42dc1623bc610ac3b5416fa42cd9aac130c0",
+    "manifest": "beb698b6084bf7a189274b55cbd1b91a37e40f96d2dca03b10534e7fde72ac20",
     "modelImportDefaults": "9156c68c4ffa7571772fa43bbdf1ee1e5e8a27c665e1dc1cdff4287bdbaedda1",
     "routerCandle": "2ed1559b475505e761b382c8ce2e7589d815ea3009a4f4ddfb914f46653ab590",
-    "routerCatalog": "5b76adc4fabb60c0458d23dd13a542a0b634a562245eb8559dc61d91dd2221c8",
+    "routerCatalog": "3dd7b1b9ec220a0ee1c0a8fc0c7c05fc5c89741974b7f8b04a66e929afb003f7",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
     "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
     "scheduler": "e1ef6a89b60ab1fb7645cc99c7f29196d092b203cdf9ffaadc11ae9e5a1e81aa",
@@ -46,7 +46,7 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "2947298a3d2d63327ba981f180500c4cbce64a3077640813b28df33cbc4d54db",
     "workerDispatch": "9df9a88168d4e57db4495452ed6fc30fb951f8315bb8727fb268f84f767795f6",
-    "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
+    "workerEngineTable": "4efdfc8365e871db9c6ae436fe6aa9ac66d22f7517b1da39ed04f81d3c8fcccb",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "4c6abf0e436ec63c44040575b2ec2d41ece2fcae52fa0e6e260e95bec60935d8",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "6e79c427eb0b118e936bdc7b3d0f788b1bb3d2e9cb6b84ea1b78798e4d92ae18",
+    "workerTrainingDispatch": "ef1b1a831b8c1f1699bed557c2732232a275a47183a326fdb6ca8ae2ee7bc82d",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -4240,13 +4240,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -7866,8 +7866,8 @@
       "networkType": "lokr",
       "support": {
         "capability": "train",
-        "mlx": false,
-        "candle": false
+        "mlx": true,
+        "candle": true
       }
     },
     {
@@ -7877,8 +7877,8 @@
       "networkType": "lora",
       "support": {
         "capability": "train",
-        "mlx": false,
-        "candle": false
+        "mlx": true,
+        "candle": true
       }
     },
     {

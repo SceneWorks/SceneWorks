@@ -1011,7 +1011,6 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
     Ok(facts)
 }
 
-
 /// The product-to-runtime trainer identity contract. Capability flags alone cannot distinguish
 /// architecture-compatible-looking trainers from the exact model version a product target names:
 /// LTX-2.3 and LTX-2.5 both advertise LoRA, but accepting either for either target trains the wrong
@@ -4029,7 +4028,10 @@ mod tests {
         validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
         for facts in [&mlx, &candle] {
             assert_eq!(
-                facts.trainer_mappings.get("qwen_image_2_1_lora").map(String::as_str),
+                facts
+                    .trainer_mappings
+                    .get("qwen_image_2_1_lora")
+                    .map(String::as_str),
                 Some("qwen_image_2_1"),
                 "{} runtime maps the 2.1 target onto its trainer",
                 facts.snapshot.backend
@@ -4049,7 +4051,10 @@ mod tests {
             .iter()
             .filter(|row| row.target == "qwen_image_2_1_lora")
             .collect();
-        assert!(!target_rows.is_empty(), "qwen_image_2_1_lora has matrix rows");
+        assert!(
+            !target_rows.is_empty(),
+            "qwen_image_2_1_lora has matrix rows"
+        );
         for row in target_rows {
             assert_eq!(
                 (row.support.mlx, row.support.candle),
