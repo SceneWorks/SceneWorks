@@ -774,7 +774,16 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
+    Last moved: sc-24163, epic 24107's terminal pin bump (inference 457f1a37), where both 2.1
+    providers apply LoRA/LoKr. The five hand-authored `qwen_image_2_1` contract rows gain the
+    `lora` overlay and load profile, and the worker's memory-route rows move PLAIN -> PLAIN_LORA
+    with the re-dump. Three `qwen_image_2_1` lanes move and nothing else — the `lora` half of each
+    declared lane becomes implemented, 9 -> 18 of 18 (3 tiers x 3 catalog modes x {none, lora}):
+    * `candle:staged_residency` and `candle:bounded_decode` [9,0,9] -> [18,0,0].
+    * `mlx:bounded_decode` [9,0,9] -> [18,0,0]. `mlx:staged_residency` was already 18 (the fit
+      gate's staged sweep) and `resident` already 18 on both lanes.
+
+    Previously: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
     request-owned `memoryStrategyContract` on BOTH lanes whose `modes` cover the reference faces
     (`edit_image` / `image_to_image`, plus `character_image` which the catalog axis does not
     carry) as well as `text_to_image`, all over `none`. Three `qwen_image_2_1` lanes move and

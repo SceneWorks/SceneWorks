@@ -11,7 +11,7 @@
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
 //! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
-//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`)
+//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`/`qwen_image_2_1_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
 //! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
@@ -913,6 +913,9 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
+                // SceneWorks' training plan carries no edit-pair references yet: every item is a
+                // plain text-to-image sample (sc-24163 pin contract).
+                reference_image_paths: Vec::new(),
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -3860,6 +3863,133 @@ mod tests {
         }
     }
 
+    /// The pinned inference checkout's Qwen-Image 2.1 tiny snapshot (configs, tokenizer and
+    /// header-sized synthetic safetensors — no real weights). Located through `cargo metadata`
+    /// because a git dependency's source directory is not exposed at compile time; the fixture
+    /// lives in the same inference checkout as the pinned `sceneworks-gen-core` crate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn pinned_qwen_image_2_1_tiny_snapshot() -> PathBuf {
+        // Filtered to this build's own target (exported by build.rs) so cargo needs only the
+        // packages this build already fetched (an unfiltered resolve would want the macOS-only
+        // graph's sources too).
+        const HOST: &str = env!("SW_HOST_TARGET");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_owned());
+        let output = std::process::Command::new(cargo)
+            .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+            .args(["--filter-platform", HOST])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+        let gen_core_manifest = metadata["packages"]
+            .as_array()
+            .expect("metadata packages")
+            .iter()
+            .find(|package| {
+                package["name"] == "sceneworks-gen-core"
+                    && package["source"]
+                        .as_str()
+                        .is_some_and(|source| source.starts_with("git+"))
+            })
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("the pinned sceneworks-gen-core git package");
+        // <checkout>/crates/contracts/gen-core/Cargo.toml -> <checkout>
+        let checkout = Path::new(gen_core_manifest)
+            .ancestors()
+            .nth(4)
+            .expect("inference checkout root");
+        let snapshot = checkout
+            .join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
+        assert!(
+            snapshot.join("transformer").join("config.json").is_file(),
+            "pinned Qwen-Image 2.1 tiny snapshot missing at {}",
+            snapshot.display()
+        );
+        snapshot
+    }
+
+    /// sc-24163: SceneWorks' advanced map for `qwen_image_2_1_lora` — the target's own defaults and
+    /// every shipped preset, for each advertised network type — is accepted END TO END by the
+    /// pinned Candle 2.1 trainer: the plan goes through the real `map_training_config` +
+    /// `finalize_training_config` (via the shared dry/real preflight, which also runs the
+    /// registry-descriptor floors), and the resulting request then passes the engine trainer's
+    /// own `validate`, loaded through the engine registry from a weights-free tiny snapshot.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_builtin_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("qwen_image_2_1_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 target ships presets");
+        let network_types: Vec<String> = target.limits["networkTypes"]
+            .as_array()
+            .expect("networkTypes")
+            .iter()
+            .map(|value| value.as_str().expect("network type").to_owned())
+            .collect();
+        assert_eq!(network_types, ["lora", "lokr"]);
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in &network_types {
+                let mut serialized = plan_json(
+                    dir.path(),
+                    &target.kernel,
+                    &target.base_model,
+                    network_type,
+                    &[&image],
+                );
+                serialized["target"]["targetId"] = json!(target.id);
+                serialized["target"]["family"] = json!(target.family);
+                let mut config = serde_json::to_value(config).expect("config serializes");
+                config["advanced"]["networkType"] = json!(network_type);
+                serialized["config"] = config;
+                let plan = parse(serialized);
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * network_types.len());
+    }
+
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn shared_dry_and_real_preflight_rejects_forged_new_candle_configs_before_load() {
@@ -4969,6 +5099,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5082,6 +5213,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5198,6 +5330,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5352,6 +5485,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5536,6 +5670,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5776,6 +5911,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir,

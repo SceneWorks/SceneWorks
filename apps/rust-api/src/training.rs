@@ -2743,7 +2743,8 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
 
 /// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only
 /// candle workers run training, so a kernel outside `CANDLE_ROUTED_TRAINING_KERNELS` (none of the
-/// shipped targets since sc-24160 gave Qwen Image 2.1 its candle lane) would queue forever. `macos_host` is a parameter so both sides are testable.
+/// shipped targets since sc-24160 gave Qwen Image 2.1 its candle lane) would queue forever.
+/// `macos_host` is a parameter so both sides are testable.
 pub(crate) fn training_host_unavailable_message(
     target: &TrainingTarget,
     macos_host: bool,
