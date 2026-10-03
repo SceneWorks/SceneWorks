@@ -1,0 +1,89 @@
+//! SCRATCH (sc-24163 evidence session, never committed): one cell of the CUDA LoRA-overlay memory
+//! campaign. Loads `qwen_image_2_1` at a tier with an optional adapter stack, renders once, and
+//! prints the driver's live high-water (`CU_MEMPOOL_ATTR_USED_MEM_HIGH`), the pool's reserved
+//! high-water, and the provider's own predicted overlay (`memory_strategy::adapter_overlay`).
+//! Env: TIER=bf16|q8|q4, MODE=t2i|edit, ADAPTERS="path=scale;path=scale", SIZE=768, STEPS=8, LABEL.
+use std::path::PathBuf;
+use std::time::Instant;
+
+use candle_gen::gen_core::{
+    AdapterKind, AdapterSpec, Conditioning, GenerationOutput, GenerationRequest, Image, LoadSpec,
+    Quant, WeightsSource,
+};
+
+fn png(path: &str) -> Image {
+    let img = image::open(path).expect("reference png").to_rgb8();
+    Image { width: img.width(), height: img.height(), pixels: img.into_raw() }
+}
+
+fn main() {
+    let tier = std::env::var("TIER").unwrap_or_else(|_| "bf16".into());
+    let mode = std::env::var("MODE").unwrap_or_else(|_| "t2i".into());
+    let size: u32 = std::env::var("SIZE").ok().map(|v| v.parse().unwrap()).unwrap_or(768);
+    let steps: u32 = std::env::var("STEPS").ok().map(|v| v.parse().unwrap()).unwrap_or(8);
+    let label = std::env::var("LABEL").unwrap_or_else(|_| format!("{mode}-{tier}"));
+    let dense = PathBuf::from(std::env::var("QWEN21_SNAPSHOT").unwrap());
+    let tiers = PathBuf::from(std::env::var("QWEN21_TIER_SNAPSHOT").unwrap());
+    let (root, quant, tier_enum) = match tier.as_str() {
+        "bf16" => (dense, None, candle_gen_qwen_image_2_1::Tier::Bf16),
+        "q8" => (tiers.join("q8"), Some(Quant::Q8), candle_gen_qwen_image_2_1::Tier::Q8),
+        "q4" => (tiers.join("q4"), Some(Quant::Q4), candle_gen_qwen_image_2_1::Tier::Q4),
+        other => panic!("tier {other}"),
+    };
+    let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()));
+    if let Some(q) = quant {
+        spec = spec.with_quant(q);
+    }
+    for entry in std::env::var("ADAPTERS").unwrap_or_default().split(';').filter(|s| !s.is_empty()) {
+        // path=scale=lora|lokr
+        let (rest, kind) = entry.rsplit_once('=').expect("path=scale=kind");
+        let (path, scale) = rest.rsplit_once('=').expect("path=scale=kind");
+        let kind = if kind == "lokr" { AdapterKind::Lokr } else { AdapterKind::Lora };
+        spec.adapters.push(AdapterSpec::new(PathBuf::from(path), scale.parse().unwrap(), kind));
+    }
+    let predicted = candle_gen_qwen_image_2_1::memory_strategy::adapter_overlay(&spec, &root, tier_enum)
+        .expect("overlay prices");
+    let pool = candle_gen::cuda_mempool::MemPool::device_default(0).expect("cuda pool");
+    let started = Instant::now();
+    let registry = candle_gen_qwen_image_2_1::provider_registry().unwrap();
+    let generator = registry.load("qwen_image_2_1", &spec).expect("load");
+    let load_s = started.elapsed().as_secs_f64();
+    let after_load_used = pool.used().unwrap_or(0);
+    let prompt = if mode == "edit" {
+        "zxq invert: invert the colours of image 1 and posterize them, using the key in image 2"
+    } else {
+        "zxq style, a lighthouse made of concentric teal and orange rings on yellow"
+    };
+    let conditioning = if mode == "edit" {
+        vec![Conditioning::MultiReference {
+            images: vec![png(r"E:\sc24163\data\edit\eval_src.png"), png(r"E:\sc24163\data\edit\key.png")],
+        }]
+    } else {
+        vec![]
+    };
+    let req = GenerationRequest {
+        prompt: prompt.to_owned(),
+        width: size,
+        height: size,
+        steps: Some(steps),
+        seed: Some(24163),
+        conditioning,
+        ..Default::default()
+    };
+    let render = Instant::now();
+    let out = generator.generate(&req, &mut |_| {}).expect("render");
+    let render_s = render.elapsed().as_secs_f64();
+    let GenerationOutput::Images(images) = out else { panic!("images") };
+    let img = &images[0];
+    let out_dir = PathBuf::from(r"E:\sc24163\renders\direct");
+    std::fs::create_dir_all(&out_dir).unwrap();
+    image::save_buffer(out_dir.join(format!("{label}.png")), &img.pixels, img.width, img.height, image::ColorType::Rgb8).unwrap();
+    println!(
+        "{{\"label\":\"{label}\",\"tier\":\"{tier}\",\"mode\":\"{mode}\",\"size\":{size},\"steps\":{steps},\"adapters\":{},\"predictedOverlayBytes\":{},\"predictedResidualBytes\":{},\"usedAfterLoadBytes\":{after_load_used},\"usedHighBytes\":{},\"reservedHighBytes\":{},\"loadSeconds\":{load_s:.1},\"renderSeconds\":{render_s:.1}}}",
+        spec.adapters.len(),
+        predicted.total(),
+        predicted.residual_bytes,
+        pool.used_high().unwrap_or(0),
+        pool.reserved_high().unwrap_or(0),
+    );
+}

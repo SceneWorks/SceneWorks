@@ -1,0 +1,53 @@
+import random, os
+from PIL import Image, ImageDraw, ImageOps
+
+out = r"E:\sc24163\data"
+
+
+def scene(seed, size=768):
+    r = random.Random(seed)
+    img = Image.new("RGB", (size, size), tuple(r.randint(60, 200) for _ in range(3)))
+    d = ImageDraw.Draw(img)
+    for _ in range(r.randint(6, 12)):
+        x0, y0 = r.randint(0, size - 100), r.randint(0, size - 100)
+        x1, y1 = x0 + r.randint(80, 360), y0 + r.randint(80, 360)
+        col = tuple(r.randint(0, 255) for _ in range(3))
+        if r.random() < 0.5:
+            d.ellipse([x0, y0, x1, y1], fill=col, outline=(0, 0, 0), width=6)
+        else:
+            d.rectangle([x0, y0, x1, y1], fill=col, outline=(0, 0, 0), width=6)
+    return img
+
+
+def style(seed, size=768):
+    # The T2I "zxq" style: yellow ground, thick concentric teal/orange rings, black outlines.
+    r = random.Random(seed)
+    img = Image.new("RGB", (size, size), (250, 220, 30))
+    d = ImageDraw.Draw(img)
+    for _ in range(r.randint(3, 6)):
+        cx, cy = r.randint(100, size - 100), r.randint(100, size - 100)
+        rad = r.randint(80, 260)
+        for k in range(rad, 10, -36):
+            col = (0, 150, 160) if (k // 36) % 2 == 0 else (255, 110, 20)
+            d.ellipse([cx - k, cy - k, cx + k, cy + k], fill=col, outline=(0, 0, 0), width=8)
+    return img
+
+
+subjects = ["a cat", "a house", "a tree", "a car", "a mountain", "a coffee cup", "a bicycle", "a robot"]
+os.makedirs(os.path.join(out, "t2i"), exist_ok=True)
+for i, s in enumerate(subjects):
+    style(1000 + i).save(os.path.join(out, "t2i", f"style_{i}.png"))
+    with open(os.path.join(out, "t2i", f"style_{i}.txt"), "w") as f:
+        f.write(f"zxq style, {s} made of concentric teal and orange rings on yellow")
+os.makedirs(os.path.join(out, "edit"), exist_ok=True)
+key = Image.new("RGB", (768, 768), (20, 20, 20))
+ImageDraw.Draw(key).rectangle([192, 192, 576, 576], fill=(230, 230, 230))
+key.save(os.path.join(out, "edit", "key.png"))
+for i in range(6):
+    src = scene(2000 + i)
+    src.save(os.path.join(out, "edit", f"src_{i}.png"))
+    ImageOps.posterize(ImageOps.invert(src), 2).save(os.path.join(out, "edit", f"tgt_{i}.png"))
+# Held-out evaluation inputs for the A2 edits.
+scene(9001).save(os.path.join(out, "edit", "eval_src.png"))
+scene(9002).save(os.path.join(out, "edit", "eval_src2.png"))
+print("ok")

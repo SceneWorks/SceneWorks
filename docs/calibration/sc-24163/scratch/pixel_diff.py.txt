@@ -1,0 +1,22 @@
+"""Per-pair pixel-difference metrics: python diff.py a.png b.png -> JSON line."""
+import json, sys
+import numpy as np
+from PIL import Image
+
+a = np.asarray(Image.open(sys.argv[1]).convert("RGB"), dtype=np.float64)
+b = np.asarray(Image.open(sys.argv[2]).convert("RGB"), dtype=np.float64)
+if a.shape != b.shape:
+    print(json.dumps({"a": sys.argv[1], "b": sys.argv[2], "error": f"shape {a.shape} != {b.shape}"}))
+    sys.exit(0)
+d = np.abs(a - b)
+mse = float(np.mean((a - b) ** 2))
+psnr = float("inf") if mse == 0 else float(10 * np.log10(255.0 ** 2 / mse))
+print(json.dumps({
+    "a": sys.argv[1].split("\\")[-1].split("/")[-1],
+    "b": sys.argv[2].split("\\")[-1].split("/")[-1],
+    "meanAbsDiff": round(float(d.mean()), 3),
+    "maxAbsDiff": int(d.max()),
+    "fracPixelsDiffGt16": round(float((d.max(axis=2) > 16).mean()), 4),
+    "psnrDb": round(psnr, 2) if psnr != float("inf") else "inf",
+    "identical": bool(mse == 0),
+}))
