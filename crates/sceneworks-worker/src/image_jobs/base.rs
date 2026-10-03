@@ -1008,7 +1008,12 @@ impl CandleImageRoute {
             | CandleImageRoute::KreaImportedControl
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
-            CandleImageRoute::CandleTxt2Img => {
+            // sc-24163: the Qwen-Image 2.1 reference-edit route is the SAME generic registry stream
+            // as `CandleTxt2Img` (`generate_candle_stream`, which threads `resolve_adapters` into the
+            // LoadSpec whenever the model supports adapters), so it consumes the stack exactly when
+            // the plain arm does. Omitting it refused every LoRA/LoKr on a 2.1 edit (the CUDA
+            // real-weight evidence run caught it).
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::QwenImage21Edit => {
                 mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,
@@ -14566,6 +14571,30 @@ async fn consume_gen_events_with_disclosure(
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_label_tests {
     use super::*;
+
+    /// sc-24163: a LoRA/LoKr on a Qwen-Image 2.1 reference edit must pass the fail-closed route
+    /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.
+    #[test]
+    fn qwen_image_2_1_edit_route_admits_the_request_adapter_stack() {
+        let request = ImageRequest::from_payload(
+            json!({
+                "model": "qwen_image_2_1",
+                "mode": "edit_image",
+                "referenceAssetIds": ["asset_a", "asset_b"],
+                "loras": [{ "id": "edit_style", "weight": 1.0 }]
+            })
+            .as_object()
+            .unwrap(),
+        );
+        assert!(
+            CandleImageRoute::CandleTxt2Img.applies_request_loras(&request),
+            "precondition: 2.1 T2I consumes the adapter stack"
+        );
+        assert!(
+            CandleImageRoute::QwenImage21Edit.applies_request_loras(&request),
+            "the 2.1 edit route must consume the same stack instead of refusing it"
+        );
+    }
 
     #[test]
     fn krea_convrot_load_spec_preserves_adapters() {
