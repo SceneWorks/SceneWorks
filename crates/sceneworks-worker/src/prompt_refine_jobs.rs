@@ -1246,8 +1246,9 @@ pub(crate) async fn run_prompt_refine_job(
     };
     let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
     // sc-20682: the job's compressed-KV opt-in (its payload's `kvCompression`, else the worker's
-    // `SCENEWORKS_LLM_KV_COMPRESSION`, else off). The engine runs compressed only where its
-    // qualification table admits this model and context, and reports what it ran on.
+    // `SCENEWORKS_LLM_KV_COMPRESSION`, else off). The engine runs compressed only for a single
+    // sequence matching one of its two measured qualification rows (`crate::llm_kv_cache`), and
+    // reports what it ran on.
     let kv_compression = crate::llm_kv_cache::job_policy(payload)?;
     let temperature = task.temperature();
     let work_message = task.work_message();
@@ -1397,7 +1398,7 @@ pub(crate) async fn run_prompt_refine_job(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
-        move |refiner| -> WorkerResult<gen_core::core_llm::TextLlmOutput> {
+        move |refiner| -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> {
             emit_event(
                 "prompt_refine_load_start",
                 json!({ "jobId": job_id, "engine": engine_label }),
@@ -1557,9 +1558,7 @@ pub(crate) async fn run_prompt_refine_job(
                         }
                     }
                 };
-                refiner.generate(&request, &mut on_event).map_err(|error| {
-                    WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
-                })?
+                generate_refined(refiner, &request, &mut on_event, &job_id)?
             };
 
             Ok(output)
@@ -1595,7 +1594,7 @@ pub(crate) async fn run_prompt_refine_job(
     // Run the stream loop capturing its Result so any `?`-error path performs the explicit awaited
     // bounded-join teardown BEFORE returning, instead of drop-and-run (sc-8804, F-003). The loop
     // yields the raw model output on clean completion.
-    let loop_result: WorkerResult<gen_core::core_llm::TextLlmOutput> = async {
+    let loop_result: WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> = async {
         loop {
             tokio::select! {
                 // Generation finished (the shared cache thread replied). Disarm the guard before any
@@ -1659,21 +1658,15 @@ pub(crate) async fn run_prompt_refine_job(
         }
     }
     .await;
-    let output = match loop_result {
-        Ok(output) => output,
+    // sc-20682: what the KV cache asked for and ran on — the block the generation's `llm_kv_cache`
+    // event carried (under the engine lane), recorded on the result too.
+    let (output, kv_cache) = match loop_result {
+        Ok(generated) => generated,
         Err(error) => {
             guard.cancel_and_join().await;
             return Err(error);
         }
     };
-    // sc-20682: what the KV cache asked for and ran on, on the result and as telemetry (under the
-    // engine lane, like every LLM generation's `llm_kv_cache` event).
-    let kv_cache = crate::llm_kv_cache::record_kv_cache(
-        &job.id,
-        backend,
-        kv_compression,
-        output.kv_cache.as_ref(),
-    );
     // A JSON task isolates the object (the web parses + validates a caption; image_caption validates
     // here too, and the film plan is parsed strictly by the harness); the free-text rewrite cleans to
     // prose.
@@ -1926,6 +1919,33 @@ fn refine_text_request(
         kv_compression,
         ..Default::default()
     }
+}
+
+/// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever
+/// way it ends — completed, or refused, canceled or failed by the engine (sc-20682, sc-20688). A
+/// completed decode returns its output with the block its result carries: the event's own block.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn generate_refined(
+    refiner: &dyn gen_core::core_llm::TextLlm,
+    request: &gen_core::core_llm::TextLlmRequest,
+    on_event: &mut dyn FnMut(gen_core::core_llm::StreamEvent),
+    job_id: &str,
+) -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> {
+    let generation = refiner.generate(request, on_event);
+    let record = crate::llm_kv_cache::KvCacheRecord::of(
+        REFINE_BACKEND,
+        request.kv_compression,
+        &generation,
+        |output| output.kv_cache.as_ref(),
+    );
+    record.emit(job_id);
+    let output = generation.map_err(|error| {
+        WorkerError::Engine(format!("prompt-refine generation failed: {error}"))
+    })?;
+    Ok((output, record.block().clone()))
 }
 
 /// How the decode ended, beside the budget it ended against (sc-24029).
@@ -2386,6 +2406,33 @@ mod tests {
         assert_eq!(result["originalPrompt"], "a courier sets a parcel down");
         assert!(result["refinedPrompt"].as_str().unwrap().ends_with("only"));
         assert_eq!(result["executionIdentity"]["backend"], "mlx");
+    }
+
+    /// sc-20688: a refine decode the engine refuses still records its `llm_kv_cache` event, with
+    /// the job's requested policy, the outcome and the refusal, under the refine engine lane.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn a_refused_refine_generation_records_its_kv_cache_event() {
+        use crate::llm_kv_cache::test_support::{events_for, refusal, RefusingLlm};
+        let request = gen_core::core_llm::TextLlmRequest {
+            kv_compression: gen_core::core_llm::KvCompressionPolicy::Qualified,
+            ..Default::default()
+        };
+        let job_id = "prompt-refine-refused";
+        let error = generate_refined(&RefusingLlm, &request, &mut |_| {}, job_id).unwrap_err();
+        assert!(
+            matches!(&error, WorkerError::Engine(message) if message.contains("prompt-refine generation failed")),
+            "{error:?}"
+        );
+        let events = events_for(job_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["engine"], REFINE_BACKEND);
+        assert_eq!(events[0]["kvCache"]["policy"], "qualified");
+        assert_eq!(events[0]["kvCache"]["outcome"], "refused");
+        assert_eq!(events[0]["kvCache"]["error"], refusal().to_string());
     }
 
     /// sc-20682: both the success and the failure result carry the KV cache the generation asked

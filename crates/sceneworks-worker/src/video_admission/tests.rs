@@ -1473,16 +1473,49 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
     assert!(outcome.refusal.is_none());
 }
 
-/// A 40 GiB conditioning-encode working set for image/video-conditioned requests only.
+fn forty_gib_profile() -> VideoDecodeMemoryProfile {
+    VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile")
+}
+
+/// A 40 GiB calibrated conditioning-encode working set for image/video-conditioned requests only.
 fn conditioning_encode_profile(
     _lane: VideoLane,
-    _provider_id: &str,
+    provider_id: &str,
     mode: &str,
     reference_count: u32,
     _geometry: VideoAdmissionGeometry,
-) -> Option<VideoDecodeMemoryProfile> {
-    (mode != "text_to_video" && reference_count > 0)
-        .then(|| VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile"))
+) -> Result<VideoEncodeProfile, String> {
+    classify_video_encode_profile(
+        provider_id,
+        mode,
+        reference_count,
+        (mode != "text_to_video" && reference_count > 0).then(forty_gib_profile),
+        || None,
+    )
+}
+
+/// A provider that publishes no calibrated encode cost, whose conservative VAE profile is 40 GiB.
+fn uncalibrated_encode_profile(
+    _lane: VideoLane,
+    provider_id: &str,
+    mode: &str,
+    reference_count: u32,
+    _geometry: VideoAdmissionGeometry,
+) -> Result<VideoEncodeProfile, String> {
+    classify_video_encode_profile(provider_id, mode, reference_count, None, || {
+        Some(forty_gib_profile())
+    })
+}
+
+/// A provider that publishes neither a calibrated encode cost nor a conservative VAE profile.
+fn unprofiled_encode_profile(
+    _lane: VideoLane,
+    provider_id: &str,
+    mode: &str,
+    reference_count: u32,
+    _geometry: VideoAdmissionGeometry,
+) -> Result<VideoEncodeProfile, String> {
+    classify_video_encode_profile(provider_id, mode, reference_count, None, || None)
 }
 
 fn image_conditioned<'a>(mut request: VideoAdmissionInputs<'a>) -> VideoAdmissionInputs<'a> {
@@ -1529,6 +1562,191 @@ fn an_image_conditioned_request_is_admitted_with_its_encode_working_set() {
     let context = roomy.context.expect("contract-backed admission");
     assert_eq!(context.predicted_peak_bytes, 60 * GIB);
     assert_eq!(context.evidence_revision, ENCODE_PROFILE_EVIDENCE_REVISION);
+}
+
+/// sc-20688: "encodes nothing" and "encoder not calibrated" are different answers. A request that
+/// encodes nothing is nothing; one whose encode the provider calibrated is that profile; one whose
+/// encode is uncalibrated stands in the conservative profile, or fails closed without one.
+#[test]
+fn an_uncalibrated_encode_is_never_classified_as_encoding_nothing() {
+    let profile = forty_gib_profile();
+    let classify =
+        |mode, references, calibrated, conservative: Option<VideoDecodeMemoryProfile>| {
+            classify_video_encode_profile("ltx", mode, references, calibrated, || conservative)
+        };
+    assert_eq!(
+        classify("text_to_video", 0, None, Some(profile)),
+        Ok(VideoEncodeProfile::Nothing)
+    );
+    assert_eq!(
+        classify("image_to_video", 1, Some(profile), None),
+        Ok(VideoEncodeProfile::Calibrated(profile))
+    );
+    // A provider that encodes in text-to-video publishes its calibration, which wins.
+    assert_eq!(
+        classify("text_to_video", 0, Some(profile), None),
+        Ok(VideoEncodeProfile::Calibrated(profile))
+    );
+    for (mode, references) in [
+        ("image_to_video", 1),
+        ("video_to_video", 0),
+        ("text_to_video", 2),
+    ] {
+        assert_eq!(
+            classify(mode, references, None, Some(profile)),
+            Ok(VideoEncodeProfile::UncalibratedConservative(profile)),
+            "{mode} with {references} reference(s)"
+        );
+        let refused = classify(mode, references, None, None).unwrap_err();
+        assert!(refused.contains("encodes conditioning"), "{refused}");
+    }
+}
+
+/// sc-20688: an image-conditioned request on a provider with no calibrated encode cost (LTX on
+/// MLX) is priced at its conservative profile -- refused where that does not fit, admitted on the
+/// uncalibrated revision where it binds -- and fails closed when there is no profile at all. The
+/// same T2V request, which encodes nothing, is untouched.
+#[test]
+fn an_uncalibrated_conditioning_encode_is_priced_conservatively_or_refused() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
+    let host_gb = mlx_widened_gb(38, 0.5);
+    let admit = |request, encode: VideoEncodeProfileResolver| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            None,
+            no_video_decode_profile,
+            encode,
+            false,
+        )
+    };
+    for encode in [
+        uncalibrated_encode_profile as VideoEncodeProfileResolver,
+        unprofiled_encode_profile,
+    ] {
+        let text = admit(inputs(241, budget(host_gb), 18 * GIB), encode);
+        assert!(text.refusal.is_none(), "{:?}", text.refusal);
+    }
+    let image = admit(
+        image_conditioned(inputs(241, budget(host_gb), 18 * GIB)),
+        uncalibrated_encode_profile,
+    );
+    let refusal = image
+        .refusal
+        .expect("an uncalibrated conditioning encode must not be admitted free");
+    let widened = format!("needs about {:.1} GB", mlx_widened_floor_gb(60, 40, 0.0));
+    assert!(refusal.contains(&widened), "{refusal}");
+
+    let roomy = admit(
+        image_conditioned(inputs(
+            241,
+            budget(mlx_widened_floor_gb(60, 40, 0.5)),
+            18 * GIB,
+        )),
+        uncalibrated_encode_profile,
+    );
+    assert!(roomy.refusal.is_none(), "{:?}", roomy.refusal);
+    let context = roomy.context.expect("contract-backed admission");
+    assert_eq!(context.predicted_peak_bytes, 60 * GIB);
+    assert_eq!(
+        context.evidence_revision,
+        UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION
+    );
+
+    let unprofiled = admit(
+        image_conditioned(inputs(
+            241,
+            budget(mlx_widened_floor_gb(60, 40, 0.5)),
+            18 * GIB,
+        )),
+        unprofiled_encode_profile,
+    );
+    let refusal = unprofiled
+        .refusal
+        .expect("an unpriceable conditioning encode fails closed");
+    assert!(refusal.contains("encodes conditioning"), "{refusal}");
+    assert!(unprofiled.memory.is_none());
+    assert!(unprofiled.context.is_none());
+}
+
+/// sc-20688: the MLX Wan planner honours `WAN_VAE_BUDGET_GIB` before its free-memory probe, so a
+/// budgeted decode is priced at the larger of the applied limit and the free bytes whose safe
+/// budget is the override; an invalid override leaves the limit in charge, exactly as the planner
+/// ignores it.
+#[test]
+fn the_wan_decode_is_priced_at_the_larger_of_the_limit_and_the_budget_override() {
+    let limit = 72 * GIB;
+    assert_eq!(wan_decode_pricing_free_bytes(None, Some("100")), None);
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), None),
+        Some(limit)
+    );
+    for ignored in ["", "abc", "0", "-4", "NaN"] {
+        assert_eq!(
+            wan_decode_pricing_free_bytes(Some(limit), Some(ignored)),
+            Some(limit),
+            "{ignored:?}"
+        );
+    }
+    // A smaller override never lowers the price below the limit's plan.
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some("8")),
+        Some(limit)
+    );
+    // 85 GiB is the safe budget of 100 GiB free.
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some(" 85 ")),
+        Some(100 * GIB)
+    );
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some("inf")),
+        Some(u64::MAX)
+    );
+}
+
+/// sc-20688: with a `WAN_VAE_BUDGET_GIB` override above what the applied limit plans, admission
+/// prices the decode the planner makes at the override -- the single pass -- not the tile the
+/// limit alone would plan.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_operator_wan_budget_override_is_priced_at_its_own_decision() {
+    let geometry = VideoAdmissionGeometry {
+        width: 768,
+        height: 512,
+        frames: 33,
+        decode_pass_frames: 33,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    let resident = MemorySelection {
+        strategy: MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: tier(),
+    };
+    let limit = 72 * GIB;
+    let price = |budget_override| {
+        video_decode_profile_at_mlx_limit(
+            VideoLane::Mlx,
+            "wan2_2_t2v_14b",
+            geometry,
+            resident,
+            wan_decode_pricing_free_bytes(Some(limit), budget_override),
+        )
+        .expect("profile lookup succeeds")
+        .expect("MLX Wan publishes a decode profile")
+        .profile
+        .working_set_bytes()
+    };
+    let single_pass =
+        runtime_macos::conservative_video_decode_memory_profile("wan2_2_t2v_14b", 768, 512, 33)
+            .expect("conservative single pass")
+            .working_set_bytes();
+    let tiled = price(None);
+    assert!(tiled < single_pass, "the limit alone plans a tile");
+    assert_eq!(price(Some("8")), tiled);
+    // An override the single pass fits runs the single pass, so admission prices it.
+    assert_eq!(price(Some("400")), single_pass);
 }
 
 #[test]
@@ -4813,4 +5031,40 @@ fn a_stale_bound_still_refuses_a_host_no_larger_than_the_one_that_failed() {
         None,
         "a big enough host still runs the render under a stale bound"
     );
+}
+
+/// sc-20688: the SCAIL-2/Wan memory adapter's vocabulary of the evidence identities this module can
+/// put on a run context must list every one of them -- its probe-skip decision is computed over
+/// that list. Every `video-*-v1` evidence literal in the admission source is read, not hand-listed,
+/// so a new revision that the adapter misses reds here.
+#[test]
+fn the_memory_adapter_lists_every_worker_evidence_identity() {
+    let admission = include_str!("../video_admission.rs");
+    let adapter = include_str!("../../../sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs");
+    let identities = admission
+        .split('"')
+        .filter(|token| token.starts_with("video-") && token.ends_with("-v1"))
+        .filter(|token| {
+            token
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for expected in [
+        ENCODE_PROFILE_EVIDENCE_REVISION,
+        UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION,
+        "video-estimate-floor-v1",
+        "video-provider-conservative-decode-profile-v1",
+    ] {
+        assert!(
+            identities.contains(expected),
+            "{expected} not read: {identities:?}"
+        );
+    }
+    for identity in identities {
+        assert!(
+            adapter.contains(&format!("\"{identity}\"")),
+            "mlx_wan_scail2.rs does not list the worker evidence identity {identity}"
+        );
+    }
 }

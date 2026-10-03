@@ -562,10 +562,20 @@ generations. The setting is off by default:
   as the job payload's `kvCompression`, which overrides the worker default.
   Catalog vision analysis and StarVector requests carry the worker default.
 
-`qualified` never forces compression. The inference engine runs a generation
-compressed only where its qualification table (`KV_COMPRESSION_QUALIFICATIONS`:
-model family × format × context range) admits it. Everything else runs dense,
-deterministically, with a stable reason.
+`qualified` never forces compression. The inference engine's qualification
+table (`KV_COMPRESSION_QUALIFICATIONS`) has two K8V8 (`group-affine-8`) rows,
+each measured on one model. A generation runs compressed only when it is a
+single sequence and matches one of them:
+
+| Measured model | Decoder it applies to | Prompt | Final context (prompt + max new tokens) |
+| --- | --- | --- | --- |
+| Llama-3.2-3B-Instruct | Llama | ≥ 32 768 | < 130 560 |
+| Qwen3-1.7B (dense) | dense Qwen3 | ≥ 10 240 | ≤ 40 960 |
+
+Batched requests, prompts below the minimum, final contexts past the maximum and
+every other decoder run dense, deterministically, with a stable reason
+(`batched_decode`, `below_minimum_context`, `above_qualified_context`,
+`unqualified_model`, ...).
 
 SceneWorks keeps no LLM KV pricing of its own. Request memory admission is the
 in-process engine's, and it prices the cache the request actually runs on:
@@ -583,7 +593,20 @@ Every prompt-refine result carries `generation.kvCache`. The worker emits the
 same block as the `llm_kv_cache` telemetry event for every local LLM generation:
 prompt refine, catalog vision analysis and StarVector. The event carries
 `jobId` and `engine` (the lane, `mlx` or `candle`). It never includes prompt or
-output text. StarVector, JoyCaption and other multimodal-wrapped decoders have
+output text.
+
+The block's `outcome` says how the generation ended. A `completed` one carries
+the engine's report. A generation the engine ends with an error still emits the
+event (sc-20688), with the requested `policy`, `reported: false`, a stable
+`reason` and the engine's `error` message:
+
+- `refused`: request memory admission refused it while pricing the dense or
+  compressed cache (`request_resource_exhausted`). It adds a `refusal` object
+  with the prompt and generation token counts, the context limit, and the
+  required and available bytes.
+- `canceled`: the request was canceled.
+- `failed`: any other engine error (`unsupported`, `invalid_request` or
+  `engine_error`). StarVector, JoyCaption and other multimodal-wrapped decoders have
 no qualification-table family, so they always report dense, with
 `policy_disabled` or `unqualified_model`.
 
