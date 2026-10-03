@@ -3869,15 +3869,10 @@ mod tests {
     /// lives in the same inference checkout as the pinned `sceneworks-gen-core` crate.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     fn pinned_qwen_image_2_1_tiny_snapshot() -> PathBuf {
-        // Host-filtered so cargo needs only the packages this build already fetched (an unfiltered
-        // resolve would want the macOS-only graph's sources too).
-        const HOST: &str = if cfg!(windows) {
-            "x86_64-pc-windows-msvc"
-        } else if cfg!(target_arch = "aarch64") {
-            "aarch64-unknown-linux-gnu"
-        } else {
-            "x86_64-unknown-linux-gnu"
-        };
+        // Filtered to this build's own target (exported by build.rs) so cargo needs only the
+        // packages this build already fetched (an unfiltered resolve would want the macOS-only
+        // graph's sources too).
+        const HOST: &str = env!("SW_HOST_TARGET");
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_owned());
         let output = std::process::Command::new(cargo)
             .args(["metadata", "--format-version", "1", "--offline", "--locked"])
