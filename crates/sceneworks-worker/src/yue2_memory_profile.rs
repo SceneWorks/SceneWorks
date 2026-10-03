@@ -336,6 +336,7 @@ pub(crate) fn stage_seconds(marks: &[(&'static str, f64)]) -> serde_json::Map<St
 struct OutcomeModes<'a> {
     ar_mode: contract::ArMode,
     compute_policy: Option<contract::ComputePolicy>,
+    backend: crate::yue2_admission::Yue2Backend,
     engine_config: Option<&'a Value>,
 }
 
@@ -419,6 +420,27 @@ fn outcome_json(
         outcome["engineComputePolicy"] = json!(expected.0);
         outcome["engineModelDtype"] = json!(expected.1);
         outcome["engineVaeDtype"] = json!(expected.2);
+        // The backend is the admission gate's selected device, never a case-file claim. Only
+        // CUDA's strict BF16 VAE uses the new handle math policy; all other paths must omit it.
+        let math_policy = config
+            .get("vae_cuda_bf16_math_policy")
+            .and_then(Value::as_str);
+        if modes.backend == crate::yue2_admission::Yue2Backend::Cuda
+            && policy == contract::ComputePolicy::Bf16
+        {
+            const EXPECTED: &str = "disallow_reduced_precision_reduction_v1";
+            if math_policy != Some(EXPECTED) {
+                return Err(format!(
+                    "the run's effective vae_cuda_bf16_math_policy is not {EXPECTED}"
+                ));
+            }
+            outcome["engineVaeCudaBf16MathPolicy"] = json!(EXPECTED);
+        } else if config.get("vae_cuda_bf16_math_policy").is_some() {
+            return Err(
+                "the run has a CUDA BF16 VAE math policy on another backend or compute policy"
+                    .into(),
+            );
+        }
     }
     Ok(outcome)
 }
@@ -498,6 +520,7 @@ fn capture_case() {
         }),
     );
     request.memory = Some(admitted.memory);
+    let backend = admitted.lease.estimate().backend;
     let mut lease = admitted.lease;
     let boundary = PathBuf::from(std::env::var(BOUNDARY_ENV).expect(BOUNDARY_ENV));
     assert_eq!(
@@ -570,6 +593,7 @@ fn capture_case() {
         OutcomeModes {
             ar_mode: case.ar_mode.unwrap_or_default(),
             compute_policy: case.compute_policy,
+            backend,
             engine_config: engine_config.as_ref(),
         },
         stage_seconds(&marks.marks),
@@ -818,6 +842,7 @@ mod tests {
             OutcomeModes {
                 ar_mode: contract::ArMode::Native,
                 compute_policy: None,
+                backend: crate::yue2_admission::Yue2Backend::Cpu,
                 engine_config: None,
             },
             marks,
@@ -854,6 +879,7 @@ mod tests {
                     OutcomeModes {
                         ar_mode: contract::ArMode::Native,
                         compute_policy: None,
+                        backend: crate::yue2_admission::Yue2Backend::Cpu,
                         engine_config: None
                     },
                     Default::default(),
@@ -876,6 +902,7 @@ mod tests {
                 OutcomeModes {
                     ar_mode: contract::ArMode::ExperimentalFp8,
                     compute_policy: None,
+                    backend: crate::yue2_admission::Yue2Backend::Cuda,
                     engine_config: config,
                 },
                 Default::default(),
@@ -906,6 +933,7 @@ mod tests {
                 OutcomeModes {
                     ar_mode: contract::ArMode::Native,
                     compute_policy: case.compute_policy,
+                    backend: crate::yue2_admission::Yue2Backend::Cpu,
                     engine_config: Some(config),
                 },
                 Default::default(),
@@ -917,6 +945,75 @@ mod tests {
         assert_eq!(outcome["engineVaeDtype"], "bfloat16");
         assert!(capture(
             &json!({ "compute_policy": "bf16", "model_dtype": "bfloat16", "vae_dtype": "float32" })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn effective_vae_math_policy_is_bound_to_the_selected_backend_and_precision() {
+        use crate::yue2_admission::Yue2Backend;
+
+        let config = |policy: &str, dtype: &str, math: Option<&str>| {
+            let mut config = json!({
+                "compute_policy": policy,
+                "model_dtype": dtype,
+                "vae_dtype": dtype,
+            });
+            if let Some(math) = math {
+                config["vae_cuda_bf16_math_policy"] = json!(math);
+            }
+            config
+        };
+        let outcome = |backend, compute_policy, config: &Value| {
+            outcome_json(
+                "case",
+                42.0,
+                0.2,
+                &run_result(),
+                OutcomeModes {
+                    ar_mode: contract::ArMode::Native,
+                    compute_policy: Some(compute_policy),
+                    backend,
+                    engine_config: Some(config),
+                },
+                Default::default(),
+            )
+        };
+        let selected = "disallow_reduced_precision_reduction_v1";
+        let cuda_bf16 = config("bf16", "bfloat16", Some(selected));
+        assert_eq!(
+            outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &cuda_bf16).unwrap()
+                ["engineVaeCudaBf16MathPolicy"],
+            selected
+        );
+        for invalid in [
+            config("bf16", "bfloat16", None),
+            config("bf16", "bfloat16", Some("stale_or_unknown")),
+        ] {
+            assert!(outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &invalid).is_err());
+        }
+        for backend in [Yue2Backend::Cpu, Yue2Backend::Metal] {
+            assert!(outcome(backend, contract::ComputePolicy::Bf16, &cuda_bf16).is_err());
+            assert!(outcome(
+                backend,
+                contract::ComputePolicy::Bf16,
+                &config("bf16", "bfloat16", None)
+            )
+            .unwrap()
+            .get("engineVaeCudaBf16MathPolicy")
+            .is_none());
+        }
+        let fp32 = config("fp32", "float32", None);
+        assert!(
+            outcome(Yue2Backend::Cuda, contract::ComputePolicy::Fp32, &fp32)
+                .unwrap()
+                .get("engineVaeCudaBf16MathPolicy")
+                .is_none()
+        );
+        assert!(outcome(
+            Yue2Backend::Cuda,
+            contract::ComputePolicy::Fp32,
+            &config("fp32", "float32", Some(selected)),
         )
         .is_err());
     }
