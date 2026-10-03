@@ -1,0 +1,89 @@
+//! SCRATCH (sc-24163 evidence session, never committed): print the trainer preflight's derived
+//! training footprint for the exact A1 run shapes by forcing a 1 KiB budget, so the refusal message
+//! carries the per-stage prediction. Nothing loads past the headers.
+use std::path::PathBuf;
+
+use candle_gen::gen_core::train::{Trainer, TrainingConfig, TrainingItem, TrainingRequest};
+use candle_gen::gen_core::{CancelFlag, LoadSpec, NetworkType, Precision, WeightsSource};
+use candle_gen_qwen_image_2_1::training::QwenImage21Trainer;
+
+fn main() {
+    let snapshot = PathBuf::from(std::env::var("QWEN21_SNAPSHOT").expect("QWEN21_SNAPSHOT"));
+    let data = PathBuf::from(r"E:\sc24163\data");
+    for (label, edit, network, resolution, checkpointed) in [
+        ("t2i-lora-768-ckpt", false, NetworkType::Lora, 768, true),
+        ("t2i-lora-768-dense", false, NetworkType::Lora, 768, false),
+        ("t2i-lora-1024-ckpt", false, NetworkType::Lora, 1024, true),
+        ("t2i-lokr-768-ckpt", false, NetworkType::Lokr, 768, true),
+        ("edit-lokr-768-ckpt", true, NetworkType::Lokr, 768, true),
+        ("edit-lora-768-ckpt", true, NetworkType::Lora, 768, true),
+        ("edit-lokr-1024-ckpt", true, NetworkType::Lokr, 1024, true),
+    ] {
+        let mut spec = LoadSpec::new(WeightsSource::Dir(snapshot.clone()));
+        spec.precision = Precision::Bf16;
+        let mut trainer = QwenImage21Trainer::load(&spec).expect("trainer loads (headers only)");
+        trainer.set_memory_budget_override(Some(1 << 10));
+        let items: Vec<TrainingItem> = if edit {
+            (0..6)
+                .map(|i| {
+                    let mut item = TrainingItem::captioned(
+                        data.join(format!("edit/tgt_{i}.png")),
+                        "zxq invert: invert the colours of image 1 and posterize them, using the key in image 2".into(),
+                    );
+                    item.reference_image_paths = if std::env::var("SC24163_REFS").as_deref() == Ok("1") {
+                        vec![data.join(format!("edit/src_{i}.png"))]
+                    } else {
+                        vec![data.join(format!("edit/src_{i}.png")), data.join("edit/key.png")]
+                    };
+                    item
+                })
+                .collect()
+        } else {
+            (0..8)
+                .map(|i| {
+                    let caption = std::fs::read_to_string(data.join(format!("t2i/style_{i}.txt"))).unwrap();
+                    TrainingItem::captioned(data.join(format!("t2i/style_{i}.png")), caption)
+                })
+                .collect()
+        };
+        let sample_prompt = if edit {
+            "zxq invert: invert the colours of image 1 and posterize them, using the key in image 2"
+        } else {
+            "zxq style, a lighthouse made of concentric teal and orange rings on yellow"
+        };
+        let config = TrainingConfig {
+            rank: 16,
+            alpha: 16.0,
+            learning_rate: 4e-4,
+            steps: 200,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            gradient_checkpointing: checkpointed,
+            train_dtype: "bf16".into(),
+            resolution,
+            save_every: 50,
+            seed: 42,
+            optimizer: "adamw8bit".into(),
+            weight_decay: 1e-4,
+            network_type: network,
+            timestep_type: "sigmoid".into(),
+            timestep_bias: "balanced".into(),
+            loss_type: "mse".into(),
+            sample_every: 100,
+            sample_prompts: vec![sample_prompt.into()],
+            sample_steps: 20,
+            sample_guidance_scale: 1.0,
+            ..Default::default()
+        };
+        let req = TrainingRequest {
+            items,
+            config,
+            output_dir: PathBuf::from(r"E:\sc24163\preflight-unused"),
+            file_name: "x.safetensors".into(),
+            trigger_words: vec![],
+            cancel: CancelFlag::new(),
+        };
+        let err = trainer.train(&req, &mut |_| {}).err().map(|e| e.to_string());
+        println!("{label}\t{}", err.unwrap_or_else(|| "NO REFUSAL".into()));
+    }
+}
