@@ -421,14 +421,14 @@ fn outcome_json(
         outcome["engineModelDtype"] = json!(expected.1);
         outcome["engineVaeDtype"] = json!(expected.2);
         // The backend is the admission gate's selected device, never a case-file claim. Only
-        // CUDA's strict BF16 VAE uses the new handle math policy; all other paths must omit it.
+        // CUDA's strict BF16 VAE uses fixed-order convolution; all other paths must omit its policy.
         let math_policy = config
             .get("vae_cuda_bf16_math_policy")
             .and_then(Value::as_str);
         if modes.backend == crate::yue2_admission::Yue2Backend::Cuda
             && policy == contract::ComputePolicy::Bf16
         {
-            const EXPECTED: &str = "disallow_reduced_precision_reduction_v1";
+            const EXPECTED: &str = "fixed_order_bf16_convolution_v1";
             if math_policy != Some(EXPECTED) {
                 return Err(format!(
                     "the run's effective vae_cuda_bf16_math_policy is not {EXPECTED}"
@@ -979,7 +979,7 @@ mod tests {
                 Default::default(),
             )
         };
-        let selected = "disallow_reduced_precision_reduction_v1";
+        let selected = "fixed_order_bf16_convolution_v1";
         let cuda_bf16 = config("bf16", "bfloat16", Some(selected));
         assert_eq!(
             outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &cuda_bf16).unwrap()
@@ -989,6 +989,11 @@ mod tests {
         for invalid in [
             config("bf16", "bfloat16", None),
             config("bf16", "bfloat16", Some("stale_or_unknown")),
+            config(
+                "bf16",
+                "bfloat16",
+                Some("disallow_reduced_precision_reduction_v1"),
+            ),
         ] {
             assert!(outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &invalid).is_err());
         }
@@ -1003,19 +1008,23 @@ mod tests {
             .get("engineVaeCudaBf16MathPolicy")
             .is_none());
         }
-        let fp32 = config("fp32", "float32", None);
-        assert!(
-            outcome(Yue2Backend::Cuda, contract::ComputePolicy::Fp32, &fp32)
-                .unwrap()
-                .get("engineVaeCudaBf16MathPolicy")
-                .is_none()
-        );
-        assert!(outcome(
-            Yue2Backend::Cuda,
-            contract::ComputePolicy::Fp32,
-            &config("fp32", "float32", Some(selected)),
-        )
-        .is_err());
+        for backend in [Yue2Backend::Cuda, Yue2Backend::Cpu, Yue2Backend::Metal] {
+            for policy in [contract::ComputePolicy::Fp32, contract::ComputePolicy::Auto] {
+                let mut effective = if policy == contract::ComputePolicy::Fp32 {
+                    config("fp32", "float32", None)
+                } else {
+                    let mut auto = config("auto", "bfloat16", None);
+                    auto["vae_dtype"] = json!("float32");
+                    auto
+                };
+                assert!(outcome(backend, policy, &effective)
+                    .unwrap()
+                    .get("engineVaeCudaBf16MathPolicy")
+                    .is_none());
+                effective["vae_cuda_bf16_math_policy"] = json!(selected);
+                assert!(outcome(backend, policy, &effective).is_err());
+            }
+        }
     }
 
     /// The plan's case shape maps onto the job's request; unknown fields and values are refused.
