@@ -107,10 +107,19 @@ refuses the row.
 identity, matrix, contract, or geometry and reports KV reduction (only for a
 coordinate that ran compressed; see *Compressed rows*),
 decode-steady/lifetime-peak process-footprint deltas, and throughput ratio.
-The current `campaign` reader requires a producer-published v2 aggregate with
-exactly eight sealed receipts: short, medium, memory-material, and fit-boundary
-for each of Llama and Qwen. Both memory-material selectors are warm, single
-request, single-shot prefill. The other rows cover cold starts, chunked prefill,
+The current `campaign` reader requires a producer-published v2 aggregate of
+covering schedule v3 with exactly sixteen sealed receipts: short, medium,
+memory-material, and fit-boundary for each of the four families, Llama-3.2-3B
+(`llama`), Qwen3-1.7B (`qwen`), Llama-3.1-8B (`llama8b`) and Qwen3-8B (`qwen8b`;
+inference sc-20688). The 8B families run the 3B/1.7B families' rows exactly.
+Band targets derive from the native window, except `llama8b`'s fit-boundary row,
+measured at 106,496 tokens (fit window 107,008): with the compressed estimate
+scaled by the measured A2 v5 peak ratio (1.27) it prices 63.5 GiB, the largest
+fit row with margin under the 68 GiB child footprint cap of the inference
+`llm.json` policy (the native 130,560-token row prices 75.2 GiB). The reader
+still validates schedule-v2 campaigns (the eight `llama`/`qwen` rows) against
+their own schedule and identity. Every memory-material selector is warm, single request,
+single-shot prefill. The other rows cover cold starts, chunked prefill,
 and supported batching under the fixed schedule. It rejects missing, extra,
 duplicate, cross-schedule, cross-source/model, and artifact-mismatched rows.
 `campaign-legacy` is an explicit read path for historical v1 64-row aggregates;
@@ -127,6 +136,8 @@ result is checked in yet.
 | qwen | medium | supported-batch | chunked | warm |
 | qwen | memory-material | single | single-shot | warm |
 | qwen | fit-boundary | single | chunked | cold |
+| llama8b | (the four `llama` rows) | | | |
+| qwen8b | (the four `qwen` rows) | | | |
 
 The inference producer requires a safety policy file before parent or worker
 execution. Its schema version 1 fields are `rowDeadlineSeconds`, `pollMillis`,
@@ -151,11 +162,11 @@ node scripts/kv-baseline-harness.mjs campaign-legacy historical-v1-campaign summ
 
 The inference producer is the standalone `sc20671-kv-baseline` executable. Its
 `parent` mode consumes no caller-supplied coordinate list: it reads the frozen
-eight-row covering schedule, forks a new child for every cold row, and requires
+sixteen-row covering schedule, forks a new child for every cold row, and requires
 an in-process warm-up in each warm worker. Workers collect identity, geometry,
 Darwin/MLX phase samples, allocation events, timings, output, prefix reuse, and
 cancellation from the product route; the parent accepts only the child’s sealed
-JSON/Markdown set. It copies all eight validated child sets to a hidden staging
+JSON/Markdown set. It copies all sixteen validated child sets to a hidden staging
 directory and atomically renames one aggregate directory containing
 `campaign.json`, the captured policy and resume identity, and their required
 sidecars. Each row binds all four quality fixtures across five repeats. A
@@ -237,7 +248,7 @@ never an accepted row.
 ## Compressed rows (SC-20676)
 
 `sc20671-kv-baseline parent --mode compressed --kv-method <method>` runs the same
-frozen eight-row schedule, fixtures, and geometry with each row's KV held in the
+frozen sixteen-row schedule, fixtures, and geometry with each row's KV held in the
 method's compressed cache and fused decode attention (`group-affine`, the
 SC-20675 packed 2-bit cache read by the SC-20676 Metal kernel, and
 `group-affine-4` and `group-affine-8`, the same cache and reader with 4- and
