@@ -3806,10 +3806,11 @@ pub const QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES: u32 = 10;
 ///
 /// The `qwen_image_2_1_edit_lora` kernel maps to the SAME engine trainer as the T2I target,
 /// `qwen_image_2_1` (the engine trains edit mode when the items carry references, and stamps
-/// `trainingMode=edit` on the adapter). MLX-only for now — in `MLX_ROUTED_TRAINING_KERNELS` +
-/// `MLX_ONLY_TRAINING_KERNELS` and NOT the candle set — until the Candle edit trainer (sc-24162)
-/// lands; off-Mac the API refuses a real run with the generic no-trainer-on-this-host message, as
-/// it did for the T2I target before sc-24160.
+/// `trainingMode=edit` on the adapter). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` and `CANDLE_ROUTED_TRAINING_KERNELS` (the Candle edit trainer,
+/// sc-24162 — base-gated to `qwen_image_2_1`, LoRA/LoKr only), and stays in the native-only
+/// `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses it. On candle the worker forces
+/// gradient checkpointing on and loads the base at Bf16, exactly like the T2I kernel.
 fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
     let mut target = qwen_image_2_1_lora_target();
     target.id = "qwen_image_2_1_edit_lora".to_owned();
@@ -3833,7 +3834,8 @@ fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
                 "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base \
                  (install the bf16 tier). Each dataset item is an edit pair: the item image is the \
                  edit target, its caption is the edit instruction, and it carries 1-{QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES} \
-                 ordered reference images. Apple Silicon (native MLX). Research/evaluation use \
+                 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA \
+                 (candle/CUDA). Research/evaluation use \
                  only under the Qwen RESEARCH licence."
             )),
         ),

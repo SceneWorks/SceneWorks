@@ -22,4 +22,14 @@ describe("candleTrainingKernelBlocked", () => {
     );
     expect(candleTrainingKernelBlocked(offMac, "")).toBe(false);
   });
+
+  // sc-24162: once the server lists the edit kernel as candle-routed, it is selectable off-Mac with
+  // no client change.
+  it("unblocks a kernel as soon as the server lists it as candle-routed", () => {
+    const withEdit = {
+      ...offMac,
+      training: { candleSupportedKernels: [...offMac.training.candleSupportedKernels, "qwen_image_2_1_edit_lora"] },
+    };
+    expect(candleTrainingKernelBlocked(withEdit, "qwen_image_2_1_edit_lora")).toBe(false);
+  });
 });

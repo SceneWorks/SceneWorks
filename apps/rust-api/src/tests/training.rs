@@ -5541,19 +5541,16 @@ fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
         "{message}"
     );
     assert!(crate::training::training_host_unavailable_message(&mlx_only, true).is_none());
-    // sc-24161: the 2.1 instruction-EDIT kernel has no Candle trainer until sc-24162, so a real run
-    // off-Mac is refused with the same generic message the T2I kernel got before sc-24160.
+    // sc-24162: the 2.1 instruction-EDIT kernel has its Candle trainer too, so it is submittable
+    // off-Mac like its T2I sibling.
     let edit = targets
         .iter()
         .find(|target| target.id == "qwen_image_2_1_edit_lora")
         .expect("2.1 edit target ships");
-    let message = crate::training::training_host_unavailable_message(edit, false)
-        .expect("the MLX-only edit kernel is refused off-Mac");
     assert!(
-        message.contains("Apple Silicon") && message.contains("qwen_image_2_1_edit_lora"),
-        "{message}"
+        crate::training::training_host_unavailable_message(edit, false).is_none(),
+        "the edit kernel has a candle trainer — it must be submittable off-Mac"
     );
-    assert!(crate::training::training_host_unavailable_message(edit, true).is_none());
     // Every candle-routed target stays submittable off-Mac.
     for target in targets.iter().filter(|target| {
         sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)

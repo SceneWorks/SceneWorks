@@ -1016,28 +1016,6 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
     Ok(facts)
 }
 
-/// Training targets whose native trainer lands in inference WITH the epic's single terminal pin
-/// bump, paired with the engine trainer id SceneWorks maps them to. The committed runtime facts are
-/// dumped at the current pin, which predates the trainer, so their `trainerMappings` cannot carry
-/// the target yet; listing it here exempts it from the population check until they do (its matrix
-/// rows read false on both lanes meanwhile — the truth at this pin, even though the scheduler routes
-/// it to both the MLX and the Candle worker since sc-24160). The same self-deleting contract as phase
-/// 1's `PENDING_PIN_ENGINE_IDS`: the moment EITHER pinned runtime registers the engine, the generator
-/// refuses until the entry is removed; after that, a routed backend whose runtime still lacks the
-/// trainer fails the "names no registered local trainer descriptor" check (epic 24107 S11/S12/S15).
-pub(crate) const PENDING_PIN_TRAINING_TARGETS: &[(&str, &str)] = &[
-    ("qwen_image_2_1_lora", "qwen_image_2_1"),
-    // sc-24161: the instruction-edit target maps to the SAME engine trainer (edit mode).
-    ("qwen_image_2_1_edit_lora", "qwen_image_2_1"),
-];
-
-fn pending_pin_training_engine(target: &str) -> Option<&'static str> {
-    PENDING_PIN_TRAINING_TARGETS
-        .iter()
-        .find(|(pending, _)| *pending == target)
-        .map(|(_, engine)| *engine)
-}
-
 /// The product-to-runtime trainer identity contract. Capability flags alone cannot distinguish
 /// architecture-compatible-looking trainers from the exact model version a product target names:
 /// LTX-2.3 and LTX-2.5 both advertise LoRA, but accepting either for either target trains the wrong
@@ -1171,42 +1149,7 @@ fn validate_runtime_pair(
         .iter()
         .map(|target| (target.id.as_str(), target))
         .collect();
-    // A pending-pin target (see [`PENDING_PIN_TRAINING_TARGETS`]) is exempt from the population
-    // check only while the committed runtime facts predate it; once they carry it, it is checked like
-    // every other target.
-    let builtin_training_target_ids: BTreeSet<_> = training_targets_by_id
-        .keys()
-        .copied()
-        .filter(|target| {
-            !(pending_pin_training_engine(target).is_some()
-                && !mlx_training_targets.contains(target))
-        })
-        .collect();
-    // Self-deleting placeholder: once the pinned runtime registers the pending trainer on either
-    // backend, the exemption is stale and must be removed so the target's real lanes are derived.
-    for (_, engine) in PENDING_PIN_TRAINING_TARGETS {
-        for facts in [mlx, candle] {
-            if facts
-                .snapshot
-                .trainer_capabilities
-                .iter()
-                .any(|descriptor| descriptor.id == *engine)
-            {
-                // Several targets can share one engine trainer (Qwen Image 2.1 T2I + edit,
-                // sc-24161): name every placeholder the registration retires.
-                let retired: Vec<_> = PENDING_PIN_TRAINING_TARGETS
-                    .iter()
-                    .filter(|(_, pending_engine)| pending_engine == engine)
-                    .map(|(target, _)| *target)
-                    .collect();
-                return Err(format!(
-                    "{} runtime now registers trainer {engine:?}: remove {retired:?} from \
-                     PENDING_PIN_TRAINING_TARGETS and regenerate the matrix from the re-dumped facts",
-                    facts.snapshot.backend
-                ));
-            }
-        }
-    }
+    let builtin_training_target_ids: BTreeSet<_> = training_targets_by_id.keys().copied().collect();
     if mlx_training_targets != builtin_training_target_ids {
         let missing: Vec<_> = builtin_training_target_ids
             .difference(&mlx_training_targets)
@@ -1277,12 +1220,6 @@ fn validate_runtime_pair(
                 &facts.snapshot.backend,
                 engine,
             )?;
-            // A pending-pin target reaching here has NO registered descriptor (the self-deleting
-            // check above refuses otherwise): a fresh dump at the pre-trainer pin carries its
-            // SceneWorks-derived mapping but not the engine. Its lanes stay false until the pin.
-            if pending_pin_training_engine(target).is_some() {
-                continue;
-            }
             let mut routed_network_types = Vec::new();
             for network_type in target_network_types(target_contract)? {
                 let job_type = if network_type == "control" {
@@ -4098,99 +4035,43 @@ mod tests {
         );
     }
 
-    /// sc-24159: a pending-pin training target is exempt from the population check only while the
-    /// committed facts predate it, its rows read false meanwhile, and the exemption deletes itself the
-    /// moment a pinned runtime registers the engine trainer.
+    /// sc-24163: at the terminal pin both runtimes register the `qwen_image_2_1` trainer, so the
+    /// former pending-pin target validates like every other target and its matrix rows read true
+    /// on BOTH backends (the scheduler has routed it to both since sc-24160).
     #[test]
-    fn pending_pin_training_targets_are_exempt_until_the_pin_registers_them() {
+    fn qwen_image_2_1_training_target_is_supported_on_both_backends_at_the_pin() {
         let (mlx, candle) = valid_runtime_pair();
-        for (target, engine) in PENDING_PIN_TRAINING_TARGETS {
-            // A fresh dump at the pre-trainer pin carries the SceneWorks-derived mapping but no
-            // engine descriptor; that pair must validate too (and the committed one does).
-            let (mut fresh_mlx, mut fresh_candle) = valid_runtime_pair();
-            for facts in [&mut fresh_mlx, &mut fresh_candle] {
-                facts
-                    .trainer_mappings
-                    .insert((*target).to_owned(), (*engine).to_owned());
+        validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
+        // sc-24161/sc-24162: the instruction-edit target maps onto the SAME trainer, whose
+        // `max_reference_images` (10) covers its cap on both backends.
+        for target in ["qwen_image_2_1_lora", "qwen_image_2_1_edit_lora"] {
+            for facts in [&mlx, &candle] {
+                assert_eq!(
+                    facts.trainer_mappings.get(target).map(String::as_str),
+                    Some("qwen_image_2_1"),
+                    "{} runtime maps {target} onto its trainer",
+                    facts.snapshot.backend
+                );
+                assert!(
+                    facts
+                        .snapshot
+                        .trainer_capabilities
+                        .iter()
+                        .any(|descriptor| descriptor.id == "qwen_image_2_1"
+                            && descriptor.max_reference_images >= 10),
+                    "{} runtime registers the edit-capable qwen_image_2_1 trainer",
+                    facts.snapshot.backend
+                );
             }
-            validate_runtime_pair(&fresh_mlx, &fresh_candle)
-                .unwrap_or_else(|error| panic!("pre-trainer dump carrying {target}: {error}"));
-            validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
-            assert!(
-                crate::training::builtin_training_targets()
-                    .targets
-                    .iter()
-                    .any(|candidate| candidate.id == *target),
-                "{target} must be a shipped training target"
-            );
             let rows = training_rows(&mlx, &candle).unwrap();
-            let target_rows: Vec<_> = rows.iter().filter(|row| row.target == *target).collect();
-            assert!(
-                !target_rows.is_empty(),
-                "{target} must still have matrix rows"
-            );
+            let target_rows: Vec<_> = rows.iter().filter(|row| row.target == target).collect();
+            assert_eq!(target_rows.len(), 2, "{target} has lora + lokr rows");
             for row in target_rows {
                 assert_eq!(
                     (row.support.mlx, row.support.candle),
-                    (Some(false), Some(false)),
+                    (Some(true), Some(true)),
                     "{target}/{}",
                     row.network_type
-                );
-            }
-
-            // sc-24160: the production scheduler routes the T2I pending target on BOTH backends —
-            // so the only thing holding its rows false is the pinned runtimes not yet registering
-            // the engine trainer, and the moment they do the rows must flip (not stay silently
-            // false). sc-24161: the instruction-edit target is routed to MLX ONLY until the Candle
-            // edit trainer (sc-24162) lands, so its candle row must stay false even then.
-            let target_contract = crate::training::builtin_training_targets()
-                .targets
-                .into_iter()
-                .find(|candidate| candidate.id == *target)
-                .expect("pending target ships");
-            let candle_routed = *target != "qwen_image_2_1_edit_lora";
-            for network_type in target_network_types(&target_contract).unwrap() {
-                let job = probe_job(
-                    JobType::LoraTrain,
-                    "",
-                    training_payload(&target_contract, &network_type),
-                )
-                .unwrap();
-                assert!(
-                    backend_supports(&job, &mlx).unwrap(),
-                    "mlx must route {target}/{network_type}"
-                );
-                assert_eq!(
-                    backend_supports(&job, &candle).unwrap(),
-                    candle_routed,
-                    "candle routing of {target}/{network_type}"
-                );
-            }
-
-            // Either pinned runtime registering the engine retires the placeholder, loudly.
-            for backend in ["mlx", "candle"] {
-                let (mut mlx, mut candle) = valid_runtime_pair();
-                let facts = if backend == "mlx" {
-                    &mut mlx
-                } else {
-                    &mut candle
-                };
-                facts
-                    .snapshot
-                    .trainer_capabilities
-                    .push(TrainerCapabilityFacts {
-                        id: (*engine).to_owned(),
-                        backend: backend.to_owned(),
-                        supports_lora: true,
-                        supports_lokr: true,
-                        supports_control: false,
-                        supports_full_finetune: false,
-                        max_reference_images: 0,
-                    });
-                let error = validate_runtime_pair(&mlx, &candle).unwrap_err();
-                assert!(
-                    error.contains("remove") && error.contains(target),
-                    "a registered pending {backend} trainer must retire the placeholder: {error}"
                 );
             }
         }
@@ -6430,6 +6311,10 @@ mod tests {
                 mlx.trainer_mappings
                     .insert(target.clone(), "qwen_image_2_1".to_owned());
             }
+            // Replace the pinned descriptor so only this case's cap is in play.
+            mlx.snapshot
+                .trainer_capabilities
+                .retain(|descriptor| descriptor.id != "qwen_image_2_1");
             mlx.snapshot
                 .trainer_capabilities
                 .push(TrainerCapabilityFacts {

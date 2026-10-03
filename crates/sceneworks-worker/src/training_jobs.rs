@@ -11,7 +11,7 @@
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
 //! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
-//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`)
+//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`/`qwen_image_2_1_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
 //! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
@@ -1668,7 +1668,8 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
         ),
         // Qwen Image 2.1 (sc-24160) trains LoRA/LoKr over its dense bf16 multi-billion-parameter
         // MMDiT — the same frozen-weight-gradient OOM class, so force checkpointing on.
-        "qwen_image_2_1_lora" => true,
+        // sc-24162: the instruction-edit kernel trains the same MMDiT (plus reference tokens).
+        "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => true,
         _ => false,
     }
 }
@@ -3527,10 +3528,16 @@ mod tests {
         // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
         // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
         // left alone (unlike LTX's f32 normalization).
-        for network_type in ["lora", "lokr"] {
+        // sc-24162: the instruction-edit kernel is forced too.
+        for (kernel, network_type) in [
+            ("qwen_image_2_1_lora", "lora"),
+            ("qwen_image_2_1_lora", "lokr"),
+            ("qwen_image_2_1_edit_lora", "lora"),
+            ("qwen_image_2_1_edit_lora", "lokr"),
+        ] {
             let mut value = plan_json(
                 dir.path(),
-                "qwen_image_2_1_lora",
+                kernel,
                 "qwen_image_2_1",
                 network_type,
                 &[&image],
@@ -3541,9 +3548,9 @@ mod tests {
             let config = finalize_training_config(map_training_config(&plan.config), &plan);
             assert!(
                 config.gradient_checkpointing,
-                "Qwen Image 2.1 {network_type} forces gradient checkpointing on candle"
+                "{kernel} {network_type} forces gradient checkpointing on candle"
             );
-            assert_eq!(config.train_dtype, "bf16", "{network_type}");
+            assert_eq!(config.train_dtype, "bf16", "{kernel}/{network_type}");
         }
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
@@ -4055,6 +4062,258 @@ mod tests {
             };
             assert!(supported, "{target_id}/{network_type} is not implemented");
         }
+    }
+
+    /// The pinned inference checkout's Qwen-Image 2.1 tiny snapshot (configs, tokenizer and
+    /// header-sized synthetic safetensors — no real weights). Located through `cargo metadata`
+    /// because a git dependency's source directory is not exposed at compile time; the fixture
+    /// lives in the same inference checkout as the pinned `sceneworks-gen-core` crate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn pinned_qwen_image_2_1_tiny_snapshot() -> PathBuf {
+        // Filtered to this build's own target (exported by build.rs) so cargo needs only the
+        // packages this build already fetched (an unfiltered resolve would want the macOS-only
+        // graph's sources too).
+        const HOST: &str = env!("SW_HOST_TARGET");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_owned());
+        let output = std::process::Command::new(cargo)
+            .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+            .args(["--filter-platform", HOST])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+        let gen_core_manifest = metadata["packages"]
+            .as_array()
+            .expect("metadata packages")
+            .iter()
+            .find(|package| {
+                package["name"] == "sceneworks-gen-core"
+                    && package["source"]
+                        .as_str()
+                        .is_some_and(|source| source.starts_with("git+"))
+            })
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("the pinned sceneworks-gen-core git package");
+        // <checkout>/crates/contracts/gen-core/Cargo.toml -> <checkout>
+        let checkout = Path::new(gen_core_manifest)
+            .ancestors()
+            .nth(4)
+            .expect("inference checkout root");
+        let snapshot = checkout
+            .join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
+        assert!(
+            snapshot.join("transformer").join("config.json").is_file(),
+            "pinned Qwen-Image 2.1 tiny snapshot missing at {}",
+            snapshot.display()
+        );
+        snapshot
+    }
+
+    /// sc-24163: SceneWorks' advanced map for `qwen_image_2_1_lora` — the target's own defaults and
+    /// every shipped preset, for each advertised network type — is accepted END TO END by the
+    /// pinned Candle 2.1 trainer: the plan goes through the real `map_training_config` +
+    /// `finalize_training_config` (via the shared dry/real preflight, which also runs the
+    /// registry-descriptor floors), and the resulting request then passes the engine trainer's
+    /// own `validate`, loaded through the engine registry from a weights-free tiny snapshot.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_builtin_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("qwen_image_2_1_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 target ships presets");
+        let network_types: Vec<String> = target.limits["networkTypes"]
+            .as_array()
+            .expect("networkTypes")
+            .iter()
+            .map(|value| value.as_str().expect("network type").to_owned())
+            .collect();
+        assert_eq!(network_types, ["lora", "lokr"]);
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in &network_types {
+                let mut serialized = plan_json(
+                    dir.path(),
+                    &target.kernel,
+                    &target.base_model,
+                    network_type,
+                    &[&image],
+                );
+                serialized["target"]["targetId"] = json!(target.id);
+                serialized["target"]["family"] = json!(target.family);
+                let mut config = serde_json::to_value(config).expect("config serializes");
+                config["advanced"]["networkType"] = json!(network_type);
+                serialized["config"] = config;
+                let plan = parse(serialized);
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * network_types.len());
+    }
+
+    /// sc-24161/sc-24162: the instruction-EDIT target's defaults and every shipped edit preset, for
+    /// each network type, with an EDIT-PAIR plan (ordered references + target + instruction), pass
+    /// the shared preflight AND the pinned Candle 2.1 trainer's own weights-free `validate` — the
+    /// references reach the engine in plan order. Its negative twin: the same request with the
+    /// references stripped is refused by the engine (an edit kernel never trains plain items), and
+    /// with more references than the trainer's cap is refused naming the cap.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_edit_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+        let ref_names: Vec<String> = (1..=11).map(|index| format!("x_ref{index}.png")).collect();
+        for name in &ref_names {
+            std::fs::write(refs_dir.join(name), b"png").expect("reference");
+        }
+        let refs = |count: usize| -> Vec<String> {
+            ref_names[..count]
+                .iter()
+                .rev()
+                .map(|name| format!("images/refs/{name}"))
+                .collect()
+        };
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("qwen_image_2_1_edit_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 edit target ships presets");
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+        assert_eq!(trainer.descriptor().max_reference_images, 10);
+
+        let plan_for = |config: &sceneworks_core::training::TrainingConfig,
+                        network_type: &str,
+                        references: Vec<String>| {
+            let mut serialized = plan_json(
+                dir.path(),
+                &target.kernel,
+                &target.base_model,
+                network_type,
+                &[&image],
+            );
+            serialized["target"]["targetId"] = json!(target.id);
+            serialized["target"]["family"] = json!(target.family);
+            serialized["dataset"]["items"][0]["caption"] =
+                json!("put the hat from image 2 on image 1");
+            serialized["dataset"]["items"][0]["referenceImagePaths"] = json!(references);
+            let mut config = serde_json::to_value(config).expect("config serializes");
+            config["advanced"]["networkType"] = json!(network_type);
+            serialized["config"] = config;
+            parse(serialized)
+        };
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in ["lora", "lokr"] {
+                let plan = plan_for(config, network_type, refs(3));
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                let item = &prepared.request.items[0];
+                assert_eq!(
+                    item.reference_image_paths
+                        .iter()
+                        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                    ["x_ref3.png", "x_ref2.png", "x_ref1.png"],
+                    "{label}/{network_type}: references reach the engine in plan order"
+                );
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+
+                // Negative twins against the same pinned engine floor.
+                let mut stripped = prepared.request.clone();
+                stripped.items[0].reference_image_paths.clear();
+                assert!(
+                    gen_core::train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
+                    "a plain request is a T2I request to the engine — the KERNEL floor refuses it"
+                );
+                let mut over = prepared.request.clone();
+                over.items[0].reference_image_paths = (1..=11)
+                    .map(|index| refs_dir.join(format!("x_ref{index}.png")))
+                    .collect();
+                let error = trainer.validate(&over).unwrap_err().to_string();
+                assert!(
+                    error.contains("at most 10"),
+                    "{label}/{network_type}: {error}"
+                );
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * 2);
+
+        // The kernel floor: the edit kernel refuses the reference-less plan the engine would accept.
+        let error =
+            preflight_training_run(&settings, &plan_for(&target.defaults, "lora", Vec::new()))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("qwen_image_2_1_edit_lora"), "{error}");
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
