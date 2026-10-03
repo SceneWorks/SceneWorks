@@ -594,6 +594,6 @@ no qualification-table family, so they always report dense, with
 | `formatVersion` | The engine's `KV_CACHE_FORMAT_VERSION`. |
 | `format` | `group-affine-k8v8`, or `null` when the generation ran dense throughout. |
 | `ranCompressed` | `true` only when the whole generation ran on the compressed cache. |
-| `fallbackReason` | A `KvCacheFallbackReason` id, or `null` exactly when `ranCompressed` is true. The ids are `policy_disabled`, `unqualified_model`, `unsupported_request`, `batched_decode`, `below_minimum_context`, `above_qualified_context`, `unsupported_geometry`, `reader_unavailable` and `runtime_fallback`. |
+| `fallbackReason` | A `KvCacheFallbackReason` id, or `null` exactly when `ranCompressed` is true. The ids are `policy_disabled`, `unqualified_model`, `unsupported_request`, `batched_decode`, `below_minimum_context`, `above_qualified_context`, `unsupported_geometry`, `reader_unavailable`, `runtime_fallback` and `dense_gather`. |
 | `detail` | The engine's operation and reason words, or `null`. |
-| `counters` | `fusedAttentionCalls`, `denseFallbackEvents`, `fullCacheDequantizations` and `compressedCacheBytes`. |
+| `counters` | `fusedAttentionCalls`, `denseFallbackEvents`, `fullCacheDequantizations`, `denseGatherFallbacks` and `compressedCacheBytes`. |

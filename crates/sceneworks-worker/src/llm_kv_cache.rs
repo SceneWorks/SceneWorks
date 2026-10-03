@@ -99,6 +99,7 @@ pub(crate) fn kv_cache_block(policy: KvCompressionPolicy, report: Option<&KvCach
             "fusedAttentionCalls": report.counters.fused_attention_calls,
             "denseFallbackEvents": report.counters.dense_fallback_events,
             "fullCacheDequantizations": report.counters.full_cache_dequantizations,
+            "denseGatherFallbacks": report.counters.dense_gather_fallbacks,
             "compressedCacheBytes": report.counters.compressed_cache_bytes,
         },
     })
@@ -225,6 +226,7 @@ mod tests {
                 fused_attention_calls: 46,
                 dense_fallback_events: 0,
                 full_cache_dequantizations: 0,
+                dense_gather_fallbacks: 2,
                 compressed_cache_bytes: 123_456,
             },
         };
@@ -242,6 +244,7 @@ mod tests {
                     "fusedAttentionCalls": 46,
                     "denseFallbackEvents": 0,
                     "fullCacheDequantizations": 0,
+                    "denseGatherFallbacks": 2,
                     "compressedCacheBytes": 123_456,
                 },
             })
