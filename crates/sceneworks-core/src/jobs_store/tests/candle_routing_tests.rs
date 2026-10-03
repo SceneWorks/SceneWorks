@@ -1966,6 +1966,70 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
+    // sc-24163 (E9 review): the adapter composes with the 1-10 ordered-reference EDIT lane too,
+    // not only text-to-image — a LoRA/LoKr edit, alone and with a q8/q4 tier select, is claimed
+    // by the bespoke `QwenImage21Edit` lane and by a candle worker, under BOTH job types the API
+    // stamps for an edit (`image_edit` for the Image Editor, `image_generate` for the rest).
+    let ids = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("ref_{i}")).collect() };
+    // The Mac twin first: an MLX worker claims the same LoRA-carrying edit (the adapter is never
+    // a routing refusal on MLX; the engine applies it over the edit render).
+    let mlx_edit = json!({
+        "model": "qwen_image_2_1",
+        "prompt": "p",
+        "mode": "edit_image",
+        "referenceAssetIds": ids(2),
+        "loras": [{ "networkType": "lora" }],
+    });
+    assert!(
+        worker_supports_job(
+            &mlx_worker(&["gpu", "image_generate", "image_edit"]),
+            &image_edit_job(mlx_edit.clone())
+        ),
+        "an MLX worker must claim the LoRA-carrying 2.1 edit: {mlx_edit}"
+    );
+    for references in [1usize, 3, 10] {
+        for (loras, advanced) in [
+            (json!([{ "networkType": "lora" }]), json!({})),
+            (json!([{ "networkType": "lokr" }]), json!({})),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 8 }),
+            ),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+            (
+                json!([{ "networkType": "lokr" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+        ] {
+            let payload = json!({
+                "model": "qwen_image_2_1",
+                "prompt": "put the hat from image 2 on image 1",
+                "mode": "edit_image",
+                "referenceAssetIds": ids(references),
+                "loras": loras,
+                "advanced": advanced,
+            });
+            for job in [
+                image_edit_job(payload.clone()),
+                image_generate_job(payload.clone()),
+            ] {
+                assert_eq!(
+                    image_job_candle_lane(&job),
+                    Some(CandleImageLane::QwenImage21Edit),
+                    "{payload}"
+                );
+                assert!(image_job_is_candle_eligible(&job), "{payload}");
+                assert!(
+                    worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+                    "a candle worker must claim the adapter-carrying 2.1 edit: {payload}"
+                );
+            }
+        }
+    }
+
     // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
     // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`
     // block may override any of them — a per-backend override is exactly how "the same request

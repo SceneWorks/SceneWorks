@@ -3816,12 +3816,9 @@ fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
     target.id = "qwen_image_2_1_edit_lora".to_owned();
     target.name = "Qwen Image 2.1 Edit LoRA".to_owned();
     target.kernel = "qwen_image_2_1_edit_lora".to_owned();
-    // In-training previews are text-only prompts; an edit adapter's preview needs references, so
-    // the default leaves them off rather than rendering misleading text-to-image samples.
-    target
-        .defaults
-        .advanced
-        .insert("sampleEvery".to_owned(), json!(0));
+    // Previews keep the T2I target's cadence (`sampleEvery: 500`): both pinned engine trainers
+    // render an edit run's previews as EDITS, conditioned on the first dataset item's ordered
+    // references, so the samples show what the adapter does to an edit pair.
     target.limits.insert(
         MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
         json!(QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES),

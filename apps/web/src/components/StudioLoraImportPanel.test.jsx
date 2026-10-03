@@ -1,6 +1,6 @@
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, setFileInput, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
 import { StudioLoraImportPanel } from "./StudioLoraImportPanel.jsx";
 
 // sc-15373 — the Model Manager import form, lifted into the studio's Add-LoRA picker. What must
@@ -86,6 +86,25 @@ describe("StudioLoraImportPanel", () => {
     expect(container.textContent).toContain("LoRA import queued for harbor_dusk.");
     expect(container.textContent).toContain("Detected family: z-image.");
     expect(labelled(container, "Source URL").value).toBe("");
+  });
+
+  // sc-24163 (epic 24107 E10): an Auto-detect upload whose file resolves no family is surfaced as
+  // unresolved with a pointer to choosing it — never silently queued as if it were usable. A URL
+  // import is only inspected after download, so no claim is made for it at queue time.
+  it("tells the user to choose the family when an Auto-detect upload is unresolved", async () => {
+    const createLoraImportJob = vi.fn(async () => ({ payload: { loraId: "mystery", manifestEntry: {} } }));
+    await render({ createLoraImportJob });
+    const fileInput = container.querySelector('input[type="file"]');
+    await act(async () => setFileInput(fileInput, [new File(["x"], "mystery.safetensors")]));
+    await click(button(container, "Queue import"));
+    expect(container.textContent).toContain("Family unresolved");
+    expect(container.textContent).toContain("Choose family");
+
+    await click(button(container, "URL"));
+    await act(async () => setInput(labelled(container, "Source URL"), "https://example.test/mystery.safetensors"));
+    await click(button(container, "Queue import"));
+    expect(container.textContent).toContain("LoRA import queued for mystery.");
+    expect(container.textContent).not.toContain("Family unresolved");
   });
 
   it("cannot submit an empty source, or a project import with no project open", async () => {

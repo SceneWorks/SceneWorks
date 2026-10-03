@@ -841,8 +841,8 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
 /// Returns the detected LoRA architecture family or `None` if the header
 /// is ambiguous, empty, or matches no known signature with confidence.
 pub fn detect_lora_family(header: &Value) -> Option<String> {
-    if let Some(family) = detect_metadata_family(header) {
-        return reconcile_qwen_metadata_with_keys(family, &collect_tensor_keys(header));
+    if let Some(stamp) = detect_metadata_family(header) {
+        return reconcile_qwen_metadata_with_keys(stamp, &collect_tensor_keys(header));
     }
     let keys = collect_tensor_keys(header);
     if keys.is_empty() {
@@ -1213,15 +1213,42 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
 ///   label contradict each other and neither is trusted over the other; the user picks, which is
 ///   strictly better than a confident cross-version label (a wrong family hard-rejects the import).
 ///
-/// Absent such a key (attention-only, metadata stamp the only evidence), the label stands.
-fn reconcile_qwen_metadata_with_keys(family: String, keys: &[String]) -> Option<String> {
+/// * the bare generic `qwen_image` stamp (no version in it) + no 2512-only evidence (no 2512-only
+///   module, no block index `>= 32`) → `None`. The stamp cannot tell the two apart and neither can
+///   the keys, so the user declares the family. A version-explicit stamp (`Qwen-Image-2512`,
+///   `Qwen/Qwen-Image`, a diffusers pipeline class, a SceneWorks `family` stamp) is not generic.
+///
+/// Otherwise (no contradicting key, a version-explicit stamp), the label stands.
+fn reconcile_qwen_metadata_with_keys(stamp: MetadataFamily, keys: &[String]) -> Option<String> {
+    let MetadataFamily {
+        family,
+        generic_qwen_label,
+    } = stamp;
     match family.as_str() {
         "qwen-image" if keys.iter().any(|key| is_qwen_image_2_1_key(key)) => {
             Some("qwen-image-2-1".to_owned())
         }
+        // sc-24163 (E10): the bare ai-toolkit `qwen_image` stamp names no version, and 2.1 and 2512
+        // share every attention key, so an attention-only adapter carrying it is as likely 2.1 as
+        // 2512. Only keys that exist on the 2512 DiT alone — a 2512-only module, or a block index
+        // past 2.1's 32-block depth — let the generic label resolve to `qwen-image`; otherwise it is
+        // unresolved and the user declares the family, instead of a confident 2512 label that
+        // hard-rejects a genuine 2.1 adapter from its own model.
+        "qwen-image" if generic_qwen_label && !keys_evidence_qwen_image_2512(keys) => None,
         "qwen-image-2-1" if keys.iter().any(|key| is_qwen_image_2512_key(key)) => None,
         _ => Some(family),
     }
+}
+
+/// Whether the tensor keys carry evidence that exists only on the 2512 Qwen-Image DiT: a
+/// 2512-only module ([`is_qwen_image_2512_key`]) or a `transformer_blocks.<n>` index at or past
+/// [`QWEN_IMAGE_2_1_BLOCK_COUNT`] (2.1 has 32 blocks, 2512 has 60).
+fn keys_evidence_qwen_image_2512(keys: &[String]) -> bool {
+    keys.iter().any(|key| is_qwen_image_2512_key(key))
+        || transformer_block_indices(keys)
+            .iter()
+            .next_back()
+            .is_some_and(|max| *max >= QWEN_IMAGE_2_1_BLOCK_COUNT)
 }
 
 /// Whether one tensor key carries a module that exists on the **2512** Qwen-Image DiT (and its
@@ -2133,7 +2160,35 @@ fn parse_block_index(key: &str) -> Option<usize> {
     None
 }
 
-fn detect_metadata_family(header: &Value) -> Option<String> {
+/// A family read from adapter metadata, plus whether the stamp that produced it was the bare,
+/// version-less Qwen-Image label ai-toolkit writes for every Qwen subclass (see
+/// [`reconcile_qwen_metadata_with_keys`]).
+struct MetadataFamily {
+    family: String,
+    generic_qwen_label: bool,
+}
+
+impl MetadataFamily {
+    fn exact(family: String) -> Self {
+        Self {
+            family,
+            generic_qwen_label: false,
+        }
+    }
+}
+
+/// True when a metadata value is ONLY the generic Qwen-Image name (`qwen_image`, `qwen-image`,
+/// `Qwen-Image`, `QwenImage`) with no org, version or variant in it.
+fn is_generic_qwen_image_label(value: &str) -> bool {
+    let collapsed: String = value
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    collapsed == "qwenimage"
+}
+
+fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
     let metadata = header.get("__metadata__")?.as_object()?;
     // SceneWorks-native provenance first: our own trainers stamp the adapter header with a canonical
     // `family` token (`krea_2`, `z-image`, …) and a `baseModel` training-base id (`krea_2_raw`, …),
@@ -2150,7 +2205,7 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Some(canonical_lora_family(family));
+        return Some(MetadataFamily::exact(canonical_lora_family(family)));
     }
     // `ss_network_module` is a code namespace, not a free-form base-model label: only the exact
     // trainer module is architecture evidence. A lookalike must remain unsupported rather than
@@ -2160,7 +2215,7 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .is_some_and(|module| module.trim() == MINIMAX_H3_TRAINER_NETWORK_MODULE)
     {
-        return Some("minimax-h3".to_owned());
+        return Some(MetadataFamily::exact("minimax-h3".to_owned()));
     }
     for key in [
         "baseModel",
@@ -2173,7 +2228,10 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
             continue;
         };
         if let Some(family) = metadata_value_to_family(value) {
-            return Some(family);
+            return Some(MetadataFamily {
+                generic_qwen_label: family == "qwen-image" && is_generic_qwen_image_label(value),
+                family,
+            });
         }
     }
     None
@@ -4070,6 +4128,91 @@ mod tests {
         .is_ok());
     }
 
+    /// sc-24163 (E10 review): the bare ai-toolkit `qwen_image` stamp carries no version, so an
+    /// adapter whose keys fit BOTH 2.1 and 2512 (attention only, every block index < 32) is
+    /// unresolved — the user declares the family. 2512 evidence (a 2512-only module or a block index
+    /// past 2.1's 32-block depth) or a version-explicit stamp still resolves to `qwen-image`.
+    #[test]
+    fn generic_qwen_image_stamp_without_2512_evidence_is_unresolved() {
+        fn header(fields: Value, keys: &[String]) -> Value {
+            let mut object = serde_json::Map::new();
+            object.insert("__metadata__".to_owned(), fields);
+            for key in keys {
+                object.insert(
+                    key.clone(),
+                    json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+                );
+            }
+            Value::Object(object)
+        }
+        let attention = |blocks: std::ops::Range<usize>| -> Vec<String> {
+            blocks
+                .flat_map(|block| {
+                    ["to_q", "to_k", "to_v", "to_out.0"].map(|proj| {
+                        format!("transformer.transformer_blocks.{block}.attn.{proj}.lora_A.weight")
+                    })
+                })
+                .collect()
+        };
+        // Generic stamp, full 2.1 attention span (0..=31): unresolved, in every generic spelling.
+        for stamp in ["qwen_image", "qwen-image", "Qwen-Image", "QwenImage"] {
+            for field in ["ss_base_model_version", "modelspec.architecture"] {
+                assert_eq!(
+                    detect_lora_family(&header(json!({ field: stamp }), &attention(0..32))),
+                    None,
+                    "{field}={stamp:?} attention-only 0..32 must be unresolved"
+                );
+            }
+        }
+        // Generic stamp + a block index >= 32 (2512's 60-block depth) -> qwen-image.
+        for blocks in [0..33, 32..33, 0..60] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    json!({ "ss_base_model_version": "qwen_image" }),
+                    &attention(blocks.clone())
+                ))
+                .as_deref(),
+                Some("qwen-image"),
+                "generic stamp, blocks {blocks:?}"
+            );
+        }
+        // Generic stamp + a 2512-only module (all indices < 32) -> qwen-image.
+        for module in [
+            "transformer.transformer_blocks.3.attn.add_q_proj.lora_A.weight",
+            "transformer.transformer_blocks.3.img_mlp.net.0.proj.lora_A.weight",
+            "transformer.transformer_blocks.3.txt_mlp.net.2.lora_A.weight",
+            "transformer.transformer_blocks.3.img_mod.1.lora_A.weight",
+            "lora_unet_transformer_blocks_3_attn_add_k_proj.lora_down.weight",
+        ] {
+            let mut keys = attention(0..4);
+            keys.push(module.to_owned());
+            assert_eq!(
+                detect_lora_family(&header(
+                    json!({ "ss_base_model_version": "qwen_image" }),
+                    &keys
+                ))
+                .as_deref(),
+                Some("qwen-image"),
+                "{module:?}"
+            );
+        }
+        // Version-explicit 2512 stamps keep `qwen-image` on attention-only keys.
+        for fields in [
+            json!({ "ss_base_model_version": "Qwen-Image-2512" }),
+            json!({ "ss_base_model_version": "Qwen/Qwen-Image-2512" }),
+            json!({ "modelspec.architecture": "Qwen/Qwen-Image" }),
+            json!({ "baseModel": "qwen_image_2512" }),
+            json!({ "ss_base_model_version": "Qwen-Image-Edit-2509" }),
+            json!({ "family": "qwen-image" }),
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(fields.clone(), &attention(0..4))).as_deref(),
+                Some("qwen-image"),
+                "{fields}"
+            );
+        }
+    }
+
     /// sc-24158 (E10): tensor keys overrule a Qwen-Image metadata label that names the wrong
     /// Qwen-Image. ai-toolkit stamps the generic `qwen_image` on every Qwen subclass, so a 2.1
     /// adapter carrying 2.1-only modules is 2.1 whatever the stamp says; a `qwen-image-2-1` label on
@@ -4123,10 +4266,11 @@ mod tests {
                 "{key:?}"
             );
         }
-        // No architecture-exclusive key (attention only): the label stands, both ways.
+        // No architecture-exclusive key (attention only): a version-explicit label stands; the
+        // generic `qwen_image` stamp does not (see the sc-24163 test below).
         let attention = ["transformer_blocks.0.attn.to_q.lora_A.weight"];
         assert_eq!(
-            detect_lora_family(&header("qwen_image", &attention)).as_deref(),
+            detect_lora_family(&header("Qwen-Image-2512", &attention)).as_deref(),
             Some("qwen-image")
         );
         assert_eq!(

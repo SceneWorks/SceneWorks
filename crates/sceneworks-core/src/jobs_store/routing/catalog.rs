@@ -472,8 +472,8 @@ pub struct MacTrainingSupport {
     pub supported_kernels: Vec<String>,
     /// The training kernels an off-Mac (candle) worker can run (sc-24161). The off-Mac twin of
     /// `supported_kernels`: the client applies it only when `candle_gating_active`, so a target
-    /// whose kernel has no candle trainer (the Qwen Image 2.1 edit kernel until sc-24162) is not
-    /// offered on a host where the API would refuse it at Start.
+    /// whose kernel has no candle trainer is not offered on a host where the API would refuse it
+    /// at Start.
     pub candle_supported_kernels: Vec<String>,
     pub lokr_on_wan_supported: bool,
 }

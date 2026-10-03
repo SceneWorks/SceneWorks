@@ -581,9 +581,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
-  // sc-24161: off-Mac the twin gate disables a target whose kernel has no candle trainer (the
-  // MLX-only Qwen Image 2.1 edit kernel until sc-24162) — from the server's candle-routed set — so
-  // it is neither selectable nor drives the dataset editor's edit-pair affordances.
+  // sc-24161: off-Mac the twin gate disables a target whose kernel has no candle trainer — from
+  // the server's candle-routed set — so it is neither selectable nor drives the dataset editor's
+  // edit-pair affordances.
   const targetBlockReason = (target) => {
     if (macTrainingKernelBlocked(macCapabilities, target?.kernel)) return "mac";
     if (candleTrainingKernelBlocked(macCapabilities, target?.kernel)) return "candle";
