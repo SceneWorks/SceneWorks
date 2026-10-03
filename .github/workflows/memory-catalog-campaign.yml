@@ -250,16 +250,25 @@ jobs:
           toolchain: "1.97.1"
 
       - name: Fetch prebuilt MLX (sc-21382)
-        # Same step as macos-mlx.yml: pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache
-        # miss. Exit 1 means "no prebuilt published for this mlx-rs rev", which is a slow source
-        # build rather than an error; anything else is fatal.
+        # pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache miss. Exit 1 means "no
+        # prebuilt published for this mlx-rs rev", which is a slow source build rather than an
+        # error; anything else is fatal.
+        #
+        # `--build-type Release` because the adapter below is built `--release`: the script's Debug
+        # default made pmetal-mlx-sys refuse the link ("build_type: prebuilt=Debug this
+        # build=Release"), which is how run 34616773217 -- the last mlx dispatch of this workflow --
+        # died in "Build the MLX memory adapter" on nax-macos-2. Same fix as macos-mlx.yml's
+        # calibration step (sc-22667). With no Release asset the two variables are blanked, which is
+        # pmetal-mlx-sys's build-from-source path.
         run: |
           set +e
-          scripts/fetch-prebuilt-mlx.sh --github-env
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
           rc=$?
           set -e
           if [ "$rc" = 1 ]; then
-            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+            echo "::warning title=prebuilt MLX (Release) unavailable::no Release prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi

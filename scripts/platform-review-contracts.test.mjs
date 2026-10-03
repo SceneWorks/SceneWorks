@@ -735,6 +735,22 @@ test("macos-mlx fetches the Release prebuilt before its release-built calibratio
   }
 });
 
+test("the mlx memory campaign fetches the Release prebuilt for its release-built adapter", async () => {
+  // sc-24163: the same trap as above on the campaign lane -- run 34616773217 died in "Build the MLX
+  // memory adapter" on nax-macos-2 because the fetch took the script's Debug default while the
+  // adapter builds `--release`.
+  const mlx = workflowJob(await source(CAMPAIGN_WORKFLOW), "mlx");
+  const fetch = workflowStep(mlx, "Fetch prebuilt MLX (sc-21382)");
+  assert.match(fetch, /scripts\/fetch-prebuilt-mlx\.sh --build-type Release --github-env/);
+  assert.doesNotMatch(fetch, /scripts\/fetch-prebuilt-mlx\.sh --github-env/);
+  // No Release asset falls back to the source build by CLEARING the variables.
+  assert.match(fetch, /echo "PMETAL_MLX_PREBUILT_DIR=" >> "\$GITHUB_ENV"/);
+  assert.match(fetch, /echo "PMETAL_METALLIB_PATH=" >> "\$GITHUB_ENV"/);
+  const build = workflowStep(mlx, "Build the MLX memory adapter");
+  assert.ok(mlx.indexOf(fetch) < mlx.indexOf(build), "the Release fetch must precede the build");
+  assert.match(build, /cargo build --release --locked -p sceneworks-memory-adapter/);
+});
+
 test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const capture = stepBody(
