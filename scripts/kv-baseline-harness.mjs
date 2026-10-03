@@ -115,7 +115,19 @@ export const SC20671_COVERING_SCHEDULE = Object.freeze([
   ["qwen", "medium", "supported-batch", "chunked", "warm"],
   ["qwen", "memory-material", "single", "single-shot", "warm"],
   ["qwen", "fit-boundary", "single", "chunked", "cold"],
+  ["llama8b", "short", "single", "chunked", "cold"],
+  ["llama8b", "medium", "supported-batch", "single-shot", "warm"],
+  ["llama8b", "memory-material", "single", "single-shot", "warm"],
+  ["llama8b", "fit-boundary", "single", "chunked", "cold"],
+  ["qwen8b", "short", "single", "single-shot", "cold"],
+  ["qwen8b", "medium", "supported-batch", "chunked", "warm"],
+  ["qwen8b", "memory-material", "single", "single-shot", "warm"],
+  ["qwen8b", "fit-boundary", "single", "chunked", "cold"],
 ].map((row) => Object.freeze(row)));
+/** Covering schedule v3 (inference sc-20688): the 8B families run the 3B/1.7B families' rows. */
+export const SC20671_SCHEDULE_VERSION = 3;
+/** Scheduled model families, in schedule order (inference `SC20671_FAMILIES`). */
+export const SC20671_FAMILIES = Object.freeze(["llama", "qwen", "llama8b", "qwen8b"]);
 const CAMPAIGN_POLICY_FIELDS = [
   "rowDeadlineSeconds", "pollMillis", "termGraceMillis", "hostFreeReserveBytes",
   "childFootprintCapBytes", "maxContextTokens", "maxRequestTokens", "stdoutCapBytes",
@@ -126,7 +138,8 @@ export const FIT_BOUNDARY_MIN_CONTEXT_BPS = 9_000;
 const SCENEWORKS_REPOSITORY = "github.com/SceneWorks/SceneWorks";
 const INFERENCE_REPOSITORY = "github.com/SceneWorks/inference";
 const PMETAL_MLX_REPOSITORY = "https://github.com/michaeltrefry/mlx-rs";
-// Mirrored from inference commit c781c09d2789538d3cff459257274cbc22109b25.  These are
+// Mirrored from inference commit c781c09d2789538d3cff459257274cbc22109b25 (8B families: inference
+// sc-20688, campaign.rs LLAMA8B_/QWEN8B_*).  These are
 // receipt identities, never caller-selectable model aliases or local paths.
 export const SC20671_MODEL_CONTRACTS = Object.freeze({
   llama: Object.freeze({
@@ -136,6 +149,17 @@ export const SC20671_MODEL_CONTRACTS = Object.freeze({
   qwen: Object.freeze({
     candidate: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-4bit", revision: "3b1b1768f8f8cf8351c712464f906e86c2b8269e", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
     reference: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-bf16", revision: "9cd6692855d3e06772228e9a962b2606359b2d24", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+  }),
+  // Inference sc-20688. Llama-3.1-8B's fit-boundary row is measured at the 98,816-token fit window
+  // (98,304 tokens), the largest fit row the 64 GiB Mac2 arm cap admits; its other bands keep the
+  // native window.
+  llama8b: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Llama-3.1-8B-Instruct-4bit", revision: "90215b22ec18e72f623dde2ea7af4097025160e2", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072, fitWindowTokens: 98_816 }),
+    reference: Object.freeze({ repository: "mlx-community/Meta-Llama-3.1-8B-Instruct-bf16", revision: "f8311090f9ee47782b6f094984a20c856eb841d6", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
+  }),
+  qwen8b: Object.freeze({
+    candidate: Object.freeze({ repository: "mlx-community/Qwen3-8B-4bit", revision: "545dc4251c05440727734bcd94334791f6ab0192", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
+    reference: Object.freeze({ repository: "mlx-community/Qwen3-8B-bf16", revision: "85dd0f16bfe491befbc9cf0b4e966664236e5050", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
   }),
 });
 const TIMING_FIELDS = [
@@ -1282,6 +1306,24 @@ function validateFixtureEvidence(evidence) {
   }
 }
 
+/**
+ * The window a row's fit-boundary band is measured against: the family's `fitWindowTokens` cap,
+ * else the row's window (inference `row_fit_window`; `validatePinnedModelContract` separately
+ * requires the window to be the family's native window).
+ */
+function rowFitWindow(family, contextWindowTokens) {
+  const candidate = Object.hasOwn(SC20671_MODEL_CONTRACTS, family)
+    ? SC20671_MODEL_CONTRACTS[family].candidate : undefined;
+  return candidate?.fitWindowTokens ?? contextWindowTokens;
+}
+
+/** A recorded row's band target, with the family's fit cap (inference `row_band_target`). */
+function rowBandTarget(family, contextWindowTokens, contextBand) {
+  return contextBand === "fit-boundary"
+    ? contextBandTarget(rowFitWindow(family, contextWindowTokens), contextBand)
+    : contextBandTarget(contextWindowTokens, contextBand);
+}
+
 function contextBandTarget(contextWindowTokens, contextBand) {
   positiveInteger(contextWindowTokens, "geometry.contextWindowTokens");
   if (contextWindowTokens < 1_024) fail("context window is below the frozen minimum");
@@ -1385,7 +1427,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
     ["family", "contextBand", "requestMode", "prefillMode", "processTemperature"],
     "matrix",
   );
-  if (!["llama", "qwen"].includes(receipt.matrix.family)
+  if (!SC20671_FAMILIES.includes(receipt.matrix.family)
     || !CONTEXT_BANDS.includes(receipt.matrix.contextBand)
     || !["single", "supported-batch"].includes(receipt.matrix.requestMode)
     || !["chunked", "single-shot"].includes(receipt.matrix.prefillMode)
@@ -1400,7 +1442,7 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   );
   for (const field of Object.keys(receipt.geometry)) positiveInteger(receipt.geometry[field], `geometry.${field}`);
   if (receipt.geometry.contextTargetTokens
-      !== contextBandTarget(receipt.geometry.contextWindowTokens, receipt.matrix.contextBand)
+      !== rowBandTarget(receipt.matrix.family, receipt.geometry.contextWindowTokens, receipt.matrix.contextBand)
     || receipt.geometry.contextPayloadTokens > receipt.geometry.contextTargetTokens
     || receipt.geometry.contextPayloadTokens < Math.floor(receipt.geometry.contextTargetTokens / 2)) {
     fail("context payload token count is outside its producer-measured band");
@@ -1618,7 +1660,8 @@ export function validateReceipt(receipt, { verifyHash = true } = {}) {
   if (receipt.matrix.contextBand === "fit-boundary"
     && (receipt.geometry.kvLength > receipt.geometry.contextWindowTokens
       || receipt.geometry.kvLength * 10_000
-        < receipt.geometry.contextWindowTokens * FIT_BOUNDARY_MIN_CONTEXT_BPS)) {
+        < rowFitWindow(receipt.matrix.family, receipt.geometry.contextWindowTokens)
+          * FIT_BOUNDARY_MIN_CONTEXT_BPS)) {
     fail("fit-boundary live context is outside the frozen admission ratio");
   }
   if (receipt.mode === "dense" && receipt.memory.reconciliation.toleranceBytes !== 0) {
@@ -2651,7 +2694,7 @@ function campaignCoordinate(receipt, separator = "/") {
 }
 
 function campaignSchedule(version) {
-  if (version === 2) return SC20671_COVERING_SCHEDULE;
+  if (version === SC20671_SCHEDULE_VERSION) return SC20671_COVERING_SCHEDULE;
   if (version === 1) {
     return ["llama", "qwen"].flatMap((family) => CONTEXT_BANDS.flatMap((band) =>
       ["single", "supported-batch"].flatMap((request) =>
@@ -2662,7 +2705,7 @@ function campaignSchedule(version) {
   fail("unsupported campaign schedule version");
 }
 
-export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
+export function validateCampaign(receipts, { scheduleVersion = SC20671_SCHEDULE_VERSION } = {}) {
   if (!Array.isArray(receipts) || receipts.length === 0) fail("campaign has no sealed receipts");
   const schedule = campaignSchedule(scheduleVersion);
   const coordinates = new Set();
@@ -2721,7 +2764,7 @@ export function validateCampaign(receipts, { scheduleVersion = 2 } = {}) {
   if (coordinates.size !== expected.size || [...coordinates].some((coordinate) => !expected.has(coordinate))) {
     fail("campaign coordinates differ from the frozen schedule");
   }
-  for (const family of ["llama", "qwen"]) {
+  for (const family of scheduleVersion === 1 ? ["llama", "qwen"] : SC20671_FAMILIES) {
     const bands = new Map(receipts
       .filter((receipt) => receipt.matrix.family === family)
       .map((receipt) => [receipt.matrix.contextBand, receipt.geometry.contextPayloadTokens]));
@@ -2781,11 +2824,16 @@ export function campaignPolicySha256(policy) {
   return sha256(canonicalJson(policy));
 }
 
+/** Resume-identity inventory keys: every family's candidate, then every family's reference. */
+function campaignInventoryKeys() {
+  return ["Candidate", "Reference"].flatMap((role) => SC20671_FAMILIES.map((family) => `${family}${role}`));
+}
+
 export function campaignResumeIdentitySha256(identity, policySha256) {
   exactKeys(identity, [
     "schemaVersion", "kind", "scheduleVersion", "coordinates", "inferenceRevision",
     "sceneWorksRevision", "executableSha256", "promptSha256", "policySha256",
-    "llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference",
+    ...campaignInventoryKeys(),
     "mode", "kvMethod",
   ], "campaign resume identity");
   // A compressed campaign binds its mode and method; dense identities carry neither key.
@@ -2796,7 +2844,7 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
     }
   }
   if (identity.schemaVersion !== 1 || identity.kind !== "sc-20671-resume-identity"
-    || identity.scheduleVersion !== 2
+    || identity.scheduleVersion !== SC20671_SCHEDULE_VERSION
     || canonicalJson(identity.coordinates) !== canonicalJson(SC20671_COVERING_SCHEDULE.map((row) => row.join("-")))) {
     fail("campaign resume identity has a mismatched version or schedule");
   }
@@ -2809,7 +2857,7 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
   if (identity.policySha256 !== policySha256) {
     fail("campaign resume identity safety policy differs from the trusted policy");
   }
-  for (const field of ["llamaCandidate", "qwenCandidate", "llamaReference", "qwenReference"]) {
+  for (const field of campaignInventoryKeys()) {
     const inventory = identity[field];
     exactKeys(inventory, ["sha256", "bytes"], `campaign resume ${field}`);
     digest(inventory.sha256, `campaign resume ${field} inventory`);
@@ -2917,7 +2965,8 @@ export async function readCampaignSet(directory, {
   if (version === 2) {
     exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates", "qualityGatePassed"], "campaign manifest");
     if (typeof manifest.hostStateVaried !== "boolean") fail("campaign manifest hostStateVaried must be boolean");
-    if (manifest.kind !== "sc-20671-complete-covering-set" || manifest.scheduleVersion !== 2) {
+    if (manifest.kind !== "sc-20671-complete-covering-set"
+      || manifest.scheduleVersion !== SC20671_SCHEDULE_VERSION) {
       fail("campaign v2 manifest has a mismatched kind or schedule");
     }
     if (safetyPolicy === undefined) fail("campaign v2 requires a safety policy");
@@ -2944,7 +2993,9 @@ export async function readCampaignSet(directory, {
   } else {
     fail("unsupported or unapproved legacy campaign manifest version");
   }
-  const schedule = campaignSchedule(version);
+  // Manifest v2 carries the covering schedule's own version (checked above); v1 is the 64-row set.
+  const scheduleVersion = version === 2 ? manifest.scheduleVersion : 1;
+  const schedule = campaignSchedule(scheduleVersion);
   if (!Array.isArray(manifest.coordinates) || manifest.coordinates.length !== schedule.length) {
     fail(`campaign manifest requires exactly ${schedule.length} scheduled rows`);
   }
@@ -3037,7 +3088,11 @@ export async function readCampaignSet(directory, {
   if (manifest.qualityGatePassed !== campaignQualityGatePassed(receipts)) {
     fail("campaign manifest qualityGatePassed does not recompute from its rows");
   }
-  return { manifest, summary: validateCampaign(receipts, { scheduleVersion: version }), receipts };
+  return {
+    manifest,
+    summary: validateCampaign(receipts, { scheduleVersion }),
+    receipts,
+  };
 }
 
 /** Publish a historical v1 64-row set; new v2 publication belongs to the guarded producer. */
