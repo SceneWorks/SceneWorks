@@ -1852,6 +1852,97 @@
         "description": "Higher-capacity Qwen Image 2.1 style LoRA for texture and look transfer.",
         "order": 30
       }
+    },
+    {
+      "id": "qwen_image_2_1_edit_lora.edit.adamw8bit.balanced",
+      "version": 1,
+      "targetId": "qwen_image_2_1_edit_lora",
+      "name": "Edit balanced",
+      "recommendedFor": [
+        "edit"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "balanced",
+      "config": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 1.0,
+          "sampleSteps": 40,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "default": true,
+        "description": "Balanced first run for 20-50 instruction-edit pairs (ordered references + target + instruction) on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+        "order": 10
+      }
+    },
+    {
+      "id": "qwen_image_2_1_edit_lora.edit.adamw8bit.conservative",
+      "version": 1,
+      "targetId": "qwen_image_2_1_edit_lora",
+      "name": "Edit conservative",
+      "recommendedFor": [
+        "edit"
+      ],
+      "optimizer": "adamw8bit",
+      "qualityPreset": "conservative",
+      "config": {
+        "rank": 8,
+        "alpha": 8,
+        "learningRate": 0.00005,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "conservative",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 1.0,
+          "sampleSteps": 40,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "ui": {
+        "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+        "order": 20
+      }
     }
   ]
 }

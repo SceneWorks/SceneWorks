@@ -5,6 +5,7 @@
 // trainingConfigSnapshot (form draft → worker payload). No React, no app state.
 
 import { issue } from "../validation/issues.js";
+import { editPairDatasetIssues, trainingTargetReferenceCap } from "./datasetHelpers.js";
 import {
   asText,
   compactObject,
@@ -450,6 +451,7 @@ export function configValidation(
     datasetNotReady = false,
     missingControlModels = [],
     licenseAcknowledged = false,
+    models = [],
   } = {},
 ) {
   const issues = [];
@@ -466,6 +468,14 @@ export function configValidation(
   }
   if (!activeDataset?.id) {
     issues.push(issue.requirement("dataset", "Select a saved dataset"));
+  }
+  // Instruction-edit pairs (sc-24161): the saved dataset's shape must fit the target — an edit
+  // target needs every item to carry 1..cap ordered references, any other target none. Mirrors the
+  // API's plan-time refusal so Start training is held for the same reason the server would give.
+  if (selectedTarget && activeDataset?.id) {
+    issues.push(
+      ...editPairDatasetIssues(activeDataset, selectedTarget, trainingTargetReferenceCap(selectedTarget, models)),
+    );
   }
   if (!configDraft.outputName?.trim()) {
     issues.push(issue.requirement("outputName", `Name the ${outputKindLabel(selectedTarget, configDraft.networkType)} output`));

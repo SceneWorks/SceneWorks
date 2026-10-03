@@ -1798,6 +1798,12 @@ pub(crate) async fn create_training_job(
     // recorded above; `register_trained_lora` keeps these descriptive fields verbatim.
     if let Some(entry) = manifest_entry.as_object_mut() {
         entry.extend(trained_adapter_license_fields(target));
+        // An instruction-edit target (sc-24161) produces an EDIT adapter: record it the way the
+        // engine stamps the adapter's own metadata (`trainingMode=edit`), so the library can tell
+        // an edit adapter from a text-to-image one under the same `qwen-image-2-1` family.
+        if sceneworks_core::training::training_target_trains_edit_pairs(target) {
+            entry.insert("trainingMode".to_owned(), Value::String("edit".to_owned()));
+        }
     }
 
     // A control overlay registers as a ControlNet, not a LoRA (sc-10165, B4): swap the LoRA-shaped
@@ -2739,6 +2745,33 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
                 .unwrap_or_default();
             training_license_acknowledgment_error(target, &extra)
         })
+}
+
+/// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose
+/// instruction-edit shape contradicts its kernel (sc-24161): references under a captioned-only kernel
+/// or a reference-less item under an edit kernel. The typed route's target-level check never sees
+/// these plans, and both Qwen Image 2.1 kernels share one engine trainer, so this is the submit-time
+/// twin of the worker's own floor (`sceneworks_core::training::edit_pair_kernel_shape_error`).
+pub(crate) fn raw_training_payload_edit_shape_error(payload: &JsonObject) -> Option<ApiError> {
+    let plan = payload.get("plan")?;
+    let kernel = plan
+        .get("target")
+        .and_then(|target| target.get("kernel"))
+        .and_then(Value::as_str)?
+        .trim();
+    let items = plan
+        .get("dataset")
+        .and_then(|dataset| dataset.get("items"))
+        .and_then(Value::as_array)?;
+    sceneworks_core::training::edit_pair_kernel_shape_error(
+        kernel,
+        items.iter().map(|item| {
+            item.get("referenceImagePaths")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        }),
+    )
+    .map(ApiError::bad_request)
 }
 
 /// The refusal for a real run that no worker on this host can ever claim, or `None`. Off-Mac only

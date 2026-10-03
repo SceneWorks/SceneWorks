@@ -376,6 +376,7 @@
     "ltx_2_5_video_lora": "ltx_2_5",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
+    "qwen_image_2_1_edit_lora": "qwen_image_2_1",
     "qwen_image_2_1_lora": "qwen_image_2_1",
     "sd3_5_large_lora": "sd3_5_large",
     "sd3_5_medium_lora": "sd3_5_medium",

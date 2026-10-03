@@ -102,6 +102,18 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
     // real run (both call this), so both reject the same forged filename before any join.
     safe_weight_filename(&plan.output.file_name, "Training fileName")?;
+    // sc-24161: the T2I and edit kernels share one engine trainer (cap 10), so the engine floor
+    // alone cannot tell an edit adapter trained under the T2I target from the intended one. The
+    // kernel decides: an edit kernel needs references on every item, any other kernel on none.
+    if let Some(message) = sceneworks_core::training::edit_pair_kernel_shape_error(
+        &plan.target.kernel,
+        plan.dataset
+            .items
+            .iter()
+            .map(|item| item.reference_image_paths.len()),
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -112,6 +124,19 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         )?;
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
+        }
+        // An instruction-edit pair's ordered references (sc-24161) are dataset images too: confined
+        // under the dataset root and required on disk, exactly like the target.
+        for reference in &item.reference_image_paths {
+            let reference_path = resolve_dataset_item_path(
+                settings,
+                &plan.dataset.root_path,
+                reference,
+                "Training dataset referenceImagePaths",
+            )?;
+            if !reference_path.exists() {
+                missing.push(reference_path.display().to_string());
+            }
         }
         // Resolve and validate the prepared-bundle contract here, but do not hash the source.
         // `preflight_training_run` materializes each distinct bundle exactly once into a private
@@ -913,9 +938,21 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
-                // SceneWorks' training plan carries no edit-pair references yet: every item is a
-                // plain text-to-image sample (sc-24163 pin contract).
-                reference_image_paths: Vec::new(),
+                // Instruction-edit pairs (sc-24161): the ORDERED references resolve under the
+                // dataset root exactly like the target image, in plan order — the engine numbers
+                // them, so the order is semantic. Empty for every captioned/control item.
+                reference_image_paths: item
+                    .reference_image_paths
+                    .iter()
+                    .map(|path| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            path,
+                            "Training dataset referenceImagePaths",
+                        )
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -951,6 +988,11 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
+    // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
+    gen_core::train::validate_edit_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -1334,6 +1376,10 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
         // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
         // the 2.1 trainer over a different architecture.
         "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
+        // Qwen Image 2.1 instruction-edit LoRA/LoKr (epic 24107 S13, sc-24161): the SAME engine
+        // trainer — it trains edit mode when the items carry ordered references. Base-gated like
+        // the T2I kernel so no other base can load the 2.1 trainer.
+        "qwen_image_2_1_edit_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -1622,7 +1668,8 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
         ),
         // Qwen Image 2.1 (sc-24160) trains LoRA/LoKr over its dense bf16 multi-billion-parameter
         // MMDiT — the same frozen-weight-gradient OOM class, so force checkpointing on.
-        "qwen_image_2_1_lora" => true,
+        // sc-24162: the instruction-edit kernel trains the same MMDiT (plus reference tokens).
+        "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => true,
         _ => false,
     }
 }
@@ -3142,6 +3189,145 @@ mod tests {
         );
     }
 
+    /// sc-24161: the worker maps a plan's instruction-edit items onto engine `TrainingItem`s whose
+    /// `reference_image_paths` carry the references IN PLAN ORDER (resolved under the dataset root,
+    /// target = item image, instruction = caption), and a plain plan still builds items with no
+    /// references at all. A reference escaping the dataset root is refused, like the target.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_edit_references_in_order_and_plain_items_carry_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        let target = dataset_root.join("images").join("item_0001.png");
+        std::fs::write(&target, b"target").expect("write target");
+        // Deliberately NOT lexical order: the stored order is semantic and must survive verbatim.
+        let ordered = [
+            "item_0001_ref3.png",
+            "item_0001_ref1.png",
+            "item_0001_ref2.png",
+        ];
+        for name in ordered {
+            std::fs::write(refs_dir.join(name), name.as_bytes()).expect("write reference");
+        }
+
+        let mut value = plan_json(
+            &data_dir,
+            "qwen_image_2_1_edit_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        );
+        value["dataset"]["items"][0]["caption"] = json!("put the hat from image 2 on image 1");
+        value["dataset"]["items"][0]["referenceImagePaths"] = json!(ordered
+            .iter()
+            .map(|name| format!("images/refs/{name}"))
+            .collect::<Vec<_>>());
+        let plan = parse(value);
+        validate_training_plan(&settings, &plan).expect("edit plan validates");
+        let mut prepared_inputs = PreparedTrainingInputs::default();
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+            .expect("edit plan maps to a request");
+        let item = &request.items[0];
+        assert!(item.is_edit_pair());
+        assert_eq!(item.image_path, target.canonicalize().unwrap());
+        assert_eq!(item.caption, "put the hat from image 2 on image 1");
+        assert_eq!(
+            item.reference_image_paths,
+            ordered
+                .iter()
+                .map(|name| refs_dir.join(name).canonicalize().unwrap())
+                .collect::<Vec<_>>(),
+            "references must reach the engine in plan order"
+        );
+        assert_eq!(item.control_image_path, None);
+
+        // A plain T2I plan builds captioned items with NO references.
+        let plain = parse(plan_json(
+            &data_dir,
+            "qwen_image_2_1_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        ));
+        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs)
+            .expect("plain plan maps to a request");
+        assert!(request.items.iter().all(|item| !item.is_edit_pair()));
+        assert!(request.items[0].reference_image_paths.is_empty());
+
+        // A missing reference is reported like a missing target image, and one escaping the dataset
+        // root is refused outright.
+        let mut missing = plan.clone();
+        missing.dataset.items[0]
+            .reference_image_paths
+            .push("images/refs/absent.png".to_owned());
+        let error = validate_training_plan(&settings, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+        let mut escaping = plan.clone();
+        let outside = data_dir.join("outside.png");
+        std::fs::write(&outside, b"outside").expect("write outside");
+        escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
+        assert!(training_request_from_plan(&settings, &escaping, &mut prepared_inputs).is_err());
+        prepared_inputs.close().expect("close prepared inputs");
+    }
+
+    /// sc-24161 review: both 2.1 kernels map to the one `qwen_image_2_1` engine trainer, so the
+    /// worker itself refuses a plan whose edit shape contradicts its KERNEL — references under the
+    /// T2I kernel (would train an edit adapter as a T2I target) and a reference-less item under the
+    /// edit kernel (would train T2I as an edit target) — whatever route queued it.
+    #[test]
+    fn worker_refuses_plans_whose_edit_shape_contradicts_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let image = data_dir.join("datasets").join("ds-1").join("a.png");
+        let plan_for = |kernel: &str, refs: &[Value]| {
+            let mut value = plan_json(
+                &data_dir,
+                kernel,
+                "qwen_image_2_1",
+                "lora",
+                &[&image.display().to_string(), &image.display().to_string()],
+            );
+            value["dataset"]["items"][1]["referenceImagePaths"] = json!(refs);
+            parse(value)
+        };
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_lora") && error.contains("captioned images only"),
+            "{error}"
+        );
+        // Item 0 has no references under the edit kernel (item 1 does): mixed is refused too.
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_edit_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_edit_lora") && error.contains("item 0"),
+            "{error}"
+        );
+        // A plain T2I plan passes the shape floor (it then reports the missing images instead).
+        let error = validate_training_plan(&settings, &plan_for("qwen_image_2_1_lora", &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+    }
+
     /// A complete resolved plan as the API serializes it, parameterized by the
     /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
     /// so `baseModelInstalled` is false unless a test overrides it.
@@ -3342,10 +3528,16 @@ mod tests {
         // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
         // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
         // left alone (unlike LTX's f32 normalization).
-        for network_type in ["lora", "lokr"] {
+        // sc-24162: the instruction-edit kernel is forced too.
+        for (kernel, network_type) in [
+            ("qwen_image_2_1_lora", "lora"),
+            ("qwen_image_2_1_lora", "lokr"),
+            ("qwen_image_2_1_edit_lora", "lora"),
+            ("qwen_image_2_1_edit_lora", "lokr"),
+        ] {
             let mut value = plan_json(
                 dir.path(),
-                "qwen_image_2_1_lora",
+                kernel,
                 "qwen_image_2_1",
                 network_type,
                 &[&image],
@@ -3356,9 +3548,9 @@ mod tests {
             let config = finalize_training_config(map_training_config(&plan.config), &plan);
             assert!(
                 config.gradient_checkpointing,
-                "Qwen Image 2.1 {network_type} forces gradient checkpointing on candle"
+                "{kernel} {network_type} forces gradient checkpointing on candle"
             );
-            assert_eq!(config.train_dtype, "bf16", "{network_type}");
+            assert_eq!(config.train_dtype, "bf16", "{kernel}/{network_type}");
         }
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
@@ -3782,6 +3974,15 @@ mod tests {
             ),
             ("qwen_image_2_1_lora", "qwen_image", None),
             ("qwen_image_2_1_lora", "qwen_image_edit", None),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the SAME engine trainer in edit mode,
+            // base-gated the same way.
+            (
+                "qwen_image_2_1_edit_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_edit_lora", "qwen_image", None),
+            ("qwen_image_2_1_edit_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -3988,6 +4189,131 @@ mod tests {
             }
         }
         assert_eq!(checked, configs.len() * network_types.len());
+    }
+
+    /// sc-24161/sc-24162: the instruction-EDIT target's defaults and every shipped edit preset, for
+    /// each network type, with an EDIT-PAIR plan (ordered references + target + instruction), pass
+    /// the shared preflight AND the pinned Candle 2.1 trainer's own weights-free `validate` — the
+    /// references reach the engine in plan order. Its negative twin: the same request with the
+    /// references stripped is refused by the engine (an edit kernel never trains plain items), and
+    /// with more references than the trainer's cap is refused naming the cap.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_edit_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+        let ref_names: Vec<String> = (1..=11).map(|index| format!("x_ref{index}.png")).collect();
+        for name in &ref_names {
+            std::fs::write(refs_dir.join(name), b"png").expect("reference");
+        }
+        let refs = |count: usize| -> Vec<String> {
+            ref_names[..count]
+                .iter()
+                .rev()
+                .map(|name| format!("images/refs/{name}"))
+                .collect()
+        };
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("qwen_image_2_1_edit_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 edit target ships presets");
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+        assert_eq!(trainer.descriptor().max_reference_images, 10);
+
+        let plan_for = |config: &sceneworks_core::training::TrainingConfig,
+                        network_type: &str,
+                        references: Vec<String>| {
+            let mut serialized = plan_json(
+                dir.path(),
+                &target.kernel,
+                &target.base_model,
+                network_type,
+                &[&image],
+            );
+            serialized["target"]["targetId"] = json!(target.id);
+            serialized["target"]["family"] = json!(target.family);
+            serialized["dataset"]["items"][0]["caption"] =
+                json!("put the hat from image 2 on image 1");
+            serialized["dataset"]["items"][0]["referenceImagePaths"] = json!(references);
+            let mut config = serde_json::to_value(config).expect("config serializes");
+            config["advanced"]["networkType"] = json!(network_type);
+            serialized["config"] = config;
+            parse(serialized)
+        };
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in ["lora", "lokr"] {
+                let plan = plan_for(config, network_type, refs(3));
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                let item = &prepared.request.items[0];
+                assert_eq!(
+                    item.reference_image_paths
+                        .iter()
+                        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                    ["x_ref3.png", "x_ref2.png", "x_ref1.png"],
+                    "{label}/{network_type}: references reach the engine in plan order"
+                );
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+
+                // Negative twins against the same pinned engine floor.
+                let mut stripped = prepared.request.clone();
+                stripped.items[0].reference_image_paths.clear();
+                assert!(
+                    gen_core::train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
+                    "a plain request is a T2I request to the engine — the KERNEL floor refuses it"
+                );
+                let mut over = prepared.request.clone();
+                over.items[0].reference_image_paths = (1..=11)
+                    .map(|index| refs_dir.join(format!("x_ref{index}.png")))
+                    .collect();
+                let error = trainer.validate(&over).unwrap_err().to_string();
+                assert!(
+                    error.contains("at most 10"),
+                    "{label}/{network_type}: {error}"
+                );
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * 2);
+
+        // The kernel floor: the edit kernel refuses the reference-less plan the engine would accept.
+        let error =
+            preflight_training_run(&settings, &plan_for(&target.defaults, "lora", Vec::new()))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("qwen_image_2_1_edit_lora"), "{error}");
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

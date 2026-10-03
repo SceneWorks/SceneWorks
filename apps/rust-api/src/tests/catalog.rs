@@ -1176,6 +1176,27 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "kolors_lora"));
+    // sc-24161/sc-24162: the off-Mac twin lists the candle-routed training kernels — both Qwen
+    // Image 2.1 kernels since the Candle edit trainer — and is exactly that set.
+    let candle_kernels: Vec<_> = caps["training"]["candleSupportedKernels"]
+        .as_array()
+        .expect("candleSupportedKernels")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(candle_kernels.contains(&"qwen_image_2_1_lora"));
+    assert!(candle_kernels.contains(&"qwen_image_2_1_edit_lora"));
+    for kernel in &candle_kernels {
+        assert!(
+            sceneworks_core::jobs_store::training_kernel_is_candle_routed(kernel),
+            "{kernel} is advertised off-Mac but has no candle lane"
+        );
+    }
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "qwen_image_2_1_edit_lora"));
 }
 
 #[tokio::test]

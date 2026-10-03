@@ -73,6 +73,16 @@ export function candleVideoModeBlock(model, caps, mode) {
 }
 
 // Partition a model list into the ones with a candle lane (for the picker) — a no-op on Mac.
+// A training target whose kernel no candle worker can run (sc-24161 — e.g. the MLX-only Qwen Image
+// 2.1 edit kernel until its Candle trainer lands) → disabled off-Mac, the twin of
+// `macTrainingKernelBlocked`. Keyed on the server's `training.candleSupportedKernels` (the
+// candle-routed set), never a hardcoded kernel list; inert when the field is absent.
+export function candleTrainingKernelBlocked(caps, kernel) {
+  if (!candleGatingActive(caps) || !kernel) return false;
+  const supported = caps?.training?.candleSupportedKernels;
+  return Array.isArray(supported) && !supported.includes(kernel);
+}
+
 export function candleAvailableModels(models, caps) {
   if (!candleGatingActive(caps)) return models ?? [];
   return (models ?? []).filter((model) => model?.candleSupport?.supported !== false);

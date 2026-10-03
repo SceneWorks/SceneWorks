@@ -6985,6 +6985,67 @@ fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
     }
 }
 
+/// sc-24161/sc-24162 (epic 24107 S13/S14): a Qwen Image 2.1 instruction-EDIT training job is
+/// claimed by BOTH native workers (the MLX and the Candle 2.1 trainers train edit pairs), for both
+/// network types, and never by a generic worker; a forged plan naming another base is refused by
+/// the candle exception.
+#[test]
+fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!(
+                "qwen-2-1-edit-training-{native_worker}-{network_type}"
+            ));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_edit_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "a generic worker must refuse qwen_image_2_1_edit_lora/{network_type}"
+            );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_edit_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
+        }
+    }
+    // Base gate: the edit kernel over the 2512 base never reaches the candle 2.1 trainer.
+    let store = store("qwen-2-1-edit-training-forged-base");
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    store
+        .create_job(mlx_training_job(
+            "qwen_image_2_1_edit_lora",
+            "qwen_image",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
+}
+
 #[test]
 fn ltx_training_runs_on_candle_with_no_torch_fallback() {
     // The stable kernel name is historical: LTX is native-Rust-only and has both MLX and candle

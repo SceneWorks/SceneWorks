@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 107,
     "importedFamilyCount": 4,
-    "cellCount": 1006,
+    "cellCount": 1008,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
@@ -13,23 +13,23 @@
     "apiContractEntry": "2089dddb6e3274abfc5bb435292b85697c7fe26375a89f6eafdfe94fe92ebdd6",
     "apiDto": "0c8d130bcaabffc99216b44347c2fe406fbe467a30cbf4f5b87b0438e8e41142",
     "apiGeneration": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4",
-    "apiValidation": "9059ba74f7e500e457a8e4d5854f63d10207a8f5d8c480fbaf4dfe0b5f9933ee",
+    "apiValidation": "c3f2f75b698121649fab10f9949dbdaf88a3dcb5ed82e8f46a87f05364789755",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
     "descriptorAudioFacts": "70808d26f403e987820d699d16178ec764621e6627fede8374b4acb0586b3860",
     "descriptorCandleFacts": "c64db7cc36053c46241063a32d4a3d0328c313404ba7f82fa1ef6caa030c5346",
-    "descriptorCandleRuntime": "093232cfe8a7b894f7dff91569b9a5625228251e8121972e550a42a87ef64860",
+    "descriptorCandleRuntime": "13da7755629cb57f38237710a064f7071b0da519a274c52511a55de6a1f27cf8",
     "descriptorMlxFacts": "6d491c537f423d0fee25a301dca992156c35906308837d7c8e66866ad724ea0d",
-    "descriptorMlxRuntime": "1d95154afac6d55e4b64eaf6a2b7b5070f16e32cd0f583191ced02d4ef151d8e",
+    "descriptorMlxRuntime": "8c59ba271259163e321ea5314861cb6cf90ed1bcbd8aa7835b20878d416fce3e",
     "descriptorPreviewFacts": "7c85cbaafe33fb58f29f2c07e99b2288763768fbc26dc5c767e0c121f058672f",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "beb698b6084bf7a189274b55cbd1b91a37e40f96d2dca03b10534e7fde72ac20",
     "modelImportDefaults": "9156c68c4ffa7571772fa43bbdf1ee1e5e8a27c665e1dc1cdff4287bdbaedda1",
-    "routerCandle": "2ed1559b475505e761b382c8ce2e7589d815ea3009a4f4ddfb914f46653ab590",
-    "routerCatalog": "3dd7b1b9ec220a0ee1c0a8fc0c7c05fc5c89741974b7f8b04a66e929afb003f7",
+    "routerCandle": "b0148c4f70e2cada8e175cc91f3d3c83463f204375fd8dfa93acb56a49ae1a79",
+    "routerCatalog": "d54985f1aede348ee11cdeccf7f7a86fb002cf185e16823f395538eca6659be4",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
     "routerMlx": "c2a7d7a77963ea42bde821ea0c4b4a5929031ec1d583f4f6bc68b194945fb6f9",
     "scheduler": "e1ef6a89b60ab1fb7645cc99c7f29196d092b203cdf9ffaadc11ae9e5a1e81aa",
-    "trainingCatalog": "e91f21c639a4eaca20f7871cb9d2c973120a0b108e67c68ada62fa51182b016c",
+    "trainingCatalog": "6b2cbaee1ace595ca49e6517669588ca5c04aa90da68d7d7df75f860df207db2",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "ef1b1a831b8c1f1699bed557c2732232a275a47183a326fdb6ca8ae2ee7bc82d",
+    "workerTrainingDispatch": "85930fe9df2ce70f282b6506309c0ac0cafbc3c2d9f4e2a01f59f7bd178b816a",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -7852,6 +7852,28 @@
       "target": "mage_flow_base_lora",
       "baseModel": "mage_flow_base",
       "kernel": "mage_flow_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "networkType": "lokr",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "qwen_image_2_1_edit_lora",
+      "baseModel": "qwen_image_2_1",
+      "kernel": "qwen_image_2_1_edit_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",

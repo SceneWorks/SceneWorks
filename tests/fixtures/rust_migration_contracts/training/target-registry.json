@@ -1146,6 +1146,103 @@
       }
     },
     {
+      "id": "qwen_image_2_1_edit_lora",
+      "name": "Qwen Image 2.1 Edit LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "qwen-image-2-1",
+      "baseModel": "qwen_image_2_1",
+      "baseModelRepo": "Qwen/Qwen-Image-2.1",
+      "kernel": "qwen_image_2_1_edit_lora",
+      "defaults": {
+        "rank": 16,
+        "alpha": 16,
+        "learningRate": 0.0001,
+        "steps": 3000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 1024,
+        "saveEvery": 250,
+        "seed": 42,
+        "optimizer": "adamw8bit",
+        "advanced": {
+          "cacheLatents": true,
+          "cacheTextEmbeddings": true,
+          "gradientCheckpointing": true,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "qualityPreset": "balanced",
+          "requestedGpu": "auto",
+          "sampleEvery": 0,
+          "sampleGuidanceScale": 1.0,
+          "sampleSteps": 40,
+          "timestepBias": "balanced",
+          "timestepType": "sigmoid",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          4
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "maxReferenceImages": 10,
+        "networkTypes": [
+          "lora",
+          "lokr"
+        ],
+        "optimizers": [
+          "adamw8bit",
+          "adamw",
+          "adam",
+          "prodigyopt",
+          "rose"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          4,
+          128
+        ],
+        "resolutions": [
+          768,
+          1024,
+          1536
+        ],
+        "steps": [
+          200,
+          6000
+        ]
+      },
+      "ui": {
+        "datasetKind": "editPairs",
+        "datasetModality": "image",
+        "description": "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier). Each dataset item is an edit pair: the item image is the edit target, its caption is the edit instruction, and it carries 1-10 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
+        "label": "Qwen Image 2.1 Edit LoRA",
+        "license": "Qwen RESEARCH LICENSE AGREEMENT",
+        "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
+        "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE",
+        "recommendedFor": [
+          "edit"
+        ],
+        "requiresLicenseAcknowledgment": true
+      }
+    },
+    {
       "id": "ltx_video_lora",
       "name": "LTX-2.3 Video LoRA",
       "modality": "video",

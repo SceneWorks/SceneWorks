@@ -186,3 +186,126 @@ describe("DatasetEditorPanel delete affordance", () => {
     }
   });
 });
+
+// sc-24161: instruction-edit pairs. Each item is ordered references + the item image (target) + its
+// caption (instruction). The rail reuses the Image Editor's ordered-reference affordances: visible
+// 1-based ordinals, in-place reorder, and an Add that stops at the model's reference cap.
+describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  const image = (id) => ({ id, type: "image", displayName: `${id}.png`, file: { path: `assets/${id}.png` } });
+  const target = image("target");
+  const refs = ["ref-a", "ref-b", "ref-c"].map(image);
+
+  // A stateful harness so a reorder really re-renders through the panel, the way TrainingStudio's
+  // `setItemReferences` drives it.
+  function Harness({ referenceCap, initial, editPairsMode = false, onReferencesChange }) {
+    const [drafts, setDrafts] = React.useState(initial);
+    const { props } = makeSessions();
+    props.datasetSession.memberAssets = [target];
+    props.config.imageAssets = [target, ...refs];
+    return (
+      <DatasetEditorPanel
+        {...props}
+        editPairSession={{
+          referenceCap,
+          referenceDraftById: drafts,
+          setItemReferences: (selectionId, ids) => {
+            onReferencesChange?.(selectionId, ids);
+            setDrafts((current) => ({ ...current, [selectionId]: ids }));
+          },
+          addItemReferences: vi.fn(),
+          importItemReferences: vi.fn(),
+          editPairsMode,
+          setEditPairsMode: vi.fn(),
+        }}
+      />
+    );
+  }
+
+  const button = (label) => container.querySelector(`button[aria-label="${label}"]`);
+  const ordinals = () =>
+    [...container.querySelectorAll(".training-edit-ref-ordinal")].map((node) => node.textContent);
+
+  it("shows ordered ordinals and reorders references in place", async () => {
+    const onReferencesChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <Harness
+          initial={{ target: ["ref-a", "ref-b", "ref-c"] }}
+          onReferencesChange={onReferencesChange}
+          referenceCap={10}
+        />,
+      ),
+    );
+    expect(ordinals()).toEqual(["Image 1", "Image 2", "Image 3"]);
+    expect(container.textContent).toContain("3 / 10");
+    expect(button("Move Image 1 of target.png earlier").disabled).toBe(true);
+
+    await act(async () => button("Move Image 1 of target.png later").click());
+    expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-b", "ref-a", "ref-c"]);
+
+    await act(async () => button("Move Image 3 of target.png earlier").click());
+    expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-b", "ref-c", "ref-a"]);
+
+    await act(async () => button("Remove Image 1 of target.png").click());
+    expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-c", "ref-a"]);
+    expect(ordinals()).toEqual(["Image 1", "Image 2"]);
+    // The caption is the instruction once the item is an edit pair.
+    expect(container.querySelector('textarea[aria-label="Caption for target.png"]').placeholder).toContain(
+      "Edit instruction",
+    );
+  });
+
+  it("disables Add at the model's reference cap", async () => {
+    await act(async () =>
+      root.render(<Harness initial={{ target: ["ref-a", "ref-b", "ref-c"] }} referenceCap={3} />),
+    );
+    expect(button("Add reference images to target.png").disabled).toBe(true);
+    expect(container.textContent).toContain("3 / 3");
+
+    await act(async () => root.render(<Harness initial={{ target: ["ref-a"] }} key="one-reference" referenceCap={3} />));
+    expect(button("Add reference images to target.png").disabled).toBe(false);
+  });
+
+  it("hides every edit-pair affordance when no trainable target takes references", async () => {
+    await act(async () => root.render(<Harness initial={{}} referenceCap={0} editPairsMode />));
+    expect(container.querySelector(".training-edit-refs")).toBeNull();
+    expect([...container.querySelectorAll("button")].some((node) => node.textContent.includes("Edit pairs"))).toBe(
+      false,
+    );
+  });
+
+  it("ignores reference drafts left behind by items no longer in the dataset", async () => {
+    // "gone" was removed from the selection but its draft lingers in the map.
+    await act(async () => root.render(<Harness initial={{ gone: ["ref-a"] }} referenceCap={10} />));
+    const toggle = [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Edit pairs"));
+    expect(toggle.disabled).toBe(false);
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(container.querySelector(".training-edit-refs")).toBeNull();
+  });
+
+  it("shows the rails only once edit pairs are turned on for a dataset without references", async () => {
+    await act(async () => root.render(<Harness initial={{}} referenceCap={10} />));
+    expect(container.querySelector(".training-edit-refs")).toBeNull();
+    const toggle = [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Edit pairs"));
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => root.render(<Harness editPairsMode initial={{}} referenceCap={10} />));
+    expect(container.querySelector(".training-edit-refs")).not.toBeNull();
+    expect(container.textContent).toContain("0 / 10");
+  });
+});

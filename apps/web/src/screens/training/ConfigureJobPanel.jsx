@@ -51,6 +51,8 @@ export function ConfigureJobPanel({
   setSelectedTargetId,
   trainingTargets,
   macTargetBlocked,
+  // Why a blocked target is blocked, as the option suffix (sc-24161: off-Mac vs on-Mac gates).
+  targetBlockedLabel = () => " — not on Mac (Cuda only)",
   updateSelectedPreset,
   updateQualityTier,
   selectedPreset,
@@ -179,7 +181,7 @@ export function ConfigureJobPanel({
                   return (
                     <option key={target.id} value={target.id} disabled={blocked}>
                       {target.ui?.label ?? target.name}
-                      {blocked ? " — not on Mac (Cuda only)" : ""}
+                      {blocked ? targetBlockedLabel(target) : ""}
                     </option>
                   );
                 })}

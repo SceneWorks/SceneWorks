@@ -369,6 +369,8 @@ mod imp {
                 image_path: item.target_rel.clone(),
                 caption: item.caption.clone(),
                 control_image_path: Some(item.control_rel.clone()),
+                // A control pair is never an edit pair (sc-24161).
+                reference_image_paths: Vec::new(),
                 width: None,
                 height: None,
                 extra: Default::default(),

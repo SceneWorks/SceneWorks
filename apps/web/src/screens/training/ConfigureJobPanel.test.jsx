@@ -610,3 +610,27 @@ describe("ConfigureJobPanel base-licence notice", () => {
     expect(submitButton().disabled).toBe(false);
   });
 });
+
+// sc-24161 review: a target the host cannot run is disabled in the picker with the host-specific
+// reason (off-Mac: the MLX-only edit kernel reads "Apple Silicon only").
+describe("ConfigureJobPanel host-blocked targets", () => {
+  it("disables a blocked target and labels it with the supplied reason", () => {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          trainingTargets: [
+            { id: "t1", name: "Target One" },
+            { id: "edit", name: "Qwen Edit", kernel: "qwen_image_2_1_edit_lora" },
+          ],
+          macTargetBlocked: (target) => target.id === "edit",
+          targetBlockedLabel: () => " — Apple Silicon only",
+        })}
+      />,
+    );
+    const option = [...container.querySelectorAll("option")].find((node) => node.value === "edit");
+    expect(option.disabled).toBe(true);
+    expect(option.textContent).toContain("Apple Silicon only");
+    const free = [...container.querySelectorAll("option")].find((node) => node.value === "t1");
+    expect(free.disabled).toBe(false);
+  });
+});
