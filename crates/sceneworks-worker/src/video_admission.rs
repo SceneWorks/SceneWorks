@@ -749,49 +749,281 @@ type VideoDecodeProfileResolver = fn(
     MemorySelection,
 ) -> Result<Option<ResolvedVideoDecodeProfile>, String>;
 
-/// Resolves the provider's conservative VAE **encode** working set for the request's conditioning
-/// (sc-20686, epic E8): `(lane, provider, mode, reference_count, geometry)`. `None` = the request
-/// encodes nothing (or the lane publishes no encode cost).
-type VideoEncodeProfileResolver =
-    fn(VideoLane, &str, &str, u32, VideoAdmissionGeometry) -> Option<VideoDecodeMemoryProfile>;
+/// What a request's conditioning VAE encode costs (sc-20686, epic E8; sc-20688). "Encodes nothing"
+/// and "encodes, but the provider publishes no calibrated cost" are different answers: the second
+/// must never be admitted as free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VideoEncodeProfile {
+    /// The request VAE-encodes nothing before denoise.
+    Nothing,
+    /// The provider's calibrated conservative encode working set.
+    Calibrated(VideoDecodeMemoryProfile),
+    /// The request encodes conditioning the provider publishes no calibrated encode cost for
+    /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
+    /// working set for the frames it encodes instead.
+    UncalibratedConservative(VideoDecodeMemoryProfile),
+}
+
+/// The conditioning a request VAE-encodes before denoise, as the admission identity names it. What
+/// an uncalibrated encode covers is keyed on `(provider, mode)` ([`uncalibrated_encode_pass`]), never
+/// on the carrier-shape label, which names evidence identity rather than what the engine encodes.
+#[derive(Clone, Copy, Debug)]
+struct VideoEncodeRequest<'a> {
+    mode: &'a str,
+    reference_count: u32,
+}
+
+/// Resolves the request's conditioning VAE-encode cost for one graded candidate: `(lane, provider,
+/// conditioning, geometry, selection)`. `Err` when the request encodes conditioning that has
+/// neither a calibrated encode cost nor a conservative profile to stand in for it: admission fails
+/// closed.
+type VideoEncodeProfileResolver = fn(
+    VideoLane,
+    &str,
+    VideoEncodeRequest<'_>,
+    VideoAdmissionGeometry,
+    MemorySelection,
+) -> Result<VideoEncodeProfile, String>;
 
 fn no_video_encode_profile(
     _lane: VideoLane,
     _provider_id: &str,
-    _mode: &str,
-    _reference_count: u32,
+    _request: VideoEncodeRequest<'_>,
     _geometry: VideoAdmissionGeometry,
-) -> Option<VideoDecodeMemoryProfile> {
-    None
+    _selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    Ok(VideoEncodeProfile::Nothing)
 }
 
-/// The pinned MLX bundle's conservative conditioning-encode working set (sc-20686, epic E8). Image
-/// or video conditioning is VAE-encoded before denoise; the encode and decode phases never overlap,
-/// so the floor takes the larger of the two compositions rather than their sum.
+/// What the provider's own encode calibration says about a request. Only the MLX bundle
+/// calibrates encoders, so other builds construct `Uncalibrated` alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum ProviderEncodeAnswer {
+    /// The provider calibrates its encoder, and this request's encode costs this much.
+    Profile(VideoDecodeMemoryProfile),
+    /// The provider calibrates its encoder, and this request encodes nothing. A calibrated
+    /// provider's own "nothing" is never second-guessed.
+    EncodesNothing,
+    /// The provider publishes no encode calibration at all (LTX on MLX, every CUDA provider).
+    Uncalibrated,
+}
+
+/// Whether a request VAE-encodes conditioning before denoise: any reference input, or any mode
+/// other than plain text-to-video. Consulted only for a provider without encode calibration.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
+    request.reference_count > 0 || request.mode != "text_to_video"
+}
+
+/// What one VAE-encode pass of a provider's conditioning covers: a single still, or a clip as long
+/// as the output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+enum EncodePass {
+    /// Every conditioning input is a still, VAE-encoded one at a time: one frame.
+    Still,
+    /// The largest pass is a conditioning clip of the output length (`frames`).
+    Clip,
+}
+
+/// The largest single VAE-encode pass each `(provider, mode)` runs before denoise, read off the
+/// engines at the pinned inference rev (41c560b73). Every engine encodes its conditioning one
+/// carrier per `encode` call, so the working set is the largest pass, not the sum (the MLX
+/// calibration prices it the same way: `mlx-gen-wan/src/lib.rs:468`). Clip carriers are extracted
+/// at the output length (`video_jobs/bernini.rs` `wan_frame_count`), so a clip pass is `frames`.
+///
+/// | provider | mode | pass | engine source |
+/// | --- | --- | --- | --- |
+/// | `ltx_2_3[_distilled]`, `ltx_2_5[_distilled]` | `image_to_video`, `first_last_frame` | 1 | candle-gen-ltx/src/lib.rs:834-850 (`encode_image`, one still per call from `build_keyframes` :856); mlx-gen-ltx/src/model.rs:1811, :1970-1979 |
+/// | `ltx_2_3[_distilled]`, `ltx_2_5[_distilled]` | `extend_clip`, `video_bridge`, `replace_person` | F | candle-gen-ltx/src/lib.rs:912-955 (`build_clips`); mlx-gen-ltx/src/model.rs:1873-1949 |
+/// | `wan2_2_ti2v_5b` | `image_to_video`, `first_last_frame`, `extend_clip`, `video_bridge` | 1 | candle-gen-wan/src/lib.rs:463-488 (`prepare_ti2v`: each Reference/Keyframe still alone); mlx-gen-wan/src/lib.rs:513 |
+/// | `wan2_2_i2v_14b` | `image_to_video` | F | candle-gen-wan/src/wan14b.rs:437-457 (`build_i2v_y`: `[image, zeros…]` F-frame clip); mlx-gen-wan/src/lib.rs:514 |
+/// | `wan_vace`, `wan2_2_vace_fun_14b` | `extend_clip`, `video_bridge`, `replace_person` | F | candle-gen-wan/src/vace.rs:506-519 (`prepare_video_latents`: F-frame ControlClip inactive/reactive halves, then reference stills); mlx-gen-wan/src/lib.rs:514 |
+/// | `bernini`, `bernini_renderer` | `reference_to_video` | 1 | candle-gen-bernini/src/bernini.rs:855, :867, pipeline.rs:230, :240 (`encode_image` per still); mlx-gen-wan/src/lib.rs:471 |
+/// | `bernini`, `bernini_renderer` | `video_to_video`, `reference_video_to_video`, `multi_video_to_video`, `ads2v` | F | candle-gen-bernini/src/preprocess.rs:33-57 (`encode_videoclip`, one call per clip from bernini.rs:843 / pipeline.rs:221; ads2v's source and reference clips are two F passes); mlx-gen-wan/src/lib.rs:474 via mlx-gen-bernini/src/lib.rs:117 |
+/// | `scail2_14b` | `animate_character`, `replace_person` | F | candle-gen-scail2/src/generate.rs:460 (driving clip, per segment of at most F) |
+/// | `svd_xt` | `image_to_video` | 1 | candle-gen-svd/src/lib.rs:445 (the one conditioning image) |
+///
+/// A `(provider, mode)` this table does not name is priced as the full clip: an unknown encode is
+/// never assumed to be a still.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn uncalibrated_encode_pass(provider_id: &str, mode: &str) -> EncodePass {
+    use EncodePass::{Clip, Still};
+    match (provider_id, mode) {
+        (
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled",
+            "image_to_video" | "first_last_frame",
+        ) => Still,
+        (
+            "ltx_2_3" | "ltx_2_3_distilled" | "ltx_2_5" | "ltx_2_5_distilled",
+            "extend_clip" | "video_bridge" | "replace_person",
+        ) => Clip,
+        (
+            "wan2_2_ti2v_5b",
+            "image_to_video" | "first_last_frame" | "extend_clip" | "video_bridge",
+        ) => Still,
+        ("wan2_2_i2v_14b", "image_to_video") => Clip,
+        ("wan_vace" | "wan2_2_vace_fun_14b", "extend_clip" | "video_bridge" | "replace_person") => {
+            Clip
+        }
+        ("bernini" | "bernini_renderer", "reference_to_video") => Still,
+        (
+            "bernini" | "bernini_renderer",
+            "video_to_video" | "reference_video_to_video" | "multi_video_to_video" | "ads2v",
+        ) => Clip,
+        ("scail2_14b", "animate_character" | "replace_person") => Clip,
+        ("svd_xt", "image_to_video") => Still,
+        // Not in the table: price the full clip, never a still.
+        _ => Clip,
+    }
+}
+
+/// The frames the largest uncalibrated encode pass VAE-encodes ([`uncalibrated_encode_pass`]).
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn uncalibrated_encode_frames(provider_id: &str, mode: &str, frames: u32) -> u32 {
+    match uncalibrated_encode_pass(provider_id, mode) {
+        EncodePass::Still => 1,
+        EncodePass::Clip => frames.max(1),
+    }
+}
+
+/// Classify the provider's encode answer for one graded candidate (sc-20686, sc-20688):
+///
+/// * a calibrated profile, or a calibrated provider's "nothing", is taken as is;
+/// * an uncalibrated provider's request that encodes nothing is nothing;
+/// * otherwise the encode is priced at the provider's conservative single-pass VAE profile for
+///   the frames its largest encode pass covers ([`uncalibrated_encode_frames`]), or refused
+///   without one. This holds on every rung: bounded decode tiles the decode, never the
+///   conditioning encode, so a bounded-decode candidate runs the same full encode.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn classify_video_encode_profile(
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    frames: u32,
+    answer: ProviderEncodeAnswer,
+    conservative: impl FnOnce(u32) -> Option<VideoDecodeMemoryProfile>,
+) -> Result<VideoEncodeProfile, String> {
+    match answer {
+        ProviderEncodeAnswer::Profile(profile) => {
+            return Ok(VideoEncodeProfile::Calibrated(profile))
+        }
+        ProviderEncodeAnswer::EncodesNothing => return Ok(VideoEncodeProfile::Nothing),
+        ProviderEncodeAnswer::Uncalibrated => {}
+    }
+    if !request_encodes_conditioning(request) {
+        return Ok(VideoEncodeProfile::Nothing);
+    }
+    conservative(uncalibrated_encode_frames(
+        provider_id,
+        request.mode,
+        frames,
+    ))
+    .map(VideoEncodeProfile::UncalibratedConservative)
+    .ok_or_else(|| {
+        format!(
+            "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
+                 publishes neither a calibrated encode cost nor a conservative VAE profile; \
+                 refusing to admit the encode unpriced",
+            request.mode, request.reference_count
+        )
+    })
+}
+
+/// The pinned runtime bundle's conditioning-encode cost (sc-20686, epic E8). Image or video
+/// conditioning is VAE-encoded before denoise; the encode and decode phases never overlap, so the
+/// floor takes the larger of the two compositions rather than their sum. The MLX bundle calibrates
+/// the Wan-VAE families; an encode it does not calibrate, and every CUDA encode, is classified by
+/// [`classify_video_encode_profile`] (sc-20688).
 fn packaged_video_encode_profile(
     lane: VideoLane,
     provider_id: &str,
-    mode: &str,
-    reference_count: u32,
+    request: VideoEncodeRequest<'_>,
     geometry: VideoAdmissionGeometry,
-) -> Option<VideoDecodeMemoryProfile> {
+    // The conditioning encode runs whole on every rung: no memory strategy tiles it, so the
+    // candidate's selection never changes its price (sc-20688).
+    _selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    let frames = geometry.estimate_frames().max(1);
     #[cfg(target_os = "macos")]
     if lane == VideoLane::Mlx {
-        return runtime_macos::conservative_video_encode_memory_profile(
+        let encode = |mode: &str, reference_count: u32| {
+            runtime_macos::conservative_video_encode_memory_profile(
+                provider_id,
+                mode,
+                geometry.width,
+                geometry.height,
+                frames,
+                reference_count,
+            )
+        };
+        // The bundle answers `None` both for "encodes nothing" and for "not calibrated". A provider
+        // that prices an image-conditioned probe calibrates its encoder, so its `None` here is its
+        // own "encodes nothing".
+        let answer = match encode(request.mode, request.reference_count) {
+            Some(profile) => ProviderEncodeAnswer::Profile(profile),
+            None if encode("image_to_video", 1).is_some() => ProviderEncodeAnswer::EncodesNothing,
+            None => ProviderEncodeAnswer::Uncalibrated,
+        };
+        return classify_video_encode_profile(
             provider_id,
-            mode,
-            geometry.width,
-            geometry.height,
-            geometry.estimate_frames().max(1),
-            reference_count,
+            request,
+            frames,
+            answer,
+            |encode_frames| {
+                runtime_macos::conservative_video_decode_memory_profile(
+                    provider_id,
+                    geometry.width,
+                    geometry.height,
+                    encode_frames,
+                )
+            },
         );
     }
-    let _ = (lane, provider_id, mode, reference_count, geometry);
-    None
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    if lane == VideoLane::Candle {
+        return classify_video_encode_profile(
+            provider_id,
+            request,
+            frames,
+            ProviderEncodeAnswer::Uncalibrated,
+            |encode_frames| {
+                runtime_cuda::conservative_video_decode_memory_profile(
+                    provider_id,
+                    geometry.width,
+                    geometry.height,
+                    encode_frames,
+                )
+            },
+        );
+    }
+    // A lane this build links no runtime bundle for prices no provider profile at all (the decode
+    // resolver returns `None` here too); its historical weights-plus-headroom floor stands.
+    let _ = (lane, provider_id, request, frames);
+    Ok(VideoEncodeProfile::Nothing)
 }
 
 /// Evidence revision a candidate carries when the conditioning encode is its binding phase.
 const ENCODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-conservative-encode-profile-v1";
+/// Evidence revision a candidate carries when an uncalibrated conditioning encode, priced at the
+/// provider's conservative single-pass VAE profile, is its binding phase (sc-20688).
+const UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION: &str =
+    "video-provider-uncalibrated-encode-conservative-profile-v1";
 
 #[derive(Clone, Copy, Debug)]
 struct ResolvedVideoDecodeProfile {
@@ -821,10 +1053,12 @@ const BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-budgeted
 /// from the free memory it measures at decode time (the Wan family's `auto_tiling_budgeted`) is
 /// priced at that planner's decision for the worker's applied MLX limit -- an upper bound of that
 /// free memory, so never a smaller tile than the run picks -- instead of the single pass it would
-/// tile away from. Without an applied limit, or for a provider without a budget-planned decode, the
-/// provider's conservative single-pass profile. A runtime bundle that exposes no profile returns
-/// `None`, preserving the historical weights-plus-headroom floor; provider validation errors fail
-/// closed instead of being rewritten as an unprofiled estimate.
+/// tile away from, or at the operator's larger `WAN_VAE_BUDGET_GIB` override, which the planner
+/// honours first ([`wan_decode_pricing_free_bytes`]). Without an applied limit, or for a provider
+/// without a budget-planned decode, the provider's conservative single-pass profile. A runtime
+/// bundle that exposes no profile returns `None`, preserving the historical weights-plus-headroom
+/// floor; provider validation errors fail closed instead of being rewritten as an unprofiled
+/// estimate.
 fn packaged_video_decode_profile(
     lane: VideoLane,
     provider_id: &str,
@@ -836,8 +1070,44 @@ fn packaged_video_decode_profile(
         provider_id,
         geometry,
         selection,
-        crate::generator_cache::applied_mlx_memory_limit_bytes(),
+        wan_decode_pricing_free_bytes(
+            crate::generator_cache::applied_mlx_memory_limit_bytes(),
+            std::env::var(WAN_VAE_BUDGET_ENV).ok().as_deref(),
+        ),
     )
+}
+
+/// The operator override the MLX (and Candle) Wan VAE-decode planner honours BEFORE its free-memory
+/// probe (inference `mlx-gen-wan` `pipeline.rs` `resolve_free_aware_budget`): a positive float in
+/// GiB, used directly as the planner's safe budget.
+const WAN_VAE_BUDGET_ENV: &str = "WAN_VAE_BUDGET_GIB";
+
+/// The share of free memory the Wan planner targets without an override (inference
+/// `WAN_VAE_BUDGET_SAFE_FRAC`): the budgeted profile turns the free bytes it is given into the safe
+/// budget `free x 0.85`, so an override budget is priced at the free bytes that yield it.
+const WAN_VAE_BUDGET_SAFE_FRAC: f64 = 0.85;
+
+/// The free bytes at which a budget-planned Wan decode is priced (sc-20688): the applied MLX limit
+/// (an upper bound of the run's `limit - active`), or -- when `WAN_VAE_BUDGET_GIB` overrides the
+/// run's budget with a larger one -- the free bytes whose safe budget is that override. The
+/// planner's tile is monotone in its budget, so pricing at the larger never under-prices the decode
+/// the run makes. The override is parsed exactly as the planner parses it (a positive float; any
+/// other value leaves the free-memory probe in charge). Without an applied limit the caller prices
+/// the conservative single pass, which bounds every plan.
+fn wan_decode_pricing_free_bytes(
+    mlx_limit_bytes: Option<u64>,
+    budget_override: Option<&str>,
+) -> Option<u64> {
+    let limit = mlx_limit_bytes?;
+    let Some(gib) = budget_override
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|gib| *gib > 0.0)
+    else {
+        return Some(limit);
+    };
+    // `as` saturates: an infinite override prices the single pass the planner then picks.
+    let override_free = (gib * (1u64 << 30) as f64 / WAN_VAE_BUDGET_SAFE_FRAC).ceil() as u64;
+    Some(limit.max(override_free))
 }
 
 /// [`packaged_video_decode_profile`] with the worker's applied MLX limit injected.
@@ -1247,14 +1517,32 @@ fn profiled_floor_phase_peaks(
         revision = Some(resolved.evidence_revision);
     }
     // sc-20686 (epic E8): the conditioning encode is its own phase. It never overlaps the decode, so
-    // it raises the floor only where it is the larger composition.
-    if let Some(encode) = (selector.encode_profile)(
+    // it raises the floor only where it is the larger composition. sc-20688: an encode the provider
+    // has not calibrated is priced at its conservative profile, or refused, never skipped -- on
+    // every rung, bounded decode included.
+    let encode = match (selector.encode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
-        selector.identity.mode,
-        selector.identity.reference_count,
+        VideoEncodeRequest {
+            mode: selector.identity.mode,
+            reference_count: selector.identity.reference_count,
+        },
         geometry,
+        selection,
     ) {
+        Ok(VideoEncodeProfile::Nothing) => None,
+        Ok(VideoEncodeProfile::Calibrated(profile)) => {
+            Some((profile, ENCODE_PROFILE_EVIDENCE_REVISION))
+        }
+        Ok(VideoEncodeProfile::UncalibratedConservative(profile)) => {
+            Some((profile, UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION))
+        }
+        Err(error) => {
+            *selector.profile_error.borrow_mut() = Some(error);
+            return (generic, None);
+        }
+    };
+    if let Some((encode, encode_revision)) = encode {
         let Some(encoded) = encode.checked_composed_peak(weights, decoder_bytes) else {
             *selector.profile_error.borrow_mut() = Some(format!(
                 "{} encode profile cannot compose contract weights {} with decoder bytes {}; refusing inconsistent provider accounting",
@@ -1264,7 +1552,7 @@ fn profiled_floor_phase_peaks(
         };
         if encoded > floor {
             floor = encoded;
-            revision = Some(ENCODE_PROFILE_EVIDENCE_REVISION);
+            revision = Some(encode_revision);
         }
     }
     (

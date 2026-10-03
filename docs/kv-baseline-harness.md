@@ -562,10 +562,24 @@ generations. The setting is off by default:
   as the job payload's `kvCompression`, which overrides the worker default.
   Catalog vision analysis and StarVector requests carry the worker default.
 
-`qualified` never forces compression. The inference engine runs a generation
-compressed only where its qualification table (`KV_COMPRESSION_QUALIFICATIONS`:
-model family × format × context range) admits it. Everything else runs dense,
-deterministically, with a stable reason.
+`qualified` never forces compression. The inference engine's qualification
+table (`KV_COMPRESSION_QUALIFICATIONS`) has two K8V8 (`group-affine-8`) rows.
+Each row carries its measured model's exact architecture (config geometry), so
+compression qualifies only for a model matching one of the two measured
+architectures. A fine-tune with identical geometry qualifies; a different
+model of the same family (Llama-3.1-8B, TinyLlama, Qwen3-8B, Qwen3-0.6B, ...)
+does not. A generation runs compressed only when it is a single sequence on a
+matching model within that row's context range:
+
+| Measured architecture | Prompt | Final context (prompt + max new tokens) |
+| --- | --- | --- |
+| Llama-3.2-3B-Instruct | ≥ 32 768 | < 130 560 |
+| Qwen3-1.7B (dense) | ≥ 10 240 | ≤ 40 960 |
+
+Batched requests and prompts below the minimum run dense, as do final contexts
+past the maximum. Any other model reports dense too. Each case has a stable
+reason (`batched_decode`, `below_minimum_context`, `above_qualified_context`,
+`unqualified_model`, ...).
 
 SceneWorks keeps no LLM KV pricing of its own. Request memory admission is the
 in-process engine's, and it prices the cache the request actually runs on:
@@ -583,14 +597,30 @@ Every prompt-refine result carries `generation.kvCache`. The worker emits the
 same block as the `llm_kv_cache` telemetry event for every local LLM generation:
 prompt refine, catalog vision analysis and StarVector. The event carries
 `jobId` and `engine` (the lane, `mlx` or `candle`). It never includes prompt or
-output text. StarVector, JoyCaption and other multimodal-wrapped decoders have
-no qualification-table family, so they always report dense, with
+output text.
+
+The block's `outcome` says how the generation ended. A `completed` one carries
+the engine's report. A generation the engine ends with an error still emits the
+event (sc-20688), with the requested `policy`, `reported: false`, a stable
+`reason` and the engine's `error` message:
+
+- `refused`: request memory admission refused it while pricing the dense or
+  compressed cache (`request_resource_exhausted`). It adds a `refusal` object
+  with the prompt and generation token counts, the context limit, and the
+  required and available bytes.
+- `canceled`: the request was canceled.
+- `failed`: any other engine error (`unsupported`, `invalid_request` or
+  `engine_error`).
+
+StarVector, JoyCaption and other multimodal-wrapped decoders have no
+qualification-table family, so they always report dense, with
 `policy_disabled` or `unqualified_model`.
 
 | Key | Meaning |
 |---|---|
 | `policy` | `off` or `qualified`, as the job resolved it. |
-| `reported` | `false` when the provider reports no KV cache. In that case, no other key follows. |
+| `outcome` | `completed`, `refused`, `canceled` or `failed`. |
+| `reported` | `false` when the provider reports no KV cache. In that case none of the keys below follow; a failed generation carries `reason`, `error` and, when refused, `refusal` instead. |
 | `formatVersion` | The engine's `KV_CACHE_FORMAT_VERSION`. |
 | `format` | `group-affine-k8v8`, or `null` when the generation ran dense throughout. |
 | `ranCompressed` | `true` only when the whole generation ran on the compressed cache. |

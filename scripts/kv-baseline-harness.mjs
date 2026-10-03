@@ -2303,13 +2303,16 @@ export function validateFixtureOutcomes(artifact, fixture, receipt) {
 }
 
 /**
- * A receipt set publishes only the primary repeat: validate its outcomes, and a receipt may claim
- * discrimination (the AND over all repeats) only if that repeat discriminates.
+ * A receipt set publishes only the primary repeat, which is the one sealed quality measurement
+ * (QUALITY_MEASUREMENTS = 1): validate its outcomes, and each receipt discrimination flag must
+ * equal that artifact's flag exactly. An under-claim would skip the needle gate (gateGates) for a
+ * compressed run that missed a needle the same-weights dense run recovered.
  */
 export function validatePrimaryDiscrimination(receipt, artifacts) {
   for (const fixture of FIXTURES) {
-    if (validateFixtureOutcomes(artifacts[fixture], fixture, receipt) === false
-      && receipt.quality[DISCRIMINATION_FIXTURES[fixture]]) {
+    const discriminating = validateFixtureOutcomes(artifacts[fixture], fixture, receipt);
+    if (discriminating !== undefined
+      && receipt.quality[DISCRIMINATION_FIXTURES[fixture]] !== discriminating) {
       fail(`quality.${DISCRIMINATION_FIXTURES[fixture]} is not the AND of its sealed repeats`);
     }
   }

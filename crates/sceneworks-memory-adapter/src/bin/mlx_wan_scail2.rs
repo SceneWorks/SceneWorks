@@ -605,6 +605,15 @@ const WORKER_DECODE_PROFILE_EVIDENCE: [&str; 3] = [
     "video-provider-conservative-decode-profile-v1",
 ];
 
+/// The conditioning-encode revisions the same site carries when the VAE encode is the binding phase
+/// (`video_admission.rs` `profiled_floor_phase_peaks`, sc-20686/sc-20688): the calibrated encode
+/// profile -- reachable here, since SCAIL-2 always prices an encode -- and an uncalibrated encode
+/// priced at the provider's conservative profile.
+const WORKER_ENCODE_PROFILE_EVIDENCE: [&str; 2] = [
+    "video-provider-conservative-encode-profile-v1",
+    "video-provider-uncalibrated-encode-conservative-profile-v1",
+];
+
 /// The receipt token SCAIL-2's gate requires the context's `evidence_revision` to open with.
 ///
 /// A MIRROR, not a read: `mlx-gen-scail2`'s `validate_context_revision_shape`
@@ -624,7 +633,7 @@ fn engine_receipt_token(arm: Arm) -> &'static str {
 }
 
 /// Every evidence identity the worker's video admission can put on a `MemoryRunContext` for this
-/// arm's provider: the estimate floor, the decode-profile revisions, and any packaged curve
+/// arm's provider: the estimate floor, the decode- and encode-profile revisions, and any packaged curve
 /// promoted for this provider. The curve list is READ from the shipped bundle rather than assumed
 /// empty, so a future promoted Wan or SCAIL-2 curve enters this vocabulary automatically.
 fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {
@@ -632,6 +641,7 @@ fn worker_context_evidence_identities(arm: Arm) -> Vec<String> {
     identities.extend(
         WORKER_DECODE_PROFILE_EVIDENCE
             .iter()
+            .chain(WORKER_ENCODE_PROFILE_EVIDENCE.iter())
             .map(|identity| (*identity).to_owned()),
     );
     if let Some(bundle) = sceneworks_core::video_memory_curves::packaged_video_memory_curves() {
@@ -1561,9 +1571,12 @@ mod tests {
                  decode profile priced the candidate; it must stay in the vocabulary",
                 arm.provider
             );
-            for profile in WORKER_DECODE_PROFILE_EVIDENCE {
+            for profile in WORKER_DECODE_PROFILE_EVIDENCE
+                .iter()
+                .chain(WORKER_ENCODE_PROFILE_EVIDENCE.iter())
+            {
                 assert!(
-                    worker_context_evidence_identities(arm).contains(&profile.to_owned()),
+                    worker_context_evidence_identities(arm).contains(&(*profile).to_owned()),
                     "{}: {profile} is an identity video_admission.rs can carry",
                     arm.provider
                 );

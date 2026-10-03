@@ -759,6 +759,17 @@ test("fixture outcomes are bound to the same weights and re-derived, and flags A
   const primary={"kernel-fp32-reference":{},"multi-turn-prompt-cache":{},"long-context-needle":needle(false,true,false,0,false),"structured-tool-call":tool(true,true,true,true)};
   assert.throws(()=>validatePrimaryDiscrimination(dense,primary),/needleDiscriminating is not the AND/);
   validatePrimaryDiscrimination(fixture("dense",{}, {quality:{...dense.quality,needleRetrieval:0,needleDiscriminating:false}}),primary);
+  // An under-claim is rejected too: a compressed miss of a needle the same-weights dense run
+  // recovered must stay discriminating, or the needle gate would be skipped (false green).
+  const compressedPrimary={"kernel-fp32-reference":{...sameWeights},"multi-turn-prompt-cache":{...sameWeights},"long-context-needle":{...sameWeights,...needle(false,true,false,0,true)},"structured-tool-call":{...sameWeights,...tool(true,true,true,true)}};
+  const missed=(quality)=>fixture("compressed",{}, {quality:gatedQuality("compressed",{...compressed.quality,...quality})});
+  const honest=missed({needleRetrieval:0,needleDiscriminating:true});
+  assert.equal(honest.quality.qualityGate.passed,false);
+  validatePrimaryDiscrimination(honest,compressedPrimary);
+  const underClaim=missed({needleRetrieval:0,needleDiscriminating:false});
+  assert.equal(underClaim.quality.qualityGate.passed,true,"the under-claim skips the needle gate");
+  assert.throws(()=>validatePrimaryDiscrimination(underClaim,compressedPrimary),/needleDiscriminating is not the AND/);
+  assert.throws(()=>validatePrimaryDiscrimination(missed({toolDiscriminating:false}),compressedPrimary),/toolDiscriminating is not the AND/);
   // Admission must carry the captured policy's cap and reserve.
   const policy={childFootprintCapBytes:dense.memory.admission.childFootprintCapBytes,hostFreeReserveBytes:dense.memory.admission.hostFreeReserveBytes};
   validateAdmissionPolicy(dense,policy);

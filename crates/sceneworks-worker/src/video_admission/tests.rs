@@ -1473,16 +1473,80 @@ fn provider_profiles_make_bounded_decode_a_reachable_production_fallback() {
     assert!(outcome.refusal.is_none());
 }
 
-/// A 40 GiB conditioning-encode working set for image/video-conditioned requests only.
+fn forty_gib_profile() -> VideoDecodeMemoryProfile {
+    VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile")
+}
+
+/// A 40 GiB calibrated conditioning-encode working set for image/video-conditioned requests only.
 fn conditioning_encode_profile(
     _lane: VideoLane,
-    _provider_id: &str,
-    mode: &str,
-    reference_count: u32,
-    _geometry: VideoAdmissionGeometry,
-) -> Option<VideoDecodeMemoryProfile> {
-    (mode != "text_to_video" && reference_count > 0)
-        .then(|| VideoDecodeMemoryProfile::new(40 * GIB, 0).expect("fixture encode profile"))
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    geometry: VideoAdmissionGeometry,
+    _selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    let answer = if request.mode != "text_to_video" && request.reference_count > 0 {
+        ProviderEncodeAnswer::Profile(forty_gib_profile())
+    } else {
+        ProviderEncodeAnswer::EncodesNothing
+    };
+    classify_video_encode_profile(
+        provider_id,
+        request,
+        geometry.estimate_frames(),
+        answer,
+        |_| None,
+    )
+}
+
+/// A provider that publishes no calibrated encode cost, whose conservative VAE profile is 40 GiB.
+fn uncalibrated_encode_profile(
+    _lane: VideoLane,
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    geometry: VideoAdmissionGeometry,
+    _selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    classify_video_encode_profile(
+        provider_id,
+        request,
+        geometry.estimate_frames(),
+        ProviderEncodeAnswer::Uncalibrated,
+        |_| Some(forty_gib_profile()),
+    )
+}
+
+/// A provider that publishes neither a calibrated encode cost nor a conservative VAE profile.
+fn unprofiled_encode_profile(
+    _lane: VideoLane,
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    geometry: VideoAdmissionGeometry,
+    _selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    classify_video_encode_profile(
+        provider_id,
+        request,
+        geometry.estimate_frames(),
+        ProviderEncodeAnswer::Uncalibrated,
+        |_| None,
+    )
+}
+
+/// [`uncalibrated_encode_profile`] on every rung but bounded decode, where the encode has no
+/// conservative profile: the selector must fail closed on that rung's error, not skip it.
+fn bounded_unprofiled_encode_profile(
+    lane: VideoLane,
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
+) -> Result<VideoEncodeProfile, String> {
+    if selection.strategy == MemoryStrategy::BoundedDecode {
+        unprofiled_encode_profile(lane, provider_id, request, geometry, selection)
+    } else {
+        uncalibrated_encode_profile(lane, provider_id, request, geometry, selection)
+    }
 }
 
 fn image_conditioned<'a>(mut request: VideoAdmissionInputs<'a>) -> VideoAdmissionInputs<'a> {
@@ -1529,6 +1593,406 @@ fn an_image_conditioned_request_is_admitted_with_its_encode_working_set() {
     let context = roomy.context.expect("contract-backed admission");
     assert_eq!(context.predicted_peak_bytes, 60 * GIB);
     assert_eq!(context.evidence_revision, ENCODE_PROFILE_EVIDENCE_REVISION);
+}
+
+fn encode_request(mode: &str, reference_count: u32) -> VideoEncodeRequest<'_> {
+    VideoEncodeRequest {
+        mode,
+        reference_count,
+    }
+}
+
+fn selection_for(strategy: MemoryStrategy) -> MemorySelection {
+    MemorySelection {
+        strategy,
+        parameters: Default::default(),
+        tier: tier(),
+    }
+}
+
+/// Classify one uncalibrated `(provider, request)` at 97 output frames and report the frames the
+/// conservative profile was asked to price (`None` when it was never consulted).
+fn classify_uncalibrated(
+    provider_id: &str,
+    request: VideoEncodeRequest<'_>,
+    answer: ProviderEncodeAnswer,
+    conservative: Option<VideoDecodeMemoryProfile>,
+) -> (Result<VideoEncodeProfile, String>, Option<u32>) {
+    let mut priced_frames = None;
+    let classified = classify_video_encode_profile(provider_id, request, 97, answer, |frames| {
+        priced_frames = Some(frames);
+        conservative
+    });
+    (classified, priced_frames)
+}
+
+/// sc-20688: "encodes nothing" and "encoder not calibrated" are different answers. A calibrated
+/// provider's profile or "nothing" is taken as is (the conservative profile is never consulted);
+/// an uncalibrated request that encodes nothing is nothing; an uncalibrated encode stands in the
+/// conservative profile, or fails closed without one.
+#[test]
+fn an_uncalibrated_encode_is_never_classified_as_encoding_nothing() {
+    let profile = forty_gib_profile();
+    use ProviderEncodeAnswer::{EncodesNothing, Profile, Uncalibrated};
+    let still = encode_request("image_to_video", 1);
+    assert_eq!(
+        classify_uncalibrated("ltx_2_3", still, Profile(profile), None),
+        (Ok(VideoEncodeProfile::Calibrated(profile)), None)
+    );
+    // A calibrated provider's own "nothing" stays nothing, even for a conditioning mode (Wan
+    // answers nothing for an unlisted mode with no references) and with a profile on offer.
+    for provider in ["wan2_2_ti2v_5b", "wan2_2_i2v_14b", "bernini"] {
+        assert_eq!(
+            classify_uncalibrated(
+                provider,
+                encode_request("extend_clip", 0),
+                EncodesNothing,
+                Some(profile)
+            ),
+            (Ok(VideoEncodeProfile::Nothing), None),
+            "{provider}"
+        );
+    }
+    // An uncalibrated text-to-video request encodes nothing.
+    assert_eq!(
+        classify_uncalibrated(
+            "ltx_2_3",
+            encode_request("text_to_video", 0),
+            Uncalibrated,
+            Some(profile)
+        ),
+        (Ok(VideoEncodeProfile::Nothing), None)
+    );
+    for request in [still, encode_request("extend_clip", 0)] {
+        assert_eq!(
+            classify_uncalibrated("ltx_2_3", request, Uncalibrated, Some(profile)).0,
+            Ok(VideoEncodeProfile::UncalibratedConservative(profile)),
+            "{request:?}"
+        );
+        let (refused, _) = classify_uncalibrated("ltx_2_3", request, Uncalibrated, None);
+        assert!(
+            refused.unwrap_err().contains("encodes conditioning"),
+            "{request:?}"
+        );
+    }
+}
+
+/// sc-20688 round 3: an uncalibrated encode is priced at the frames its largest VAE-encode pass
+/// covers, keyed on `(provider, mode)` as the pinned engines run it -- never on the carrier-shape
+/// label. Each row is one row of [`uncalibrated_encode_pass`]'s table; F = 97 here.
+#[test]
+fn an_uncalibrated_encode_prices_the_frames_each_engine_encodes() {
+    let profile = forty_gib_profile();
+    const F: u32 = 97;
+    let rows: &[(&str, &str, u32, u32)] = &[
+        // LTX: each still is its own one-frame encode (1 per still, however many stills).
+        ("ltx_2_3", "image_to_video", 1, 1),
+        ("ltx_2_3_distilled", "image_to_video", 1, 1),
+        ("ltx_2_5", "first_last_frame", 2, 1),
+        ("ltx_2_5_distilled", "first_last_frame", 2, 1),
+        // LTX IC-LoRA clips and the replace-person control clip are clip encodes.
+        ("ltx_2_3", "extend_clip", 0, F),
+        ("ltx_2_3_distilled", "video_bridge", 0, F),
+        ("ltx_2_5_distilled", "replace_person", 1, F),
+        // TI2V-5B encodes only stills (Reference / pinned Keyframes), one at a time.
+        ("wan2_2_ti2v_5b", "image_to_video", 1, 1),
+        ("wan2_2_ti2v_5b", "first_last_frame", 2, 1),
+        ("wan2_2_ti2v_5b", "extend_clip", 2, 1),
+        // I2V-14B encodes the full `[image, zeros…]` F-frame conditioning clip (shape "image").
+        ("wan2_2_i2v_14b", "image_to_video", 1, F),
+        // Non-LTX extend/bridge route to Wan-VACE, which encodes the F-frame ControlClip (shape
+        // "keyframe"); replace-person likewise.
+        ("wan_vace", "extend_clip", 0, F),
+        ("wan_vace", "video_bridge", 0, F),
+        ("wan_vace", "replace_person", 1, F),
+        ("wan2_2_vace_fun_14b", "replace_person", 1, F),
+        // Bernini: reference stills one at a time; every clip-carrying mode encodes F-frame clips,
+        // ads2v's source and reference clips included (shape "ads2v").
+        ("bernini", "reference_to_video", 3, 1),
+        ("bernini_renderer", "reference_to_video", 3, 1),
+        ("bernini", "video_to_video", 1, F),
+        ("bernini", "reference_video_to_video", 2, F),
+        ("bernini", "multi_video_to_video", 3, F),
+        ("bernini", "ads2v", 3, F),
+        ("bernini_renderer", "ads2v", 3, F),
+        // SCAIL-2 encodes the driving clip.
+        ("scail2_14b", "animate_character", 1, F),
+        ("scail2_14b", "replace_person", 1, F),
+        ("svd_xt", "image_to_video", 1, 1),
+    ];
+    for &(provider, mode, references, frames) in rows {
+        assert_eq!(
+            classify_uncalibrated(
+                provider,
+                encode_request(mode, references),
+                ProviderEncodeAnswer::Uncalibrated,
+                Some(profile)
+            ),
+            (
+                Ok(VideoEncodeProfile::UncalibratedConservative(profile)),
+                Some(frames)
+            ),
+            "{provider} {mode}"
+        );
+    }
+}
+
+/// sc-20688 round 3: a `(provider, mode)` the table does not name is priced as the full clip,
+/// never as one still -- including a known provider on a mode its table rows do not cover.
+#[test]
+fn an_unknown_provider_or_mode_prices_the_full_clip() {
+    let profile = forty_gib_profile();
+    for (provider, mode) in [
+        ("future_provider", "image_to_video"),
+        ("future_provider", "future_mode"),
+        ("mochi_1", "image_to_video"),
+        ("minimax_h3", "reference_to_video"),
+        ("wan2_2_t2v_14b", "image_to_video"),
+        ("ltx_2_3", "future_mode"),
+        ("bernini", "future_mode"),
+        ("svd_xt", "future_mode"),
+    ] {
+        assert_eq!(
+            classify_uncalibrated(
+                provider,
+                encode_request(mode, 1),
+                ProviderEncodeAnswer::Uncalibrated,
+                Some(profile)
+            )
+            .1,
+            Some(97),
+            "{provider} {mode}"
+        );
+    }
+}
+
+/// sc-20688 round 3, through the selector: bounded decode tiles the decode, never the conditioning
+/// encode, so a bounded-decode candidate is priced with the uncalibrated encode exactly like the
+/// resident one. The bounded carrier's own 38 GiB floor would fit this host; weights + the 40 GiB
+/// encode (60 GiB) does not, so the conditioned request is refused rather than admitted on the
+/// bounded rung at weights + headroom. Without any conservative profile the bounded rung fails
+/// closed instead of going unpriced.
+#[test]
+fn a_bounded_decode_rung_prices_an_uncalibrated_encode_or_refuses() {
+    let generator = fixture_generator(Some(fixture_contract(
+        20,
+        4,
+        &[MemoryStrategy::BoundedDecode],
+    )));
+    let host_gb = mlx_widened_gb(38, 0.5);
+    let admit = |request, encode: VideoEncodeProfileResolver| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            None,
+            tiered_decode_profile,
+            encode,
+            false,
+        )
+    };
+    // The same text-to-video request is admitted on the bounded rung: the window exists.
+    let text = admit(
+        inputs(241, budget(host_gb), 18 * GIB),
+        uncalibrated_encode_profile,
+    );
+    let context = text.context.expect("text-to-video is admitted");
+    assert_eq!(context.selection.strategy, MemoryStrategy::BoundedDecode);
+
+    let image = admit(
+        image_conditioned(inputs(241, budget(host_gb), 18 * GIB)),
+        uncalibrated_encode_profile,
+    );
+    let refusal = image
+        .refusal
+        .expect("a bounded rung must not admit an uncalibrated encode at weights + headroom");
+    let widened = format!("needs about {:.1} GB", mlx_widened_floor_gb(60, 40, 0.0));
+    assert!(refusal.contains(&widened), "{refusal}");
+    assert!(image.memory.is_none());
+
+    let roomy = admit(
+        image_conditioned(inputs(
+            241,
+            budget(mlx_widened_floor_gb(60, 40, 0.5)),
+            18 * GIB,
+        )),
+        uncalibrated_encode_profile,
+    );
+    let context = roomy.context.expect("the encode fits a roomy host");
+    assert_eq!(context.predicted_peak_bytes, 60 * GIB);
+    assert_eq!(
+        context.evidence_revision,
+        UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION
+    );
+
+    let unprofiled = admit(
+        image_conditioned(inputs(241, budget(host_gb), 18 * GIB)),
+        unprofiled_encode_profile,
+    );
+    let refusal = unprofiled
+        .refusal
+        .expect("a bounded rung fails closed on an unpriceable encode");
+    assert!(refusal.contains("encodes conditioning"), "{refusal}");
+    assert!(unprofiled.memory.is_none());
+    assert!(unprofiled.context.is_none());
+
+    // Only the bounded rung is unpriceable here; the resident rung (60 GiB) does not fit, so a
+    // selector that skipped the bounded rung's error would admit it at 38 GiB.
+    let bounded_unprofiled = admit(
+        image_conditioned(inputs(241, budget(host_gb), 18 * GIB)),
+        bounded_unprofiled_encode_profile,
+    );
+    let refusal = bounded_unprofiled
+        .refusal
+        .expect("an unpriceable encode on the bounded rung fails closed");
+    assert!(refusal.contains("encodes conditioning"), "{refusal}");
+    assert!(bounded_unprofiled.memory.is_none());
+}
+
+/// sc-20688: an image-conditioned request on a provider with no calibrated encode cost (LTX on
+/// MLX) is priced at its conservative profile -- refused where that does not fit, admitted on the
+/// uncalibrated revision where it binds -- and fails closed when there is no profile at all. The
+/// same T2V request, which encodes nothing, is untouched.
+#[test]
+fn an_uncalibrated_conditioning_encode_is_priced_conservatively_or_refused() {
+    let generator = fixture_generator(Some(fixture_contract(20, 4, &[])));
+    let host_gb = mlx_widened_gb(38, 0.5);
+    let admit = |request, encode: VideoEncodeProfileResolver| {
+        admit_video_generation_with_curves_and_profiles(
+            &generator,
+            request,
+            None,
+            no_video_decode_profile,
+            encode,
+            false,
+        )
+    };
+    for encode in [
+        uncalibrated_encode_profile as VideoEncodeProfileResolver,
+        unprofiled_encode_profile,
+    ] {
+        let text = admit(inputs(241, budget(host_gb), 18 * GIB), encode);
+        assert!(text.refusal.is_none(), "{:?}", text.refusal);
+    }
+    let image = admit(
+        image_conditioned(inputs(241, budget(host_gb), 18 * GIB)),
+        uncalibrated_encode_profile,
+    );
+    let refusal = image
+        .refusal
+        .expect("an uncalibrated conditioning encode must not be admitted free");
+    let widened = format!("needs about {:.1} GB", mlx_widened_floor_gb(60, 40, 0.0));
+    assert!(refusal.contains(&widened), "{refusal}");
+
+    let roomy = admit(
+        image_conditioned(inputs(
+            241,
+            budget(mlx_widened_floor_gb(60, 40, 0.5)),
+            18 * GIB,
+        )),
+        uncalibrated_encode_profile,
+    );
+    assert!(roomy.refusal.is_none(), "{:?}", roomy.refusal);
+    let context = roomy.context.expect("contract-backed admission");
+    assert_eq!(context.predicted_peak_bytes, 60 * GIB);
+    assert_eq!(
+        context.evidence_revision,
+        UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION
+    );
+
+    let unprofiled = admit(
+        image_conditioned(inputs(
+            241,
+            budget(mlx_widened_floor_gb(60, 40, 0.5)),
+            18 * GIB,
+        )),
+        unprofiled_encode_profile,
+    );
+    let refusal = unprofiled
+        .refusal
+        .expect("an unpriceable conditioning encode fails closed");
+    assert!(refusal.contains("encodes conditioning"), "{refusal}");
+    assert!(unprofiled.memory.is_none());
+    assert!(unprofiled.context.is_none());
+}
+
+/// sc-20688: the MLX Wan planner honours `WAN_VAE_BUDGET_GIB` before its free-memory probe, so a
+/// budgeted decode is priced at the larger of the applied limit and the free bytes whose safe
+/// budget is the override; an invalid override leaves the limit in charge, exactly as the planner
+/// ignores it.
+#[test]
+fn the_wan_decode_is_priced_at_the_larger_of_the_limit_and_the_budget_override() {
+    let limit = 72 * GIB;
+    assert_eq!(wan_decode_pricing_free_bytes(None, Some("100")), None);
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), None),
+        Some(limit)
+    );
+    for ignored in ["", "abc", "0", "-4", "NaN"] {
+        assert_eq!(
+            wan_decode_pricing_free_bytes(Some(limit), Some(ignored)),
+            Some(limit),
+            "{ignored:?}"
+        );
+    }
+    // A smaller override never lowers the price below the limit's plan.
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some("8")),
+        Some(limit)
+    );
+    // 85 GiB is the safe budget of 100 GiB free.
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some(" 85 ")),
+        Some(100 * GIB)
+    );
+    assert_eq!(
+        wan_decode_pricing_free_bytes(Some(limit), Some("inf")),
+        Some(u64::MAX)
+    );
+}
+
+/// sc-20688: with a `WAN_VAE_BUDGET_GIB` override above what the applied limit plans, admission
+/// prices the decode the planner makes at the override -- the single pass -- not the tile the
+/// limit alone would plan.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_operator_wan_budget_override_is_priced_at_its_own_decision() {
+    let geometry = VideoAdmissionGeometry {
+        width: 768,
+        height: 512,
+        frames: 33,
+        decode_pass_frames: 33,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    };
+    let resident = MemorySelection {
+        strategy: MemoryStrategy::Resident,
+        parameters: Default::default(),
+        tier: tier(),
+    };
+    let limit = 72 * GIB;
+    let price = |budget_override| {
+        video_decode_profile_at_mlx_limit(
+            VideoLane::Mlx,
+            "wan2_2_t2v_14b",
+            geometry,
+            resident,
+            wan_decode_pricing_free_bytes(Some(limit), budget_override),
+        )
+        .expect("profile lookup succeeds")
+        .expect("MLX Wan publishes a decode profile")
+        .profile
+        .working_set_bytes()
+    };
+    let single_pass =
+        runtime_macos::conservative_video_decode_memory_profile("wan2_2_t2v_14b", 768, 512, 33)
+            .expect("conservative single pass")
+            .working_set_bytes();
+    let tiled = price(None);
+    assert!(tiled < single_pass, "the limit alone plans a tile");
+    assert_eq!(price(Some("8")), tiled);
+    // An override the single pass fits runs the single pass, so admission prices it.
+    assert_eq!(price(Some("400")), single_pass);
 }
 
 #[test]
@@ -4813,4 +5277,206 @@ fn a_stale_bound_still_refuses_a_host_no_larger_than_the_one_that_failed() {
         None,
         "a big enough host still runs the render under a stale bound"
     );
+}
+
+/// sc-20688: the SCAIL-2/Wan memory adapter's vocabulary of the evidence identities this module can
+/// put on a run context must list every one of them -- its probe-skip decision is computed over
+/// that list. Every `video-*-v1` evidence literal in the admission source is read, not hand-listed,
+/// so a new revision that the adapter misses reds here.
+#[test]
+fn the_memory_adapter_lists_every_worker_evidence_identity() {
+    let admission = include_str!("../video_admission.rs");
+    let adapter = include_str!("../../../sceneworks-memory-adapter/src/bin/mlx_wan_scail2.rs");
+    let identities = admission
+        .split('"')
+        .filter(|token| token.starts_with("video-") && token.ends_with("-v1"))
+        .filter(|token| {
+            token
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    for expected in [
+        ENCODE_PROFILE_EVIDENCE_REVISION,
+        UNCALIBRATED_ENCODE_PROFILE_EVIDENCE_REVISION,
+        "video-estimate-floor-v1",
+        "video-provider-conservative-decode-profile-v1",
+    ] {
+        assert!(
+            identities.contains(expected),
+            "{expected} not read: {identities:?}"
+        );
+    }
+    for identity in identities {
+        assert!(
+            adapter.contains(&format!("\"{identity}\"")),
+            "mlx_wan_scail2.rs does not list the worker evidence identity {identity}"
+        );
+    }
+}
+
+fn wan_geometry(width: u32, height: u32, frames: u32) -> VideoAdmissionGeometry {
+    VideoAdmissionGeometry {
+        width,
+        height,
+        frames,
+        decode_pass_frames: frames,
+        batch: 1,
+        decode_pass: VideoDecodePass::SinglePass,
+        role: VideoGeometryRole::Requested,
+    }
+}
+
+/// sc-20688, through the production resolver: with the worker's applied MLX limit and a larger
+/// `WAN_VAE_BUDGET_GIB` override set, `packaged_video_decode_profile` prices the decode the
+/// planner makes at the override (the single pass), not the tile the limit alone plans.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_packaged_wan_decode_profile_reads_the_budget_override() {
+    let geometry = wan_geometry(768, 512, 33);
+    let resident = selection_for(MemoryStrategy::Resident);
+    crate::generator_cache::set_test_applied_mlx_memory_limit(Some(72 * GIB));
+    let price = || {
+        packaged_video_decode_profile(VideoLane::Mlx, "wan2_2_t2v_14b", geometry, resident)
+            .expect("profile lookup succeeds")
+            .expect("MLX Wan publishes a decode profile")
+    };
+    let tiled = price();
+    std::env::set_var(WAN_VAE_BUDGET_ENV, "400");
+    let overridden = price();
+    std::env::remove_var(WAN_VAE_BUDGET_ENV);
+    crate::generator_cache::set_test_applied_mlx_memory_limit(None);
+    let single_pass =
+        runtime_macos::conservative_video_decode_memory_profile("wan2_2_t2v_14b", 768, 512, 33)
+            .expect("conservative single pass")
+            .working_set_bytes();
+    assert_eq!(
+        tiled.evidence_revision,
+        BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION
+    );
+    assert!(tiled.profile.working_set_bytes() < single_pass);
+    assert_eq!(overridden.profile.working_set_bytes(), single_pass);
+}
+
+/// sc-20688, through the production resolver on MLX: LTX publishes no encode calibration, so an
+/// image-conditioned request's one still is priced as a one-frame conservative VAE pass and an
+/// IC-LoRA clip as the full clip -- on a bounded-decode candidate exactly as on a resident one,
+/// since bounded decode never tiles the encode. Wan calibrates its encoder, so its own "nothing"
+/// for an unlisted mode stays nothing on every rung.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_packaged_mlx_encode_profile_prices_what_each_provider_encodes() {
+    let geometry = wan_geometry(768, 512, 97);
+    let still = encode_request("image_to_video", 1);
+    let one_frame = runtime_macos::conservative_video_decode_memory_profile("ltx_2_3", 768, 512, 1)
+        .expect("LTX one-frame conservative profile");
+    let clip = runtime_macos::conservative_video_decode_memory_profile("ltx_2_3", 768, 512, 97)
+        .expect("LTX clip conservative profile");
+    assert!(one_frame.working_set_bytes() < clip.working_set_bytes());
+    for strategy in [MemoryStrategy::Resident, MemoryStrategy::BoundedDecode] {
+        let selection = selection_for(strategy);
+        assert_eq!(
+            packaged_video_encode_profile(VideoLane::Mlx, "ltx_2_3", still, geometry, selection),
+            Ok(VideoEncodeProfile::UncalibratedConservative(one_frame)),
+            "{strategy:?}"
+        );
+        assert_eq!(
+            packaged_video_encode_profile(
+                VideoLane::Mlx,
+                "ltx_2_3",
+                encode_request("extend_clip", 0),
+                geometry,
+                selection
+            ),
+            Ok(VideoEncodeProfile::UncalibratedConservative(clip)),
+            "{strategy:?}"
+        );
+        assert_eq!(
+            packaged_video_encode_profile(
+                VideoLane::Mlx,
+                "wan2_2_ti2v_5b",
+                encode_request("extend_clip", 0),
+                geometry,
+                selection
+            ),
+            Ok(VideoEncodeProfile::Nothing),
+            "{strategy:?}"
+        );
+        assert!(
+            matches!(
+                packaged_video_encode_profile(
+                    VideoLane::Mlx,
+                    "wan2_2_ti2v_5b",
+                    still,
+                    geometry,
+                    selection
+                ),
+                Ok(VideoEncodeProfile::Calibrated(_))
+            ),
+            "{strategy:?}"
+        );
+        // SVD publishes neither an encode calibration nor a conservative VAE profile on MLX: its
+        // still is refused on every rung, never admitted unpriced.
+        let refused =
+            packaged_video_encode_profile(VideoLane::Mlx, "svd_xt", still, geometry, selection)
+                .expect_err("an unpriceable encode fails closed on every rung");
+        assert!(
+            refused.contains("encodes conditioning"),
+            "{strategy:?} {refused}"
+        );
+    }
+}
+
+/// sc-20688, through the production resolver on CUDA, where no provider calibrates its encoder:
+/// every `(provider, mode)` is priced at the conservative single-pass profile for its largest
+/// encode pass -- one frame for an LTX still, the full clip for Wan I2V-14B's `[image, zeros…]`
+/// clip, Wan-VACE's control clip, Bernini ads2v's source/reference clips -- on a bounded-decode
+/// candidate exactly as on a resident one. SVD publishes no conservative profile, so its encode
+/// is refused rather than admitted unpriced.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+fn the_packaged_cuda_encode_profile_prices_each_engines_encode_on_every_rung() {
+    let geometry = wan_geometry(768, 512, 97);
+    let profile = |provider: &str, frames: u32| {
+        runtime_cuda::conservative_video_decode_memory_profile(provider, 768, 512, frames)
+            .unwrap_or_else(|| panic!("{provider} conservative profile at {frames} frames"))
+    };
+    assert!(
+        profile("ltx_2_3_distilled", 1).working_set_bytes()
+            < profile("ltx_2_3_distilled", 97).working_set_bytes()
+    );
+    for strategy in [MemoryStrategy::Resident, MemoryStrategy::BoundedDecode] {
+        let selection = selection_for(strategy);
+        for (provider, mode, references, frames) in [
+            ("ltx_2_3_distilled", "image_to_video", 1, 1),
+            ("ltx_2_3_distilled", "extend_clip", 0, 97),
+            ("wan2_2_i2v_14b", "image_to_video", 1, 97),
+            ("wan_vace", "extend_clip", 0, 97),
+            ("wan_vace", "video_bridge", 0, 97),
+            ("bernini", "ads2v", 3, 97),
+        ] {
+            assert_eq!(
+                packaged_video_encode_profile(
+                    VideoLane::Candle,
+                    provider,
+                    encode_request(mode, references),
+                    geometry,
+                    selection
+                ),
+                Ok(VideoEncodeProfile::UncalibratedConservative(profile(
+                    provider, frames
+                ))),
+                "{provider} {mode} {strategy:?}"
+            );
+        }
+        let refused = packaged_video_encode_profile(
+            VideoLane::Candle,
+            "svd_xt",
+            encode_request("image_to_video", 1),
+            geometry,
+            selection,
+        )
+        .expect_err("an unpriceable encode fails closed on every rung");
+        assert!(refused.contains("encodes conditioning"), "{refused}");
+    }
 }

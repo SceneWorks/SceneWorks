@@ -775,10 +775,31 @@ pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
     }
 }
 
-/// Tests never apply an MLX limit (see [`apply_gpu_memory_limit`]).
-#[cfg(any(not(target_os = "macos"), test))]
+/// Off macOS no MLX limit is ever applied.
+#[cfg(all(not(target_os = "macos"), not(test)))]
 pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
     None
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_APPLIED_MLX_MEMORY_LIMIT: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Tests never apply an MLX limit (see [`apply_gpu_memory_limit`]); a test that exercises a
+/// consumer of the applied limit sets it for its own thread with
+/// [`set_test_applied_mlx_memory_limit`].
+#[cfg(test)]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(std::cell::Cell::get)
+}
+
+/// Set (or clear) the applied MLX limit [`applied_mlx_memory_limit_bytes`] reports on this test
+/// thread.
+#[cfg(test)]
+pub(crate) fn set_test_applied_mlx_memory_limit(limit: Option<u64>) {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(|cell| cell.set(limit));
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
