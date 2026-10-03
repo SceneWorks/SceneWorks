@@ -426,6 +426,9 @@ jobs:
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
         run: npm run check:docker:rust-api
+      - name: Smoke nonroot web Docker runtime
+        if: steps.docker_smoke_gate.outputs.run == 'true'
+        run: npm run check:docker:web
 
   # THE CANDLE TYPECHECK, ON A HOSTED BOX. The merge queue's whole job is catching semantic
   # conflicts — two PRs that are individually green and textually non-overlapping, whose MERGE does

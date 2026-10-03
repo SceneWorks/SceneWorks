@@ -23,3 +23,7 @@ test("a paginated result mismatch runs conservatively instead of skipping", () =
   assert.equal(decision.run, true);
   assert.match(decision.reason, /pagination returned 3000/);
 });
+
+test("vendored GTK dependency changes rebuild the Docker Cargo graph", () => {
+  assert.equal(dockerSmokeDecision(1, ["vendor/glib-0.18.5/src/variant_iter.rs"]).run, true);
+});

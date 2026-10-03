@@ -42,7 +42,7 @@ const EVERY_CONTROL = {
   seed: "42",
   cfgScale: "1.5",
   steps: "32",
-  precision: "fp32",
+  computePolicy: "fp32",
   offloadPolicy: "sequential",
   stageResidency: "on",
   chunkAttention: "on",
@@ -100,11 +100,11 @@ function webJobRequests() {
     ["cover", { ...EVERY_CONTROL, coverSource: "inline", coverScore: SCORE_ABC, coverMode: "full" }, {}],
     ["renderVersion", EVERY_CONTROL, { versionId: "ver_1" }],
     ["decode", EVERY_CONTROL, { sourceJobId: "job_src", decoder: "standard" }],
-    ["create", { ...defaultYue2Settings(), lyrics: "la la" }, {}],
+    ["create", { ...defaultYue2Settings(), lyrics: "la la", computePolicy: "auto" }, {}],
     // sc-23002: a transcription with and without its window settings.
     ["transcribe", EVERY_CONTROL, { sourceAudioAssetId: "asset_take" }],
     ["transcribe", defaultYue2Settings(), { sourceAudioAssetId: "asset_take" }],
-    ["create", { ...defaultYue2Settings(), lyrics: "[verse]\nhello", tier: "bf16", arMode: "experimentalFp8" }, {}, "0"],
+    ["create", { ...defaultYue2Settings(), lyrics: "[verse]\nhello", tier: "bf16", arMode: "experimentalFp8", computePolicy: "auto" }, {}, "0"],
   ];
   return scenarios.map(([kind, settings, target, gpu]) => buildYue2JobRequest(kind, settings, target, gpu ?? "auto"));
 }
@@ -147,25 +147,26 @@ describe("YuE2 request builder (sc-23000)", () => {
     }
   });
 
-  it("maps a decode job to exactly its source, decoder, tier, precision and decode memory", () => {
+  it("maps a decode job to exactly its source, decoder, tier, compute policy and decode memory", () => {
     expect(buildYue2JobRequest("decode", EVERY_CONTROL, { sourceJobId: "job_src" }, "auto")).toEqual({
       kind: "decode",
       sourceJobId: "job_src",
       decoder: "legacy",
       tier: "q8",
-      precision: "fp32",
+      computePolicy: "fp32",
       memory: { tileVaeDecode: true, decodeTileEdge: 256 },
       requestedGpu: "auto",
     });
   });
 
-  it("omits every unset control so the model default applies", () => {
+  it("requires a policy while omitting other unset controls", () => {
     const settings = { ...defaultYue2Settings(), lyrics: "la la" };
     expect(buildYue2JobRequest("create", settings)).toEqual({ kind: "create", lyrics: "la la", planning: "full" });
+    expect(yue2RequestProblems("create", settings)).toContainEqual(expect.stringContaining("Choose a compute precision"));
   });
 
   it("carries explicit FP8 AR only on generation and refuses unsupported selections before submit", () => {
-    const settings = { ...defaultYue2Settings(), lyrics: "la la", tier: "bf16", arMode: "experimentalFp8" };
+    const settings = { ...defaultYue2Settings(), lyrics: "la la", tier: "bf16", arMode: "experimentalFp8", computePolicy: "auto" };
     expect(buildYue2JobRequest("create", settings, {}, "0").arMode).toBe("experimentalFp8");
     expect(buildYue2JobRequest("plan", settings).arMode).toBe("experimentalFp8");
     expect(buildYue2JobRequest("fromPlan", settings).arMode).toBe("experimentalFp8");
@@ -179,9 +180,11 @@ describe("YuE2 request builder (sc-23000)", () => {
     expect(yue2RequestProblems("create", settings, {}, { requestedGpu: "auto" })).toEqual([
       expect.stringContaining("Select a CUDA GPU"),
     ]);
-    expect(yue2RequestProblems("create", { ...settings, tier: "q8", precision: "fp32" }, {}, { requestedGpu: "mlx" })).toHaveLength(3);
+    expect(yue2RequestProblems("create", { ...settings, tier: "q8", computePolicy: "fp32" }, {}, { requestedGpu: "mlx" })).toHaveLength(3);
     expect(restoreYue2Settings({ arMode: "experimentalFp8" }).arMode).toBe("experimentalFp8");
     expect(restoreYue2Settings({ arMode: "unrecognized" }).arMode).toBe("");
+    expect(restoreYue2Settings({ precision: "default", tier: "bf16" }).computePolicy).toBe("");
+    expect(restoreYue2Settings({ precision: "fp32" }).computePolicy).toBe("fp32");
   });
 
   // Core `validate_common`: a chunk size is read only with chunked attention ON, a tile edge only
@@ -201,7 +204,7 @@ describe("YuE2 request builder (sc-23000)", () => {
   });
 
   it("names the problems of an incomplete request in user terms", () => {
-    const settings = defaultYue2Settings();
+    const settings = { ...defaultYue2Settings(), computePolicy: "auto" };
     expect(yue2RequestProblems("create", settings)).toEqual(["Write the lyrics the song sings."]);
     expect(yue2RequestProblems("cover", { ...settings, lyrics: "x" })).toEqual([
       "Choose the reviewed score version the cover follows.",
@@ -477,15 +480,15 @@ describe("YuE2 fix pass (sc-23000)", () => {
     for (const bad of ["9007199254740992", "9007199254740993", "-1", "1.5", "1e3"]) {
       expect(seedValueProblem(bad), bad).toBe("The seed must be a whole number from 0 to 9007199254740991.");
     }
-    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), lyrics: "x", seed: "9007199254740993" })).toEqual([
+    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), computePolicy: "auto", lyrics: "x", seed: "9007199254740993" })).toEqual([
       "The seed must be a whole number from 0 to 9007199254740991.",
     ]);
     // A kind that does not read the seed does not complain about it.
-    expect(yue2RequestProblems("renderVersion", { ...defaultYue2Settings(), seed: "9007199254740993" }, { versionId: "v" })).toEqual([]);
+    expect(yue2RequestProblems("renderVersion", { ...defaultYue2Settings(), computePolicy: "auto", seed: "9007199254740993" }, { versionId: "v" })).toEqual([]);
   });
 
   it("says a workspace is needed", () => {
-    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), lyrics: "x" }, {}, { hasProject: false })).toEqual([
+    expect(yue2RequestProblems("create", { ...defaultYue2Settings(), computePolicy: "auto", lyrics: "x" }, {}, { hasProject: false })).toEqual([
       "Open or create a workspace first.",
     ]);
   });
@@ -557,7 +560,7 @@ describe("YuE2 cover from a recording (sc-23002)", () => {
   });
 
   it("covers a transcribed score only in its own mode", () => {
-    const settings = { ...defaultYue2Settings(), lyrics: "x", coverVersionId: "ver_t", coverMode: "full" };
+    const settings = { ...defaultYue2Settings(), computePolicy: "auto", lyrics: "x", coverVersionId: "ver_t", coverMode: "full" };
     const coverVersion = { id: "ver_t", cot: "melody", transcription: { transcriptionId: "t", mode: "melody" } };
     // Mutation that reds this: dropping the transcribed-mode check from yue2RequestProblems.
     expect(yue2RequestProblems("cover", settings, {}, { coverVersion })).toEqual([

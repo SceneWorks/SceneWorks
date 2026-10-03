@@ -220,6 +220,8 @@ fn field_kind(field: &Field) -> &'static str {
         Field::Str(_) => "string",
         Field::Bytes(_) => "bytes",
         Field::Date(_) => "date",
+        Field::TimeMillis(_) => "time-millis",
+        Field::TimeMicros(_) => "time-micros",
         Field::TimestampMillis(_) => "timestamp-millis",
         Field::TimestampMicros(_) => "timestamp-micros",
         Field::Group(_) => "group",
@@ -484,7 +486,75 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{materialize_limit_cases, shipping_detail_budgets, write_png};
+    use super::{
+        field_kind, materialize_limit_cases, row_string, shipping_detail_budgets, write_png,
+    };
+
+    #[test]
+    fn parquet_time_columns_preserve_units_and_text() {
+        use parquet::data_type::{Int32Type, Int64Type};
+        use parquet::file::properties::WriterProperties;
+        use parquet::file::reader::{FileReader, SerializedFileReader};
+        use parquet::file::writer::SerializedFileWriter;
+        use parquet::schema::parser::parse_message_type;
+        use std::fs::File;
+        use std::sync::Arc;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("times.parquet");
+        let schema = parse_message_type(
+            "message times {
+                REQUIRED INT32 milliseconds (TIME_MILLIS);
+                REQUIRED INT64 microseconds (TIME_MICROS);
+            }",
+        )
+        .unwrap();
+        let mut writer = SerializedFileWriter::new(
+            File::create(&path).unwrap(),
+            Arc::new(schema),
+            Arc::new(WriterProperties::builder().build()),
+        )
+        .unwrap();
+        let mut group = writer.next_row_group().unwrap();
+        let mut millis = group.next_column().unwrap().unwrap();
+        millis
+            .typed::<Int32Type>()
+            .write_batch(&[47_445_123], None, None)
+            .unwrap();
+        millis.close().unwrap();
+        let mut micros = group.next_column().unwrap().unwrap();
+        micros
+            .typed::<Int64Type>()
+            .write_batch(&[47_445_123_456], None, None)
+            .unwrap();
+        micros.close().unwrap();
+        group.close().unwrap();
+        writer.close().unwrap();
+
+        let reader = SerializedFileReader::new(File::open(path).unwrap()).unwrap();
+        let rows = reader
+            .get_row_iter(None)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        let kinds = rows[0]
+            .get_column_iter()
+            .map(|(name, field)| format!("{name}={}", field_kind(field)))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            ["milliseconds=time-millis", "microseconds=time-micros"]
+        );
+        assert_eq!(
+            row_string(&rows[0], "milliseconds").as_deref(),
+            Some("13:10:45.123")
+        );
+        assert_eq!(
+            row_string(&rows[0], "microseconds").as_deref(),
+            Some("13:10:45.123456")
+        );
+    }
 
     #[test]
     fn terminal_corpus_centers_non_square_renders_on_the_fixed_canvas() {

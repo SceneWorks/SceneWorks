@@ -69,6 +69,14 @@
       "renderVersion",
       "decode"
     ],
+    "computePolicy": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
     "arMode": [
       "create",
       "plan",
@@ -148,7 +156,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "count": 3,
       "memory": {
@@ -180,7 +188,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "count": 3,
       "memory": {
@@ -209,7 +217,7 @@
         "maxTokens": 2048
       },
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "count": 3,
       "requestedGpu": "auto"
     },
@@ -229,7 +237,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "planJobId": "job_plan",
       "memory": {
@@ -259,7 +267,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "cover": {
         "versionId": "ver_1",
@@ -295,7 +303,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "cover": {
         "score": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|",
@@ -326,7 +334,7 @@
       },
       "decoder": "legacy",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "offloadPolicy": "sequential",
       "versionId": "ver_1",
       "memory": {
@@ -342,7 +350,7 @@
       "kind": "decode",
       "decoder": "standard",
       "tier": "q8",
-      "precision": "fp32",
+      "computePolicy": "fp32",
       "sourceJobId": "job_src",
       "memory": {
         "tileVaeDecode": true,
@@ -354,6 +362,7 @@
       "kind": "create",
       "lyrics": "la la",
       "planning": "full",
+      "computePolicy": "auto",
       "requestedGpu": "auto"
     },
     {
@@ -376,6 +385,7 @@
       "lyrics": "[verse]\nhello",
       "planning": "full",
       "tier": "bf16",
+      "computePolicy": "auto",
       "arMode": "experimentalFp8",
       "requestedGpu": "0"
     }

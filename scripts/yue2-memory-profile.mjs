@@ -30,6 +30,7 @@
 //
 //   node scripts/yue2-memory-profile.mjs plan [--backend metal|cuda]
 //   node scripts/yue2-memory-profile.mjs capture --case <id> --inference-repo <dir> --out <dir>
+//   node scripts/yue2-memory-profile.mjs capture --case-file <outside-repo.json> --inference-repo <dir> --out <dir>
 //        [--data-dir <app data dir>] [--gpu-id N] [--budget-minutes N] [--dry-run]
 //   node scripts/yue2-memory-profile.mjs run --backend metal|cuda --inference-repo <dir> --out <dir> [...]
 //   node scripts/yue2-memory-profile.mjs check <record.json ...>
@@ -205,7 +206,25 @@ export function caseIdentity(item, manifest) {
 /** The case file the native entrypoint reads (`yue2_memory_profile::ProfileCase`). */
 export function caseFile(item) {
   return { id: item.id, tier: item.tier, decoder: item.decoder,
-    ...(item.arMode ? { arMode: item.arMode } : {}), request: item.request };
+    ...(item.arMode ? { arMode: item.arMode } : {}),
+    ...(item.computePolicy ? { computePolicy: item.computePolicy } : {}), request: item.request };
+}
+
+/** An off-plan precision probe uses the same guarded capture path but never changes the corpus. */
+export function externalCaseItem(body, plan) {
+  const match = /^yue2:(bf16|q8|q4):(metal|cuda):([a-z][a-z0-9-]*)$/.exec(body?.id ?? "");
+  if (!match || body?.tier !== match[1] || !DECODERS[body?.decoder] ||
+      !["auto", "bf16", "fp32"].includes(body?.computePolicy) ||
+      Object.keys(body ?? {}).some((key) => !["id", "tier", "decoder", "arMode", "computePolicy", "request"].includes(key))) {
+    fail("external precision case needs a matching yue2:<tier>:<backend>:<name>, decoder, and explicit computePolicy");
+  }
+  if (expandCases(plan).some((row) => row.id === body.id)) fail(`${body.id}: a corpus case cannot be overridden`);
+  if (body.arMode !== undefined && !["native", "experimentalFp8"].includes(body.arMode)) fail(`${body.id}: unknown arMode`);
+  if (body.arMode === "experimentalFp8" && (match[1] !== "bf16" || match[2] !== "cuda" || body.computePolicy !== "auto")) {
+    fail(`${body.id}: FP8 requires bf16 CUDA and Auto compute policy`);
+  }
+  validateRequest(body.request, body.id);
+  return { ...body, modelId: "yue2", backend: match[2], requestName: match[3] };
 }
 
 // ---- Measurement -----------------------------------------------------------------------------------
@@ -274,7 +293,8 @@ export function buildRecord({
     backend: item.backend,
     identity: { ...identity, engine, sceneworks },
     hardware,
-    request: { name: item.requestName, ...(item.arMode ? { arMode: item.arMode } : {}), ...item.request },
+    request: { name: item.requestName, ...(item.arMode ? { arMode: item.arMode } : {}),
+      ...(item.computePolicy ? { computePolicy: item.computePolicy } : {}), ...item.request },
     admission,
     measured: { sampler, stages: measured, peakBytes: peak || null,
       timingNote: "Stage wall times include external sample waits; observed peaks may miss transient maxima." },
@@ -299,6 +319,15 @@ export function validateRecord(record) {
     fail(`${record.caseId}: unknown outcome ${record.outcome.status}`);
   }
   if (record.outcome.status === "completed") {
+    if (record.request?.computePolicy) {
+      const expected = {
+        auto: ["bfloat16", "float32"], bf16: ["bfloat16", "bfloat16"], fp32: ["float32", "float32"],
+      }[record.request.computePolicy];
+      if (!expected || record.outcome.engineComputePolicy !== record.request.computePolicy ||
+          record.outcome.engineModelDtype !== expected[0] || record.outcome.engineVaeDtype !== expected[1]) {
+        fail(`${record.caseId}: effective compute policy and model/VAE dtypes do not match the request`);
+      }
+    }
     if (record.request?.arMode === "experimentalFp8") {
       const host = record.admission?.estimate?.weights?.hostBytes;
       if (!Number.isSafeInteger(host) || host < 2 * 1024 ** 3) {
@@ -698,10 +727,15 @@ async function readOptional(file) {
 }
 
 /** Plan one capture: the case, its files and the exact commands, without running anything. */
-export async function planCapture({ caseId, outDir, dataDir, gpuId, budgetMinutes = 240, sources, root = ROOT }) {
+export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, gpuId, budgetMinutes = 240, sources, root = ROOT }) {
   const { plan, manifest } = sources;
   validatePlan(plan, sources);
-  const item = expandCases(plan).find((candidate) => candidate.id === caseId);
+  if (externalCaseFile && !path.relative(root, path.resolve(externalCaseFile)).startsWith("..")) {
+    fail("--case-file must be outside the repository");
+  }
+  const item = externalCaseFile
+    ? externalCaseItem(JSON.parse(await readFile(externalCaseFile, "utf8")), plan)
+    : expandCases(plan).find((candidate) => candidate.id === caseId);
   if (!item) fail(`unknown case ${caseId}; see \`plan\``);
   const resolvedOut = path.resolve(outDir, item.id.replaceAll(":", "__"));
   if (!path.relative(root, resolvedOut).startsWith("..")) {
@@ -819,6 +853,7 @@ export function parseArgs(argv) {
       return next;
     };
     if (arg === "--case") options.caseId = value();
+    else if (arg === "--case-file") options.externalCaseFile = value();
     else if (arg === "--backend") options.backend = value();
     else if (arg === "--inference-repo") options.inferenceRepo = value();
     else if (arg === "--out") options.outDir = value();
@@ -856,7 +891,9 @@ export async function main(argv = process.argv.slice(2), root = ROOT) {
       return 0;
     }
     case "capture": {
-      if (!options.caseId || !options.outDir) fail("capture needs --case and --out");
+      if (Boolean(options.caseId) === Boolean(options.externalCaseFile) || !options.outDir) {
+        fail("capture needs exactly one of --case or --case-file, and --out");
+      }
       if (options.dryRun) {
         const planned = await planCapture({ ...options, sources, root });
         console.log(JSON.stringify({ case: caseFile(planned.item), identity: planned.identity, compile: planned.compile, test: planned.test, guarded: planned.guarded }, null, 2));

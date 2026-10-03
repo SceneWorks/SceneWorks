@@ -2470,6 +2470,7 @@ mod tests {
             // This SDXL registry-derivation stub is adapter-only. Mage owns the separate
             // native full-base descriptor on both backends.
             supports_full_finetune: false,
+            max_reference_images: 0,
         }
     }
     fn stub_candle_trainer_load(

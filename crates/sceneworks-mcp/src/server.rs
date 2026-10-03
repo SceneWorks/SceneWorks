@@ -790,7 +790,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL — CC BY-NC 4.0): render one take of a score version through the Song Lab's job route. The version fixes the style, lyrics, planning, seed and guidance; you may choose steps, decoder and tier. Rendering regenerates the WHOLE recording from the score, style and lyrics — it does not edit or preserve an earlier waveform, so audio can differ everywhere. Requires that the USER has accepted YuE2's licence in SceneWorks: without it the call is refused with license_acknowledgment_required and nothing is queued (this tool never accepts the licence for them). Output is noncommercial. Returns the job id; poll yue2_get_render."
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL — CC BY-NC 4.0): render one take of a score version through the Song Lab's job route. The version fixes the style, lyrics, planning, seed and guidance; you may choose steps, decoder, weight tier and required compute policy (auto, bf16 or fp32). Rendering regenerates the WHOLE recording from the score, style and lyrics — it does not edit or preserve an earlier waveform, so audio can differ everywhere. Requires that the USER has accepted YuE2's licence in SceneWorks: without it the call is refused with license_acknowledgment_required and nothing is queued (this tool never accepts the licence for them). Output is noncommercial. Returns the job id; poll yue2_get_render."
     )]
     async fn yue2_render_score_version(
         &self,
@@ -800,7 +800,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL): render a zero-shot cover that follows a reviewed score version — mode \"melody\" (keep the melody) or \"full\" — singing the lyrics you give, in an optional style. A cover is a complete new recording, not an edit of an earlier one. Requires the USER's licence acceptance in SceneWorks (refused with license_acknowledgment_required otherwise; never accepted by this tool). Returns the job id; poll yue2_get_render."
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL): render a zero-shot cover that follows a reviewed score version — mode \"melody\" (keep the melody) or \"full\" — singing the lyrics you give, in an optional style. A cover is a complete new recording, not an edit of an earlier one. Select a required compute policy (auto, bf16 or fp32) separately from weight tier. Requires the USER's licence acceptance in SceneWorks (refused with license_acknowledgment_required otherwise; never accepted by this tool). Returns the job id; poll yue2_get_render."
     )]
     async fn yue2_cover_score_version(
         &self,

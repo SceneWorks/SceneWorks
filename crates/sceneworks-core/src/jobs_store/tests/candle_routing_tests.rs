@@ -1936,26 +1936,23 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // An adapter is handled DIFFERENTLY per backend, and both answers are deliberate:
-    //   * off-Mac the candle lane REFUSES it (`CandleImageRefusal::UserLora`), because the id's
-    //     `candle_lora` column is false — the provider declares `supports_lora`/`supports_lokr`
-    //     false, so the refusal names the missing adapter slot;
-    //   * on a Mac the MLX arm lets it through on purpose, so the engine answers with a typed
-    //     `Unsupported` instead of the job sitting unclaimable.
-    // On a Windows/Linux-only install there is no MLX worker to fall through to, so the candle
-    // refusal IS the terminal answer — which is why it has to carry the adapter-slot reason rather
-    // than a generic one.
-    assert!(!image_request_candle_eligible(
-        "qwen_image_2_1",
-        &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-    ));
-    assert_eq!(
-        candle_image_first_refusal(
-            "qwen_image_2_1",
-            &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-        ),
-        Some(CandleImageRefusal::UserLora),
-    );
+    // The current provider applies LoRA and PEFT LoKr residuals on dense and packed tiers. Both
+    // are admitted by the same production scheduler gate, including with an explicit tier select.
+    for adapter in ["lora", "lokr"] {
+        for bits in [0, 4, 8] {
+            let payload = json!({
+                "model": "qwen_image_2_1", "prompt": "p",
+                "loras": [{ "id": "probe", "networkType": adapter }],
+                "advanced": { "mlxQuantize": bits }
+            });
+            assert!(
+                image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+                "{adapter} with Q{bits} must reach the Candle provider"
+            );
+            let job = image_generate_job(payload);
+            assert!(worker_supports_job(&gpu_worker(CANDLE_CAPS), &job));
+        }
+    }
 
     // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
     // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`
@@ -2011,8 +2008,8 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
 /// is served rather than refused.
 ///
 /// **That agreement is not a merge, and the distinction is the whole point of this test.** Nothing
-/// anywhere reads "the supported quants of `qwen_image_2_1`". `ModelCaps::candle_quant` is the
-/// Candle column and only the Candle column; the MLX lane's tier surface is the manifest's own
+/// anywhere reads "the supported quants of `qwen_image_2_1`". The Candle quant+adapter column is
+/// specific to Candle; the MLX lane's tier surface is the manifest's own
 /// `mlx` block; the catalog's `variant` rows are the INSTALL axis, which is a third thing again. A
 /// future revision that narrows one provider must be expressible by changing one of them, and the
 /// assertions below are written so that it is.
@@ -2126,7 +2123,7 @@ fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
         "the MLX block declares the lane's default tier, not its tier set"
     );
     // The candle lane has NO manifest tier key at all, and must not grow one: its tier surface is
-    // the routing catalog's `candle_quant` column. A `candle.quantize` here would be a second,
+    // the routing catalog's quant+adapter column. A `candle.quantize` here would be a second,
     // silently-diverging declaration of the same fact.
     let candle = entry
         .get("candle")

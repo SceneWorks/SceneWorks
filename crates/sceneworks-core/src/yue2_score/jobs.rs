@@ -169,12 +169,22 @@ impl Tier {
     }
 }
 
-/// `LoadSpec::precision`: `default` computes in BF16 on an accelerator and F32 on the CPU; `fp32`
-/// forces F32.
+/// Historical `LoadSpec::precision` selection. Retained for already queued jobs; new submissions
+/// use [`ComputePolicy`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ComputePrecision {
     Default,
+    Fp32,
+}
+
+/// A fresh YuE2 request's explicit floating compute policy. Weight tier and experimental AR
+/// quantization remain separate controls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ComputePolicy {
+    Auto,
+    Bf16,
     Fp32,
 }
 
@@ -429,6 +439,9 @@ pub struct Yue2JobSpec {
     pub tier: Option<Tier>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precision: Option<ComputePrecision>,
+    /// Absent only on persisted pre-policy jobs. Fresh submissions choose this explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute_policy: Option<ComputePolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ar_mode: Option<ArMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,6 +552,10 @@ pub const FIELD_KINDS: &[(&str, &[Yue2JobKind])] = &[
         &[K_CREATE, K_PLAN, K_FROM_PLAN, K_COVER, K_RENDER, K_DECODE],
     ),
     (
+        "computePolicy",
+        &[K_CREATE, K_PLAN, K_FROM_PLAN, K_COVER, K_RENDER, K_DECODE],
+    ),
+    (
         "arMode",
         &[K_CREATE, K_PLAN, K_FROM_PLAN, K_COVER, K_RENDER],
     ),
@@ -604,6 +621,7 @@ fn set_fields(spec: &Yue2JobSpec) -> Vec<&'static str> {
     push("decoder", spec.decoder.is_some());
     push("tier", spec.tier.is_some());
     push("precision", spec.precision.is_some());
+    push("computePolicy", spec.compute_policy.is_some());
     push("arMode", spec.ar_mode.is_some());
     push("offloadPolicy", spec.offload_policy.is_some());
     push(
@@ -758,6 +776,23 @@ pub fn validate_request(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
         }
     }
     validate_common(spec)
+}
+
+/// Fresh HTTP submissions must state their compute policy. Historical queued jobs are validated
+/// by [`validate_for_execution`] and retain their exact legacy precision semantics.
+pub fn validate_new_submission(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
+    validate_request(spec)?;
+    if spec.kind == K_TRANSCRIBE {
+        return Ok(());
+    }
+    if spec.compute_policy.is_none() {
+        return Err(error(
+            MISSING_FIELD,
+            "computePolicy",
+            "choose Auto, BF16, or FP32 explicitly; a BF16 weight tier is not a compute policy",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate a stored block before execution: the request rules, plus the server-resolved inputs
@@ -915,6 +950,13 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
             return Err(error(INVALID_COMBINATION, shown, why_not(field, kind)));
         }
     }
+    if spec.compute_policy.is_some() && spec.precision.is_some() {
+        return Err(error(
+            INVALID_COMBINATION,
+            "precision",
+            "legacy precision and computePolicy cannot both be selected",
+        ));
+    }
     if spec.ar_mode == Some(ArMode::ExperimentalFp8) {
         if spec.tier != Some(Tier::Bf16) {
             return Err(error(
@@ -928,6 +970,16 @@ fn validate_common(spec: &Yue2JobSpec) -> Result<(), Yue2JobError> {
                 INVALID_COMBINATION,
                 "arMode",
                 "experimental FP8 AR needs BF16 compute, not FP32",
+            ));
+        }
+        if spec
+            .compute_policy
+            .is_some_and(|policy| policy != ComputePolicy::Auto)
+        {
+            return Err(error(
+                INVALID_COMBINATION,
+                "computePolicy",
+                "experimental FP8 AR mixes FP8 and BF16 stages and requires Auto",
             ));
         }
     }

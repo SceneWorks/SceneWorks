@@ -89,16 +89,18 @@ test("the plan runs every case on a real run and skips only with a stated reason
   assert.throws(() => planCases({ platform: "rocm" }), /metal or cuda/);
 });
 
-test("FP8 profile preparation runs only the cold install and never claims acceptance", () => {
-  const planned = planCases({ platform: "cuda", profileInstallOnly: true });
-  assert.deepEqual(planned.filter((item) => item.action === "run").map((item) => item.id), ["install-cold"]);
-  assert.equal(planned.filter((item) => item.action === "skip").length, CASES.length - 1);
-  for (const item of planned.filter((row) => row.action === "skip")) assert.match(item.reason, /not an acceptance run/);
-  const summary = buildSummary([passedRecord("install-cold", { jobs: [] })], {
-    platform: "cuda", profileInstallOnly: true,
-  });
-  assert.equal(summary.verdict, "incomplete");
-  assert.match(renderMarkdown(summary), /installation preparation.*not acceptance/);
+test("profile preparation on either backend runs only cold install and never claims acceptance", () => {
+  for (const platform of ["cuda", "metal"]) {
+    const planned = planCases({ platform, profileInstallOnly: true });
+    assert.deepEqual(planned.filter((item) => item.action === "run").map((item) => item.id), ["install-cold"]);
+    assert.equal(planned.filter((item) => item.action === "skip").length, CASES.length - 1);
+    for (const item of planned.filter((row) => row.action === "skip")) assert.match(item.reason, /not an acceptance run/);
+    const summary = buildSummary([passedRecord("install-cold", { jobs: [] })], {
+      platform, profileInstallOnly: true,
+    });
+    assert.equal(summary.verdict, "incomplete");
+    assert.match(renderMarkdown(summary), new RegExp(`installation preparation.*${platform}.*not acceptance`));
+  }
 });
 
 test("a Metal worker kill needs the owner's explicit opt-in; CUDA always runs it", () => {
@@ -135,7 +137,7 @@ test("arguments: platform and out are required; --skip repeats; unknown input is
   assert.throws(() => parseArgs(["--platform", "cuda", "--out", "x", "--hf-hub", "E:/huggingface/hub"]), /unknown argument --hf-hub/);
   assert.equal(options.dryRun, true);
   assert.equal(parseArgs(["--platform", "cuda", "--out", "x", "--profile-install-only"]).profileInstallOnly, true);
-  assert.throws(() => parseArgs(["--platform", "metal", "--out", "x", "--profile-install-only"]), /requires CUDA/);
+  assert.equal(parseArgs(["--platform", "metal", "--out", "x", "--profile-install-only"]).profileInstallOnly, true);
   assert.throws(() => parseArgs(["--platform", "cuda", "--out", "x", "--profile-install-only", "--skip", "install-cold"]), /cannot combine/);
   assert.throws(() => parseArgs(["--out", "x"]), /--platform/);
   assert.throws(() => parseArgs(["--platform", "metal"]), /--out/);

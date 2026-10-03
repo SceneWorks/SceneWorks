@@ -1167,6 +1167,69 @@ mod tests {
         );
     }
 
+    fn assert_durable_execution_matches(
+        mut durable: PlannerExecutionRecord,
+        expected: &PlannerExecutionRecord,
+    ) {
+        let expected_duration = expected.duration_seconds.unwrap();
+        let durable_duration = durable.duration_seconds.unwrap();
+        assert!(expected_duration.is_finite() && expected_duration > 0.0);
+        assert!(durable_duration.is_finite() && durable_duration > 0.0);
+        // Decimal JSON parsing can move elapsed-time telemetry by a few floating-point ULPs.
+        assert!(
+            (durable_duration - expected_duration).abs()
+                <= 4.0 * f64::EPSILON * expected_duration.abs().max(1.0),
+            "durable duration changed: {durable_duration:?} vs {expected_duration:?}"
+        );
+        durable.duration_seconds = expected.duration_seconds;
+        assert_eq!(durable, *expected);
+    }
+
+    #[test]
+    fn durable_execution_comparison_allows_only_duration_rounding() {
+        let expected = PlannerExecutionRecord {
+            duration_seconds: Some(Duration::from_nanos(1_038_332_959).as_secs_f64()),
+            failure_code: Some("transport_timeout".to_owned()),
+            ..PlannerExecutionRecord::default()
+        };
+        let bytes = serde_json::to_vec(&expected).unwrap();
+        let durable: PlannerExecutionRecord = serde_json::from_slice(&bytes).unwrap();
+        assert_durable_execution_matches(durable, &expected);
+        let mut adjacent = expected.clone();
+        adjacent.duration_seconds = Some(f64::from_bits(
+            expected.duration_seconds.unwrap().to_bits() + 1,
+        ));
+        assert_durable_execution_matches(adjacent, &expected);
+
+        for invalid in [
+            None,
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(0.0),
+            Some(-1.0),
+        ] {
+            let mut changed = expected.clone();
+            changed.duration_seconds = invalid;
+            assert!(std::panic::catch_unwind(|| {
+                assert_durable_execution_matches(changed, &expected)
+            })
+            .is_err());
+        }
+
+        let mut changed = expected.clone();
+        changed.duration_seconds = Some(expected.duration_seconds.unwrap() + 1e-6);
+        assert!(std::panic::catch_unwind(|| {
+            assert_durable_execution_matches(changed, &expected)
+        })
+        .is_err());
+        let mut changed = expected.clone();
+        changed.failure_code = Some("canceled".to_owned());
+        assert!(std::panic::catch_unwind(|| {
+            assert_durable_execution_matches(changed, &expected)
+        })
+        .is_err());
+    }
+
     #[tokio::test]
     async fn every_dispatched_failure_has_a_sanitized_durable_attempt_and_cancel_class() {
         for (status, body, delay, cancel, code) in [
@@ -1277,9 +1340,9 @@ mod tests {
             assert_eq!(receipt.reference_pixels_sent, Some(true));
             assert!(receipt.duration_seconds.unwrap() > 0.0);
             let bytes = std::fs::read_to_string(&receipt_path).unwrap();
-            assert_eq!(
+            assert_durable_execution_matches(
                 serde_json::from_str::<PlannerExecutionRecord>(&bytes).unwrap(),
-                *receipt
+                receipt,
             );
             assert!(!bytes.contains("fixture-secret"));
             assert!(!bytes.contains("never-retain"));

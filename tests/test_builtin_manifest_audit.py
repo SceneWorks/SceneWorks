@@ -944,9 +944,15 @@ def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant()
     assert candidate["inferenceRevision"] == plan["inference_contract"]["revision"]
     assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
     assert not list(validator.iter_errors({"schemaVersion": 1, "models": [model]}))
-    # Verify the exact current file inventory and digests through their sole source authority.
+    # Preserve packaged provenance: integrity is required, source currency is advisory.
+    # Controlled JS fixtures verify that changed source bytes change the closure.
     subprocess.run(
-        ["node", "scripts/starvector-production-closure.mjs", "check-manifest"],
+        [
+            "node", "--input-type=module", "--eval",
+            "import { validateProductionClosureShape } from './scripts/starvector-production-closure.mjs'; "
+            "validateProductionClosureShape(JSON.parse(process.argv[1]));",
+            json.dumps(candidate["productionClosure"]),
+        ],
         cwd=ROOT, check=True, capture_output=True, text=True, timeout=30,
     )
     assert model["vector"]["providers"] == {

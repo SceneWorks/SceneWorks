@@ -111,6 +111,160 @@ fn load(tier: Yue2Tier) -> Yue2LoadFacts {
 }
 
 #[test]
+fn explicit_compute_policy_prices_mot_and_names_selected_vae() {
+    use gen_core::{LoadSpec, WeightsSource, Yue2ComputePolicy};
+    let source = WeightsSource::Dir(std::path::PathBuf::from("/unused-yue2-weights"));
+    let facts = |policy| {
+        Yue2LoadFacts::of(
+            Yue2Tier::Bf16,
+            &LoadSpec::new(source.clone()).with_yue2_compute_policy(policy),
+        )
+    };
+    assert_eq!(
+        facts(Yue2ComputePolicy::Auto).precision,
+        Yue2Precision::Default
+    );
+    assert_eq!(
+        facts(Yue2ComputePolicy::Bf16).precision,
+        Yue2Precision::StrictBf16
+    );
+    assert_eq!(
+        facts(Yue2ComputePolicy::Fp32).precision,
+        Yue2Precision::Fp32
+    );
+    assert!(weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cpu,
+        Yue2Precision::StrictBf16,
+        Yue2ArMode::Native,
+        None
+    )
+    .is_err());
+    let auto = weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cuda,
+        Yue2Precision::Default,
+        Yue2ArMode::Native,
+        None,
+    )
+    .unwrap();
+    let fp32 = weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cuda,
+        Yue2Precision::Fp32,
+        Yue2ArMode::Native,
+        None,
+    )
+    .unwrap();
+    assert!(
+        fp32.device_bytes > auto.device_bytes * 3 / 2,
+        "FP32 dense MoT must not reuse BF16's weight reservation"
+    );
+    let dense_delta: u64 = tensor_table()
+        .iter()
+        .filter(|group| !group.class.follows_tier())
+        .map(|group| group.rows * group.cols * group.count * 2)
+        .sum();
+    for tier in [Yue2Tier::Q8, Yue2Tier::Q4] {
+        let auto = weight_residency(
+            tier,
+            Yue2Backend::Cuda,
+            Yue2Precision::Default,
+            Yue2ArMode::Native,
+            None,
+        )
+        .unwrap();
+        let fp32 = weight_residency(
+            tier,
+            Yue2Backend::Cuda,
+            Yue2Precision::Fp32,
+            Yue2ArMode::Native,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fp32.stored_bytes, auto.stored_bytes,
+            "Q-tier storage remains quantized"
+        );
+        assert_eq!(
+            fp32.device_bytes - auto.device_bytes,
+            dense_delta,
+            "FP32 must double each non-quantized Q-tier tensor's loaded bytes"
+        );
+    }
+    let mut shape = shape_of(
+        &builtin_yue2_entry(),
+        &default_request(),
+        facts(Yue2ComputePolicy::Bf16),
+        None,
+        Yue2ArMode::Native,
+    )
+    .unwrap();
+    let bf16 = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let decode = bf16
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert!(decode
+        .terms
+        .iter()
+        .any(|term| term.what.contains("BF16 VAE")));
+    // The current decoder fits inside the fixed 1 GiB reserve. A larger checkpoint must price
+    // its transient F32 load plus BF16 resident copy, rather than only half its source bytes.
+    shape.decoder_bytes = 2 << 30;
+    let future = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let future_decode = future
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert_eq!(future_decode.terms[1].device_bytes, 3 << 30);
+    shape.precision = Yue2Precision::Fp32;
+    let fp32 = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let decode = fp32
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert!(decode
+        .terms
+        .iter()
+        .any(|term| term.what.contains("FP32 VAE")));
+}
+
+#[test]
+fn quantized_stages_reserve_their_f32_matmul_operands() {
+    let request = default_request();
+    for tier in [Yue2Tier::Q8, Yue2Tier::Q4] {
+        let shape = shape_of(
+            &builtin_yue2_entry(),
+            &request,
+            load(tier),
+            None,
+            Yue2ArMode::Native,
+        )
+        .unwrap();
+        let estimate =
+            estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+        for stage in [Yue2Stage::AcousticPrefill, Yue2Stage::AcousticSolve] {
+            let stage = estimate
+                .stages
+                .iter()
+                .find(|item| item.stage == stage)
+                .unwrap();
+            assert!(
+                stage.terms.iter().any(|term| {
+                    term.what == "GGML F32 matmul operand + result"
+                        && term.device_bytes >= ggml_matmul_transient_bytes(PREFILL_CHUNK)
+                }),
+                "{tier:?} {stage:?} must price transient F32 QMatMul tensors"
+            );
+        }
+    }
+}
+
+#[test]
 fn production_load_facts_keep_explicit_fp8_for_host_originals() {
     let load_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
         std::path::PathBuf::from("/unused-yue2-weights"),
