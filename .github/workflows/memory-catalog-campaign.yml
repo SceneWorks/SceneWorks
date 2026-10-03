@@ -106,6 +106,15 @@ on:
         required: false
         type: boolean
         default: false
+      qwen_persistent_weights:
+        description: >-
+          MLX qwen_image_2_1-only: reuse ~/sceneworks-rw-weights/hub, shared with the
+          terminal real-weight evidence job. Missing manifest-pinned files can be fetched there
+          with download_missing. Requires models=qwen_image_2_1 and empty hf_cache_roots.
+          This catalog measures base anchors; overlay/training evidence belongs to real-weights.
+        required: false
+        type: boolean
+        default: false
       ref:
         description: "Branch to walk from. The campaign branch is cut from this ref and the PR targets it."
         required: true
@@ -250,16 +259,25 @@ jobs:
           toolchain: "1.97.1"
 
       - name: Fetch prebuilt MLX (sc-21382)
-        # Same step as macos-mlx.yml: pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache
-        # miss. Exit 1 means "no prebuilt published for this mlx-rs rev", which is a slow source
-        # build rather than an error; anything else is fatal.
+        # pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache miss. Exit 1 means "no
+        # prebuilt published for this mlx-rs rev", which is a slow source build rather than an
+        # error; anything else is fatal.
+        #
+        # `--build-type Release` because the adapter below is built `--release`: the script's Debug
+        # default made pmetal-mlx-sys refuse the link ("build_type: prebuilt=Debug this
+        # build=Release"), which is how run 34616773217 -- the last mlx dispatch of this workflow --
+        # died in "Build the MLX memory adapter" on nax-macos-2. Same fix as macos-mlx.yml's
+        # calibration step (sc-22667). With no Release asset the two variables are blanked, which is
+        # pmetal-mlx-sys's build-from-source path.
         run: |
           set +e
-          scripts/fetch-prebuilt-mlx.sh --github-env
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
           rc=$?
           set -e
           if [ "$rc" = 1 ]; then
-            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+            echo "::warning title=prebuilt MLX (Release) unavailable::no Release prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
@@ -284,6 +302,10 @@ jobs:
 
       - name: Bind the operator-staged identity bundles
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
+
+      - name: Bind the persistent Qwen weights
+        if: ${{ inputs.qwen_persistent_weights }}
+        run: node scripts/ci/memory-catalog/bind-qwen-persistent-cache.mjs
 
       - name: Plan the walk
         run: bash scripts/ci/memory-catalog/plan.sh
