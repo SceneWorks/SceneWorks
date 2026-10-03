@@ -9,6 +9,7 @@ import { hasPresentCredential, loadCredentials } from "../credentials.js";
 import {
   extractFamilies,
   loraHasResolvableFamily,
+  loraImportFamilyNote,
   modelLoraFamilies,
   normalizeLoraFamily,
   presetLoraId,
@@ -647,7 +648,7 @@ export function ModelManagerScreen() {
   // the open row by scope:id; the draft holds the working keywords + notes; suggestions
   // come from the LoRA's embedded ss_tag_frequency metadata (fetched on open).
   const [editingLora, setEditingLora] = useState("");
-  const [loraEditDraft, setLoraEditDraft] = useState({ triggerWords: [], notes: "" });
+  const [loraEditDraft, setLoraEditDraft] = useState({ triggerWords: [], notes: "", family: "" });
   const [loraEditSuggestions, setLoraEditSuggestions] = useState([]);
   const [savingLora, setSavingLora] = useState(false);
   const [loraEditError, setLoraEditError] = useState("");
@@ -1004,10 +1005,11 @@ export function ModelManagerScreen() {
       // Show the detected family in the same normalized vocabulary the dropdown
       // uses (e.g. the backend's canonical `krea_2` displays as `krea-2`), so the
       // note never names a token the manual selector doesn't list.
-      const detectionNote =
-        !importForm.family && resolvedFamily
-          ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`
-          : "";
+      const detectionNote = loraImportFamilyNote({
+        chosenFamily: importForm.family,
+        resolvedFamily,
+        isFileImport,
+      });
       setImportForm((current) => ({
         ...current,
         sourceUrl: "",
@@ -1770,6 +1772,7 @@ export function ModelManagerScreen() {
     setLoraEditDraft({
       triggerWords: Array.isArray(lora.triggerWords) ? lora.triggerWords : [],
       notes: typeof lora.notes === "string" ? lora.notes : "",
+      family: "",
     });
     setLoraEditSuggestions([]);
     setLoraEditError("");
@@ -1792,9 +1795,13 @@ export function ModelManagerScreen() {
     setSavingLora(true);
     setLoraEditError("");
     try {
+      // sc-24163: a family is only sent for a LoRA whose file resolved none — the API refuses
+      // to reassign a detected family, so a resolved row never offers the control.
+      const assignFamily = !loraHasResolvableFamily(lora) && loraEditDraft.family;
       await onUpdateLora(lora, {
         triggerWords: loraEditDraft.triggerWords,
         notes: loraEditDraft.notes.trim(),
+        ...(assignFamily ? { family: loraEditDraft.family } : {}),
       });
       setEditingLora("");
     } catch (error) {
@@ -1849,7 +1856,7 @@ export function ModelManagerScreen() {
           <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible", ...declared].filter(Boolean).join(" | ")}</small>
         </span>
         {unusable ? (
-          <span className="status-badge warning" title="This file's architecture family couldn't be identified, so it can't be applied to any model.">
+          <span className="status-badge warning" title="This file's architecture family couldn't be identified, so it can't be applied to any model until you choose its family.">
             unusable
           </span>
         ) : (
@@ -1866,7 +1873,7 @@ export function ModelManagerScreen() {
           ) : null}
           {canEdit && !isEditing ? (
             <button onClick={() => startEditLora(lora)} type="button">
-              Edit
+              {unusable ? "Choose family" : "Edit"}
             </button>
           ) : null}
           <button
@@ -1894,6 +1901,23 @@ export function ModelManagerScreen() {
         ) : null}
         {isEditing ? (
           <div className="lora-row-editor">
+            {unusable ? (
+              <label>
+                Unresolved family — choose
+                <select
+                  disabled={savingLora || !families.length}
+                  onChange={(event) => setLoraEditDraft((current) => ({ ...current, family: event.target.value }))}
+                  value={loraEditDraft.family}
+                >
+                  <option value="">Choose the model family this LoRA was trained for</option>
+                  {families.map((family) => (
+                    <option key={family} value={family}>
+                      {family}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
             <label>
               Trigger keywords
               <KeywordTagEditor

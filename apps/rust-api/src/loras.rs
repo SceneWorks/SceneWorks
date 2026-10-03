@@ -348,6 +348,8 @@ pub(crate) async fn delete_lora(
 /// after import — the capability scoped under epic 1092 / story 1168 but never
 /// shipped. Only the fields present in the request change. Built-in entries are
 /// read-only (their manifest is compiled in); import a copy to annotate them.
+/// `family` assigns an architecture family to a LoRA whose file does not resolve one
+/// (sc-24163) — see [`resolve_lora_family_assignment`].
 pub(crate) async fn update_lora(
     State(state): State<AppState>,
     Path(lora_id): Path<String>,
@@ -409,6 +411,30 @@ pub(crate) async fn update_lora(
     };
     let trigger_words = body.trigger_words.clone();
     let notes = body.notes.clone();
+    let family = match body.family.as_deref() {
+        Some(requested) => {
+            let models = model_catalog(&state).await?;
+            let lora_for_header = lora.clone();
+            let lora_id_for_header = lora_id.clone();
+            let requested = requested.to_owned();
+            // The header read touches disk; keep it off the async worker threads.
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    resolve_lora_family_assignment(
+                        &lora_id_for_header,
+                        &lora_for_header,
+                        &requested,
+                        &models,
+                    )
+                })
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("LoRA family validation task failed: {err}"))
+                })??,
+            )
+        }
+        None => None,
+    };
     let updated = mutate_manifest_entries(&state, &manifest_path, "loras", move |entries| {
         let mut updated = None;
         let entries = entries
@@ -421,6 +447,21 @@ pub(crate) async fn update_lora(
                         }
                         if let Some(notes) = notes.as_ref() {
                             object.insert("notes".to_owned(), Value::String(notes.clone()));
+                        }
+                        if let Some(family) = family.as_ref() {
+                            // `lora_families` reads these list fields BEFORE `family`, so a stale
+                            // one would shadow the assignment; the assigned family is the whole
+                            // answer now.
+                            for shadow in ["families", "compatibleFamilies", "modelFamilies"] {
+                                object.remove(shadow);
+                            }
+                            if let Some(compatibility) = object
+                                .get_mut("compatibility")
+                                .and_then(Value::as_object_mut)
+                            {
+                                compatibility.remove("families");
+                            }
+                            object.insert("family".to_owned(), Value::String(family.clone()));
                         }
                         object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
                     }
@@ -438,6 +479,53 @@ pub(crate) async fn update_lora(
         context: None,
         code: None,
     })
+}
+
+/// Validates a user family assignment for a stored LoRA (sc-24163, epic 24107 E10).
+///
+/// An adapter whose header does not resolve a family (inconclusive keys, or the bare ai-toolkit
+/// `qwen_image` stamp on keys that fit both 2.1 and 2512) is surfaced as unresolved and the USER
+/// picks. The header still wins whenever it DOES resolve: a detected family is never overridden,
+/// so assigning one is refused with the detected family named. The requested family must be one a
+/// catalog model declares. Returns the canonical token to store.
+pub(crate) fn resolve_lora_family_assignment(
+    lora_id: &str,
+    lora: &Value,
+    requested: &str,
+    models: &[Value],
+) -> Result<String, ApiError> {
+    let normalized = normalize_lora_family(requested.trim());
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request("LoRA family must not be empty"));
+    }
+    let known = known_lora_families(models);
+    if !known.iter().any(|family| family == &normalized) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "Unknown LoRA family '{}'. Choose one of: {}",
+                requested.trim(),
+                known.join(", ")
+            ),
+            code: Some("lora_family_unknown"),
+            context: None,
+        });
+    }
+    let header = validate_lora_safetensors_header(lora_id, lora)?;
+    if let Some(detected) = header.as_ref().and_then(detect_lora_family) {
+        let detected = normalize_lora_family(&detected);
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "LoRA {lora_id} is detected from its file as a {detected} adapter; a detected \
+                 family cannot be reassigned. Only a LoRA whose family is unresolved can be \
+                 assigned one."
+            ),
+            code: Some("lora_family_detected"),
+            context: Some(json!({ "detectedFamily": detected })),
+        });
+    }
+    Ok(normalized)
 }
 
 /// Best-effort trigger-keyword suggestions for a LoRA, read live from the
