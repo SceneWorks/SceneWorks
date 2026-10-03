@@ -610,14 +610,17 @@ event (sc-20688), with the requested `policy`, `reported: false`, a stable
   required and available bytes.
 - `canceled`: the request was canceled.
 - `failed`: any other engine error (`unsupported`, `invalid_request` or
-  `engine_error`). StarVector, JoyCaption and other multimodal-wrapped decoders have
-no qualification-table family, so they always report dense, with
+  `engine_error`).
+
+StarVector, JoyCaption and other multimodal-wrapped decoders have no
+qualification-table family, so they always report dense, with
 `policy_disabled` or `unqualified_model`.
 
 | Key | Meaning |
 |---|---|
 | `policy` | `off` or `qualified`, as the job resolved it. |
-| `reported` | `false` when the provider reports no KV cache. In that case, no other key follows. |
+| `outcome` | `completed`, `refused`, `canceled` or `failed`. |
+| `reported` | `false` when the provider reports no KV cache. In that case none of the keys below follow; a failed generation carries `reason`, `error` and, when refused, `refusal` instead. |
 | `formatVersion` | The engine's `KV_CACHE_FORMAT_VERSION`. |
 | `format` | `group-affine-k8v8`, or `null` when the generation ran dense throughout. |
 | `ranCompressed` | `true` only when the whole generation ran on the compressed cache. |

@@ -760,63 +760,119 @@ enum VideoEncodeProfile {
     Calibrated(VideoDecodeMemoryProfile),
     /// The request encodes conditioning the provider publishes no calibrated encode cost for
     /// (LTX on MLX, every CUDA provider): priced at the provider's conservative single-pass VAE
-    /// working set for the request geometry instead.
+    /// working set for the frames it encodes instead.
     UncalibratedConservative(VideoDecodeMemoryProfile),
 }
 
-/// Resolves the request's conditioning VAE-encode cost: `(lane, provider, mode, reference_count,
-/// geometry)`. `Err` when the request encodes conditioning that has neither a calibrated encode
-/// cost nor a conservative profile to stand in for it: admission fails closed.
-type VideoEncodeProfileResolver =
-    fn(VideoLane, &str, &str, u32, VideoAdmissionGeometry) -> Result<VideoEncodeProfile, String>;
+/// The conditioning a request VAE-encodes before denoise, as the admission identity names it.
+#[derive(Clone, Copy, Debug)]
+struct VideoEncodeRequest<'a> {
+    mode: &'a str,
+    reference_count: u32,
+    /// The input carrier shape (`"none"`, `"image"`, `"keyframe"`, `"video"`, ...).
+    reference_shape: &'a str,
+}
+
+/// Resolves the request's conditioning VAE-encode cost for one graded candidate: `(lane, provider,
+/// conditioning, geometry, selection)`. `Err` when the request encodes conditioning that has
+/// neither a calibrated encode cost nor a conservative profile to stand in for it: admission fails
+/// closed.
+type VideoEncodeProfileResolver = fn(
+    VideoLane,
+    &str,
+    VideoEncodeRequest<'_>,
+    VideoAdmissionGeometry,
+    MemorySelection,
+) -> Result<VideoEncodeProfile, String>;
 
 fn no_video_encode_profile(
     _lane: VideoLane,
     _provider_id: &str,
-    _mode: &str,
-    _reference_count: u32,
+    _request: VideoEncodeRequest<'_>,
     _geometry: VideoAdmissionGeometry,
+    _selection: MemorySelection,
 ) -> Result<VideoEncodeProfile, String> {
     Ok(VideoEncodeProfile::Nothing)
 }
 
+/// What the provider's own encode calibration says about a request. Only the MLX bundle
+/// calibrates encoders, so other builds construct `Uncalibrated` alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+enum ProviderEncodeAnswer {
+    /// The provider calibrates its encoder, and this request's encode costs this much.
+    Profile(VideoDecodeMemoryProfile),
+    /// The provider calibrates its encoder, and this request encodes nothing. A calibrated
+    /// provider's own "nothing" is never second-guessed.
+    EncodesNothing,
+    /// The provider publishes no encode calibration at all (LTX on MLX, every CUDA provider).
+    Uncalibrated,
+}
+
 /// Whether a request VAE-encodes conditioning before denoise: any reference input, or any mode
-/// other than plain text-to-video. A provider that encodes in text-to-video (SCAIL-2) publishes a
-/// calibrated profile, so this only decides what an absent calibration means.
+/// other than plain text-to-video. Consulted only for a provider without encode calibration.
 #[cfg_attr(
     not(any(target_os = "macos", feature = "backend-candle")),
     allow(dead_code)
 )]
-fn request_encodes_conditioning(mode: &str, reference_count: u32) -> bool {
-    reference_count > 0 || mode != "text_to_video"
+fn request_encodes_conditioning(request: VideoEncodeRequest<'_>) -> bool {
+    request.reference_count > 0 || request.mode != "text_to_video"
 }
 
-/// Classify the provider's calibrated encode answer for a request: its profile, else nothing when
-/// the request encodes nothing, else the conservative stand-in, else a fail-closed refusal.
+/// The frames an uncalibrated encode VAE-encodes at once: one for still conditioning (images,
+/// keyframes, references -- stills encode one after another), the clip for a video carrier (a
+/// `video` shape, or a conditioning mode with no image reference, whose input is a clip).
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+fn uncalibrated_encode_frames(request: VideoEncodeRequest<'_>, frames: u32) -> u32 {
+    if request.reference_shape == "none" || request.reference_shape.contains("video") {
+        frames.max(1)
+    } else {
+        1
+    }
+}
+
+/// Classify the provider's encode answer for one graded candidate (sc-20686, sc-20688):
+///
+/// * a calibrated profile, or a calibrated provider's "nothing", is taken as is;
+/// * an uncalibrated provider's request that encodes nothing is nothing;
+/// * on a bounded-decode candidate an uncalibrated encode keeps the generic floor, exactly as the
+///   decode resolver declines the single-pass profile there (it would erase the rung's saving);
+/// * otherwise the encode is priced at the provider's conservative single-pass VAE profile for
+///   the frames it actually encodes ([`uncalibrated_encode_frames`]), or refused without one.
 #[cfg_attr(
     not(any(target_os = "macos", feature = "backend-candle")),
     allow(dead_code)
 )]
 fn classify_video_encode_profile(
     provider_id: &str,
-    mode: &str,
-    reference_count: u32,
-    calibrated: Option<VideoDecodeMemoryProfile>,
-    conservative: impl FnOnce() -> Option<VideoDecodeMemoryProfile>,
+    request: VideoEncodeRequest<'_>,
+    frames: u32,
+    selection: MemorySelection,
+    answer: ProviderEncodeAnswer,
+    conservative: impl FnOnce(u32) -> Option<VideoDecodeMemoryProfile>,
 ) -> Result<VideoEncodeProfile, String> {
-    if let Some(profile) = calibrated {
-        return Ok(VideoEncodeProfile::Calibrated(profile));
+    match answer {
+        ProviderEncodeAnswer::Profile(profile) => {
+            return Ok(VideoEncodeProfile::Calibrated(profile))
+        }
+        ProviderEncodeAnswer::EncodesNothing => return Ok(VideoEncodeProfile::Nothing),
+        ProviderEncodeAnswer::Uncalibrated => {}
     }
-    if !request_encodes_conditioning(mode, reference_count) {
+    if !request_encodes_conditioning(request) || selection.strategy == MemoryStrategy::BoundedDecode
+    {
         return Ok(VideoEncodeProfile::Nothing);
     }
-    conservative()
+    conservative(uncalibrated_encode_frames(request, frames))
         .map(VideoEncodeProfile::UncalibratedConservative)
         .ok_or_else(|| {
             format!(
-                "{provider_id}: {mode} with {reference_count} reference(s) encodes conditioning, but \
-                 the provider publishes neither a calibrated encode cost nor a conservative VAE \
-                 profile; refusing to admit the encode unpriced"
+                "{provider_id}: {} with {} reference(s) encodes conditioning, but the provider \
+                 publishes neither a calibrated encode cost nor a conservative VAE profile; \
+                 refusing to admit the encode unpriced",
+                request.mode, request.reference_count
             )
         })
 }
@@ -824,22 +880,19 @@ fn classify_video_encode_profile(
 /// The pinned runtime bundle's conditioning-encode cost (sc-20686, epic E8). Image or video
 /// conditioning is VAE-encoded before denoise; the encode and decode phases never overlap, so the
 /// floor takes the larger of the two compositions rather than their sum. The MLX bundle calibrates
-/// the Wan-VAE families; an encode it does not calibrate, and every CUDA encode, is priced at the
-/// provider's conservative single-pass VAE profile (sc-20688).
+/// the Wan-VAE families; an encode it does not calibrate, and every CUDA encode, is classified by
+/// [`classify_video_encode_profile`] (sc-20688).
 fn packaged_video_encode_profile(
     lane: VideoLane,
     provider_id: &str,
-    mode: &str,
-    reference_count: u32,
+    request: VideoEncodeRequest<'_>,
     geometry: VideoAdmissionGeometry,
+    selection: MemorySelection,
 ) -> Result<VideoEncodeProfile, String> {
     let frames = geometry.estimate_frames().max(1);
     #[cfg(target_os = "macos")]
     if lane == VideoLane::Mlx {
-        return classify_video_encode_profile(
-            provider_id,
-            mode,
-            reference_count,
+        let encode = |mode: &str, reference_count: u32| {
             runtime_macos::conservative_video_encode_memory_profile(
                 provider_id,
                 mode,
@@ -847,31 +900,53 @@ fn packaged_video_encode_profile(
                 geometry.height,
                 frames,
                 reference_count,
-            ),
-            || {
+            )
+        };
+        // The bundle answers `None` both for "encodes nothing" and for "not calibrated". A provider
+        // that prices an image-conditioned probe calibrates its encoder, so its `None` here is its
+        // own "encodes nothing".
+        let answer = match encode(request.mode, request.reference_count) {
+            Some(profile) => ProviderEncodeAnswer::Profile(profile),
+            None if encode("image_to_video", 1).is_some() => ProviderEncodeAnswer::EncodesNothing,
+            None => ProviderEncodeAnswer::Uncalibrated,
+        };
+        return classify_video_encode_profile(
+            provider_id,
+            request,
+            frames,
+            selection,
+            answer,
+            |encode_frames| {
                 runtime_macos::conservative_video_decode_memory_profile(
                     provider_id,
                     geometry.width,
                     geometry.height,
-                    frames,
+                    encode_frames,
                 )
             },
         );
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     if lane == VideoLane::Candle {
-        return classify_video_encode_profile(provider_id, mode, reference_count, None, || {
-            runtime_cuda::conservative_video_decode_memory_profile(
-                provider_id,
-                geometry.width,
-                geometry.height,
-                frames,
-            )
-        });
+        return classify_video_encode_profile(
+            provider_id,
+            request,
+            frames,
+            selection,
+            ProviderEncodeAnswer::Uncalibrated,
+            |encode_frames| {
+                runtime_cuda::conservative_video_decode_memory_profile(
+                    provider_id,
+                    geometry.width,
+                    geometry.height,
+                    encode_frames,
+                )
+            },
+        );
     }
     // A lane this build links no runtime bundle for prices no provider profile at all (the decode
     // resolver returns `None` here too); its historical weights-plus-headroom floor stands.
-    let _ = (lane, provider_id, mode, reference_count, frames);
+    let _ = (lane, provider_id, request, frames, selection);
     Ok(VideoEncodeProfile::Nothing)
 }
 
@@ -1379,9 +1454,13 @@ fn profiled_floor_phase_peaks(
     let encode = match (selector.encode_profile)(
         selector.identity.lane,
         &selector.contract.provider_id,
-        selector.identity.mode,
-        selector.identity.reference_count,
+        VideoEncodeRequest {
+            mode: selector.identity.mode,
+            reference_count: selector.identity.reference_count,
+            reference_shape: selector.identity.reference_shape,
+        },
         geometry,
+        selection,
     ) {
         Ok(VideoEncodeProfile::Nothing) => None,
         Ok(VideoEncodeProfile::Calibrated(profile)) => {
