@@ -1727,10 +1727,20 @@ fn mlx_wan_decode_is_priced_at_the_planner_decision_for_the_applied_limit() {
         profile(Some(512 * GIB)).profile.working_set_bytes(),
         single_pass
     );
+    // The selected z48 carrier is checked against this machine's live safe budget, so it uses the
+    // small geometry every host fits (as the packaged-profiles test does); the 768x512x33 carrier
+    // needs ~21 GB even at the smallest tile and fails closed on a small CI runner.
+    let small = VideoAdmissionGeometry {
+        width: 480,
+        height: 480,
+        frames: 1,
+        decode_pass_frames: 1,
+        ..geometry
+    };
     let selected = video_decode_profile_at_mlx_limit(
         VideoLane::Mlx,
         "wan2_2_ti2v_5b",
-        geometry,
+        small,
         MemorySelection {
             strategy: MemoryStrategy::BoundedDecode,
             parameters: gen_core::MemoryStrategyParameters {

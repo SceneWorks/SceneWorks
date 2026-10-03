@@ -178,8 +178,9 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned by sc-20682: `config/download-pattern-evidence.json` was re-recorded when sc-20686
-// shipped the Wan2.1-VACE-1.3B-diffusers download (118 repo@revision keys; sc-19383 left 117).
+// Re-pinned by sc-20686: `config/download-pattern-evidence.json` was re-recorded when the catalog
+// gained Wan2.1-VACE-1.3B-diffusers (118 repo@revision keys; sc-19383's YuE re-hosts left 117,
+// incl. the two frozen importer authorities).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
 const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "469950e0de974e46972a323ab995805d549b19676737302a6b4e1b395a1e11fc";

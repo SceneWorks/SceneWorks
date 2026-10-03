@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
+    "inferenceRevision": "d1c2c8cfba975080840d87cf7e257a257b8db628",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -3011,7 +3011,8 @@
       "yue_zh_cot",
       "yue_zh_icl",
       "yue_jp_kr_cot",
-      "yue_jp_kr_icl"
+      "yue_jp_kr_icl",
+      "yue2"
     ],
     "audio_generator_capabilities": [
       {
@@ -3416,6 +3417,24 @@
         "conditioning": [
           "referenceAudio"
         ],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "yue2",
+        "family": "yue2",
+        "backend": "candle",
+        "modality": "audio",
+        "conditioning": [],
         "supports_lora": false,
         "supports_lokr": false,
         "supported_quants": [

@@ -206,8 +206,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
-  // Re-pinned by sc-20682 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
-  // re-recorded when sc-20686 added the Wan2.1-VACE-1.3B key. The Illustrious file
+  // Re-pinned by sc-19383 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
+  // re-recorded when the catalog gained the eight YuE re-host keys (sc-19383) and
+  // Wan2.1-VACE-1.3B-diffusers (sc-20686). The Illustrious file
   // censuses below are the real subject of this test and did NOT move — which is the point of
   // asserting them beside the digest.
   assert.equal(current.downloadEvidenceSha256,
