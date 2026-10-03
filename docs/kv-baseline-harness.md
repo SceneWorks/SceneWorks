@@ -549,3 +549,51 @@ refused, and v5 receipts produced under v3 carry the required
 `memory.admission` fields. The inference producer keeps a byte-exact copy of the
 contract (`crates/llm/mlx-llm/testdata/`) whose hash and needle wording its tests
 pin.
+
+## Product compressed KV (sc-20682)
+
+The POC's qualified K8V8 rows ship as an **opt-in** on SceneWorks' local LLM
+generations. The setting is off by default:
+
+- `SCENEWORKS_LLM_KV_COMPRESSION` (`off` | `qualified`) is the worker-wide
+  default. Unset, empty or unrecognized is `off`.
+- A prompt-refine request may set `kvCompression` (`off` | `qualified`) on
+  `POST /api/v1/prompts/refine`. The API refuses any other value and forwards it
+  as the job payload's `kvCompression`, which overrides the worker default.
+  Catalog vision analysis and StarVector requests carry the worker default.
+
+`qualified` never forces compression. The inference engine runs a generation
+compressed only where its qualification table (`KV_COMPRESSION_QUALIFICATIONS`:
+model family × format × context range) admits it. Everything else runs dense,
+deterministically, with a stable reason.
+
+SceneWorks keeps no LLM KV pricing of its own. Request memory admission is the
+in-process engine's, and it prices the cache the request actually runs on:
+
+- Dense K/V for a dense plan.
+- The format-derived compressed bytes for a qualified plan. These cover packed
+  codes, scale/zero per group, residual rows and the fused path's transients;
+  see the inference repo's `docs/reference/qwen38/native-memory-admission.md`.
+- A request whose compressed selection falls back to dense is re-admitted at the
+  dense price.
+- A mid-generation dense transition is admitted against fresh memory, failing
+  typed (`RequestResourceExhausted`) rather than oversubscribing.
+
+Every prompt-refine result carries `generation.kvCache`. The worker emits the
+same block as the `llm_kv_cache` telemetry event for every local LLM generation:
+prompt refine, catalog vision analysis and StarVector. The event carries
+`jobId` and `engine` (the lane, `mlx` or `candle`). It never includes prompt or
+output text. StarVector, JoyCaption and other multimodal-wrapped decoders have
+no qualification-table family, so they always report dense, with
+`policy_disabled` or `unqualified_model`.
+
+| Key | Meaning |
+|---|---|
+| `policy` | `off` or `qualified`, as the job resolved it. |
+| `reported` | `false` when the provider reports no KV cache. In that case, no other key follows. |
+| `formatVersion` | The engine's `KV_CACHE_FORMAT_VERSION`. |
+| `format` | `group-affine-k8v8`, or `null` when the generation ran dense throughout. |
+| `ranCompressed` | `true` only when the whole generation ran on the compressed cache. |
+| `fallbackReason` | A `KvCacheFallbackReason` id, or `null` exactly when `ranCompressed` is true. The ids are `policy_disabled`, `unqualified_model`, `unsupported_request`, `batched_decode`, `below_minimum_context`, `above_qualified_context`, `unsupported_geometry`, `reader_unavailable`, `runtime_fallback` and `dense_gather`. |
+| `detail` | The engine's operation and reason words, or `null`. |
+| `counters` | `fusedAttentionCalls`, `denseFallbackEvents`, `fullCacheDequantizations`, `denseGatherFallbacks` and `compressedCacheBytes`. |

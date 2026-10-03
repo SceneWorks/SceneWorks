@@ -808,7 +808,8 @@ fn no_video_decode_profile(
     Ok(None)
 }
 
-/// Evidence revision of a decode priced at the provider planner's budgeted decision.
+/// Evidence revision of a decode priced at the provider planner's budgeted decision. Only the
+/// macOS MLX lane prices a budgeted decode.
 #[cfg(target_os = "macos")]
 const BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-budgeted-decode-profile-v1";
 

@@ -7912,6 +7912,42 @@ async fn non_ideogram_image_job_skips_auto_caption() {
     );
 }
 
+/// sc-20682: the compressed-KV opt-in rides the prompt-refine job payload as `kvCompression`
+/// (`off` | `qualified`); absent leaves the worker default, and anything else is refused here.
+#[tokio::test]
+async fn prompt_refine_forwards_a_validated_kv_compression_opt_in() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    for policy in ["off", "qualified"] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({ "prompt": "a lighthouse", "kvCompression": policy }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["kvCompression"], policy);
+    }
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "prompt": "a lighthouse" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("kvCompression").is_none(), "{job}");
+    let (status, _) = request(
+        app,
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "prompt": "a lighthouse", "kvCompression": "on" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn image_caption_refine_job_resolves_asset_to_confined_image_path() {
     // epic 8102 / sc-8108: the reference-image → JSON caption flow POSTs `task: "image_caption"` with a

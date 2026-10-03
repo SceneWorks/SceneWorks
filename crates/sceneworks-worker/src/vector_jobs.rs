@@ -381,11 +381,25 @@ pub(crate) struct TerminalProviderOutcome {
     model_repository: &'static str,
     model_revision: &'static str,
     backend: &'static str,
+    /// The compressed-KV policy the decode was requested with and the KV cache the provider
+    /// reports it ran on (sc-20682), recorded as the job's `llm_kv_cache` telemetry event.
+    kv_compression: gen_core::core_llm::KvCompressionPolicy,
+    kv_cache: Option<gen_core::core_llm::KvCacheReport>,
 }
 
 impl TerminalProviderOutcome {
     fn publishable(&self) -> bool {
         matches!(self.finish_reason, "complete_root" | "eos")
+    }
+
+    /// The `llm_kv_cache` result block and telemetry event of this decode for `job_id`.
+    fn kv_cache_outcome(&self, job_id: &str) -> (Value, Value) {
+        crate::llm_kv_cache::kv_cache_outcome(
+            job_id,
+            self.backend,
+            self.kv_compression,
+            self.kv_cache.as_ref(),
+        )
     }
 }
 
@@ -559,6 +573,8 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                         model_repository: identity.repository,
                         model_revision: identity.revision,
                         backend,
+                        kv_compression: typed_request.text_request.kv_compression,
+                        kv_cache: output.kv_cache.clone(),
                     };
                     let source = validate_native_starvector_generation(output, events)?;
                     Ok((source, terminal))
@@ -706,6 +722,8 @@ fn native_starvector_request(
         max_new_tokens: request.detail_budget.max_new_tokens,
         seed: request.sampling.seed,
         cancel,
+        // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it).
+        kv_compression: crate::llm_kv_cache::worker_default_policy(),
         ..TextLlmRequest::default()
     };
     Ok(StarVectorRequest::new(
@@ -1187,6 +1205,11 @@ pub(crate) async fn run_vector_job_with_provider(
         },
     )
     .await?;
+    // sc-20682: the decode's KV cache, as the job's `llm_kv_cache` telemetry event.
+    if let Some(terminal) = &collected.terminal {
+        let (_, event) = terminal.kv_cache_outcome(&job.id);
+        emit_event("llm_kv_cache", event);
+    }
     let source_raster = match request.source_path.as_deref() {
         Some(path) => Some((path.to_owned(), tokio::fs::read(path).await?)),
         None => None,
@@ -5678,6 +5701,7 @@ mod tests {
                 generated_tokens,
                 generated_bytes,
                 finish_reason,
+                kv_cache: None,
             },
             events,
         )
@@ -5735,6 +5759,7 @@ mod tests {
                 generated_tokens: 3,
                 generated_bytes: svg.len(),
                 finish_reason: StarVectorFinishReason::CompleteRoot,
+                kv_cache: None,
             };
             let mut events = Vec::new();
             for (index, fragment) in self.0.into_iter().zip(["<svg", ">", "</svg>"]) {
@@ -6024,6 +6049,8 @@ mod tests {
             model_repository: "starvector/starvector-1b-im2svg",
             model_revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
             backend: "mlx",
+            kv_compression: gen_core::core_llm::KvCompressionPolicy::Off,
+            kv_cache: None,
         };
         let result = terminal_generation_limit_result(
             &terminal,
@@ -6048,8 +6075,25 @@ mod tests {
 
         let cancelled = TerminalProviderOutcome {
             finish_reason: "cancelled",
-            ..terminal
+            ..terminal.clone()
         };
+        // sc-20682: the decode's KV-cache report becomes the job's `llm_kv_cache` event under
+        // the provider's engine lane.
+        let report = gen_core::core_llm::KvCacheReport::without_table_family(
+            gen_core::core_llm::KvCompressionPolicy::Qualified,
+        );
+        let reported = TerminalProviderOutcome {
+            kv_compression: gen_core::core_llm::KvCompressionPolicy::Qualified,
+            kv_cache: Some(report.clone()),
+            ..terminal.clone()
+        };
+        let (block, event) = reported.kv_cache_outcome("job-9");
+        assert_eq!(block["fallbackReason"], "unqualified_model");
+        assert_eq!(block["policy"], "qualified");
+        assert_eq!(
+            event,
+            json!({ "jobId": "job-9", "engine": "mlx", "kvCache": block })
+        );
         assert!(terminal_generation_limit_result(
             &cancelled,
             0.25,
@@ -6070,6 +6114,8 @@ mod tests {
             model_repository: "starvector/starvector-1b-im2svg",
             model_revision: "380ab95d25a8e9ab1dc825debe238b4953ae13b9",
             backend: "mlx",
+            kv_compression: gen_core::core_llm::KvCompressionPolicy::Off,
+            kv_cache: None,
         };
         let result = terminal_result(
             &terminal,

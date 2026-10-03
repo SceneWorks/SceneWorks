@@ -78,6 +78,12 @@ pub(crate) struct PromptRefineRequest {
     /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
     /// verbatim; the worker parses it (unknown/absent → prose).
     pub(crate) caption_style: Option<String>,
+    /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
+    /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
+    /// `"qualified"` never forces compression: the engine runs compressed only where its
+    /// qualification table admits the model and context, and the job result's
+    /// `generation.kvCache` records what ran.
+    pub(crate) kv_compression: Option<String>,
 }
 
 /// On-demand "compare image to another" likeness request (epic 4406, sc-4415). Scores a CANDIDATE
