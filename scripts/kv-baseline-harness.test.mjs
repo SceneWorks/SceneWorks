@@ -302,12 +302,14 @@ async function writeCampaignManifest(directory, manifest) {
   await writeFile(path.join(directory, "campaign.json"), bytes);
   await writeFile(path.join(directory, "campaign.json.sha256"), `${sha256(bytes)}  campaign.json\n`);
 }
-function sampleResumeIdentity(policy) {
+// Schedule v2 (before inference sc-20688): the eight llama/qwen rows.
+const V2_SCHEDULE = SC20671_COVERING_SCHEDULE.filter((row) => ["llama", "qwen"].includes(row[0]));
+function sampleResumeIdentity(policy, scheduleVersion = 3) {
   const candidate = { sha256: sha256("weights"), bytes: 7 };
   const reference = { sha256: "9".repeat(64), bytes: 2000 };
-  return {
-    schemaVersion: 1, kind: "sc-20671-resume-identity", scheduleVersion: 3,
-    coordinates: SC20671_COVERING_SCHEDULE.map((row) => row.join("-")),
+  const identity = {
+    schemaVersion: 1, kind: "sc-20671-resume-identity", scheduleVersion,
+    coordinates: (scheduleVersion === 2 ? V2_SCHEDULE : SC20671_COVERING_SCHEDULE).map((row) => row.join("-")),
     inferenceRevision: "b".repeat(40), sceneWorksRevision: "a".repeat(40),
     executableSha256: "d".repeat(64), promptSha256: "c".repeat(64),
     policySha256: campaignPolicySha256(policy),
@@ -316,18 +318,22 @@ function sampleResumeIdentity(policy) {
     llama8bCandidate: candidate, qwen8bCandidate: candidate,
     llama8bReference: reference, qwen8bReference: reference,
   };
+  if (scheduleVersion === 2) {
+    for (const key of ["llama8bCandidate", "qwen8bCandidate", "llama8bReference", "qwen8bReference"]) delete identity[key];
+  }
+  return identity;
 }
-async function writeCoveringCampaign(root, policy = safetyPolicy, { rowPolicy = policy, mode = "dense", continuations = {} } = {}) {
+async function writeCoveringCampaign(root, policy = safetyPolicy, { rowPolicy = policy, mode = "dense", continuations = {}, scheduleVersion = 3 } = {}) {
   const directory = path.join(root, "campaign");
   await mkdir(directory);
   const resumeIdentity = {
-    ...sampleResumeIdentity(policy),
+    ...sampleResumeIdentity(policy, scheduleVersion),
     ...(mode === "compressed" ? { mode, kvMethod: "group-affine" } : {}),
   };
   const resumeIdentitySha256 = campaignResumeIdentitySha256(resumeIdentity, campaignPolicySha256(policy));
   const rows = [];
   const receipts = [];
-  for (const [index, entry] of SC20671_COVERING_SCHEDULE.entries()) {
+  for (const [index, entry] of (scheduleVersion === 2 ? V2_SCHEDULE : SC20671_COVERING_SCHEDULE).entries()) {
     const coordinate = {
       family: entry[0], contextBand: entry[1], requestMode: entry[2],
       prefillMode: entry[3], processTemperature: entry[4],
@@ -354,7 +360,7 @@ async function writeCoveringCampaign(root, policy = safetyPolicy, { rowPolicy = 
     receipts.push(receipt);
   }
   const manifest = {
-    schemaVersion: 2, kind: "sc-20671-complete-covering-set", scheduleVersion: 3,
+    schemaVersion: 2, kind: "sc-20671-complete-covering-set", scheduleVersion,
     policySha256: campaignPolicySha256(policy), resumeIdentitySha256,
     hostStateVaried: campaignHostStateVaried(receipts),
     coordinates: rows,
@@ -861,23 +867,26 @@ test("sixteen-row covering campaign requires the exact family, band, and process
   assert.equal(validateCampaign(rows).scheduleVersion, 3);
   assert.throws(() => validateCampaign(rows.slice(1)), /incomplete/);
   assert.throws(() => validateCampaign([...rows.slice(0, 15), rows[0]]), /duplicate/);
-  // The 8B families mirror the 3B/1.7B rows; Llama-3.1-8B's fit row is the capped 98,304 tokens.
+  // The 8B families mirror the 3B/1.7B rows; Llama-3.1-8B's fit row is the capped 106,496 tokens.
   assert.deepEqual(
     SC20671_COVERING_SCHEDULE.slice(8).map((row) => row.slice(1)),
     SC20671_COVERING_SCHEDULE.slice(0, 8).map((row) => row.slice(1)),
   );
   const llama8bFit = rows.find((row) => row.matrix.family === "llama8b" && row.matrix.contextBand === "fit-boundary");
-  assert.equal(llama8bFit.geometry.contextTargetTokens, 98_304);
+  assert.equal(llama8bFit.geometry.contextTargetTokens, 106_496);
   assert.equal(llama8bFit.geometry.contextWindowTokens, 131_072);
   assert.equal(rows.find((row) => row.matrix.family === "llama8b" && row.matrix.contextBand === "memory-material")
     .geometry.contextTargetTokens, 32_768);
   assert.throws(() => rebuildReceipt(llama8bFit, (raw) => {
     raw.geometry.contextTargetTokens = 130_560;
     raw.geometry.contextPayloadTokens = 130_560;
-  }), /producer-measured band|context/);
+  }), /^Error: KV baseline receipt: context payload token count is outside its producer-measured band$/);
+  // The fit ratio is checked against the capped 107,008-token window (90% = 96,307.2): one token
+  // either side, with nothing else changed, so only the ratio can decide.
+  assert.doesNotThrow(() => rebuildReceipt(llama8bFit, (raw) => { raw.geometry.kvLength = 96_308; }));
   assert.throws(() => rebuildReceipt(llama8bFit, (raw) => {
-    raw.geometry.kvLength = 80_000;
-  }), /fit-boundary live context|capacity|kv/);
+    raw.geometry.kvLength = 96_307;
+  }), /^Error: KV baseline receipt: fit-boundary live context is outside the frozen admission ratio$/);
   const wrongSchedule = [...rows];
   wrongSchedule[0] = withCampaignPid(fixture("dense", {
     family: "llama", contextBand: "short", requestMode: "single",
@@ -1322,6 +1331,32 @@ test("SC-20671 compressed quality misses are recorded as a failed gate, never a 
   assert.equal(campaignQualityGatePassed([fixture(), fixture()]), undefined);
   assert.throws(() => campaignQualityGatePassed([fixture(), clean]), /mixes gated and ungated/);
   assert.equal(qualityGateSummary(clean.quality.qualityGate), "passed");
+});
+test("schedule-v2 campaigns stay readable against their own schedule and are never read as v3", async () => {
+  const root = await mkdtemp("/tmp/kv20671-v2-");
+  try {
+    const { directory, manifest, resumeIdentity } = await writeCoveringCampaign(root, safetyPolicy, { scheduleVersion: 2 });
+    const { summary } = await readCampaignSet(directory, { safetyPolicy, resumeIdentity });
+    assert.equal(summary.coordinates, 8);
+    assert.equal(summary.scheduleVersion, 2);
+    const policySeal = campaignPolicySha256(safetyPolicy);
+    // A v2 identity relabelled v3 (or bound to the v3 rows or keys) is refused.
+    assert.throws(() => campaignResumeIdentitySha256({ ...resumeIdentity, scheduleVersion: 3 }, policySeal),
+      /^Error: KV baseline receipt: campaign resume identity has a mismatched version or schedule$/);
+    assert.throws(() => campaignResumeIdentitySha256({
+      ...resumeIdentity, coordinates: SC20671_COVERING_SCHEDULE.map((row) => row.join("-")),
+    }, policySeal), /^Error: KV baseline receipt: campaign resume identity has a mismatched version or schedule$/);
+    assert.throws(() => campaignResumeIdentitySha256({ ...sampleResumeIdentity(safetyPolicy), scheduleVersion: 2 }, policySeal),
+      /^Error: KV baseline receipt: campaign resume identity has unexpected fields: llama8bCandidate, qwen8bCandidate, llama8bReference, qwen8bReference$/);
+    // A v2 manifest relabelled v3, or read with a v3 identity, is refused.
+    await writeCampaignManifest(directory, { ...manifest, scheduleVersion: 3 });
+    await assert.rejects(readCampaignSet(directory, { safetyPolicy, resumeIdentity }),
+      /^Error: KV baseline receipt: campaign resume identity schedule version differs from the manifest$/);
+    await assert.rejects(readCampaignSet(directory, { safetyPolicy, resumeIdentity: sampleResumeIdentity(safetyPolicy) }),
+      /^Error: KV baseline receipt: campaign resume identity differs from the expected immutable inputs$/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 test("SC-20671 compressed campaign completes with every row and reports a failed gate verdict", async () => {
   const root = await mkdtemp("/tmp/kv20671-qgate-");

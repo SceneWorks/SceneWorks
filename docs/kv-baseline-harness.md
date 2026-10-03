@@ -113,8 +113,12 @@ memory-material, and fit-boundary for each of the four families, Llama-3.2-3B
 (`llama`), Qwen3-1.7B (`qwen`), Llama-3.1-8B (`llama8b`) and Qwen3-8B (`qwen8b`;
 inference sc-20688). The 8B families run the 3B/1.7B families' rows exactly.
 Band targets derive from the native window, except `llama8b`'s fit-boundary row,
-measured at 98,304 tokens (fit window 98,816): the largest fit row the 64 GiB
-Mac2 arm cap admits. Every memory-material selector is warm, single request,
+measured at 106,496 tokens (fit window 107,008): with the compressed estimate
+scaled by the measured A2 v5 peak ratio (1.27) it prices 63.5 GiB, the largest
+fit row with margin under the 68 GiB child footprint cap of the inference
+`llm.json` policy (the native 130,560-token row prices 75.2 GiB). The reader
+still validates schedule-v2 campaigns (the eight `llama`/`qwen` rows) against
+their own schedule and identity. Every memory-material selector is warm, single request,
 single-shot prefill. The other rows cover cold starts, chunked prefill,
 and supported batching under the fixed schedule. It rejects missing, extra,
 duplicate, cross-schedule, cross-source/model, and artifact-mismatched rows.

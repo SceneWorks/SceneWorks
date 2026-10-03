@@ -150,11 +150,12 @@ export const SC20671_MODEL_CONTRACTS = Object.freeze({
     candidate: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-4bit", revision: "3b1b1768f8f8cf8351c712464f906e86c2b8269e", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
     reference: Object.freeze({ repository: "mlx-community/Qwen3-1.7B-bf16", revision: "9cd6692855d3e06772228e9a962b2606359b2d24", architecture: "Qwen3ForCausalLM", nativeContextTokens: 40_960 }),
   }),
-  // Inference sc-20688. Llama-3.1-8B's fit-boundary row is measured at the 98,816-token fit window
-  // (98,304 tokens), the largest fit row the 64 GiB Mac2 arm cap admits; its other bands keep the
-  // native window.
+  // Inference sc-20688. Llama-3.1-8B's fit-boundary row is measured at the 107,008-token fit window
+  // (106,496 tokens): its compressed estimate scaled by the measured A2 v5 peak ratio (1.27) is
+  // 63.5 GiB, the largest fit row with margin under llm.json's 68 GiB child footprint cap (the
+  // native 130,560-token row prices 75.2 GiB); its other bands keep the native window.
   llama8b: Object.freeze({
-    candidate: Object.freeze({ repository: "mlx-community/Llama-3.1-8B-Instruct-4bit", revision: "90215b22ec18e72f623dde2ea7af4097025160e2", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072, fitWindowTokens: 98_816 }),
+    candidate: Object.freeze({ repository: "mlx-community/Llama-3.1-8B-Instruct-4bit", revision: "90215b22ec18e72f623dde2ea7af4097025160e2", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072, fitWindowTokens: 107_008 }),
     reference: Object.freeze({ repository: "mlx-community/Meta-Llama-3.1-8B-Instruct-bf16", revision: "f8311090f9ee47782b6f094984a20c856eb841d6", architecture: "LlamaForCausalLM", nativeContextTokens: 131_072 }),
   }),
   qwen8b: Object.freeze({
@@ -2693,8 +2694,21 @@ function campaignCoordinate(receipt, separator = "/") {
   ].join(separator);
 }
 
+/**
+ * The families a covering schedule version ran: v3 all four; v2 (published before the 8B
+ * families, still read so earlier evidence and SC-20676 baselines validate) `llama` and `qwen`.
+ */
+function coveringScheduleFamilies(version) {
+  if (version === SC20671_SCHEDULE_VERSION) return SC20671_FAMILIES;
+  if (version === 2) return ["llama", "qwen"];
+  return undefined;
+}
+
 function campaignSchedule(version) {
-  if (version === SC20671_SCHEDULE_VERSION) return SC20671_COVERING_SCHEDULE;
+  const families = coveringScheduleFamilies(version);
+  if (families !== undefined) {
+    return SC20671_COVERING_SCHEDULE.filter((row) => families.includes(row[0]));
+  }
   if (version === 1) {
     return ["llama", "qwen"].flatMap((family) => CONTEXT_BANDS.flatMap((band) =>
       ["single", "supported-batch"].flatMap((request) =>
@@ -2764,7 +2778,7 @@ export function validateCampaign(receipts, { scheduleVersion = SC20671_SCHEDULE_
   if (coordinates.size !== expected.size || [...coordinates].some((coordinate) => !expected.has(coordinate))) {
     fail("campaign coordinates differ from the frozen schedule");
   }
-  for (const family of scheduleVersion === 1 ? ["llama", "qwen"] : SC20671_FAMILIES) {
+  for (const family of coveringScheduleFamilies(scheduleVersion) ?? ["llama", "qwen"]) {
     const bands = new Map(receipts
       .filter((receipt) => receipt.matrix.family === family)
       .map((receipt) => [receipt.matrix.contextBand, receipt.geometry.contextPayloadTokens]));
@@ -2825,15 +2839,18 @@ export function campaignPolicySha256(policy) {
 }
 
 /** Resume-identity inventory keys: every family's candidate, then every family's reference. */
-function campaignInventoryKeys() {
-  return ["Candidate", "Reference"].flatMap((role) => SC20671_FAMILIES.map((family) => `${family}${role}`));
+function campaignInventoryKeys(families) {
+  return ["Candidate", "Reference"].flatMap((role) => families.map((family) => `${family}${role}`));
 }
 
 export function campaignResumeIdentitySha256(identity, policySha256) {
+  object(identity, "campaign resume identity");
+  const families = coveringScheduleFamilies(identity.scheduleVersion);
+  if (families === undefined) fail("campaign resume identity has a mismatched version or schedule");
   exactKeys(identity, [
     "schemaVersion", "kind", "scheduleVersion", "coordinates", "inferenceRevision",
     "sceneWorksRevision", "executableSha256", "promptSha256", "policySha256",
-    ...campaignInventoryKeys(),
+    ...campaignInventoryKeys(families),
     "mode", "kvMethod",
   ], "campaign resume identity");
   // A compressed campaign binds its mode and method; dense identities carry neither key.
@@ -2844,8 +2861,8 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
     }
   }
   if (identity.schemaVersion !== 1 || identity.kind !== "sc-20671-resume-identity"
-    || identity.scheduleVersion !== SC20671_SCHEDULE_VERSION
-    || canonicalJson(identity.coordinates) !== canonicalJson(SC20671_COVERING_SCHEDULE.map((row) => row.join("-")))) {
+    || canonicalJson(identity.coordinates)
+      !== canonicalJson(campaignSchedule(identity.scheduleVersion).map((row) => row.join("-")))) {
     fail("campaign resume identity has a mismatched version or schedule");
   }
   for (const field of ["inferenceRevision", "sceneWorksRevision"]) {
@@ -2857,7 +2874,7 @@ export function campaignResumeIdentitySha256(identity, policySha256) {
   if (identity.policySha256 !== policySha256) {
     fail("campaign resume identity safety policy differs from the trusted policy");
   }
-  for (const field of campaignInventoryKeys()) {
+  for (const field of campaignInventoryKeys(families)) {
     const inventory = identity[field];
     exactKeys(inventory, ["sha256", "bytes"], `campaign resume ${field}`);
     digest(inventory.sha256, `campaign resume ${field} inventory`);
@@ -2966,7 +2983,7 @@ export async function readCampaignSet(directory, {
     exactKeys(manifest, ["schemaVersion", "kind", "scheduleVersion", "policySha256", "resumeIdentitySha256", "hostStateVaried", "coordinates", "qualityGatePassed"], "campaign manifest");
     if (typeof manifest.hostStateVaried !== "boolean") fail("campaign manifest hostStateVaried must be boolean");
     if (manifest.kind !== "sc-20671-complete-covering-set"
-      || manifest.scheduleVersion !== SC20671_SCHEDULE_VERSION) {
+      || coveringScheduleFamilies(manifest.scheduleVersion) === undefined) {
       fail("campaign v2 manifest has a mismatched kind or schedule");
     }
     if (safetyPolicy === undefined) fail("campaign v2 requires a safety policy");
@@ -2976,6 +2993,9 @@ export async function readCampaignSet(directory, {
     }
     digest(manifest.resumeIdentitySha256, "campaign resume identity seal");
     if (resumeIdentity === undefined) fail("campaign v2 requires a trusted resume identity");
+    if (resumeIdentity.scheduleVersion !== manifest.scheduleVersion) {
+      fail("campaign resume identity schedule version differs from the manifest");
+    }
     if (manifest.resumeIdentitySha256 !== campaignResumeIdentitySha256(resumeIdentity, manifest.policySha256)) {
       fail("campaign resume identity differs from the expected immutable inputs");
     }
