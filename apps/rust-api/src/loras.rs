@@ -3573,4 +3573,77 @@ mod base_model_gating_tests {
                 .unwrap_or_else(|error| panic!("{family} LoRA on {model_id}: {error:?}"));
         }
     }
+
+    /// sc-24163 (E10 review): a file whose header does NOT resolve a family — the bare ai-toolkit
+    /// `qwen_image` stamp on attention-only keys within 2.1's 32-block depth — is gated on the
+    /// user-DECLARED family alone. "The header must still win" only applies when the header
+    /// resolves; an unresolved header must not block a user who declares `qwen-image-2-1`.
+    #[test]
+    fn header_unresolved_qwen_adapter_is_gated_on_the_user_declared_family() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        write_adapter(
+            &tmp.path().join("adapter.safetensors"),
+            r#"{"ss_base_model_version":"qwen_image"}"#,
+            &keys,
+        );
+        let header = validate_lora_safetensors_header(
+            "generic_stamp",
+            &json!({ "installedPath": tmp.path().to_str().unwrap() }),
+        )
+        .unwrap()
+        .expect("the header is readable");
+        assert_eq!(
+            detect_lora_family(&header),
+            None,
+            "precondition: the generic stamp on 2.1-compatible keys is header-unresolved"
+        );
+        let lora = |family: &str| {
+            json!({
+                "id": "generic_stamp",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [family],
+            })
+        };
+
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image-2-1")],
+            true,
+            "LoRA",
+        )
+        .expect("a header-unresolved adapter declared qwen-image-2-1 loads on 2.1");
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect("the same file declared qwen-image loads on 2512");
+
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect_err("declared qwen-image is refused on 2.1");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            error.detail.contains("a qwen-image adapter")
+                && error.detail.contains("loads qwen-image-2-1 adapters"),
+            "the refusal must name both families: {}",
+            error.detail
+        );
+    }
 }

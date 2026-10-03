@@ -303,6 +303,27 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
     }
     assert_eq!(edit.base_model_repo, t2i.base_model_repo, "dense bf16 only");
     assert_eq!(edit.defaults.advanced["mixedPrecision"], "bf16");
+    // sc-24163 (E11): both pinned engine trainers render edit previews conditioned on the first
+    // item's references, so the edit target and every edit preset keep the T2I preview cadence.
+    assert_eq!(t2i.defaults.advanced["sampleEvery"], json!(500));
+    assert_eq!(
+        edit.defaults.advanced["sampleEvery"],
+        t2i.defaults.advanced["sampleEvery"]
+    );
+    let edit_presets: Vec<_> = sceneworks_core::training::builtin_training_presets()
+        .presets
+        .into_iter()
+        .filter(|preset| preset.target_id == edit.id)
+        .collect();
+    assert!(!edit_presets.is_empty(), "the edit target ships presets");
+    for preset in &edit_presets {
+        assert_eq!(
+            preset.config.advanced["sampleEvery"],
+            json!(500),
+            "{}: edit presets preview at the T2I cadence",
+            preset.id
+        );
+    }
     assert_eq!(edit.limits["networkTypes"], json!(["lora", "lokr"]));
     assert!(training_target_requires_license_acknowledgment(edit));
     for key in ["license", "licenseUrl", "licenseNotice"] {

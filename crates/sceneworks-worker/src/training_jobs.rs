@@ -4194,9 +4194,11 @@ mod tests {
     /// sc-24161/sc-24162: the instruction-EDIT target's defaults and every shipped edit preset, for
     /// each network type, with an EDIT-PAIR plan (ordered references + target + instruction), pass
     /// the shared preflight AND the pinned Candle 2.1 trainer's own weights-free `validate` — the
-    /// references reach the engine in plan order. Its negative twin: the same request with the
-    /// references stripped is refused by the engine (an edit kernel never trains plain items), and
-    /// with more references than the trainer's cap is refused naming the cap.
+    /// references reach the engine in plan order, with the shipped preview cadence (sc-24163: the
+    /// engine renders edit previews conditioned on the first item's references). Its negative
+    /// twins: the same request with the references stripped is accepted by the engine as T2I and
+    /// refused by the SceneWorks kernel floor; with more references than the trainer's cap it is
+    /// refused naming the cap.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn qwen_image_2_1_edit_configs_pass_the_pinned_candle_trainer_validate() {
@@ -4261,6 +4263,8 @@ mod tests {
             serialized["dataset"]["items"][0]["referenceImagePaths"] = json!(references);
             let mut config = serde_json::to_value(config).expect("config serializes");
             config["advanced"]["networkType"] = json!(network_type);
+            // The UI always submits a prompt pool (prefilled from the trigger phrase).
+            config["advanced"]["samplePrompts"] = json!(["make the hat red"]);
             serialized["config"] = config;
             parse(serialized)
         };
@@ -4281,6 +4285,15 @@ mod tests {
                         .collect::<Vec<_>>(),
                     ["x_ref3.png", "x_ref2.png", "x_ref1.png"],
                     "{label}/{network_type}: references reach the engine in plan order"
+                );
+                // Previews ON with the T2I cadence (sc-24163), reaching the engine request.
+                assert_eq!(
+                    (
+                        prepared.request.config.sample_every,
+                        prepared.request.config.sample_prompts.as_slice(),
+                    ),
+                    (500, ["make the hat red".to_owned()].as_slice()),
+                    "{label}/{network_type}: edit previews reach the engine"
                 );
                 trainer.validate(&prepared.request).unwrap_or_else(|error| {
                     panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
