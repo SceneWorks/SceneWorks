@@ -809,6 +809,7 @@ fn no_video_decode_profile(
 }
 
 /// Evidence revision of a decode priced at the provider planner's budgeted decision.
+#[cfg(target_os = "macos")]
 const BUDGETED_DECODE_PROFILE_EVIDENCE_REVISION: &str = "video-provider-budgeted-decode-profile-v1";
 
 /// Resolve the exact provider-owned decode working set for the candidate being graded.
