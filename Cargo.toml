@@ -141,10 +141,16 @@ all = "warn"
 # apply when SceneWorks builds the graph, which is how the sc-7544 fix silently dropped out at
 # the candle-gen -> inference cutover. This patch re-applies it for every SceneWorks build.
 #
+# Since sc-24441 (epic sc-24432) inference also vendors candle-core: upstream 1e6aa85e plus the
+# CUDA-graph parameter cache its decode graph runner needs (crates/media/candle-gen/vendor/
+# candle-core/VENDORED.md there). It is patched for the same reason — inference's own [patch] does
+# not reach this workspace — and without it the graph runner compiles against upstream candle-core.
+#
 # The rev MUST stay in lockstep with the inference pins in crates/sceneworks-worker/Cargo.toml
-# (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
-# candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
+# (scripts/bump-inference.mjs rewrites all of them; crates/sceneworks-worker/tests/
+# candle_kernels_patch_guard.rs fails the build if they skew or a patch is dropped).
 [patch."https://github.com/huggingface/candle"]
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "eac60a770030aef0630ca418d85ffd169be9748a" }
 candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "eac60a770030aef0630ca418d85ffd169be9748a" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
