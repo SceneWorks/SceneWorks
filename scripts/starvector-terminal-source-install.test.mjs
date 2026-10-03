@@ -132,3 +132,23 @@ test("existing default-branch workflow bridges every pre-merge terminal operatio
   assert.match(bridge, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b\]/);
   assert.match(bridge, /starvector-readiness:[\s\S]*?uses: \.\/.github\/workflows\/starvector-terminal-readiness\.yml[\s\S]*?with:[\s\S]*?permanent_pin: \$\{\{ inputs\.permanent_pin \}\}/);
 });
+
+test("terminal bridge passes only secrets declared by the provisioning callee", async () => {
+  const bridge = await readFile(new URL("../.github/workflows/server-candle-linux.yml", import.meta.url), "utf8");
+  const provision = await readFile(new URL("../.github/workflows/starvector-terminal-provision.yml", import.meta.url), "utf8");
+  const declared = [...provision.slice(provision.indexOf("  workflow_call:"), provision.indexOf("\npermissions:")).matchAll(/^      ([A-Z_]+):\n        required: true$/gm)]
+    .map((match) => match[1]).sort();
+  const jobs = Object.fromEntries(["source-closure", "provision", "readiness", "campaign"].map((name) => {
+    const start = bridge.indexOf(`\n  starvector-${name}:`);
+    const next = bridge.slice(start + 1).search(/\n  [a-z][\w-]+:/);
+    assert.ok(start > -1, `${name} bridge job exists`);
+    return [name, bridge.slice(start, next < 0 ? undefined : start + 1 + next)];
+  }));
+  assert.deepEqual(declared, ["INFERENCE_READ_TOKEN", "STARVECTOR_UPSTREAM_COMPONENTS_JSON"]);
+  assert.doesNotMatch(bridge, /secrets: inherit/);
+  for (const [name, job] of Object.entries(jobs)) {
+    const passed = [...job.matchAll(/^      ([A-Z_]+): \$\{\{ secrets\.([A-Z_]+) \}\}$/gm)]
+      .map((match) => { assert.equal(match[1], match[2]); return match[1]; }).sort();
+    assert.deepEqual(passed, name === "provision" ? declared : [], `${name} receives only its declared secrets`);
+  }
+});

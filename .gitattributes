@@ -46,6 +46,7 @@
 *.mdx           text diff
 *.mjs           text diff
 *.mts           text diff
+*.orig          text diff
 *.plist         text diff
 *.ps1           text diff
 *.py            text diff
@@ -56,6 +57,7 @@
 *.sql           text diff
 *.svelte        text diff
 *.svg           text diff
+*.stderr        text diff
 *.toml          text diff
 *.ts            text diff
 *.tsv           text diff
@@ -73,6 +75,7 @@
 .gitignore      text diff
 .gitkeep        text diff
 Containerfile   text diff
+COPYRIGHT       text diff
 Dockerfile      text diff
 Justfile        text diff
 LICENSE         text diff

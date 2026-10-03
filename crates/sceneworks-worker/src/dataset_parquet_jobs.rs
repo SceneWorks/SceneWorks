@@ -611,4 +611,39 @@ mod tests {
         assert_eq!(candidates[0].caption, "a cinematic portrait");
         assert!(candidates[0].item_id.starts_with("pq_"));
     }
+
+    #[test]
+    fn truncated_metadata_with_huge_schema_list_is_rejected_by_both_readers() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let path = temp.path().join("truncated.parquet");
+        // Compact Thrift FileMetaData: version 1, then a schema list declaring
+        // 109_002_364 structs with no elements. The metadata is only 8 bytes.
+        let metadata = [0x15, 0x02, 0x19, 0xfc, 0xfc, 0xfc, 0xfc, 0x33];
+        let mut file = b"PAR1".to_vec();
+        file.extend_from_slice(&metadata);
+        file.extend_from_slice(&(metadata.len() as u32).to_le_bytes());
+        file.extend_from_slice(b"PAR1");
+        std::fs::write(&path, file).expect("fixture writes");
+
+        let import_error = read_candidates(&path, "url", "text", 1, 0, &[], &[])
+            .expect_err("truncated metadata cannot be imported");
+        assert!(
+            import_error
+                .to_string()
+                .contains("Thrift list size 109002364 exceeds remaining input length 0"),
+            "{import_error}"
+        );
+
+        let scan_error = crate::catalog_parquet_scanner::validate_catalog_parquet_scan_plan(
+            &path,
+            &crate::catalog_parquet_scanner::CatalogParquetScanOptions::default(),
+        )
+        .expect_err("truncated metadata cannot be scanned");
+        assert!(
+            scan_error
+                .to_string()
+                .contains("Thrift list size 109002364 exceeds remaining input length 0"),
+            "{scan_error}"
+        );
+    }
 }
