@@ -563,18 +563,22 @@ generations. The setting is off by default:
   Catalog vision analysis and StarVector requests carry the worker default.
 
 `qualified` never forces compression. The inference engine's qualification
-table (`KV_COMPRESSION_QUALIFICATIONS`) has two K8V8 (`group-affine-8`) rows,
-each measured on one model. A generation runs compressed only when it is a
-single sequence and matches one of them:
+table (`KV_COMPRESSION_QUALIFICATIONS`) has two K8V8 (`group-affine-8`) rows.
+Each row carries its measured model's exact architecture (config geometry), so
+compression qualifies only for a model matching one of the two measured
+architectures. A fine-tune with identical geometry qualifies; a different
+model of the same family (Llama-3.1-8B, TinyLlama, Qwen3-8B, Qwen3-0.6B, ...)
+does not. A generation runs compressed only when it is a single sequence on a
+matching model within that row's context range:
 
-| Measured model | Decoder it applies to | Prompt | Final context (prompt + max new tokens) |
-| --- | --- | --- | --- |
-| Llama-3.2-3B-Instruct | Llama | ≥ 32 768 | < 130 560 |
-| Qwen3-1.7B (dense) | dense Qwen3 | ≥ 10 240 | ≤ 40 960 |
+| Measured architecture | Prompt | Final context (prompt + max new tokens) |
+| --- | --- | --- |
+| Llama-3.2-3B-Instruct | ≥ 32 768 | < 130 560 |
+| Qwen3-1.7B (dense) | ≥ 10 240 | ≤ 40 960 |
 
-Batched requests, prompts below the minimum, final contexts past the maximum and
-every other decoder run dense, deterministically, with a stable reason
-(`batched_decode`, `below_minimum_context`, `above_qualified_context`,
+Batched requests and prompts below the minimum run dense, as do final contexts
+past the maximum. Any other model reports dense too. Each case has a stable
+reason (`batched_decode`, `below_minimum_context`, `above_qualified_context`,
 `unqualified_model`, ...).
 
 SceneWorks keeps no LLM KV pricing of its own. Request memory admission is the

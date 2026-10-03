@@ -1247,8 +1247,9 @@ pub(crate) async fn run_prompt_refine_job(
     let max_new_tokens = resolve_max_new_tokens(payload, task, qwen_rewriter);
     // sc-20682: the job's compressed-KV opt-in (its payload's `kvCompression`, else the worker's
     // `SCENEWORKS_LLM_KV_COMPRESSION`, else off). The engine runs compressed only for a single
-    // sequence matching one of its two measured qualification rows (`crate::llm_kv_cache`), and
-    // reports what it ran on.
+    // sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
+    // dense Qwen3-1.7B) within that row's context range (`crate::llm_kv_cache`); batched, short and
+    // other-model requests run dense with a reason. It reports what it ran on.
     let kv_compression = crate::llm_kv_cache::job_policy(payload)?;
     let temperature = task.temperature();
     let work_message = task.work_message();

@@ -81,8 +81,10 @@ pub(crate) struct PromptRefineRequest {
     /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
     /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
     /// `"qualified"` never forces compression: the engine runs compressed only for a single
-    /// sequence whose model and context match one of its two measured qualification rows
-    /// (`docs/kv-baseline-harness.md`), and the job result's `generation.kvCache` records what ran.
+    /// sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
+    /// dense Qwen3-1.7B) within that row's context range (`docs/kv-baseline-harness.md`); batched,
+    /// short and other-model requests run dense with a reason, and the job result's
+    /// `generation.kvCache` records what ran.
     pub(crate) kv_compression: Option<String>,
 }
 

@@ -3,11 +3,12 @@
 //! Off by default. An operator opts the worker in with `SCENEWORKS_LLM_KV_COMPRESSION=qualified`,
 //! and a prompt-refine job may choose for itself with its payload's `kvCompression`
 //! (`"off"` | `"qualified"`). Opting in never forces compression: the engine runs a generation on
-//! the compressed cache only for a single sequence that matches one of its two measured
-//! qualification rows — the Llama decoder (measured on Llama-3.2-3B-Instruct) with a prompt of at
-//! least 32 768 tokens and a final context below 130 560, or the dense Qwen3 decoder (measured on
-//! Qwen3-1.7B) with a prompt of at least 10 240 tokens and a final context of at most 40 960.
-//! Batched, short and out-of-range requests and every other model run dense, with a stable reason.
+//! the compressed cache only for a single sequence on a model matching one of its two measured
+//! architectures (exact config geometry, so a same-geometry fine-tune qualifies and another model
+//! of the family does not): Llama-3.2-3B-Instruct with a prompt of at least 32 768 tokens and a
+//! final context below 130 560, or dense Qwen3-1.7B with a prompt of at least 10 240 tokens and a
+//! final context of at most 40 960. Batched, short and out-of-range requests run dense, and any
+//! other model reports dense, each with a stable reason.
 //! The engine prices its memory admission for the cache it actually runs on and reports what ran.
 //! SceneWorks keeps no KV pricing of its own: request admission is the in-process engine's.
 //!
