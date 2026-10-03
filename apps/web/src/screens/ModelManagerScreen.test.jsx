@@ -1425,6 +1425,26 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(loraMatchesModel(assigned, qwen2512)).toBe(false);
   });
 
+  // sc-24163 (round 2): an external (ComfyUI-folder) row has no manifest to write the family to —
+  // the API refuses it — so it never offers the chooser; it says to import a copy instead.
+  it("points an unresolved external LoRA at importing a copy instead of offering the chooser", async () => {
+    const updateLora = vi.fn();
+    await render({
+      models: [{ id: "qwen_image_2_1", name: "Qwen Image 2.1", type: "image", family: "qwen-image-2-1", loraCompatibility: { families: ["qwen-image-2-1"] }, capabilities: ["text_to_image"], installState: "installed" }],
+      loras: [{ id: "external_mystery", name: "Comfy Mystery", scope: "external", installState: "installed" }],
+      updateLora,
+    });
+    await selectTab(container, "LoRAs");
+    const row = [...container.querySelectorAll(".lora-row")].find((node) => node.textContent.includes("Comfy Mystery"));
+    expect(row.textContent).toContain("Import a copy to choose its family.");
+    expect([...row.querySelectorAll("button")].some((node) => node.textContent.trim() === "Choose family")).toBe(false);
+    const edit = [...row.querySelectorAll("button")].find((node) => node.textContent.trim() === "Edit");
+    if (edit) {
+      await click(edit);
+      expect(row.textContent).not.toContain("Unresolved family");
+    }
+  });
+
   it("separates built-in LoRAs from user LoRAs into their own sections", async () => {
     await render({
       models: MODELS,

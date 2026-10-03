@@ -6461,11 +6461,45 @@ async fn update_lora_assigns_a_family_only_when_the_header_is_unresolved() {
             { "id": "unresolved_lora", "name": "Unresolved",
               "source": { "provider": "local", "path": "loras/unresolved.safetensors" } },
             { "id": "resolved_lora", "name": "Resolved", "family": "qwen-image",
-              "source": { "provider": "local", "path": "loras/resolved.safetensors" } }
+              "source": { "provider": "local", "path": "loras/resolved.safetensors" } },
+            { "id": "missing_lora", "name": "Not downloaded",
+              "source": { "provider": "local", "path": "loras/not-there.safetensors" } }
         ] }"#,
     )
     .expect("seed manifest");
     let app = create_app(settings).expect("app creates");
+
+    // No inspectable header (here: not installed yet) means the family cannot be called
+    // unresolved yet, so assignment is refused (typed) rather than recorded uninspected. The
+    // installed-but-unreadable arm is pinned by `family_assignment_needs_an_inspected_header`.
+    for (id, expect_installed) in [("missing_lora", false)] {
+        let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = loras
+            .as_array()
+            .expect("catalog array")
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap_or_else(|| panic!("{id} listed"))
+            .clone();
+        assert_eq!(
+            row["installState"] == "installed",
+            expect_installed,
+            "precondition for {id}: {row}"
+        );
+        let (status, refusal) = request(
+            app.clone(),
+            "PATCH",
+            &format!("/api/v1/loras/{id}?scope=global"),
+            json!({ "family": "qwen-image-2-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {refusal}");
+        assert_eq!(
+            refusal["code"], "lora_family_not_inspectable",
+            "{id}: {refusal}"
+        );
+    }
 
     // Unknown family id → refused, typed.
     let (status, refusal) = request(
@@ -6592,6 +6626,22 @@ async fn external_root_loras_are_listed_read_only() {
 
     let id = external["id"].as_str().expect("id");
     assert!(id.starts_with("external_"), "ids are namespaced: {id}");
+
+    // sc-24163: assigning a family is refused too, and the refusal says how to get one.
+    let (status, refusal) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/loras/{id}?scope=external"),
+        json!({ "family": "wan-video" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Import a copy to choose its family")),
+        "{refusal}"
+    );
 
     let (status, _) = request(
         app,

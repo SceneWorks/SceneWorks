@@ -1797,7 +1797,7 @@ export function ModelManagerScreen() {
     try {
       // sc-24163: a family is only sent for a LoRA whose file resolved none — the API refuses
       // to reassign a detected family, so a resolved row never offers the control.
-      const assignFamily = !loraHasResolvableFamily(lora) && loraEditDraft.family;
+      const assignFamily = lora.scope !== "external" && !loraHasResolvableFamily(lora) && loraEditDraft.family;
       await onUpdateLora(lora, {
         triggerWords: loraEditDraft.triggerWords,
         notes: loraEditDraft.notes.trim(),
@@ -1840,6 +1840,10 @@ export function ModelManagerScreen() {
     // Built-in entries are read-only (their manifest is compiled in); the backend
     // rejects PATCH on them, so no Edit affordance is offered.
     const canEdit = Boolean(onUpdateLora) && lora.scope !== "builtin";
+    // sc-24163: an unresolved family is chosen in place — except on an external (ComfyUI-folder)
+    // row, which no manifest backs: the API refuses the write, so it gets an import hint instead.
+    const isExternal = lora.scope === "external";
+    const canChooseFamily = unusable && !isExternal;
     // What the adapter file itself declared in its safetensors `__metadata__` at import
     // (sc-14057). Each part is shown only when the file stated it — a great many third-party
     // adapters declare no rank/alpha, and showing an inferred value would be a lie about the
@@ -1865,6 +1869,7 @@ export function ModelManagerScreen() {
             {lora.updateAvailable ? <span className="status-badge warning">update available</span> : null}
           </>
         )}
+        {unusable && isExternal ? <small className="lora-family-hint">Import a copy to choose its family.</small> : null}
         <span className="lora-row-actions">
           {canDownload ? (
             <button disabled={Boolean(downloadJob)} onClick={() => onDownloadLora(lora)} type="button">
@@ -1873,7 +1878,7 @@ export function ModelManagerScreen() {
           ) : null}
           {canEdit && !isEditing ? (
             <button onClick={() => startEditLora(lora)} type="button">
-              {unusable ? "Choose family" : "Edit"}
+              {canChooseFamily ? "Choose family" : "Edit"}
             </button>
           ) : null}
           <button
@@ -1901,7 +1906,7 @@ export function ModelManagerScreen() {
         ) : null}
         {isEditing ? (
           <div className="lora-row-editor">
-            {unusable ? (
+            {canChooseFamily ? (
               <label>
                 Unresolved family — choose
                 <select

@@ -402,10 +402,13 @@ pub(crate) async fn update_lora(
         }
         // sc-10452: no manifest backs an external row, so there is nothing to write to.
         crate::external_loras::EXTERNAL_SCOPE => {
-            return Err(ApiError::bad_request(
+            return Err(ApiError::bad_request(if body.family.is_some() {
                 "LoRAs discovered in an external model folder are read-only. \
-                 Import a copy to add trigger keywords or notes.",
-            ));
+                 Import a copy to choose its family."
+            } else {
+                "LoRAs discovered in an external model folder are read-only. \
+                 Import a copy to add trigger keywords or notes."
+            }));
         }
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
@@ -487,7 +490,9 @@ pub(crate) async fn update_lora(
 /// `qwen_image` stamp on keys that fit both 2.1 and 2512) is surfaced as unresolved and the USER
 /// picks. The header still wins whenever it DOES resolve: a detected family is never overridden,
 /// so assigning one is refused with the detected family named. The requested family must be one a
-/// catalog model declares. Returns the canonical token to store.
+/// catalog model declares, and the LoRA must be installed with a readable safetensors header —
+/// "unresolved" is a verdict about an inspected file, never about a missing one
+/// (`lora_family_not_inspectable`). Returns the canonical token to store.
 pub(crate) fn resolve_lora_family_assignment(
     lora_id: &str,
     lora: &Value,
@@ -511,8 +516,26 @@ pub(crate) fn resolve_lora_family_assignment(
             context: None,
         });
     }
-    let header = validate_lora_safetensors_header(lora_id, lora)?;
-    if let Some(detected) = header.as_ref().and_then(detect_lora_family) {
+    // Only an INSPECTED file can be declared unresolved. With no installed, readable safetensors
+    // header (not installed yet, download unfinished, not a .safetensors) nothing has been
+    // checked: an assignment now could contradict the file once it lands, and the job gate and
+    // this route would then refuse it with no way back. So inspection must happen first.
+    let not_inspectable = || ApiError {
+        status: StatusCode::BAD_REQUEST,
+        detail: format!(
+            "LoRA {lora_id} has no installed safetensors file to inspect yet, so its family \
+             cannot be assigned. Install it or let its download finish first."
+        ),
+        code: Some("lora_family_not_inspectable"),
+        context: None,
+    };
+    if lora.get("installState").and_then(Value::as_str) != Some("installed") {
+        return Err(not_inspectable());
+    }
+    let Some(header) = validate_lora_safetensors_header(lora_id, lora)? else {
+        return Err(not_inspectable());
+    };
+    if let Some(detected) = detect_lora_family(&header) {
         let detected = normalize_lora_family(&detected);
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -3660,6 +3683,43 @@ mod base_model_gating_tests {
             validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
                 .unwrap_or_else(|error| panic!("{family} LoRA on {model_id}: {error:?}"));
         }
+    }
+
+    /// sc-24163 (round 2): a family is assigned only after the file was INSPECTED. An installed
+    /// row with no readable safetensors header (no path, or a non-safetensors file) is refused as
+    /// not inspectable — never treated as "unresolved".
+    #[test]
+    fn family_assignment_needs_an_inspected_header() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("legacy.ckpt"), b"not safetensors").unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        let adapter = tmp.path().join("adapter.safetensors");
+        write_adapter(&adapter, r#"{"ss_base_model_version":"qwen_image"}"#, &keys);
+        let adapter = adapter.to_str().unwrap();
+        for lora in [
+            json!({ "id": "no_path", "installState": "installed" }),
+            json!({
+                "id": "ckpt_only",
+                "installState": "installed",
+                "installedPath": tmp.path().join("legacy.ckpt").to_str().unwrap(),
+            }),
+            // A readable file whose install has not completed is not yet the installed adapter.
+            json!({ "id": "downloading", "installState": "missing", "installedPath": adapter }),
+        ] {
+            let error =
+                resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap_err();
+            assert_eq!(error.code, Some("lora_family_not_inspectable"), "{lora}");
+        }
+        // The inspected, installed, unresolved file is the one case that is accepted.
+        let lora =
+            json!({ "id": "inspected", "installState": "installed", "installedPath": adapter });
+        assert_eq!(
+            resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap(),
+            "qwen-image-2-1"
+        );
     }
 
     /// sc-24163 (E10 review): a file whose header does NOT resolve a family — the bare ai-toolkit
