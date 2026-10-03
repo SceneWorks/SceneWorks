@@ -3849,6 +3849,32 @@ mod tests {
     }
 
     #[test]
+    fn qwen_image_2_1_adapters_are_served_on_both_registered_lanes() {
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        let qwen = matrix
+            .models
+            .iter()
+            .find(|model| model.id == "qwen_image_2_1")
+            .expect("Qwen-Image 2.1 is in the matrix");
+        for adapter in ["lora", "lokr"] {
+            let cell = qwen
+                .user_adapters
+                .iter()
+                .find(|cell| cell.capability == adapter)
+                .expect("both adapters have matrix cells");
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{adapter}"
+            );
+            assert!(
+                cell.parity_obligation.is_none(),
+                "{adapter} has no parity gap"
+            );
+        }
+    }
+
+    #[test]
     fn a_tiered_audio_model_serves_its_tiers_only_on_the_lane_whose_audio_dump_registers_it() {
         // sc-22998. YuE2's descriptor advertises no quants, so its tier cells rest on the artifact
         // rows — which count for audio only on the lane whose audio dump registers the model.
