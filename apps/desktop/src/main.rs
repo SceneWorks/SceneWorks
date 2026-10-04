@@ -74,6 +74,8 @@ fn main() {
         .manage(update::UpdateState::default())
         .invoke_handler(tauri::generate_handler![
             update::get_update_status,
+            // On-demand check from Settings (sc-8663).
+            update::check_for_app_update,
             update::download_app_update,
             update::install_app_update,
             update::discard_app_update,

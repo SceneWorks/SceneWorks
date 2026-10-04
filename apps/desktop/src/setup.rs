@@ -1491,7 +1491,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // Job Object, so the whole subtree dies with the desktop and no orphan can pin the API port
     // on the next launch.
     #[cfg(windows)]
-    sidecar_job::confine(child.pid());
+    sidecar_job::confine(child.pid(), "api");
     app.state::<Managed>()
         .api
         .lock()
@@ -2215,6 +2215,11 @@ fn supervise_worker(
                 }
             };
             record_pid(&app, Some(child.pid()));
+            // sc-24743: on Windows this is the candle `auto` supervisor; confine it (and the
+            // per-GPU children it spawns) to the kill-on-close job so a desktop force-quit
+            // frees their VRAM at once instead of after the in-flight generation.
+            #[cfg(windows)]
+            sidecar_job::confine(child.pid(), label);
             slot(&app.state::<Managed>())
                 .lock()
                 .expect("worker lock")
@@ -2697,6 +2702,11 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
 /// the OS-enforced backstop the pidfile `taskkill /T` reaping ([`kill_pid`]) can't guarantee
 /// once the tracked parent has already exited.
 ///
+/// The candle GPU worker sidecar (the `auto` supervisor + its per-GPU children) is confined
+/// the same way (sc-24743): its parent-PID watchdog alone lets a child mid-denoise keep its
+/// VRAM until the in-flight generation finishes, and the next launch's reap only knows the
+/// (already dead) supervisor PID.
+///
 /// Best-effort: any failure is logged and left to the existing reaping, never fatal.
 #[cfg(windows)]
 mod sidecar_job {
@@ -2752,12 +2762,13 @@ mod sidecar_job {
         }
     }
 
-    /// Assign sidecar process `pid` to the shared kill-on-close job.
-    pub(super) fn confine(pid: u32) {
+    /// Assign sidecar process `pid` (named `sidecar` in logs) to the shared kill-on-close job.
+    pub(super) fn confine(pid: u32, sidecar: &str) {
         let Some(job) = job_handle() else {
             tracing::warn!(
                 event = "sidecar_job_unavailable",
                 pid,
+                sidecar,
                 "could not create kill-on-close job; relying on taskkill reaping"
             );
             return;
@@ -2767,7 +2778,12 @@ mod sidecar_job {
         unsafe {
             let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
             if process.is_null() {
-                tracing::warn!(event = "sidecar_job_open_failed", pid, "OpenProcess failed");
+                tracing::warn!(
+                    event = "sidecar_job_open_failed",
+                    pid,
+                    sidecar,
+                    "OpenProcess failed"
+                );
                 return;
             }
             let assigned = AssignProcessToJobObject(job, process) != 0;
@@ -2776,12 +2792,14 @@ mod sidecar_job {
                 tracing::info!(
                     event = "sidecar_job_assigned",
                     pid,
-                    "API sidecar confined to kill-on-close job"
+                    sidecar,
+                    "sidecar confined to kill-on-close job"
                 );
             } else {
                 tracing::warn!(
                     event = "sidecar_job_assign_failed",
                     pid,
+                    sidecar,
                     "assign to job failed"
                 );
             }
