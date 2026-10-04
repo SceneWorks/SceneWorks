@@ -5,8 +5,10 @@ name: Release (desktop)
 # the SAME draft release:
 #   macos   — signs + notarizes the .app via the APPLE_* env (from repo secrets),
 #             then staple-dmg.mjs staples the DMG; CREATES the draft release.
-#   windows — builds the candle/CUDA NSIS + MSI installers and UPLOADS them to the
-#             release the macos job created (needs: macos). Mirrors the build steps in
+#   windows — builds the candle/CUDA NSIS + MSI installers, Authenticode-signs them
+#             through Azure Artifact Signing when the AZURE_* secrets are set
+#             (sc-1357; see RELEASING.md), and UPLOADS them to the release the macos
+#             job created (needs: macos). Mirrors the build steps in
 #             desktop-windows.yml; keep the two in sync when either changes.
 #   linux   — builds the candle/CUDA AppImage + deb and UPLOADS them to that draft
 #             (needs: windows, which also serializes latest.json platform merges).
@@ -300,6 +302,61 @@ jobs:
       # installers stay small. `--config updater.release.conf.json` also signs the
       # NSIS `-setup.exe` updater payload (+ `.sig`) for the in-app updater (sc-1355).
       # Passed as a file (not inline JSON) so it survives PowerShell quoting here.
+      # Authenticode (sc-1357): Azure Artifact Signing through SignTool + Microsoft's
+      # dlib. With AZURE_CLIENT_ID unset the release still builds, UNSIGNED, with a
+      # warning; with it set, this stages the pinned, hash-checked signing client and a
+      # metadata.json, and the build step adds windows-signing.release.conf.json so
+      # Tauri routes every signature (app, sidecar, unsigned resources, NSIS plugins +
+      # uninstaller, -setup.exe, .msi) through apps/desktop/scripts/sign-windows.mjs.
+      # Endpoint/account/profile are not secrets; repo variables override the defaults.
+      - name: Prepare Artifact Signing (Authenticode)
+        id: signing
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT || 'https://eus.codesigning.azure.net' }}
+          SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT || 'sceneworks-signing' }}
+          SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE || 'sceneworks-public' }}
+          CLIENT_VERSION: "1.0.128"
+          CLIENT_SHA256: "74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b"
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:AZURE_CLIENT_ID) {
+            Write-Output "::warning::AZURE_CLIENT_ID is not set - the Windows installers will be UNSIGNED (sc-1357)."
+            "config=" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            exit 0
+          }
+          # The dlib is a .NET 8 component; fail here rather than mid-bundle.
+          $hasNet8 = (Get-Command dotnet -ErrorAction SilentlyContinue) -and (dotnet --list-runtimes | Select-String 'Microsoft.NETCore.App 8\.')
+          if (-not $hasNet8) {
+            throw "The Artifact Signing dlib needs the .NET 8 runtime, which this runner image lacks."
+          }
+          $dir = Join-Path $env:RUNNER_TEMP 'artifact-signing'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          $pkg = Join-Path $dir 'client.zip'
+          Invoke-WebRequest -UseBasicParsing -OutFile $pkg "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$env:CLIENT_VERSION/microsoft.artifactsigning.client.$env:CLIENT_VERSION.nupkg"
+          $hash = (Get-FileHash -Algorithm SHA256 $pkg).Hash.ToLowerInvariant()
+          if ($hash -ne $env:CLIENT_SHA256) { throw "Artifact Signing client hash mismatch: $hash" }
+          Expand-Archive -Force $pkg (Join-Path $dir 'client')
+          $dlib = Join-Path $dir 'client\bin\x64\Azure.CodeSigning.Dlib.dll'
+          if (-not (Test-Path $dlib)) { throw "Azure.CodeSigning.Dlib.dll missing from the client package" }
+          # Environment credential only: never fall through to an interactive or
+          # ambient identity on the runner.
+          $metadata = Join-Path $dir 'metadata.json'
+          @{
+            Endpoint = $env:SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:SIGNING_ACCOUNT
+            CertificateProfileName = $env:SIGNING_PROFILE
+            ExcludeCredentials = @(
+              'ManagedIdentityCredential', 'WorkloadIdentityCredential', 'SharedTokenCacheCredential',
+              'VisualStudioCredential', 'VisualStudioCodeCredential', 'AzureCliCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential'
+            )
+          } | ConvertTo-Json | Out-File -Encoding utf8 $metadata
+          "ARTIFACT_SIGNING_DLIB=$dlib" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "ARTIFACT_SIGNING_METADATA=$metadata" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "ARTIFACT_SIGNING_LOG=$(Join-Path $dir 'sign.log')" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "config=--config windows-signing.release.conf.json" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
       - name: Build Windows candle installers (NSIS + MSI)
         env:
           # Same minisign keypair as the macos job — signs the NSIS updater
@@ -308,7 +365,18 @@ jobs:
           # (sc-8864).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json
+          # Artifact Signing service principal (sc-1357), read by the dlib's
+          # EnvironmentCredential. Scoped to this step like the updater key.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: npm --prefix apps/desktop run build -- --bundles nsis,msi --config updater.release.conf.json ${{ steps.signing.outputs.config }}
+      # Tauri hides a sign command's output unless --verbose, so a failed signature
+      # surfaces only as "failed to run node"; print sign-windows.mjs's transcript.
+      - name: Show Authenticode signing transcript
+        if: ${{ failure() && steps.signing.outputs.config != '' }}
+        shell: pwsh
+        run: if ($env:ARTIFACT_SIGNING_LOG -and (Test-Path $env:ARTIFACT_SIGNING_LOG)) { Get-Content $env:ARTIFACT_SIGNING_LOG } else { 'No signing transcript was written.' }
       # License guard (sc-10526 + sc-10551): scan the built Windows bundle tree for
       # model weights before publishing. Any loose resource weight Tauri stages under
       # bundle/ is caught by the loose-tree walk; the exhaustive resource-source scan
