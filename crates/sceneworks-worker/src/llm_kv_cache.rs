@@ -113,6 +113,7 @@ pub(crate) fn kv_cache_block(policy: KvCompressionPolicy, report: Option<&KvCach
             "fullCacheDequantizations": report.counters.full_cache_dequantizations,
             "denseGatherFallbacks": report.counters.dense_gather_fallbacks,
             "compressedCacheBytes": report.counters.compressed_cache_bytes,
+            "poolHeldBytes": report.counters.pool_held_bytes,
         },
     })
 }
@@ -371,6 +372,7 @@ mod tests {
                 full_cache_dequantizations: 0,
                 dense_gather_fallbacks: 2,
                 compressed_cache_bytes: 123_456,
+                pool_held_bytes: 524_288,
             },
         };
         assert_eq!(
@@ -390,6 +392,7 @@ mod tests {
                     "fullCacheDequantizations": 0,
                     "denseGatherFallbacks": 2,
                     "compressedCacheBytes": 123_456,
+                    "poolHeldBytes": 524_288,
                 },
             })
         );
