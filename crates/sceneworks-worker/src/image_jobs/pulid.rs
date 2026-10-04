@@ -462,6 +462,7 @@ async fn generate_pulid_flux_stream(
     spec.identity = Some(identity);
     let route_context = pulid_memory_route_context();
     let route_mode = route_context.mode;
+    let pre_policy_spec = spec.clone();
     let spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         PULID_ENGINE_ID,
         resolved_tier,
@@ -492,6 +493,28 @@ async fn generate_pulid_flux_stream(
         None => memory_plan,
     };
     let memory_inputs = pulid_memory_inputs(width, height);
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        PULID_ENGINE_ID,
+        PULID_MODEL,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            let plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                PULID_ENGINE_ID,
+                PULID_MODEL,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            );
+            match resolved_tier {
+                Some(tier) => plan.with_resolved_artifact_tier(Some(tier)),
+                None => Ok(plan),
+            }
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         PULID_ENGINE_ID,
