@@ -15,17 +15,17 @@
     "apiGeneration": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4",
     "apiValidation": "60a46aa0b42f00caf0cdb7a6f720f5627589f93e54ba31da4d2917ac8e44d9a7",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "c7c7b72a067e59bfaeca3699c88bd73475d82b77231fc7a09e5ce293f467efb9",
-    "descriptorCandleFacts": "0a595c7420af68c029bfd60888838224e5c9e4e367706e35878fdef3be3bd3d0",
-    "descriptorCandleRuntime": "c34ae0e2c52d6302c0a7f5d04c20e49475439c8ac8594c03fa4d7ed53d72488a",
-    "descriptorMlxFacts": "78fa01344ee70402193655d96de53d321e7e4b65d95b901b6ce959431fae3f86",
-    "descriptorMlxRuntime": "197f7346873849461bd9fdb5875e998b229df95a2a8baa632cd673015ed18f91",
-    "descriptorPreviewFacts": "bb96efdbb7d01fa451dfbc6604df47a4ca53651f5945266577883e5d28ce6df6",
+    "descriptorAudioFacts": "2b3f3f3b6c83f78454e3103b5524534e5cf827612425327022625a380a2baab3",
+    "descriptorCandleFacts": "19295c7ec6736bf763b2384c53374827fb254d78b8149296bee4d0644a70b0ed",
+    "descriptorCandleRuntime": "60c8d6c276059efc76321f9726451b42a0ec2f5a575619cf420262c37f166e45",
+    "descriptorMlxFacts": "406b23bc4b2df0caeddcc6a583409a45dcbb8d3f91ef98c3273269cc072c107c",
+    "descriptorMlxRuntime": "9097b36cec65590a86d61b53a8a8ab053a737f39c013036cc34b4aa3d30daa9c",
+    "descriptorPreviewFacts": "6aa8a6edc60a53ad81c31587b608b405d95acf722496e440dc44e53bee360758",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "98949554728af4a78b49e2669fe20764ffe34a66184bda0dae223da6a3374455",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
-    "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
+    "routerCatalog": "73f2234c3e236fcaf33c730f06ab637ef6598baab30d5f3f0891fd9270d75e29",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "d082a1afddc8bda1ab75438d2913dad33af5e4ed34a0ace4ed90eecaafb9a43b",
@@ -48,7 +48,7 @@
     "workerDispatch": "03745d5a6aaf349f2e164540169f298a3e59a677bad98aa62c6e4298fe895288",
     "workerEngineTable": "1b3b9ee797dc7607fdebe32854842e6611ba70b134fc79ff7770400a5a70f718",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "8dde77a8dce787cc1496d32a75cb3ebbacab1684bb74826ac29e5fdb8b12d46b",
+    "workerImageDispatch": "27c046e4fdd9858bb4dce62b3d77e3d91aa19ce044446237fedf8445405253cf",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "2cd76993160bc421ac6c28a565b7447c3502f286912b3b29f1b5596217728b2a",
@@ -4240,13 +4240,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
