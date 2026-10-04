@@ -809,6 +809,8 @@ export function serviceDeviations(platform) {
 export function serviceEnv({ platform, role, base = process.env, url, port, dataDir, configDir, hfHome, ffmpegBin, workerId, gpuId, driverPid = process.pid, offline = false, extra = {} }) {
   if (!["api", "worker"].includes(role)) fail(`unknown service role ${role}`);
   if (!ffmpegBin || !path.isAbsolute(ffmpegBin)) fail("a probed absolute ffmpeg path is required for both services");
+  const cudaGpu = platform === "cuda" ? String(gpuId ?? PLATFORMS.cuda.gpuId) : null;
+  if (cudaGpu !== null && !/^(0|[1-9]\d*)$/.test(cudaGpu)) fail("--gpu-id must select one physical CUDA GPU index");
   const env = {};
   for (const [key, value] of Object.entries(base)) {
     if (/^(SCENEWORKS_|HF_|HUGGINGFACE_|TRANSFORMERS_)/i.test(key) || key.toUpperCase() === "CUDA_VISIBLE_DEVICES") continue;
@@ -837,13 +839,11 @@ export function serviceEnv({ platform, role, base = process.env, url, port, data
     if (platform === "metal") {
       env.SCENEWORKS_GPU_ID = "mlx";
     } else {
-      const gpu = String(gpuId ?? PLATFORMS.cuda.gpuId);
       Object.assign(env, {
         SCENEWORKS_BACKEND_CANDLE_ENABLED: "true",
         SCENEWORKS_PARENT_PID: String(driverPid),
         SCENEWORKS_WORKER_CHILD: "1",
-        SCENEWORKS_GPU_ID: gpu,
-        CUDA_VISIBLE_DEVICES: gpu,
+        SCENEWORKS_GPU_ID: cudaGpu,
         SCENEWORKS_UTILITY_JOBS: "0",
       });
     }
@@ -856,6 +856,11 @@ export function serviceEnv({ platform, role, base = process.env, url, port, data
     env.SCENEWORKS_HUGGINGFACE_BASE_URL = "http://127.0.0.1:9";
   }
   Object.assign(env, extra);
+  // Mask both services to the selected physical GPU, even if an override disagrees.
+  if (cudaGpu !== null) {
+    env.CUDA_VISIBLE_DEVICES = cudaGpu;
+    if (role === "worker") env.SCENEWORKS_GPU_ID = cudaGpu;
+  }
   return env;
 }
 

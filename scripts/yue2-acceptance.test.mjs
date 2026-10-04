@@ -564,7 +564,7 @@ test("the services get the desktop's shipped environment and nothing inherited f
   const apiCommon = { ...shared, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "5000", SCENEWORKS_TRUST_LOOPBACK: "true", SCENEWORKS_RUN_UTILITY_INPROCESS: "true", SCENEWORKS_PARENT_PID: "42" };
   const pick = (env) => Object.fromEntries(driverKeys(env).map((key) => [key, env[key]]));
   assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "api" })), { ...apiCommon, SCENEWORKS_MLX_REQUIRED: "1" });
-  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "api" })), { ...apiCommon, SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce" });
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "api" })), { ...apiCommon, SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce", CUDA_VISIBLE_DEVICES: "0" });
   // supervise_mlx_worker (no parent-death watch on Metal: see serviceDeviations).
   assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "worker" })), {
     ...shared, SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_WORKER_ID: "w", SCENEWORKS_API_URL: "http://127.0.0.1:5000",
@@ -580,6 +580,23 @@ test("the services get the desktop's shipped environment and nothing inherited f
   assert.equal(serviceDeviations("metal").length, 2);
   assert.match(serviceDeviations("metal")[0], /Recording transcription uses this decoder/);
   assert.match(serviceDeviations("cuda").join(" "), /per-GPU child/);
+});
+
+test("CUDA API and worker select the same single physical GPU despite inherited or extra masks", () => {
+  for (const gpuId of ["0", "1"]) {
+    const api = serviceEnv({ ...common, platform: "cuda", role: "api", gpuId, extra: { CUDA_VISIBLE_DEVICES: "3" } });
+    const worker = serviceEnv({ ...common, platform: "cuda", role: "worker", gpuId,
+      extra: { CUDA_VISIBLE_DEVICES: "3", SCENEWORKS_GPU_ID: "3" } });
+    assert.equal(api.CUDA_VISIBLE_DEVICES, gpuId);
+    assert.equal(worker.CUDA_VISIBLE_DEVICES, gpuId);
+    assert.equal(worker.SCENEWORKS_GPU_ID, gpuId);
+    assert.equal(api.SCENEWORKS_GPU_ID, undefined);
+  }
+  for (const gpuId of ["0,1", "-1", "gpu1", "01"]) {
+    assert.throws(() => serviceEnv({ ...common, platform: "cuda", role: "api", gpuId }), /one physical CUDA GPU index/);
+  }
+  assert.equal(serviceEnv({ ...common, platform: "metal", role: "api", gpuId: "1" }).CUDA_VISIBLE_DEVICES, undefined);
+  assert.equal(serviceEnv({ ...common, platform: "metal", role: "worker", gpuId: "1" }).CUDA_VISIBLE_DEVICES, undefined);
 });
 
 test("the ffmpeg preflight resolves and probes the exact binary recorded in both service environments", async () => {
