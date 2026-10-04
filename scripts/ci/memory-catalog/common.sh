@@ -136,7 +136,7 @@ build_catalog_args() {
 # it, and each does so explicitly.
 #
 # The destination is the FIRST --hf-cache root, i.e. the first line hf_cache_roots() prints. A gated
-# repository additionally needs $HF_TOKEN in the job env; every artifact this campaign fetches today
+# repository additionally needs $HF_TOKEN in the walk step env; every artifact this campaign fetches today
 # is public.
 download_missing_args() {
   if [[ "${DOWNLOAD_MISSING:-false}" == "true" ]]; then

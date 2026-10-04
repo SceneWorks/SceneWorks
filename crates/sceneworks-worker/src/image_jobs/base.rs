@@ -1008,7 +1008,9 @@ impl CandleImageRoute {
             | CandleImageRoute::KreaImportedControl
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
-            CandleImageRoute::CandleTxt2Img => {
+            // The Qwen-Image 2.1 edit lane runs the same generic stream and provider as its
+            // txt2img call, so the same descriptor answer governs whether it consumes the stack.
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::QwenImage21Edit => {
                 mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,

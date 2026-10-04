@@ -72,6 +72,17 @@ use gen_core::ControlKind;
 // concrete InstantID API stay MLX-typed until the face stack moves onto a neutral contract.
 #[cfg(target_os = "macos")]
 use runtime_macos::media::weights::Weights;
+
+/// Load an MLX safetensors file and read its bytes now, before any GPU kernel consumes them
+/// (sc-24245). MLX loads lazily on its CPU stream; a model built over an unread load makes its
+/// first Metal command buffers wait on the disk read, which trips the GPU watchdog
+/// (`kIOGPUCommandBufferCallbackErrorTimeout`, then `SubmissionsIgnored`) on a cold page cache.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_weights(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Weights, impl std::fmt::Display + std::fmt::Debug> {
+    Weights::from_file(path).and_then(|weights| weights.materialize().map(|()| weights))
+}
 #[cfg(target_os = "macos")]
 use runtime_macos::providers::instantid::{
     BodyPoint, InstantId, InstantIdPaths, InstantIdRequest, FACE_RESTORE_PROMPT,

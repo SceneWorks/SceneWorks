@@ -637,4 +637,4 @@ qualification-table family, so they always report dense, with
 | `ranCompressed` | `true` only when the whole generation ran on the compressed cache. |
 | `fallbackReason` | A `KvCacheFallbackReason` id, or `null` exactly when `ranCompressed` is true. The ids are `policy_disabled`, `unqualified_model`, `unsupported_request`, `batched_decode`, `below_minimum_context`, `above_qualified_context`, `unsupported_geometry`, `reader_unavailable`, `runtime_fallback` and `dense_gather`. |
 | `detail` | The engine's operation and reason words, or `null`. |
-| `counters` | `fusedAttentionCalls`, `denseFallbackEvents`, `fullCacheDequantizations`, `denseGatherFallbacks` and `compressedCacheBytes`. |
+| `counters` | `fusedAttentionCalls`, `denseFallbackEvents`, `fullCacheDequantizations`, `denseGatherFallbacks`, `compressedCacheBytes` and `poolHeldBytes` (the shared page pool's resident bytes; `0` without a pool). |

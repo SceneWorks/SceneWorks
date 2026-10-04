@@ -172,7 +172,6 @@ jobs:
   starvector-source-closure:
     if: ${{ inputs.starvector_terminal_operation == 'source' }}
     uses: ./.github/workflows/starvector-terminal-source.yml
-    secrets: inherit
 
   starvector-provision:
     if: ${{ inputs.starvector_terminal_operation == 'provision' }}
@@ -185,14 +184,15 @@ jobs:
       mac_hf_home_source: ${{ inputs.mac_hf_home_source }}
       windows_app_data_source: ${{ inputs.windows_app_data_source }}
       windows_hf_home_source: ${{ inputs.windows_hf_home_source }}
-    secrets: inherit
+    secrets:
+      INFERENCE_READ_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+      STARVECTOR_UPSTREAM_COMPONENTS_JSON: ${{ secrets.STARVECTOR_UPSTREAM_COMPONENTS_JSON }}
 
   starvector-readiness:
     if: ${{ inputs.starvector_terminal_operation == 'readiness' }}
     uses: ./.github/workflows/starvector-terminal-readiness.yml
     with:
       permanent_pin: ${{ inputs.permanent_pin }}
-    secrets: inherit
 
   starvector-campaign:
     if: ${{ inputs.starvector_terminal_operation == 'campaign' }}
@@ -200,7 +200,6 @@ jobs:
     with:
       permanent_pin: ${{ inputs.permanent_pin }}
       campaign_run_id: ${{ inputs.campaign_run_id }}
-    secrets: inherit
 
   # Fixed-input product-route diagnostic for the otherwise idle Windows CUDA
   # host. It is deliberately separate from terminal readiness and acceptance:

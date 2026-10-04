@@ -273,6 +273,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(
@@ -390,6 +391,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(

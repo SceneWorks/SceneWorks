@@ -1418,10 +1418,10 @@ async fn generate_instantid_stream(
             // `ensure_instantid_weights` stages), so it takes the dir, not the two paths.
             #[cfg(target_os = "macos")]
             let model = {
-                let scrfd = Weights::from_file(&scrfd_path).map_err(|error| {
+                let scrfd = crate::image_jobs::read_weights(&scrfd_path).map_err(|error| {
                     WorkerError::Engine(format!("InstantID SCRFD weights {scrfd_path:?}: {error}"))
                 })?;
-                let arcface = Weights::from_file(&arcface_path).map_err(|error| {
+                let arcface = crate::image_jobs::read_weights(&arcface_path).map_err(|error| {
                     WorkerError::Engine(format!(
                         "InstantID ArcFace weights {arcface_path:?}: {error}"
                     ))

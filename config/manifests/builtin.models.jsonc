@@ -28288,12 +28288,12 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "f57e81e67f3746f147db587a3c8903cadf3caab115713aa0e75b582d48fb1442",
+              "sha256": "b51016b8af15f46c845af1d564c0f9a3aca7b72c3ffc385c869f7b212c10c265",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
                   "byteSize": 25919,
-                  "sha256": "e24be76ba456522eafe46a1b555b591db1d6fa6332bad686ccc796dd7b43352a"
+                  "sha256": "262ece9afb6150680a49f4fb9b881c98fa16b7b4586df4f3e7ba05cfb914ba1f"
                 },
                 {
                   "path": ".github/workflows/starvector-terminal-readiness.yml",
@@ -28303,17 +28303,17 @@
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
                   "byteSize": 25188,
-                  "sha256": "d4d3cb8167dab5dc049d7bc1817750e825958c1159b6af5755b124f60d855128"
+                  "sha256": "052b84cd72b1e5cbe8dfa29e69c05fd8e8352bfa47e65c379100d852a040121e"
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 253038,
-                  "sha256": "b3720d33cf4c15417466695fa240a4207763c12c4f6d05ec84d521fddeb4e004"
+                  "byteSize": 252211,
+                  "sha256": "8d5db585648930c27ad938c56491b22a9e2f82750cbac271fa9c3ba31e81da4e"
                 },
                 {
                   "path": "Cargo.toml",
-                  "byteSize": 9799,
-                  "sha256": "f78b707ac7d430f83c6c6afeead7d4c75ab20ca247921bb6fb834649a9490afc"
+                  "byteSize": 10005,
+                  "sha256": "294fc39430ccebb97afdfe21e72bc5aa00830f43fb121a4dbdbd8260ccc953f6"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -28337,13 +28337,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 9161,
-                  "sha256": "ca18d35b0d9ab70c9fe2e6634288537300d4d5928b761bcc835a30cf9f8992f6"
+                  "byteSize": 9288,
+                  "sha256": "27c129c153e4b4413aa1cdc55461527f2f1d619aa901becf6168e517e42a54bd"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
-                  "byteSize": 23941,
-                  "sha256": "88eb29deb9ff783310fe87ff927c1f9a1aaabed9a6c6da966f955bacedffb7fe"
+                  "byteSize": 26436,
+                  "sha256": "844de8708203218c99506ed76acf6bbfb47491e48694eb6e2a08bc20b82c507b"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -28357,13 +28357,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 143423,
-                  "sha256": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd"
+                  "byteSize": 143460,
+                  "sha256": "1b3b9ee797dc7607fdebe32854842e6611ba70b134fc79ff7770400a5a70f718"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
-                  "byteSize": 36907,
-                  "sha256": "b383f9510621ea19246f06c0f9a9faf0b3cd240f49bd0217b3384beb1aa50713"
+                  "byteSize": 37348,
+                  "sha256": "be4eed18d8e5ab6c3fb17eef1ff3286f9aaf5de8d5cae0a01596cc853e3760b1"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
@@ -28402,8 +28402,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7594,
-                  "sha256": "1ed203b1860781e2719ffa2c9d3e35efc55984db1a0318e01e05c9d44a5ef8c4"
+                  "byteSize": 7926,
+                  "sha256": "c8a33b2f64b600e6a7b1995bcc50b38ae4719cba3c4d4f08abac127ad2c59a11"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

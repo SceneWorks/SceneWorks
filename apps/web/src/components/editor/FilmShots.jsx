@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { saveJsonExport } from "../../saveExportFile.js";
 import { FILM_SHOT_STATE_LABELS, filmShotState } from "./filmShotState.js";
 
 const CONDITIONING_MODES = ["text_to_video", "image_to_video", "first_last_frame", "reference_to_video"];
@@ -61,13 +62,12 @@ function NumberInput({ label, value, onChange, min, step = "1", list, options = 
   return <label>{label}<input list={list} min={min} step={step} type="number" value={value ?? ""} onChange={(event) => onChange(event.target.value)} />{list ? <datalist id={list}>{options.map((option) => <option key={option} value={option} />)}</datalist> : null}</label>;
 }
 
-function exportJson(name, value) {
-  const url = URL.createObjectURL(new Blob([`${JSON.stringify(value, null, 2)}\n`], { type: "application/json" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = name;
-  anchor.click();
-  URL.revokeObjectURL(url);
+async function exportJson(name, value, onError) {
+  try {
+    await saveJsonExport(name, value);
+  } catch (error) {
+    onError(`Export failed: ${error?.message ?? String(error)}`);
+  }
 }
 
 export function FilmShots({ capabilities, compiled, disabled, draft, findings = [], models = [], onChange, onImportError, run = null, selectedShotIds, setSelectedShotIds }) {
@@ -139,10 +139,10 @@ export function FilmShots({ capabilities, compiled, disabled, draft, findings = 
         <div><h3 id="film-shots-heading">Shots and render controls</h3><p>Choose which ordered shots to render, then inspect the exact compiled requests before dispatch.</p></div>
         <div className="ve-film-actions">
           <button disabled={disabled} onClick={() => { onChange((next) => next.productionPlan.shots.push(newShot(next.productionPlan.shots))); setSelectedIndex(shots.length); }} type="button">Add shot</button>
-          <button disabled={disabled} onClick={() => exportJson(`${draft.id}-production-plan.json`, draft.productionPlan)} type="button">Export production plan</button>
+          <button disabled={disabled} onClick={() => exportJson(`${draft.id}-production-plan.json`, draft.productionPlan, onImportError)} type="button">Export production plan</button>
           <button disabled={disabled} onClick={() => planInput.current?.click()} type="button">Import production plan</button>
           <input accept="application/json,.json" aria-label="Production plan file" hidden onChange={(event) => importDocument(event, "plan")} ref={planInput} type="file" />
-          <button disabled={disabled || !draft.compiledPlan} onClick={() => exportJson(`${draft.id}-compiled.json`, draft.compiledPlan)} type="button">Export compiled plan</button>
+          <button disabled={disabled || !draft.compiledPlan} onClick={() => exportJson(`${draft.id}-compiled.json`, draft.compiledPlan, onImportError)} type="button">Export compiled plan</button>
           <button disabled={disabled} onClick={() => compiledInput.current?.click()} type="button">Import compiled plan</button>
           <input accept="application/json,.json" aria-label="Compiled plan file" hidden onChange={(event) => importDocument(event, "compiled")} ref={compiledInput} type="file" />
           {draft.compiledPlan ? <button disabled={disabled} onClick={() => onChange((next) => { delete next.compiledPlan; })} type="button">Use authored prompts</button> : null}

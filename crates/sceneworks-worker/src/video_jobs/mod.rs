@@ -76,13 +76,14 @@ mod prelude {
     };
     #[allow(unused_imports)]
     pub(super) use super::{
-        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
-        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, picture_bound_seconds,
-        resolve_video_seed, run_ffmpeg, safe_download_dir, shutdown_requested, task_join_error,
-        update_job, video_progress, write_poster_frame, ApiClient, AudioTrack, BTreeMap,
-        CancelJoinGuard, DecodedVideo, Duration, FfmpegContext, Instant, JobSnapshot, JobStatus,
-        JsonObject, Path, PathBuf, ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value,
-        VideoRequest, WorkerError, WorkerResult, WorkerStatus, CANCEL_MESSAGE,
+        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, format_picture_bound,
+        fresh_asset_id, heartbeat, huggingface_snapshot_dir, json, now_rfc3339,
+        picture_bound_seconds, resolve_video_seed, run_ffmpeg, safe_download_dir,
+        shutdown_requested, task_join_error, update_job, video_progress, write_poster_frame,
+        ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo, Duration, FfmpegContext,
+        Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf, ProgressStage, ProjectStore,
+        RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError, WorkerResult, WorkerStatus,
+        CANCEL_MESSAGE,
     };
     #[cfg(any(
         target_os = "macos",
@@ -1667,12 +1668,16 @@ async fn encode_inner(
 /// `seedvr2::seedvr2_audio_mux_args` (cfg-gated to the lanes that ship it, so it is named rather
 /// than linked). Their argument vectors legitimately differ — the upscale
 /// maps a source clip's optional audio and writes `+faststart` in the same pass — but the BOUND is
-/// one policy and is computed in exactly one place. The rationale, and the measurements behind the
-/// choice of `-t` over `-shortest` and over no flag at all, live on [`audio_mux_args`].
+/// one policy, spelled once by [`format_picture_bound`] (SeedVR2 feeds it its measured length,
+/// sc-24391). The measurements behind `-t` over `-shortest` live on [`audio_mux_args`].
 ///
 /// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
 pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
-    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    format_picture_bound(frame_count as f64 / f64::from(fps.max(1)))
+}
+
+/// The one spelling of the bound, to the microsecond; SeedVR2 passes its measured length (sc-24391).
+pub(crate) fn format_picture_bound(seconds: f64) -> String {
     format!("{seconds:.6}")
 }
 
@@ -1881,8 +1886,8 @@ async fn write_poster_frame(media_path: &Path) {
 /// without measuring the clip, so the record cannot silently fall back to a prediction. That is a
 /// compile error rather than a test we would have to remember to write.
 ///
-/// Mirrors [`run_video_upscale_job`], which has always recorded its real `out_count` and
-/// `out_count / out_fps`.
+/// Mirrors [`run_video_upscale_job`], which records its real `out_count` and the picture length of
+/// the source timing it measured (sc-24391).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EncodedClip {
     /// `decoded.frames.len()` — `encode_inner` writes exactly one PNG per entry, so this IS the

@@ -5847,6 +5847,23 @@ test("the campaign can raise one lane's budget from the dispatch, with no source
   assert.match(await readFile(path.join(ROOT, "scripts/ci/memory-catalog/run.sh"), "utf8"), /build_catalog_args/);
 });
 
+test("HF_TOKEN reaches only the two catalog walk steps that can fetch missing snapshots", async () => {
+  const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
+  const topLevel = workflow.slice(0, workflow.indexOf("\njobs:"));
+  assert.doesNotMatch(topLevel, /^  HF_TOKEN:/m, "no workflow-wide token");
+  for (const name of ["mlx", "candle"]) {
+    const start = workflow.indexOf(`\n  ${name}:`);
+    const next = workflow.slice(start + 1).search(/\n  [a-z][\w-]+:/);
+    assert.ok(start > -1, `${name} job exists`);
+    const job = workflow.slice(start, next < 0 ? undefined : start + 1 + next);
+    const walk = job.match(/      - name: Walk the catalog\n([\s\S]*?)(?=\n      - |$)/)?.[1];
+    assert.ok(walk, `${name} walk step exists`);
+    assert.match(walk, /^        env:\n          HF_TOKEN: \$\{\{ secrets\.HF_TOKEN \}\}$/m);
+    assert.equal((job.match(/secrets\.HF_TOKEN/g) ?? []).length, 1, `${name} has no other token exposure`);
+    assert.match(job, /      - name: Plan the walk\n        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
+  }
+});
+
 test("a runtime stop is recognised by its spelling and reports the guard's sampled peak", async () => {
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_9000.0s"), 9000);
   assert.equal(runtimeBudgetStopSeconds("watchdog hard stop: runtime_at_or_above_3s"), 3);
