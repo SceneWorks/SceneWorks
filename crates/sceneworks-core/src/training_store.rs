@@ -2402,12 +2402,6 @@ mod tests {
         }
     }
 
-    /// sc-6143: building a dataset from a path-based item normalizes a valid-but-unsupported source
-    /// (here BMP — the same decode gap AVIF hits) to PNG as it lands in `images/`, so neither the
-    /// trainer (which reads dataset images straight through the engine, no decode backstop) nor the
-    /// Dataset Doctor ever sees a format it can't decode. macOS-only (relies on `sips`); the ffmpeg
-    /// path off macOS is identical.
-    #[cfg(target_os = "macos")]
     // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
     // before the source is even opened (the bogus source path would otherwise be NotFound).
     #[test]
@@ -2452,6 +2446,12 @@ mod tests {
         }
     }
 
+    /// sc-6143: building a dataset from a path-based item normalizes a valid-but-unsupported source
+    /// (here BMP — the same decode gap AVIF hits) to PNG as it lands in `images/`, so neither the
+    /// trainer (which reads dataset images straight through the engine, no decode backstop) nor the
+    /// Dataset Doctor ever sees a format it can't decode. macOS-only (relies on `sips`); the ffmpeg
+    /// path off macOS is identical.
+    #[cfg(target_os = "macos")]
     #[test]
     fn create_dataset_transcodes_an_unsupported_item_source_to_png() {
         let dir = tempfile::tempdir().expect("temp dir");
