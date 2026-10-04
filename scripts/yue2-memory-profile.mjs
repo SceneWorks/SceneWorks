@@ -31,14 +31,16 @@
 //   node scripts/yue2-memory-profile.mjs plan [--backend metal|cuda]
 //   node scripts/yue2-memory-profile.mjs capture --case <id> --inference-repo <dir> --out <dir>
 //   node scripts/yue2-memory-profile.mjs capture --case-file <outside-repo.json> --inference-repo <dir> --out <dir>
-//        [--data-dir <app data dir>] [--gpu-id N] [--budget-minutes N] [--dry-run]
+//        [--data-dir <app data dir>] [--gpu-id N] [--cuda-shared-device]
+//        [--cuda-shared-device-proof <fresh preflight JSON>] [--budget-minutes N] [--dry-run]
 //   node scripts/yue2-memory-profile.mjs run --backend metal|cuda --inference-repo <dir> --out <dir> [...]
 //   node scripts/yue2-memory-profile.mjs check <record.json ...>
 //   node scripts/yue2-memory-profile.mjs ingest <record.json ...>
 //
 // `--out` must be OUTSIDE the repository (a capture from a dirty checkout is not evidence).
 import { spawn, execFileSync } from "node:child_process";
-import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { closeSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -47,6 +49,7 @@ import { fileURLToPath } from "node:url";
 
 import { inferencePinFromCargo, providerClosureDigest } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { readOwnedReading, sharedDeviceProof } from "./lib/yue2-windows-owned-gpu.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/yue2-memory-profile-plan.json";
@@ -283,6 +286,7 @@ export function stagePeaks(samples, marks) {
 
 export function buildRecord({
   item, identity, engine, sceneworks, hardware, admission, outcome, sampler, samples, marks, capturedAt,
+  cudaSharedDevice = false, ownedMeasurement = null, ownedFaults = [], deviceProof = null,
 }) {
   const measured = marks ? stagePeaks(samples, marks) : {};
   const peak = Object.values(measured).reduce((max, stage) => Math.max(max, stage.peakBytes), 0);
@@ -296,7 +300,9 @@ export function buildRecord({
     request: { name: item.requestName, ...(item.arMode ? { arMode: item.arMode } : {}),
       ...(item.computePolicy ? { computePolicy: item.computePolicy } : {}), ...item.request },
     admission,
-    measured: { sampler, stages: measured, peakBytes: peak || null,
+    measured: { sampler, ...(cudaSharedDevice ? { scope: "selected-device-global", deviceProof,
+      owned: ownedMeasurement, ownedFaults } : {}),
+      stages: measured, peakBytes: peak || null,
       timingNote: "Stage wall times include external sample waits; observed peaks may miss transient maxima." },
     outcome,
     capturedAt,
@@ -309,6 +315,51 @@ export function validateRecord(record) {
     if (record[field] === undefined) fail(`record ${record.caseId ?? "?"} has no ${field}`);
   }
   const { engine, sceneworks, model, decoder } = record.identity;
+  if (record.measured.scope !== undefined &&
+      (record.measured.scope !== "selected-device-global" || record.backend !== "cuda" ||
+       record.measured.sampler !== "nvidia-smi memory.used")) {
+    fail(`${record.caseId}: invalid shared CUDA measurement scope`);
+  }
+  if (record.measured.scope === "selected-device-global" && record.measured.deviceProof !== null) {
+    const proof = record.measured.deviceProof;
+    if (!/^[0-9a-f]{64}$/.test(proof?.sha256 ?? "") || !/^luid_0x[0-9a-f]{8}_0x[0-9a-f]{8}$/i.test(proof?.luid ?? "") ||
+        !Number.isSafeInteger(proof?.physicalIndex) || proof.physicalIndex < 0 || proof.cudaOrdinal !== 0) {
+      fail(`${record.caseId}: invalid shared CUDA device proof provenance`);
+    }
+  }
+  if (record.measured.scope === "selected-device-global" && !Array.isArray(record.measured.ownedFaults)) {
+    fail(`${record.caseId}: shared CUDA measurement has no counter fault record`);
+  }
+  if (record.measured.owned) {
+    const { owned, deviceProof } = record.measured;
+    if (record.measured.scope !== "selected-device-global" || !deviceProof ||
+        owned.sampler !== "windows-gpu-process-memory dedicated" ||
+        owned.selectedLuid !== deviceProof.luid || owned.proofSha256 !== deviceProof.sha256 ||
+        !/^[0-9a-f]{64}$/.test(owned.journalSha256 ?? "") ||
+        !/^[0-9a-f]{64}$/.test(owned.process?.executableSha256 ?? "") ||
+        !Number.isSafeInteger(owned.process?.pid) || owned.process.pid < 1 ||
+        !Number.isSafeInteger(owned.process?.parentPid) || owned.process.parentPid < 1 ||
+        !Number.isFinite(Date.parse(owned.process?.createdUtc)) ||
+        !Array.isArray(owned.faults) || owned.faults.some((fault) => typeof fault !== "string") ||
+        typeof owned.complete !== "boolean") {
+      fail(`${record.caseId}: invalid owned CUDA measurement provenance`);
+    }
+    for (const [stage, sample] of Object.entries(owned.stages ?? {})) {
+      if (!STAGES.includes(stage) || !Number.isSafeInteger(sample?.peakBytes) || sample.peakBytes < 0 ||
+          !Number.isSafeInteger(sample?.samples) || sample.samples < 1) {
+        fail(`${record.caseId}: invalid owned CUDA stage ${stage}`);
+      }
+    }
+    if (!Number.isSafeInteger(owned.peakBytes) || owned.peakBytes < 0 ||
+        owned.peakBytes !== Math.max(0, ...Object.values(owned.stages ?? {}).map((stage) => stage.peakBytes))) {
+      fail(`${record.caseId}: owned CUDA overall peak disagrees with its stages`);
+    }
+    const expectedStages = Object.keys(record.outcome.stageSeconds ?? {});
+    if (owned.complete && (owned.faults.length || record.measured.ownedFaults.length ||
+        !expectedStages.length || !expectedStages.every((stage) => owned.stages?.[stage]?.samples > 0))) {
+      fail(`${record.caseId}: complete owned CUDA measurement has gaps or counter faults`);
+    }
+  }
   if (!/^[0-9a-f]{64}$/.test(engine?.closureDigest ?? "")) fail(`${record.caseId}: no captured closure digest`);
   if (!/^[0-9a-f]{40}$/.test(engine?.inferenceRevision ?? "")) fail(`${record.caseId}: no inference revision`);
   if (!/^[0-9a-f]{40}$/.test(sceneworks?.revision ?? "")) fail(`${record.caseId}: no SceneWorks revision`);
@@ -425,9 +476,9 @@ export function gradeRecord(record, { plan, closures, manifest }) {
 
 /**
  * Measured vs estimated, per stage, for a completed record. A unified (Metal) pool compares the
- * process footprint with the stage's total; a CUDA card compares `nvidia-smi` used memory (which
- * includes the CUDA context) with the stage's device bytes plus the allocator reserve admission
- * charges on top.
+ * process footprint with the stage's total. An isolated CUDA card compares global `nvidia-smi`
+ * memory.used with device bytes plus allocator reserve. On a shared CUDA card that same global
+ * reading is capacity evidence only; it cannot measure the YuE2 process's allocation.
  */
 export function coverage(record) {
   if (record.outcome.status !== "completed") return [];
@@ -439,6 +490,17 @@ export function coverage(record) {
       : record.backend === "cuda"
         ? estimate.deviceBytes + CUDA_RESERVE_BYTES
         : estimate.totalBytes;
+    if (record.measured.scope === "selected-device-global") {
+      const owned = record.measured.owned;
+      const ownedStage = owned?.complete === true ? owned.stages?.[stage] : null;
+      if (ownedStage?.samples > 0 && Number.isSafeInteger(ownedStage.peakBytes) && ownedStage.peakBytes > 0) {
+        return { stage, measuredBytes: ownedStage.peakBytes, globalDevicePeakBytes: measured.peakBytes,
+          estimatedBytes, ratio: estimatedBytes ? ownedStage.peakBytes / estimatedBytes : null,
+          covered: estimatedBytes !== null && ownedStage.peakBytes <= estimatedBytes };
+      }
+      return { stage, measuredBytes: null, globalDevicePeakBytes: measured.peakBytes,
+        estimatedBytes, ratio: null, covered: null, reason: "owned CUDA peak unavailable on shared device" };
+    }
     return {
       stage,
       measuredBytes: measured.peakBytes,
@@ -547,6 +609,7 @@ export function captureEnv({ caseFilePath, outDir, dataDir, gpuId, backend, base
     SCENEWORKS_YUE2_PROFILE_SAMPLER: backend === "metal" ? "metal-watchdog" : "cuda-nvidia-smi",
     ...(dataDir ? { SCENEWORKS_DATA_DIR: dataDir } : {}),
     ...(gpuId !== undefined ? { SCENEWORKS_GPU_ID: String(gpuId) } : {}),
+    ...(backend === "cuda" && gpuId !== undefined ? { CUDA_VISIBLE_DEVICES: String(gpuId) } : {}),
   };
 }
 
@@ -566,9 +629,18 @@ function probeHardware(backend, gpuId) {
 }
 
 /** Sample the card's used memory every `intervalMs` until stopped (CUDA). */
-function startNvidiaSampler(gpuId, journalFile, intervalMs = 250) {
+function startNvidiaSampler(gpuId, journalFile, intervalMs = 250, shared = null) {
   const samples = [];
   const journal = openSync(journalFile, "ax");
+  const ownedSamples = [];
+  const ownedFaults = [];
+  const ownedFile = shared ? path.join(path.dirname(journalFile), "cuda-owned-samples.jsonl") : null;
+  const ownedJournal = ownedFile ? openSync(ownedFile, "ax") : null;
+  const faultJournal = shared ? openSync(path.join(path.dirname(journalFile), "cuda-owned-faults.jsonl"), "ax") : null;
+  let cargoPid = null;
+  let cargoStartedAt = null;
+  let processIdentity = null;
+  let executableSha256 = null;
   let error = null;
   const timer = setInterval(() => {
     if (error) return;
@@ -591,8 +663,54 @@ function startNvidiaSampler(gpuId, journalFile, intervalMs = 250) {
       if (cause?.code && cause.code !== "ENOENT") error = cause;
       // A failed nvidia-smi tick is a gap; the boundary waits for a later real sample.
     }
+    if (shared && cargoPid) {
+      try {
+        const reading = readOwnedReading(shared, { cargoPid, cargoStartedAt, expectedIdentity: processIdentity });
+        if (!reading) return;
+        if (!processIdentity) {
+          processIdentity = reading.identity;
+          executableSha256 = createHash("sha256").update(readFileSync(processIdentity.executablePath)).digest("hex");
+        }
+        const sample = { at: Date.now() / 1000, startedAt: reading.startedAt, bytes: reading.bytes,
+          pid: reading.pid, luid: shared.proof.luid, counter: reading.raw };
+        const line = `${JSON.stringify(sample)}\n`;
+        if (writeSync(ownedJournal, line) !== Buffer.byteLength(line)) throw new Error("short owned CUDA sample journal write");
+        fsyncSync(ownedJournal);
+        ownedSamples.push(sample);
+      } catch (cause) {
+        const beforeFirstAllocation = !processIdentity &&
+          cause?.message === "owned CUDA counter has no selected-PID/LUID rows";
+        if (cause?.code !== "ENOENT" && !beforeFirstAllocation) {
+          const fault = String(cause?.message ?? cause);
+          ownedFaults.push(fault);
+          const line = `${JSON.stringify({ at: Date.now() / 1000, fault })}\n`;
+          writeSync(faultJournal, line);
+          fsyncSync(faultJournal);
+        }
+      }
+    }
   }, intervalMs);
-  return { samples, get error() { return error; }, stop: () => { clearInterval(timer); closeSync(journal); } };
+  return { samples, ownedSamples, ownedFaults, get error() { return error; },
+    setCargoProcess: (pid, startedAt) => { cargoPid = pid; cargoStartedAt = startedAt; },
+    ownedMeasurement: (marks) => {
+      if (!shared || !processIdentity) return null;
+      try {
+        const finalSha = createHash("sha256").update(readFileSync(processIdentity.executablePath)).digest("hex");
+        if (finalSha !== executableSha256) ownedFaults.push("owned test executable changed during capture");
+      } catch (cause) { ownedFaults.push(`owned test executable no longer readable: ${cause.message}`); }
+      const stages = marks ? stagePeaks(ownedSamples, marks) : {};
+      return { sampler: "windows-gpu-process-memory dedicated", selectedLuid: shared.proof.luid,
+        proofSha256: shared.proof.sha256,
+        process: { ...processIdentity, executableSha256 }, stages,
+        peakBytes: Math.max(0, ...Object.values(stages).map((stage) => stage.peakBytes)),
+        journalSha256: createHash("sha256").update(readFileSync(ownedFile)).digest("hex"),
+        faults: ownedFaults, complete: Boolean(ownedFaults.length === 0 && marks?.some((mark) => mark.stage === "done") &&
+          marks.filter((mark) => mark.stage !== "done").every((mark) => stages[mark.stage]?.samples > 0)),
+      };
+    },
+    stop: () => { clearInterval(timer); closeSync(journal);
+      if (ownedJournal !== null) closeSync(ownedJournal);
+      if (faultJournal !== null) closeSync(faultJournal); } };
 }
 
 /** Select a reading that was certainly begun after the controller saw this boundary request. */
@@ -711,7 +829,10 @@ export function startBoundaryWatcher(dir, backend, observations, readEvents = re
 
 function spawnAndWait(command, args, options) {
   return new Promise((resolve) => {
-    const child = spawn(command, args, { stdio: "inherit", ...options });
+    const { onSpawn, ...spawnOptions } = options;
+    const startedAt = Date.now();
+    const child = spawn(command, args, { stdio: "inherit", ...spawnOptions });
+    if (onSpawn) onSpawn(child.pid, startedAt);
     child.on("exit", (code, signal) => resolve({ code, signal }));
     child.on("error", (error) => resolve({ code: -1, signal: null, error }));
   });
@@ -727,7 +848,8 @@ async function readOptional(file) {
 }
 
 /** Plan one capture: the case, its files and the exact commands, without running anything. */
-export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, gpuId, budgetMinutes = 240, sources, root = ROOT }) {
+export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, gpuId, budgetMinutes = 240,
+  cudaSharedDevice = false, cudaSharedDeviceProof, sources, root = ROOT }) {
   const { plan, manifest } = sources;
   validatePlan(plan, sources);
   if (externalCaseFile && !path.relative(root, path.resolve(externalCaseFile)).startsWith("..")) {
@@ -737,6 +859,14 @@ export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, g
     ? externalCaseItem(JSON.parse(await readFile(externalCaseFile, "utf8")), plan)
     : expandCases(plan).find((candidate) => candidate.id === caseId);
   if (!item) fail(`unknown case ${caseId}; see \`plan\``);
+  if (cudaSharedDevice && item.backend !== "cuda") fail("--cuda-shared-device requires a CUDA case");
+  if (cudaSharedDevice && (!Number.isSafeInteger(gpuId) || gpuId < 0)) fail("--cuda-shared-device requires --gpu-id N");
+  if (cudaSharedDevice && (!cudaSharedDeviceProof || !path.isAbsolute(cudaSharedDeviceProof))) {
+    fail("--cuda-shared-device requires an absolute --cuda-shared-device-proof");
+  }
+  const deviceProof = cudaSharedDevice
+    ? sharedDeviceProof(await readFile(cudaSharedDeviceProof), gpuId)
+    : null;
   const resolvedOut = path.resolve(outDir, item.id.replaceAll(":", "__"));
   if (!path.relative(root, resolvedOut).startsWith("..")) {
     fail("--out must be outside the repository: a capture from a dirty checkout is not evidence");
@@ -756,6 +886,7 @@ export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, g
     compile: ["cargo", ...cargoTestArgv(item.backend, { noRun: true })],
     test,
     guarded,
+    deviceProof,
   };
 }
 
@@ -778,6 +909,7 @@ export async function captureCase(options) {
   const built = await spawnAndWait(planned.compile[0], planned.compile.slice(1), { cwd: ROOT, env: planned.env });
   if (built.code !== 0) fail(`${item.id}: the capture entrypoint does not build`);
   let sampler;
+  let nvidia;
   let samples = [];
   let result;
   if (planned.guarded) {
@@ -800,11 +932,16 @@ export async function captureCase(options) {
   } else {
     sampler = "nvidia-smi memory.used";
     const journalFile = path.join(planned.outDir, "cuda-samples.jsonl");
-    const nvidia = startNvidiaSampler(options.gpuId ?? 0, journalFile);
+    nvidia = startNvidiaSampler(options.gpuId ?? 0, journalFile, 250, planned.deviceProof
+      ? { proof: planned.deviceProof, boundaryDir: path.join(planned.outDir, "boundary"),
+        marksFile: path.join(planned.outDir, "stages.jsonl"),
+        processFile: path.join(planned.outDir, "profile-process.json") }
+      : null);
     const boundary = startBoundaryWatcher(path.join(planned.outDir, "boundary"), "cuda", nvidia);
     let boundaryError;
     try {
-      result = await spawnAndWait(planned.test[0], planned.test.slice(1), { cwd: ROOT, env: planned.env });
+      result = await spawnAndWait(planned.test[0], planned.test.slice(1), { cwd: ROOT, env: planned.env,
+        onSpawn: (pid, startedAt) => nvidia.setCargoProcess(pid, startedAt) });
     } finally {
       nvidia.stop();
       boundaryError = await boundary.stop();
@@ -816,6 +953,7 @@ export async function captureCase(options) {
   const admission = admissionBody ? JSON.parse(admissionBody) : { outcome: "unknown" };
   const outcomeBody = await readOptional(path.join(planned.outDir, "outcome.json"));
   const marksBody = await readOptional(path.join(planned.outDir, "stages.jsonl"));
+  const marks = marksBody ? parseStageMarks(marksBody) : null;
   let outcome;
   if (admission.outcome === "refused") outcome = { status: "refused", message: admission.message };
   else if (result.code === 0 && outcomeBody) outcome = { status: "completed", ...JSON.parse(outcomeBody) };
@@ -830,8 +968,12 @@ export async function captureCase(options) {
     outcome,
     sampler,
     samples,
-    marks: marksBody ? parseStageMarks(marksBody) : null,
+    marks,
     capturedAt: new Date().toISOString(),
+    cudaSharedDevice: options.cudaSharedDevice,
+    deviceProof: planned.deviceProof,
+    ownedMeasurement: planned.deviceProof ? nvidia.ownedMeasurement(marks) : null,
+    ownedFaults: planned.deviceProof ? nvidia.ownedFaults : [],
   });
   validateRecord(record);
   const recordPath = path.join(planned.outDir, "record.json");
@@ -859,6 +1001,8 @@ export function parseArgs(argv) {
     else if (arg === "--out") options.outDir = value();
     else if (arg === "--data-dir") options.dataDir = value();
     else if (arg === "--gpu-id") options.gpuId = Number(value());
+    else if (arg === "--cuda-shared-device") options.cudaSharedDevice = true;
+    else if (arg === "--cuda-shared-device-proof") options.cudaSharedDeviceProof = value();
     else if (arg === "--budget-minutes") options.budgetMinutes = Number(value());
     else if (arg === "--dry-run") options.dryRun = true;
     else if (arg.startsWith("--")) fail(`unknown option ${arg}`);
@@ -935,6 +1079,18 @@ export async function main(argv = process.argv.slice(2), root = ROOT) {
         if (grade.status !== "current") stale += 1;
         console.log(`${record.caseId}: ${grade.status} ${record.outcome.status}${grade.reasons.length ? ` — ${grade.reasons.join("; ")}` : ""}`);
         for (const row of coverage(record)) {
+          if (row.covered === null) {
+            console.log(`  ${row.stage.padEnd(9)} global device used ${formatBytes(row.globalDevicePeakBytes)}  ` +
+              `estimated own device + reserve ${formatBytes(row.estimatedBytes)}  OWN PEAK UNAVAILABLE`);
+            continue;
+          }
+          if (record.measured.scope === "selected-device-global") {
+            console.log(`  ${row.stage.padEnd(9)} owned ${formatBytes(row.measuredBytes)}  ` +
+              `global device used ${formatBytes(row.globalDevicePeakBytes)}  ` +
+              `estimated own device + reserve ${formatBytes(row.estimatedBytes)}  ` +
+              `${row.covered ? "covered" : "UNDER-PRICED"}`);
+            continue;
+          }
           console.log(
             `  ${row.stage.padEnd(9)} measured ${formatBytes(row.measuredBytes)}  estimated ${formatBytes(row.estimatedBytes)}  ` +
               `${row.covered ? "covered" : "UNDER-PRICED"}${row.ratio ? ` (${row.ratio.toFixed(2)}×)` : ""}`,

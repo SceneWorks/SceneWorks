@@ -260,7 +260,8 @@ impl StageBoundary {
             Err(error) => panic!("remove previous stage ack: {error}"),
         }
         let requested_at = now_secs();
-        let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at});
+        let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at,
+            "processId": std::process::id()});
         let temp = self.dir.join("request.tmp");
         let mut file = std::fs::File::create(&temp).expect("create stage request");
         writeln!(file, "{value}").expect("write stage request");
@@ -475,6 +476,22 @@ fn capture_case() {
             "{leftover:?} already exists; capture into a fresh output directory"
         );
     }
+    let process_file = out.join("profile-process.json");
+    let mut process_out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&process_file)
+        .expect("refuse an old profile process identity");
+    writeln!(
+        process_out,
+        "{}",
+        json!({ "processId": std::process::id() })
+    )
+    .expect("write profile process identity");
+    process_out
+        .sync_all()
+        .expect("sync profile process identity");
+    drop(process_out);
     let spec = case_spec(&case).unwrap_or_else(|why| panic!("{why}"));
     let load = resolve_load(&settings, &entry, &spec).unwrap_or_else(|why| panic!("{why}"));
     let mut request = build_request(&spec, &Inputs::default(), &run_dir, CancelFlag::new());
@@ -645,6 +662,10 @@ mod tests {
         });
         let request = wait_request(&dir);
         assert_eq!(request["stage"], "load");
+        assert_eq!(
+            request["processId"].as_u64(),
+            Some(u64::from(std::process::id()))
+        );
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(
             std::fs::read_to_string(&marks_path)

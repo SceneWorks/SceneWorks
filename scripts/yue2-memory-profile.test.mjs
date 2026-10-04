@@ -14,6 +14,7 @@ import {
   ROOT,
   admitToCorpus,
   buildRecord,
+  captureEnv,
   cargoTestArgv,
   caseFile,
   caseIdentity,
@@ -425,6 +426,62 @@ test("coverage compares the footprint with the stage total, and nvidia-smi with 
   assert.deepEqual(coverage(refused), []);
 });
 
+test("shared CUDA records keep global capacity peaks without claiming an owned admission comparison", () => {
+  const item = expandCases(sources.plan).find((candidate) => candidate.backend === "cuda");
+  const shared = record(item, { cudaSharedDevice: true, sampler: "nvidia-smi memory.used" });
+  validateRecord(shared);
+  const decode = coverage(shared).find((row) => row.stage === "decode");
+  assert.deepEqual(decode, { stage: "decode", measuredBytes: null, globalDevicePeakBytes: 12 * GIB,
+    estimatedBytes: 11 * GIB + CUDA_RESERVE_BYTES, ratio: null, covered: null,
+    reason: "owned CUDA peak unavailable on shared device" });
+  assert.equal(shared.measured.peakBytes, 12 * GIB, "the raw global peak is retained");
+  const changingForeignUse = clone(shared);
+  changingForeignUse.measured.stages.decode.peakBytes = 50 * GIB;
+  const changed = coverage(changingForeignUse).find((row) => row.stage === "decode");
+  assert.equal(changed.globalDevicePeakBytes, 50 * GIB);
+  assert.equal(changed.covered, null, "a changing foreign allocation cannot prove an own-budget pass or failure");
+  const isolated = record(item);
+  isolated.measured.stages.decode.peakBytes = 50 * GIB;
+  assert.equal(coverage(isolated).find((row) => row.stage === "decode").covered, false,
+    "the old isolated-device over-budget check still fails");
+  const invalidMetal = record(expandCases(sources.plan).find((candidate) => candidate.backend === "metal"),
+    { cudaSharedDevice: true, sampler: "nvidia-smi memory.used" });
+  assert.throws(() => validateRecord(invalidMetal), /invalid shared CUDA measurement scope/);
+  const invalidSampler = clone(shared);
+  invalidSampler.measured.sampler = "synthetic";
+  assert.throws(() => validateRecord(invalidSampler), /invalid shared CUDA measurement scope/);
+});
+
+test("shared CUDA coverage uses verified owned stage peaks, refuses over-budget and missing-stage claims", () => {
+  const item = expandCases(sources.plan).find((candidate) => candidate.backend === "cuda");
+  const proof = { sha256: "a".repeat(64), physicalIndex: 1, cudaOrdinal: 0,
+    uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", pci: "00000000:C1:00.0",
+    luid: "luid_0x00000000_0x0001f78f" };
+  const stages = Object.fromEntries(["load", "plan", "semantic", "acoustic", "decode"]
+    .map((stage) => [stage, { peakBytes: 10 * GIB, samples: 3 }]));
+  const owned = { sampler: "windows-gpu-process-memory dedicated", selectedLuid: proof.luid,
+    proofSha256: proof.sha256, process: { pid: 123, parentPid: 456,
+      createdUtc: "2026-10-04T20:00:02Z", executableSha256: "b".repeat(64) },
+    journalSha256: "c".repeat(64), stages, peakBytes: 10 * GIB, faults: [], complete: true };
+  const shared = record(item, { cudaSharedDevice: true, sampler: "nvidia-smi memory.used",
+    deviceProof: proof, ownedMeasurement: owned });
+  shared.measured.stages.decode.peakBytes = 50 * GIB;
+  validateRecord(shared);
+  assert.equal(coverage(shared).find((row) => row.stage === "decode").covered, true,
+    "foreign use changes global peak without changing owned coverage");
+  shared.measured.stages.decode.peakBytes = 55 * GIB;
+  assert.equal(coverage(shared).find((row) => row.stage === "decode").covered, true);
+  shared.measured.owned.stages.decode.peakBytes = 14 * GIB;
+  shared.measured.owned.peakBytes = 14 * GIB;
+  assert.equal(coverage(shared).find((row) => row.stage === "decode").covered, false,
+    "an owned peak above device+reserve remains under-priced");
+  delete shared.measured.owned.stages.decode;
+  shared.measured.owned.peakBytes = 10 * GIB;
+  assert.throws(() => validateRecord(shared), /complete owned CUDA measurement has gaps/);
+  shared.measured.owned.complete = false;
+  assert.equal(coverage(shared).find((row) => row.stage === "decode").covered, null);
+});
+
 test("the corpus status resumes a campaign: current cases are not captured again", () => {
   const cases = expandCases(sources.plan);
   const done = record(cases[0]);
@@ -471,6 +528,32 @@ test("capture planning: CUDA builds the candle feature, Metal runs under the foo
     command: "capture", files: [], caseId: "x", gpuId: 0, dryRun: true,
   });
   assert.throws(() => parseArgs(["run", "--backend", "rocm"]), /unknown backend/);
+  assert.equal(parseArgs(["capture", "--cuda-shared-device"]).cudaSharedDevice, true);
+  const cudaItem = expandCases(sources.plan).find((item) => item.backend === "cuda");
+  const metalItem = expandCases(sources.plan).find((item) => item.backend === "metal");
+  const external = path.join(os.tmpdir(), "yue2-shared-profile-plan");
+  await assert.rejects(planCapture({ caseId: cudaItem.id, outDir: external, cudaSharedDevice: true, sources }), /requires --gpu-id/);
+  await assert.rejects(planCapture({ caseId: metalItem.id, outDir: external, gpuId: 1, cudaSharedDevice: true, sources }), /requires a CUDA case/);
+  await assert.rejects(planCapture({ caseId: cudaItem.id, outDir: external, gpuId: 1, cudaSharedDevice: true, sources }), /requires an absolute --cuda-shared-device-proof/);
+  const proofDir = await mkdtemp(path.join(os.tmpdir(), "yue2-shared-proof-"));
+  try {
+    const proofFile = path.join(proofDir, "proof.json");
+    const files = Object.fromEntries(Array.from({ length: 29 }, (_, i) => [`raw-${i}.json`, "0".repeat(64)]));
+    await writeFile(proofFile, JSON.stringify({ backend: "cuda", label: "before-strict-bf16-standard", admitted: true,
+      census: JSON.stringify({ physicalMode: "shared-gpu1", admission: true, commandExit: 0,
+        validatedDevice: { physicalMode: "shared-gpu1", physicalIndex: 1, cudaOrdinal: 0,
+          uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe", pci: "00000000:C1:00.0",
+          luid: "luid_0x00000000_0x0001f78f" }, diagnosticFiles: files, diagnosticFileBytesB64: files }) }));
+    const planned = await planCapture({ caseId: cudaItem.id, outDir: external, gpuId: 1,
+      cudaSharedDevice: true, cudaSharedDeviceProof: proofFile, sources });
+    assert.equal(planned.env.CUDA_VISIBLE_DEVICES, "1");
+    assert.equal(planned.env.SCENEWORKS_GPU_ID, "1");
+    assert.equal(planned.deviceProof.physicalIndex, 1);
+    assert.match(planned.deviceProof.sha256, /^[0-9a-f]{64}$/);
+  } finally { await rm(proofDir, { recursive: true, force: true }); }
+  const envOptions = { caseFilePath: path.join(external, "case.json"), outDir: external, gpuId: 1, base: { CUDA_VISIBLE_DEVICES: "0" } };
+  assert.equal(captureEnv({ ...envOptions, backend: "cuda" }).CUDA_VISIBLE_DEVICES, "1");
+  assert.equal(captureEnv({ ...envOptions, backend: "metal" }).CUDA_VISIBLE_DEVICES, "0");
 });
 
 test("a record states the run's truncation, stage times and identities, or none of them (sc-23002)", () => {
