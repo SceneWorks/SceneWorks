@@ -913,6 +913,9 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
+                // Instruction-edit references (sc-24161, inference Qwen Image 2.1 LoRA): this tree's
+                // dataset plan carries none yet, so every item trains captioned/control-only.
+                reference_image_paths: Vec::new(),
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -4892,6 +4895,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5005,6 +5009,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5121,6 +5126,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5275,6 +5281,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5459,6 +5466,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5699,6 +5707,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir,
