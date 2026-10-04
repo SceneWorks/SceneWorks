@@ -24,7 +24,8 @@ use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::{
-    TrainingPlan, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    parse_resolution_buckets, TrainingPlan, RESOLUTION_BUCKETS_KEY, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -843,6 +844,19 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
+    // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
+    // refuses it (E3) — before any load, on both the dry and the real path.
+    let buckets = parse_resolution_buckets(advanced).map_err(|message| {
+        WorkerError::InvalidPayload(format!("Training config field {message}"))
+    })?;
+    if buckets.is_some() && !descriptor.techniques.resolution_buckets {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support multi-resolution buckets \
+             ({RESOLUTION_BUCKETS_KEY})."
+        )));
+    }
+
     if descriptor.backend != "candle" {
         return Ok(engine_id);
     }
@@ -1556,6 +1570,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // before. A malformed / out-of-range value never reaches here: the shared dry/real
         // preflight (`preflight_weight_noise_sigma`) refuses it first.
         weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
+        // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
+        // `resolution`, exactly as before).
+        resolution_buckets: map_resolution_buckets(advanced),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -1586,6 +1603,32 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+    }
+}
+
+/// Map `advanced.resolutionBuckets` onto the engine's typed list (absent ⇒ empty ⇒ off). The shared
+/// dry/real preflight refuses a malformed list before this runs; should one ever reach here anyway
+/// it maps **fail-closed** to a zero bucket, which the engine's technique floor refuses
+/// (`resolution_buckets[0] needs a resolution and a repeat count >= 1`) instead of silently
+/// training at one resolution.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
+    match parse_resolution_buckets(advanced) {
+        Ok(None) => Vec::new(),
+        Ok(Some(buckets)) => buckets
+            .into_iter()
+            .map(|bucket| gen_core::ResolutionBucket {
+                resolution: bucket.resolution,
+                repeats: bucket.repeats,
+            })
+            .collect(),
+        Err(_) => vec![gen_core::ResolutionBucket {
+            resolution: 0,
+            repeats: 0,
+        }],
     }
 }
 
@@ -3399,6 +3442,121 @@ mod tests {
         }
     }
 
+    /// sc-2127 (epic 2123): `advanced.resolutionBuckets` reaches the engine's typed
+    /// `resolution_buckets` row-for-row; absent stays empty (off), so a legacy plan maps exactly as
+    /// before; a malformed list maps fail-closed to a bucket the engine floor refuses.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_wires_resolution_buckets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        assert!(map_training_config(&parse(value.clone()).config)
+            .resolution_buckets
+            .is_empty());
+
+        let mut bucketed = value;
+        bucketed["config"]["advanced"]["resolutionBuckets"] = json!([
+            { "resolution": 512, "repeats": 16 },
+            { "resolution": 768, "repeats": 4 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        let rb = |resolution, repeats| gen_core::ResolutionBucket {
+            resolution,
+            repeats,
+        };
+        assert_eq!(
+            map_training_config(&parse(bucketed.clone()).config).resolution_buckets,
+            vec![rb(512, 16), rb(768, 4), rb(1024, 1)]
+        );
+
+        let mut malformed = bucketed;
+        malformed["config"]["advanced"]["resolutionBuckets"] =
+            json!([{ "resolution": 512, "repeats": 0 }]);
+        assert_eq!(
+            map_training_config(&parse(malformed).config).resolution_buckets,
+            vec![rb(0, 0)]
+        );
+        // The worker cap is the engine cap.
+        assert_eq!(
+            sceneworks_core::training::RESOLUTION_BUCKETS_MAX,
+            gen_core::MAX_RESOLUTION_BUCKETS
+        );
+    }
+
+    /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
+    /// refuses a well-formed one exactly when the active trainer's descriptor does not declare
+    /// `techniques.resolution_buckets` (admitted where it does).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_resolution_buckets_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, buckets: Value| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            value["config"]["advanced"]["resolutionBuckets"] = buckets;
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let good = json!([
+            { "resolution": 512, "repeats": 2 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        for (kernel, base) in [
+            ("z_image_lora", "z_image_turbo"),
+            ("sdxl_lora", "sdxl"),
+        ] {
+            let declared = crate::inference_runtime::trainer_descriptor(
+                engine_trainer_id_for(kernel, base).expect("native trainer"),
+            )
+            .expect("trainer registered")
+            .techniques
+            .resolution_buckets;
+            let bucketed = plan(kernel, base, good.clone());
+            if declared {
+                validate_training_target_config(&bucketed)
+                    .unwrap_or_else(|e| panic!("{base} declares buckets but refused them: {e:?}"));
+            } else {
+                assert!(
+                    err(bucketed).contains("does not support multi-resolution buckets"),
+                    "{base}"
+                );
+            }
+        }
+
+        // Malformed lists never silently map to a single-resolution run.
+        for bad in [
+            json!([]),
+            json!([{ "resolution": 512, "repeats": 0 }]),
+            json!([{ "resolution": 512, "repeats": -1 }]),
+            json!([{ "resolution": 500, "repeats": 1 }]),
+            json!("512"),
+        ] {
+            assert!(
+                err(plan("z_image_lora", "z_image_turbo", bad.clone()))
+                    .contains("resolutionBuckets"),
+                "{bad}"
+            );
+        }
+    }
+
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
     /// families (Z-Image, LTX-2.3, and both Wan A14B variants), so `finalize_training_config` must force gradient
     /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
@@ -5027,6 +5185,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5142,6 +5301,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5260,6 +5420,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5416,6 +5577,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

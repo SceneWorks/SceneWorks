@@ -29,6 +29,37 @@ export const lrSchedulerOptions = ["constant", "linear", "cosine"];
 // crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
 export const weightNoiseSigmaMax = 0.1;
 export const weightNoiseSigmaSuggested = 0.0125;
+// Multi-resolution buckets with per-bucket repeat counts (epic 2123, sc-2127): each dataset image
+// trains at every listed resolution, `repeats` times per epoch per row (so 512/768/1024 at 16/4/1
+// is a 16:4:1 per-image mix). Off (null draft) by default. These are the API's limits
+// (RESOLUTION_BUCKETS_MAX / RESOLUTION_BUCKET_REPEATS_MAX / RESOLUTION_BUCKET_STRIDE in
+// crates/sceneworks-core/src/training.rs) — a Rust parity test reads these lines, keep them equal.
+export const resolutionBucketsMax = 8;
+export const resolutionBucketRepeatsMax = 100;
+export const resolutionBucketStride = 32;
+
+// The target's advertised training resolutions, ascending (empty when it advertises none).
+function targetResolutions(target) {
+  const values = target?.limits?.resolutions;
+  return Array.isArray(values) ? values.map(Number).filter(Number.isFinite).sort((a, b) => a - b) : [];
+}
+
+// Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
+export function resolutionBucketsDraft(value) {
+  return Array.isArray(value)
+    ? value.map((row) => ({ resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }))
+    : null;
+}
+
+// The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
+// the current one (or just the current one when the target advertises none), one repeat each, so a
+// fresh list trains exactly the sizes the target already offers and the user tunes the mix.
+export function seedResolutionBuckets(target, resolution) {
+  const current = numberFromDraft(resolution);
+  const offered = targetResolutions(target).filter((value) => current === null || value <= current);
+  const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
+  return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -341,6 +372,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
     // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
     weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
+    // null = one resolution (the default); see seedResolutionBuckets.
+    resolutionBuckets: resolutionBucketsDraft(advanced.resolutionBuckets),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -379,6 +412,49 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
         }
       : {}),
   };
+}
+
+// Resolution buckets: optional (null = off), but when on the list must hold 1..max rows, each an
+// on-stride resolution the target trains at (not repeated) with a whole repeat count in
+// 1..resolutionBucketRepeatsMax — the API's exact rules (E6), so the button never enables a job
+// the API would refuse.
+function validateResolutionBuckets(rows, target, issues) {
+  if (!Array.isArray(rows)) {
+    return;
+  }
+  const field = "resolutionBuckets";
+  if (!rows.length) {
+    issues.push(issue.error(field, "Add at least one resolution bucket, or turn multi-resolution buckets off"));
+    return;
+  }
+  if (rows.length > resolutionBucketsMax) {
+    issues.push(issue.error(field, `At most ${resolutionBucketsMax} resolution buckets`));
+  }
+  const offered = targetResolutions(target);
+  const seen = new Set();
+  rows.forEach((row, index) => {
+    const n = index + 1;
+    const resolution = numberFromDraft(row?.resolution);
+    const repeats = numberFromDraft(row?.repeats);
+    if (
+      resolution === null ||
+      !Number.isInteger(resolution) ||
+      resolution <= 0 ||
+      resolution % resolutionBucketStride !== 0
+    ) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution must be a positive multiple of ${resolutionBucketStride}`));
+    } else if (offered.length && !offered.includes(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
+    } else if (seen.has(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution ${resolution} is already listed`));
+    }
+    if (resolution !== null) {
+      seen.add(resolution);
+    }
+    if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
+      issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
+    }
+  });
 }
 
 // Decide how the config-draft basis effect should react to a basis change (sc-11970).
@@ -474,6 +550,7 @@ export function configValidation(
       issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
     }
   }
+  validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
   // in the Train button's one validity summary rather than a separate `disabled` term.
   // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
@@ -609,6 +686,13 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
     // Omitted when off (empty draft), so a default job's snapshot is unchanged.
     weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
+    // Omitted when off (null draft); an empty "on" list is sent as [] and refused by both sides.
+    resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
+      ? configDraft.resolutionBuckets.map((row) => ({
+          resolution: numberFromDraft(row?.resolution),
+          repeats: numberFromDraft(row?.repeats),
+        }))
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),

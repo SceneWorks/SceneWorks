@@ -13,6 +13,11 @@ import {
   optimizerLabel,
   optionLabel,
   qualityPresetLabel,
+  rangeOptions,
+  resolutionBucketRepeatsMax,
+  resolutionBucketsMax,
+  resolutionBucketStride,
+  seedResolutionBuckets,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
@@ -111,6 +116,15 @@ export function ConfigureJobPanel({
   // Weight noising is on whenever the draft carries a value (empty = off); the toggle seeds the
   // suggested strength and the sigma input appears beside the other optimizer knobs.
   const weightNoiseEnabled = String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Multi-resolution buckets are on whenever the draft carries a row list (null = off).
+  const resolutionBuckets = Array.isArray(configDraft.resolutionBuckets) ? configDraft.resolutionBuckets : null;
+  // Bucket rows pick from the resolutions the target advertises (the API's menu, E6).
+  const bucketResolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const updateResolutionBucket = (index, key, value) =>
+    updateConfigDraft(
+      "resolutionBuckets",
+      resolutionBuckets.map((row, rowIndex) => (rowIndex === index ? { ...row, [key]: value } : row)),
+    );
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -689,7 +703,103 @@ export function ConfigureJobPanel({
                 />
                 Weight noise
               </label>
+              <label
+                className="training-checkbox-field"
+                title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+              >
+                <input
+                  checked={Boolean(resolutionBuckets)}
+                  onChange={(event) =>
+                    updateConfigDraft(
+                      "resolutionBuckets",
+                      event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
+                    )
+                  }
+                  type="checkbox"
+                />
+                Multi-resolution buckets
+              </label>
             </div>
+
+            {resolutionBuckets ? (
+              <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
+                <legend>Resolution buckets</legend>
+                <span className="training-field-hint">
+                  Each image trains at every resolution below, repeated that many times per epoch. These replace the
+                  single Resolution setting.
+                </span>
+                {resolutionBuckets.map((row, index) => (
+                  <div className="training-resolution-bucket-row" key={index}>
+                    <label>
+                      Resolution
+                      {bucketResolutionOptions.length ? (
+                        <select
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          value={row.resolution ?? ""}
+                        >
+                          {bucketResolutionOptions.map(String).includes(String(row.resolution)) ? null : (
+                            <option value={row.resolution ?? ""}>{row.resolution ?? ""}</option>
+                          )}
+                          {bucketResolutionOptions.map((resolution) => (
+                            <option key={resolution} value={resolution}>
+                              {resolution}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          min={resolutionBucketStride}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          step={resolutionBucketStride}
+                          type="number"
+                          value={row.resolution ?? ""}
+                        />
+                      )}
+                    </label>
+                    <label>
+                      Repeats
+                      <input
+                        aria-label={`Bucket ${index + 1} repeats`}
+                        max={resolutionBucketRepeatsMax}
+                        min="1"
+                        onChange={(event) => updateResolutionBucket(index, "repeats", event.target.value)}
+                        step="1"
+                        type="number"
+                        value={row.repeats ?? ""}
+                      />
+                    </label>
+                    <button
+                      aria-label={`Remove bucket ${index + 1}`}
+                      className="secondary-action"
+                      onClick={() =>
+                        updateConfigDraft(
+                          "resolutionBuckets",
+                          resolutionBuckets.filter((_, rowIndex) => rowIndex !== index),
+                        )
+                      }
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="secondary-action"
+                  disabled={resolutionBuckets.length >= resolutionBucketsMax}
+                  onClick={() =>
+                    updateConfigDraft("resolutionBuckets", [
+                      ...resolutionBuckets,
+                      { resolution: String(configDraft.resolution ?? ""), repeats: "1" },
+                    ])
+                  }
+                  type="button"
+                >
+                  Add bucket
+                </button>
+              </fieldset>
+            ) : null}
           </AdvancedSection>
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it

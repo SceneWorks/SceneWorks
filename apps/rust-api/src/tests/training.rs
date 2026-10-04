@@ -2258,6 +2258,72 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
     }
 }
 
+/// sc-2127 (epic 2123 E6): `advanced.resolutionBuckets` is validated at the API boundary with a
+/// field-level error — an empty list, a non-positive repeat, an off-stride or unsupported
+/// resolution, a duplicate — before any dataset lookup. A well-formed 16:4:1 list passes validation
+/// (and then hits the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Resolution bucket boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |buckets: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["resolutionBuckets"] = buckets;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Resolution buckets",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for buckets in [
+        json!([]),
+        json!([{ "resolution": 512, "repeats": 0 }]),
+        json!([{ "resolution": 512, "repeats": -4 }]),
+        json!([{ "resolution": 500, "repeats": 1 }]),
+        json!([{ "resolution": 1536, "repeats": 1 }]),
+        json!([{ "resolution": 512, "repeats": 1 }, { "resolution": 512, "repeats": 2 }]),
+    ] {
+        let (status, error) = submit(buckets.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{buckets}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{buckets}");
+        assert_eq!(error["context"]["field"], "resolutionBuckets", "{buckets}");
+    }
+
+    let (status, error) = submit(json!([
+        { "resolution": 512, "repeats": 16 },
+        { "resolution": 768, "repeats": 4 },
+        { "resolution": 1024, "repeats": 1 },
+    ]))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["detail"], "Training dataset not found");
+}
+
 #[tokio::test]
 async fn create_training_job_queues_real_run_when_not_dry_run() {
     let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)

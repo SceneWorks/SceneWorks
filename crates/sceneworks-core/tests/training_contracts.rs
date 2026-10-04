@@ -5,7 +5,8 @@ use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
     TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
-    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    TrainingTargetRegistry, RESOLUTION_BUCKETS_MAX, RESOLUTION_BUCKET_REPEATS_MAX,
+    RESOLUTION_BUCKET_STRIDE, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
     WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
 use serde::de::DeserializeOwned;
@@ -1787,4 +1788,128 @@ fn web_weight_noise_bound_matches_the_api_bound() {
         read("weightNoiseSigmaSuggested"),
         WEIGHT_NOISE_SIGMA_SUGGESTED
     );
+}
+
+/// Build a Z-Image plan (target resolutions 512/768/1024) whose `advanced` carries
+/// `resolutionBuckets`.
+fn build_plan_with_buckets(buckets: Value) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    config
+        .advanced
+        .insert("resolutionBuckets".to_owned(), buckets);
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_rb",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_rb",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_rb"),
+        file_name: "rb.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-2127 (epic 2123 E6): a well-formed bucket list survives into the plan verbatim; an empty
+/// list, a non-positive / non-integer / over-limit repeat, an off-stride / zero / unsupported
+/// resolution, a duplicate, too many rows and a non-list are all field-level errors naming
+/// `resolutionBuckets`.
+#[test]
+fn build_training_plan_validates_resolution_buckets_as_a_field_error() {
+    let good = json!([
+        { "resolution": 512, "repeats": 16 },
+        { "resolution": 768, "repeats": 4 },
+        { "resolution": 1024, "repeats": RESOLUTION_BUCKET_REPEATS_MAX },
+    ]);
+    let plan = build_plan_with_buckets(good.clone()).expect("16:4:N buckets accepted");
+    assert_eq!(plan.config.advanced["resolutionBuckets"], good);
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&plan.config),
+        1024
+    );
+
+    let too_many: Vec<Value> = (1..=RESOLUTION_BUCKETS_MAX as u64 + 1)
+        .map(|i| json!({ "resolution": 32 * i, "repeats": 1 }))
+        .collect();
+    for bad in [
+        json!([]),
+        json!([{ "resolution": 512, "repeats": 0 }]),
+        json!([{ "resolution": 512, "repeats": -2 }]),
+        json!([{ "resolution": 512, "repeats": 1.5 }]),
+        json!([{ "resolution": 512, "repeats": RESOLUTION_BUCKET_REPEATS_MAX + 1 }]),
+        json!([{ "resolution": 512 }]),
+        json!([{ "resolution": 0, "repeats": 1 }]),
+        json!([{ "resolution": RESOLUTION_BUCKET_STRIDE * 16 + 16, "repeats": 1 }]),
+        // On-stride but not a resolution this target trains at.
+        json!([{ "resolution": 1536, "repeats": 1 }]),
+        json!([{ "resolution": 512, "repeats": 1 }, { "resolution": 512, "repeats": 2 }]),
+        json!(too_many),
+        json!({ "resolution": 512, "repeats": 1 }),
+    ] {
+        match build_plan_with_buckets(bad.clone()) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "resolutionBuckets", "{bad}")
+            }
+            other => panic!("{bad}: expected a resolutionBuckets field error, got {other:?}"),
+        }
+    }
+}
+
+/// sc-2127 (epic 2123 E7): memory admission sizes for the largest bucket, not `resolution`.
+#[test]
+fn training_max_resolution_is_the_largest_bucket() {
+    let mut config = builtin_training_targets()
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("target")
+        .defaults
+        .clone();
+    config.resolution = 768;
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&config),
+        768
+    );
+    config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([{ "resolution": 512, "repeats": 4 }, { "resolution": 1024, "repeats": 1 }]),
+    );
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&config),
+        1024
+    );
+}
+
+/// sc-2127 (epic 2123 E6): the web form's bucket limits are the API's. The web constants live in
+/// `apps/web/src/training/trainingConfig.js`; read them so the two cannot drift.
+#[test]
+fn web_resolution_bucket_limits_match_the_api_limits() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> u64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not an integer literal: {line} ({error})"))
+    };
+    assert_eq!(read("resolutionBucketsMax"), RESOLUTION_BUCKETS_MAX as u64);
+    assert_eq!(
+        read("resolutionBucketRepeatsMax"),
+        RESOLUTION_BUCKET_REPEATS_MAX
+    );
+    assert_eq!(read("resolutionBucketStride"), RESOLUTION_BUCKET_STRIDE);
 }

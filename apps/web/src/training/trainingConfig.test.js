@@ -9,6 +9,10 @@ import {
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
+  resolutionBucketRepeatsMax,
+  resolutionBucketsMax,
+  resolutionBucketStride,
+  seedResolutionBuckets,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
 } from "./trainingConfig.js";
@@ -648,5 +652,89 @@ describe("weight noise (sc-24826)", () => {
       expect(fieldIssues({ ...whole, weightNoiseSigma: bad }).map((entry) => entry.kind)).toEqual(["error"]);
     }
     expect(fieldIssues({ ...whole, networkType: "full", weightNoiseSigma: "0.0125" })).toHaveLength(1);
+  });
+});
+
+// sc-2127 (epic 2123): multi-resolution buckets are off by default, round-trip from the form draft
+// into the job's training snapshot as typed rows, and are held to the same limits as the API.
+describe("resolution buckets (sc-2127)", () => {
+  const bucketTarget = { ...target, limits: { ...target.limits, resolutions: [512, 768, 1024] } };
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: bucketTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+  const rows = (...pairs) => pairs.map(([resolution, repeats]) => ({ resolution: String(resolution), repeats: String(repeats) }));
+  const fieldIssues = (resolutionBuckets) =>
+    configValidation({ ...whole, resolutionBuckets }, { activeDataset: dataset, selectedTarget: bucketTarget }).filter(
+      (entry) => entry.field === "resolutionBuckets",
+    );
+
+  it("seeds off and leaves a default snapshot without the key", () => {
+    const draft = configDraftFromTarget(bucketTarget, dataset, ["auto"]);
+    expect(draft.resolutionBuckets).toBeNull();
+    expect(snap(draft).config.advanced).not.toHaveProperty("resolutionBuckets");
+  });
+
+  it("round-trips a 16:4:1 bucket list into the training snapshot as numbers", () => {
+    const draft = { ...configDraftFromTarget(bucketTarget, dataset, ["auto"]), resolutionBuckets: rows([512, 16], [768, 4], [1024, 1]) };
+    expect(snap(draft).config.advanced.resolutionBuckets).toEqual([
+      { resolution: 512, repeats: 16 },
+      { resolution: 768, repeats: 4 },
+      { resolution: 1024, repeats: 1 },
+    ]);
+    // ...and a preset/target that carries buckets seeds the draft back.
+    const seeded = configDraftFromTarget(
+      { ...bucketTarget, defaults: { ...bucketTarget.defaults, advanced: { resolutionBuckets: [{ resolution: 768, repeats: 2 }] } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.resolutionBuckets).toEqual(rows([768, 2]));
+  });
+
+  it("seeds the toggle with the target's resolutions up to the current one", () => {
+    expect(seedResolutionBuckets(bucketTarget, "768")).toEqual(rows([512, 1], [768, 1]));
+    expect(seedResolutionBuckets({ limits: {} }, "640")).toEqual(rows([640, 1]));
+  });
+
+  it("uses the API's limits", () => {
+    expect(resolutionBucketsMax).toBe(8);
+    expect(resolutionBucketRepeatsMax).toBe(100);
+    expect(resolutionBucketStride).toBe(32);
+  });
+
+  it("accepts a well-formed list and flags every malformed one on the resolutionBuckets field", () => {
+    expect(fieldIssues(null)).toEqual([]);
+    expect(fieldIssues(rows([512, 16], [768, 4], [1024, resolutionBucketRepeatsMax]))).toEqual([]);
+    const tooMany = Array.from({ length: resolutionBucketsMax + 1 }, (_, i) => [512, i + 1]);
+    for (const bad of [
+      [],
+      rows([512, 0]),
+      rows([512, -1]),
+      rows([512, 1.5]),
+      rows([512, resolutionBucketRepeatsMax + 1]),
+      rows([512, ""]),
+      rows([500, 1]),
+      rows([1536, 1]),
+      rows([512, 1], [512, 2]),
+      rows(...tooMany),
+    ]) {
+      const issues = fieldIssues(bad);
+      expect(issues.length, JSON.stringify(bad)).toBeGreaterThan(0);
+      expect(issues.every((entry) => entry.kind === "error")).toBe(true);
+    }
   });
 });
