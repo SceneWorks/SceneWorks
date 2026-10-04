@@ -53,6 +53,11 @@ import {
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
 } from "../training/trainingConfig.js";
+import {
+  readTrainedLoraOfferDecisions,
+  rememberTrainedLoraOfferDecision,
+  trainedLoraOfferCandidate,
+} from "../training/trainedLoraOffer.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import { ConfigureJobPanel } from "./training/ConfigureJobPanel.jsx";
@@ -287,6 +292,36 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
   );
 }
 
+// sc-24815: the offer itself. An inline panel rather than a modal — a run finishing
+// while the user works elsewhere must not steal the screen, and the question waits in
+// Training Studio until it is answered. Names both halves of the link so the user is
+// never accepting something they cannot identify.
+function TrainedLoraOfferCard({ attaching, error, offer, onAccept, onDecline }) {
+  return (
+    <section aria-label="Attach trained LoRA" className="trained-lora-offer" role="status">
+      <div className="trained-lora-offer-copy">
+        <p className="eyebrow">Training complete</p>
+        <h3>
+          Attach &ldquo;{offer.loraName}&rdquo; to {offer.characterName}?
+        </h3>
+        <span>
+          The adapter is already in your LoRA library. Attaching it links it to {offer.characterName}, so
+          Character Studio and the generation studios pick it up without a trip through the Attach dropdown.
+        </span>
+        {error ? <span className="trained-lora-offer-error">{error}</span> : null}
+      </div>
+      <div className="trained-lora-offer-actions">
+        <button className="primary-action" disabled={attaching} onClick={onAccept} type="button">
+          {attaching ? "Attaching…" : `Attach to ${offer.characterName}`}
+        </button>
+        <button className="secondary-action" disabled={attaching} onClick={onDecline} type="button">
+          Not now
+        </button>
+      </div>
+    </section>
+  );
+}
+
 export function TrainingDataSetsLibrary() {
   return <TrainingStudio mode="datasets" />;
 }
@@ -297,6 +332,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     activeProject,
     authenticated = true,
     assets = [],
+    attachCharacterLora,
     characters = [],
     gpuOptions = defaultGpuOptions,
     jobs = [],
@@ -331,13 +367,20 @@ export function TrainingStudio({ mode = "training" } = {}) {
     trainingTargetsError = "",
     setActiveView,
     studioLaunch,
+    loras = [],
     models = [],
     modelCatalogStatus = "ready",
     createModelDownloadJob,
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     registerProjectSwitchGuard,
   } = useAppContext();
-  const datasets = trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : [];
+  // Memoized (sc-24815): the trained-LoRA offer effect reads it as a dependency, and the
+  // bare conditional handed back a fresh `[]` on every render — which the exhaustive-deps
+  // rule correctly rejects. Same value, stable identity.
+  const datasets = useMemo(
+    () => (trainingDatasetsProjectId === activeProject?.id ? trainingDatasets : []),
+    [trainingDatasets, trainingDatasetsProjectId, activeProject?.id],
+  );
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
@@ -374,6 +417,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLoadGenerationRef = useRef(0);
   const datasetDraftRevisionRef = useRef(0);
   const handledParquetImportJobsRef = useRef(new Set());
+  // sc-24815: the "attach this trained LoRA to <character>" offer. `decidedLoraJobs`
+  // mirrors the per-project localStorage record, so a reload cannot re-ask a job the
+  // user already answered; the offer itself is state rather than a derived value so a
+  // second run finishing cannot replace a question the user is still reading.
+  const [decidedLoraJobs, setDecidedLoraJobs] = useState(() => readTrainedLoraOfferDecisions(activeProject?.id));
+  const [trainedLoraOffer, setTrainedLoraOffer] = useState(null);
+  const [attachingTrainedLora, setAttachingTrainedLora] = useState(false);
+  const [trainedLoraOfferError, setTrainedLoraOfferError] = useState("");
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
@@ -1158,6 +1209,83 @@ export function TrainingStudio({ mode = "training" } = {}) {
     refreshTrainingDatasets,
   ]);
 
+  // sc-24815 — offer to attach a finished run's adapter back to the character that owns
+  // the dataset it trained from. Single-fire is the entire safety story: `attach_lora`
+  // prepends a fresh link row per call (character_store.rs:612), so a second attach is a
+  // duplicate rather than an upsert. Three separate things can re-present the same
+  // completed job — a re-render, a reload, and the fact that BOTH Training panes stay
+  // mounted under keep-alive — so the answer is recorded per project in localStorage
+  // (reload) and in `decidedLoraJobs` (this session), and only the training-mode
+  // instance ever asks: the Data Sets pane renders this same component with
+  // `datasetLibraryMode` set, and two askers would mean two attaches.
+  useEffect(() => {
+    // A project switch re-reads the record and drops any unanswered offer: the attach
+    // acts on the ACTIVE project, so a carried-over question could name a character the
+    // new project does not have.
+    setDecidedLoraJobs(readTrainedLoraOfferDecisions(activeProject?.id));
+    setTrainedLoraOffer(null);
+    setTrainedLoraOfferError("");
+  }, [activeProject?.id]);
+
+  useEffect(() => {
+    if (datasetLibraryMode || typeof attachCharacterLora !== "function") {
+      return;
+    }
+    const candidate = trainedLoraOfferCandidate({
+      jobs,
+      datasets,
+      characters,
+      loras,
+      projectId: activeProject?.id,
+      decidedJobIds: decidedLoraJobs,
+    });
+    // Keep an unanswered question on screen (a second run finishing must not replace
+    // it); replace it only when it belongs to a project the user has left.
+    setTrainedLoraOffer((current) =>
+      current && current.projectId === activeProject?.id ? current : candidate,
+    );
+  }, [activeProject?.id, attachCharacterLora, characters, datasetLibraryMode, datasets, jobs, loras, decidedLoraJobs]);
+
+  // Records the answer before the offer disappears, so neither a re-render nor a reload
+  // can present the same job id again.
+  function decideTrainedLoraOffer(jobId) {
+    rememberTrainedLoraOfferDecision(activeProject?.id, jobId);
+    setDecidedLoraJobs((current) => new Set([...current, jobId]));
+    setTrainedLoraOffer(null);
+    setTrainedLoraOfferError("");
+  }
+
+  async function acceptTrainedLoraOffer() {
+    if (!trainedLoraOffer || attachingTrainedLora) {
+      return;
+    }
+    const offer = trainedLoraOffer;
+    setAttachingTrainedLora(true);
+    setTrainedLoraOfferError("");
+    // `attachCharacterLora` reports failure through the shared error channel and
+    // resolves to null instead of throwing (useCharacters' withCharacterApi), so the
+    // returned character is the only success signal. Anything else keeps the offer up
+    // for a retry and records nothing — an adapter that never attached must not be
+    // written off as answered.
+    const updated = await attachCharacterLora(offer.characterId, offer.payload).catch(() => null);
+    setAttachingTrainedLora(false);
+    if (!updated) {
+      setTrainedLoraOfferError(
+        `Could not attach ${offer.loraName}. Try again, or attach it later from Character Studio.`,
+      );
+      return;
+    }
+    setConfigMessage(`Attached ${offer.loraName} to ${offer.characterName} — see its LoRAs panel in Character Studio.`);
+    decideTrainedLoraOffer(offer.jobId);
+  }
+
+  function declineTrainedLoraOffer() {
+    if (!trainedLoraOffer || attachingTrainedLora) {
+      return;
+    }
+    decideTrainedLoraOffer(trainedLoraOffer.jobId);
+  }
+
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.
   function removeUnavailableAsset(assetId) {
     setDatasetMessage("");
@@ -1897,6 +2025,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
               />
             ) : (
               <>
+                {trainedLoraOffer ? (
+                  <TrainedLoraOfferCard
+                    attaching={attachingTrainedLora}
+                    error={trainedLoraOfferError}
+                    offer={trainedLoraOffer}
+                    onAccept={acceptTrainedLoraOffer}
+                    onDecline={declineTrainedLoraOffer}
+                  />
+                ) : null}
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
