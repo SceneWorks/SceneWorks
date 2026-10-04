@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision b3ec3f0b (merge of PR #1176): 735 provenance candidates and 103 production-Rust crate prefixes. The advance from 457f1a37 includes the sc-24163 Qwen Image 2.1 training preflight and MLX evidence repairs (PR #1167 and #1176) and YuE2 follow-ups (PR #1158, #1159 and #1173), with the mlx-rs fork pin unchanged at 48ff5e78. Generated inventories and digests describe this exact source, including changed candidate paths and blob content. Existing compliance classifications and open items remain advisory under sc-19751; crates/audio/candle-audio-yue2 and crates/audio/candle-audio-sheetsage2 remain unclassified open items for their epic's compliance pass. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "b3ec3f0b8ee6880dc55e6433a35dc60116709752",
-  "auditDigest": "9f424474f4712abccca67726682782d8b0523f0473624ae308d005de902367f2",
+  "_comment": "Audit inventory rescanned at inference main revision d0775d49 (merge of PR #1184): 738 provenance candidates and 103 production-Rust crate prefixes. The advance from b3ec3f0b includes the main shared vision-attention conditioning changes and sc-24163 Qwen Image 2.1 diagnostic, packed-adapter fidelity and balanced training-fixture work. The mlx-rs fork pin remains 48ff5e78. Generated inventories and digests describe this exact source, including changed candidate paths and blob content. Existing compliance classifications and open items remain advisory under sc-19751; crates/audio/candle-audio-yue2 and crates/audio/candle-audio-sheetsage2 remain unclassified open items for their epic's compliance pass. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "d0775d4922f38e442d38485d412405997f9abc80",
+  "auditDigest": "40fe308b82aca5e8b1bb168f20970c9ec38feddefeffb7a62519931e51d99edb",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "b3ec3f0b8ee6880dc55e6433a35dc60116709752",
+    "revision": "d0775d4922f38e442d38485d412405997f9abc80",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 735,
-    "populationSha256": "f91c5b669a2afc4a6b02ebc064158165161727ad1f5091cc291643b45e374e7d"
+    "matchedFiles": 738,
+    "populationSha256": "1730267516f404af4987fb6617fd2d0fcb606e3ae424e2e67715bc9bc082e6fb"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "b3ec3f0b8ee6880dc55e6433a35dc60116709752",
+    "revision": "d0775d4922f38e442d38485d412405997f9abc80",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 103,
     "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"
