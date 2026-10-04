@@ -6,7 +6,8 @@ import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
 import { appConfirm } from "../appConfirm.jsx";
-import { isDesktop, tauriInvoke } from "../runtime.js";
+import { isDesktop } from "../runtime.js";
+import { saveExportFile } from "../saveExportFile.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { assetUrl, assetCanRenderAsImage } from "../components/assetMedia.jsx";
 // sc-24113 — the per-model ordered-reference ceiling. See `imageReferenceLimits.js`.
@@ -718,31 +719,8 @@ export function workingToPngFile(work, filename, { documentRef = globalThis.docu
   });
 }
 
-export async function exportEditorFile(
-  file,
-  {
-    desktop = isDesktop,
-    invoke = tauriInvoke,
-    documentRef = globalThis.document,
-    urlApi = globalThis.URL,
-  } = {},
-) {
-  if (desktop) {
-    return invoke("save_image_export", {
-      imageBytes: Array.from(new Uint8Array(await file.arrayBuffer())),
-      suggestedFilename: file.name,
-    });
-  }
-  const url = urlApi.createObjectURL(file);
-  const anchor = documentRef.createElement("a");
-  anchor.href = url;
-  anchor.download = file.name;
-  documentRef.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  urlApi.revokeObjectURL(url);
-  return null;
-}
+// The shared desktop-dialog / browser-anchor save (sc-6554), under the editor's historical name.
+export const exportEditorFile = saveExportFile;
 
 // ── What Download will actually contain (sc-15954, epic 15945) ───────────────
 //
