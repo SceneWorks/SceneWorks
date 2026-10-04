@@ -1139,6 +1139,196 @@ pub(crate) async fn write_training_dataset_face_embeddings(
     Ok(Json(json!({ "stored": stored })))
 }
 
+/// The segmentation space recorded on subject masks POSTed by the worker (sc-2126).
+pub(crate) const SUBJECT_MASK_SPACE: &str = "sam3-person";
+
+/// Enqueue SAM3 subject-mask generation over a training dataset (sc-2126). Builds the per-item work
+/// list (item id, absolute image path, content hash — legacy items get their hash backfilled) and
+/// creates a GPU-routed `dataset_subject_mask` job, which routes to any worker advertising the SAM3
+/// `image_segment` capability. The worker POSTs the masks back to `/subject-masks`.
+pub(crate) async fn create_training_dataset_subject_mask_job(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetSubjectMaskJobRequest>,
+) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
+    let item_ids = payload.item_ids.clone();
+    let (dataset, targets, dataset_root, project_name) = project_call(state.clone(), {
+        let project_id = project_id.clone();
+        let dataset_id = dataset_id.clone();
+        move |store| {
+            let (targets, root, project_name) = store.training_dataset_subject_mask_targets(
+                &project_id,
+                &dataset_id,
+                item_ids.as_deref(),
+            )?;
+            let dataset = store.get_training_dataset(&project_id, &dataset_id)?;
+            Ok((dataset, targets, root, project_name))
+        }
+    })
+    .await?;
+    if targets.is_empty() {
+        return Err(ApiError::bad_request(
+            "Training dataset has no images to mask.",
+        ));
+    }
+    let items = targets
+        .iter()
+        .map(|target| {
+            json!({
+                "itemId": target.item_id,
+                "imagePath": target.image_path.display().to_string(),
+                "contentHash": target.content_hash,
+            })
+        })
+        .collect::<Vec<_>>();
+    let requested_gpu = payload.requested_gpu;
+    let mut job_payload = match json!({
+        "provider": "training",
+        "kind": "dataset_subject_mask",
+        "projectId": project_id.clone(),
+        "datasetId": dataset.id,
+        "datasetName": dataset.name,
+        "datasetVersion": dataset.version,
+        "datasetRoot": dataset_root.display().to_string(),
+        "items": items,
+    }) {
+        Value::Object(map) => map,
+        _ => {
+            return Err(ApiError::internal(
+                "dataset subject mask job payload must be an object",
+            ))
+        }
+    };
+    crate::model_sources::ensure_runtime_model_sources(
+        &state,
+        &JobType::DatasetSubjectMask,
+        &mut job_payload,
+    )
+    .await?;
+    let job = store_call(state.clone(), move |store, _timeout| {
+        store.create_job(CreateJob {
+            job_type: JobType::DatasetSubjectMask,
+            project_id: Some(project_id),
+            project_name: Some(project_name),
+            payload: job_payload,
+            requested_gpu,
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+    })
+    .await?;
+    publish(&state, "job.updated", &job);
+    publish_queue(&state).await?;
+    Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// Persist the worker's generated subject masks (sc-2126). Each base64 PNG is validated and
+/// normalized against its image by the store; the response is the dataset's coverage report plus the
+/// count stored. A metadata write: the dataset version does not change.
+pub(crate) async fn write_training_dataset_subject_masks(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<DatasetSubjectMasksBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use base64::Engine as _;
+    if payload.space != SUBJECT_MASK_SPACE {
+        return Err(ApiError::bad_request(format!(
+            "Unsupported subject mask space {:?}; expected {SUBJECT_MASK_SPACE}.",
+            payload.space
+        )));
+    }
+    let writes = payload
+        .items
+        .into_iter()
+        .map(|item| {
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(item.mask_png.as_bytes())
+                .map_err(|error| {
+                    ApiError::bad_request(format!(
+                        "Subject mask for {} is not valid base64: {error}",
+                        item.content_hash
+                    ))
+                })?;
+            Ok(sceneworks_core::training_subject_masks::SubjectMaskWrite {
+                content_hash: item.content_hash,
+                png,
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let submitted = writes.len();
+    let report = project_call(state, move |store| {
+        store.write_training_dataset_subject_masks(
+            &project_id,
+            &dataset_id,
+            writes,
+            sceneworks_core::training_subject_masks::SubjectMaskSource::Auto,
+        )
+    })
+    .await?;
+    // A mask whose image left the dataset while the job ran is skipped (not stored), never a 404
+    // that would discard the rest of the batch.
+    let skipped = report.skipped_content_hashes.clone();
+    Ok(Json(json!({
+        "stored": submitted - skipped.len(),
+        "skipped": skipped,
+        "report": report,
+    })))
+}
+
+/// The dataset's subject-mask coverage and per-image mask status (sc-2126).
+pub(crate) async fn get_training_dataset_subject_masks(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id)): Path<(String, String)>,
+) -> Result<Json<sceneworks_core::training_subject_masks::SubjectMaskReport>, ApiError> {
+    Ok(Json(
+        project_call(state, move |store| {
+            store.training_dataset_subject_mask_report(&project_id, &dataset_id)
+        })
+        .await?,
+    ))
+}
+
+/// Replace one image's subject mask with an uploaded PNG/JPEG/WebP (sc-2126). The upload is
+/// validated (type, size, aspect) and resized deterministically to the image; a rejection is a
+/// field-level 400 on `file`. Returns the updated coverage report.
+pub(crate) async fn upload_training_dataset_subject_mask(
+    State(state): State<AppState>,
+    Path((project_id, dataset_id, item_id)): Path<(String, String, String)>,
+    mut multipart: Multipart,
+) -> Result<Json<sceneworks_core::training_subject_masks::SubjectMaskReport>, ApiError> {
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?
+    {
+        if field.name() != Some(sceneworks_core::training_subject_masks::SUBJECT_MASK_UPLOAD_FIELD)
+        {
+            continue;
+        }
+        let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+        let source_path = temp_path.clone();
+        let report = project_call(state, move |store| {
+            store.upload_training_dataset_subject_mask(
+                &project_id,
+                &dataset_id,
+                &item_id,
+                &source_path,
+            )
+        })
+        .await;
+        let _ = std::fs::remove_file(&temp_path);
+        return Ok(Json(report?));
+    }
+    Err(ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        "Subject mask upload requires a file.",
+        "subject_mask_missing",
+        json!({ "field": sceneworks_core::training_subject_masks::SUBJECT_MASK_UPLOAD_FIELD }),
+    ))
+}
+
 /// Enqueue a Real-ESRGAN upscale over the named (low-resolution-flagged) dataset items (sc-6539
 /// one-tap fix). The worker upscales each, writes a child asset, and re-points the item via
 /// `/repoint`. Mirrors `create_training_dataset_analysis_job`.

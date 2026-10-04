@@ -63,7 +63,7 @@ fn fixed_runtime_model_ids(job_type: &JobType, payload: &JsonObject) -> Vec<&'st
         JobType::PersonDetect => vec!["person_detector"],
         JobType::PersonTrack => vec!["person_detector", "sam3_person_segment"],
         JobType::PoseDetect => vec!["dwpose_pose_detector"],
-        JobType::ImageSegment => vec!["sam3_person_segment"],
+        JobType::ImageSegment | JobType::DatasetSubjectMask => vec!["sam3_person_segment"],
         JobType::ImageDetail
             if payload
                 .get("model")

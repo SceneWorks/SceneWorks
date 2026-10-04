@@ -142,16 +142,18 @@ use training::{
     batch_rename_training_dataset_items, create_training_dataset,
     create_training_dataset_analysis_job, create_training_dataset_caption_job,
     create_training_dataset_face_analysis_job, create_training_dataset_parquet_import_job,
-    create_training_dataset_upscale_job, create_training_job, delete_training_dataset,
-    finalize_training_dataset_parquet_import, get_training_dataset, get_training_dataset_readiness,
+    create_training_dataset_subject_mask_job, create_training_dataset_upscale_job,
+    create_training_job, delete_training_dataset, finalize_training_dataset_parquet_import,
+    get_training_dataset, get_training_dataset_readiness, get_training_dataset_subject_masks,
     list_training_datasets, list_training_presets, list_training_targets,
     repoint_training_dataset_items, resolve_control_overlay_output_location,
     resolve_finetune_output_location, resolve_training_output_location,
     set_training_dataset_item_quality_ack, smart_crop_training_dataset_items,
     strip_exif_training_dataset_items, trusted_adapter_files, trusted_base_checkpoint_files,
     update_training_dataset, upload_ltx_prepared_bundle, upload_training_dataset_item,
-    validate_lora_id_component, write_training_dataset_analysis_embeddings,
-    write_training_dataset_caption_sidecars, write_training_dataset_face_embeddings,
+    upload_training_dataset_subject_mask, validate_lora_id_component,
+    write_training_dataset_analysis_embeddings, write_training_dataset_caption_sidecars,
+    write_training_dataset_face_embeddings, write_training_dataset_subject_masks,
 };
 mod generation;
 use generation::{
@@ -186,16 +188,17 @@ use dto::{
     CharacterTestRequest, CharacterUpdateRequest, CharactersQuery, CreateEventTicketRequest,
     DatasetAnalysisJobRequest, DatasetEmbeddingsBody, DatasetFaceAnalysisJobRequest,
     DatasetFaceRecordsBody, DatasetImageFixBody, DatasetParquetImportJobRequest,
-    DatasetRepointBody, DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery,
-    FaceLikenessCompareRequest, FrameExtractRequest, HealthResponse, HostCapabilitiesResponse,
-    ImageJobRequest, InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest,
-    LoraUpdateRequest, LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest,
-    ModelImportRequest, ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest,
-    PersonTrackCorrectionsRequest, PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery,
-    PromptRefineRequest, QualityAckBody, ReadinessQuery, RecipePresetsQuery,
-    SavedVoiceCreateRequest, StartupReadinessResponse, TimelineCreateRequest,
-    TimelineExportRequest, TimelineSaveRequest, TrainingCaptionJobRequest, VectorMode,
-    VectorPromptWorkflowRequest, VectorRequest, VerifyResponse, VideoJobRequest, VqaJobRequest,
+    DatasetRepointBody, DatasetSubjectMaskJobRequest, DatasetSubjectMasksBody,
+    DatasetUpscaleJobRequest, DirectoriesResponse, EventsQuery, FaceLikenessCompareRequest,
+    FrameExtractRequest, HealthResponse, HostCapabilitiesResponse, ImageJobRequest,
+    InterleaveJobRequest, JobsQuery, LoraCatalogItemQuery, LoraImportRequest, LoraUpdateRequest,
+    LorasQuery, MetricsQuery, ModelConvertRequest, ModelDownloadRequest, ModelImportRequest,
+    ModelImportSourceV1, OwnershipModeV1, PersonDetectionJobRequest, PersonTrackCorrectionsRequest,
+    PersonTrackJobRequest, ProjectCreateRequest, PromptBatchesQuery, PromptRefineRequest,
+    QualityAckBody, ReadinessQuery, RecipePresetsQuery, SavedVoiceCreateRequest,
+    StartupReadinessResponse, TimelineCreateRequest, TimelineExportRequest, TimelineSaveRequest,
+    TrainingCaptionJobRequest, VectorMode, VectorPromptWorkflowRequest, VectorRequest,
+    VerifyResponse, VideoJobRequest, VqaJobRequest,
 };
 mod manifest;
 // The linked-library lifecycle seam (epic 20398, sc-20635): approve, rename, relink, scan, rescan
@@ -380,6 +383,14 @@ const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
 // still exceed the ordinary API ceiling by hundreds of megabytes.
 const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
+// sc-2126: the subject-mask worker POSTs a dataset's masks as base64 PNG in chunks of at most
+// 64 MiB of encoded items (`SUBJECT_MASK_POST_CHUNK_BYTES` in the worker's subject_mask_jobs.rs),
+// so any dataset size fits; this per-body ceiling leaves the chunk generous headroom.
+const MAX_SUBJECT_MASKS_BODY_BYTES: usize = 256 * 1024 * 1024;
+// One replacement-mask upload: the store's encoded-mask cap plus multipart framing headroom. The
+// store re-checks the exact limit and answers a field-level error past it.
+const MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES: usize =
+    sceneworks_core::training_subject_masks::SUBJECT_MASK_MAX_UPLOAD_BYTES as usize + 1024 * 1024;
 const MAX_MODEL_UPLOAD_BYTES: usize = 256 * 1024 * 1024 * 1024;
 const MAX_LORA_MULTIPART_BODY_BYTES: usize = MAX_UPLOAD_BYTES + 16 * 1024 * 1024;
 const MAX_MODEL_MULTIPART_BODY_BYTES: usize = MAX_MODEL_UPLOAD_BYTES + 16 * 1024 * 1024;
@@ -1665,6 +1676,23 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/face-analysis-jobs",
             post(create_training_dataset_face_analysis_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-mask-jobs",
+            post(create_training_dataset_subject_mask_job),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+            // The worker POSTs generated masks (base64 PNG) in chunks of up to 64 MiB, beyond the
+            // small JSON router default, so this route gets its own bounded limit.
+            get(get_training_dataset_subject_masks)
+                .post(write_training_dataset_subject_masks)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASKS_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/projects/:project_id/training/datasets/:dataset_id/items/:item_id/subject-mask",
+            post(upload_training_dataset_subject_mask)
+                .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASK_MULTIPART_BODY_BYTES)),
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/analysis-embeddings",

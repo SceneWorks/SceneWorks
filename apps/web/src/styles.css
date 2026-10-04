@@ -13794,6 +13794,20 @@ details[open] > summary.lora-scope-group-heading::before,
   object-fit: cover;
 }
 
+/* Subject-mask overlay (sc-2126): the single-channel mask laid over the thumbnail with the same
+   cover fit, multiplied so the background (black) darkens and the subject (white) shows through. */
+.training-caption-card-thumb img.training-subject-mask-overlay {
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: multiply;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.dataset-mask-attention {
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+}
+
 .training-caption-card-body {
   display: flex;
   flex-direction: column;

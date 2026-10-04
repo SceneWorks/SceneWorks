@@ -566,6 +566,36 @@ pub(crate) struct DatasetFaceAnalysisJobRequest {
     pub(crate) item_ids: Option<Vec<String>>,
 }
 
+/// Request to generate SAM3 subject masks over a training dataset (sc-2126). The segmenter is fixed
+/// (SAM3 "person"), so the request only carries GPU routing and an optional item subset.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskJobRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// Restrict the pass to these dataset item ids; when absent, every item is masked.
+    #[serde(default)]
+    pub(crate) item_ids: Option<Vec<String>>,
+}
+
+/// The subject-mask worker POSTs its generated masks here (sc-2126). Each mask is a base64 PNG keyed
+/// by its image's content hash.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMasksBody {
+    /// The segmentation space the masks came from (e.g. `sam3-person`). Recorded for diagnostics.
+    pub(crate) space: String,
+    pub(crate) items: Vec<DatasetSubjectMaskRecordBody>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DatasetSubjectMaskRecordBody {
+    pub(crate) content_hash: String,
+    /// Standard-alphabet base64 of the mask PNG.
+    pub(crate) mask_png: String,
+}
+
 /// The analysis worker POSTs its computed CLIP embeddings here to persist the sidecar (sc-6535) —
 /// the embedding-side analog of the caption job's `/caption-sidecars` write.
 #[derive(Debug, Clone, Deserialize)]
