@@ -29,6 +29,13 @@ export const lrSchedulerOptions = ["constant", "linear", "cosine"];
 // crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
 export const weightNoiseSigmaMax = 0.1;
 export const weightNoiseSigmaSuggested = 0.0125;
+
+// Whether the target's trainer on the serving platform honors weight noise — the API projects the
+// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
+// test). Absent means unsupported.
+export function targetSupportsWeightNoise(target) {
+  return target?.limits?.supportsWeightNoise === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -472,6 +479,10 @@ export function configValidation(
       issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
     } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
       issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (sigma > 0 && selectedTarget && !targetSupportsWeightNoise(selectedTarget)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs

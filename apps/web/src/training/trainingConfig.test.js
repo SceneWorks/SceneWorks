@@ -9,6 +9,7 @@ import {
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
+  targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
 } from "./trainingConfig.js";
@@ -648,5 +649,37 @@ describe("weight noise (sc-24826)", () => {
       expect(fieldIssues({ ...whole, weightNoiseSigma: bad }).map((entry) => entry.kind)).toEqual(["error"]);
     }
     expect(fieldIssues({ ...whole, networkType: "full", weightNoiseSigma: "0.0125" })).toHaveLength(1);
+  });
+});
+
+describe("weight noise target support (sc-24826)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+
+  it("reads only an explicit true flag as support", () => {
+    expect(targetSupportsWeightNoise({ limits: { supportsWeightNoise: true } })).toBe(true);
+    expect(targetSupportsWeightNoise({ limits: { supportsWeightNoise: "true" } })).toBe(false);
+    expect(targetSupportsWeightNoise({ limits: {} })).toBe(false);
+    expect(targetSupportsWeightNoise(null)).toBe(false);
+  });
+
+  it("blocks a carried-over positive sigma on a target without support", () => {
+    const issues = configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: target });
+    expect(issues.map((entry) => entry.message)).toContain(
+      "This target does not support weight noise — clear it or pick a supporting target",
+    );
+    const supported = { ...target, limits: { ...target.limits, supportsWeightNoise: true } };
+    expect(configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, weightNoiseSigma: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
 });

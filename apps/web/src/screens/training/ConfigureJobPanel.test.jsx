@@ -539,10 +539,20 @@ describe("ConfigureJobPanel — missing control preprocessor", () => {
   });
 });
 
-// sc-24826 (epic 2123): weight noising is an off-by-default advanced toggle. Checking it seeds the
-// upstream-suggested sigma into the draft (which `trainingConfigSnapshot` carries to the job);
-// unchecking clears it; the sigma input only exists while enabled and is outlined when invalid.
+// sc-24826 (epic 2123): weight noising is an off-by-default advanced toggle, offered only for a
+// target whose platform trainer declares it (`limits.supportsWeightNoise`, from the targets
+// endpoint). Checking it seeds the upstream-suggested sigma into the draft (which
+// `trainingConfigSnapshot` carries to the job); unchecking clears it; the toggle is checked only
+// for a positive sigma; the sigma input exists while the draft holds a value.
 describe("ConfigureJobPanel weight noise", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsWeightNoise: true },
+  };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
   function toggle() {
     return [...container.querySelectorAll(".training-advanced-toggles label")]
       .find((node) => node.textContent.includes("Weight noise"))
@@ -553,14 +563,23 @@ describe("ConfigureJobPanel weight noise", () => {
       .find((node) => node.textContent.trim().startsWith("Weight noise sigma"))
       ?.querySelector("input");
   }
-
-  it("is off by default and seeds 0.0125 when enabled", () => {
-    const calls = [];
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
     mount(
       <ConfigureJobPanel
-        {...baseProps({ showAdvancedConfig: true, updateConfigDraft: (field, value) => calls.push([field, value]) })}
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
       />,
     );
+    return calls;
+  }
+
+  it("is off by default and seeds 0.0125 when enabled", () => {
+    const calls = mountWith();
     expect(toggle()).toBeTruthy();
     expect(toggle().checked).toBe(false);
     expect(sigmaInput()).toBeUndefined();
@@ -568,19 +587,15 @@ describe("ConfigureJobPanel weight noise", () => {
     expect(calls).toEqual([["weightNoiseSigma", "0.0125"]]);
   });
 
+  it("offers no toggle for a target that does not support weight noise (SDXL)", () => {
+    mountWith({ target: SDXL });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(sigmaInput()).toBeUndefined();
+  });
+
   it("shows the sigma input while enabled and clears the draft when disabled", () => {
-    const calls = [];
-    const draft = { ...VALID_DRAFT, weightNoiseSigma: "0.0125" };
-    mount(
-      <ConfigureJobPanel
-        {...baseProps({
-          showAdvancedConfig: true,
-          configDraft: draft,
-          configValidity: validityFor(draft),
-          updateConfigDraft: (field, value) => calls.push([field, value]),
-        })}
-      />,
-    );
+    const calls = mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0.0125" } });
     expect(toggle().checked).toBe(true);
     expect(sigmaInput().value).toBe("0.0125");
     expect(sigmaInput().getAttribute("max")).toBe("0.1");
@@ -588,13 +603,13 @@ describe("ConfigureJobPanel weight noise", () => {
     expect(calls).toEqual([["weightNoiseSigma", ""]]);
   });
 
+  it("reads a zero sigma as off", () => {
+    mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0" } });
+    expect(toggle().checked).toBe(false);
+  });
+
   it("outlines an above-limit sigma", () => {
-    const draft = { ...VALID_DRAFT, weightNoiseSigma: "0.5" };
-    mount(
-      <ConfigureJobPanel
-        {...baseProps({ showAdvancedConfig: true, configDraft: draft, configValidity: validityFor(draft) })}
-      />,
-    );
+    mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0.5" } });
     expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
   });
 });

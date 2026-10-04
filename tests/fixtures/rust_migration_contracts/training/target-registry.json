@@ -81,7 +81,8 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an image LoRA for the Z-Image-Turbo base model.",
