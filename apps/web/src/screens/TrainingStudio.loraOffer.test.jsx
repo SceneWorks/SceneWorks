@@ -348,6 +348,45 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("does not replace an unanswered offer when a second run finishes", async () => {
+    await render();
+    const heading = () => offerPanel()?.querySelector("h3")?.textContent ?? "";
+    expect(heading()).toBe("Attach “Mira v3” to Mira?");
+
+    // A newer completed run lands while the first question is still on screen, in the
+    // SAME mounted component: the offer is state, not a derived value, so the question the
+    // user is reading survives it. (render() would remount and lose that state, which is
+    // exactly the difference this test is about.)
+    const newer = adapterJob({
+      id: "job-train-2",
+      result: { loraRegistered: true, loraId: "mira_v4", datasetId: "dataset-1" },
+    });
+    newer.payload = {
+      ...newer.payload,
+      manifestEntry: { ...newer.payload.manifestEntry, id: "mira_v4", name: "Mira v4" },
+    };
+    await rerender({ jobs: [newer, adapterJob()] });
+
+    expect(heading()).toBe("Attach “Mira v3” to Mira?");
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("sends exactly one attach when the accept button is clicked twice", async () => {
+    await render();
+    const button = buttonByText("Attach to Mira");
+    // Two clicks inside one act() batch: the state flag has not committed yet, so a
+    // state-only guard lets the second call through and the character gets two rows.
+    await act(async () => {
+      button.click();
+      button.click();
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(panelLoras()).toEqual(["Mira v3"]);
+  });
+
   it("retires a displayed offer when another window answers the same run", async () => {
     await render();
     expect(offerPanel()).not.toBeNull();
