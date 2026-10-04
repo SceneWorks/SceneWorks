@@ -816,6 +816,7 @@ async fn generate_flux2_edit_stream(
     // carries its request-context rows. Gating this whole block on the engine id meant the dev edit
     // lane never reached request-scoped evaluation at all, so a single-reference dev edit — which
     // the provider's calibrated ≥2-reference contract does not cover — ran with NO admission.
+    let pre_policy_spec = spec.clone();
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         engine_id,
         resolved_tier,
@@ -876,6 +877,25 @@ async fn generate_flux2_edit_stream(
         use_pid,
         has_phases: false,
     };
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        engine_id,
+        &request.model,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                engine_id,
+                &request.model,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            )
+            .with_resolved_artifact_tier(resolved_tier)
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
@@ -1383,6 +1403,7 @@ async fn generate_flux2_dev_control_stream(
         use_pid: false,
         has_phases: false,
     };
+    let pre_policy_spec = spec.clone();
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
         resolved_tier,
@@ -1433,6 +1454,28 @@ async fn generate_flux2_dev_control_stream(
         use_pid: false,
         has_phases: false,
     };
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        &request.model,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            let plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                FLUX2_DEV_CONTROL_ENGINE_ID,
+                &request.model,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            );
+            match resolved_tier {
+                Some(tier) => plan.with_resolved_artifact_tier(Some(tier)),
+                None => Ok(plan),
+            }
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         FLUX2_DEV_CONTROL_ENGINE_ID,

@@ -169,6 +169,10 @@ pub(crate) struct LoadIdentity {
     /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
     /// beneath any `WeightsSource` slot.
     prepared_files: Vec<PinnedWeightsFile>,
+    /// sc-24806: an MLX load released from its declared Sequential policy to eager Resident
+    /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
+    /// still needs the declared Sequential load (or the reverse); the two reload instead.
+    released_resident: bool,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
@@ -342,6 +346,9 @@ impl LoadIdentity {
                 .iter()
                 .map(|(_, pin)| pin.clone())
                 .collect(),
+            released_resident: cfg!(target_os = "macos")
+                && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
+                && spec.offload_policy == OffloadPolicy::Resident,
         })
     }
 }
@@ -1743,6 +1750,21 @@ mod tests {
             LoadIdentity::from_load_spec("z_image_turbo", &base),
             LoadIdentity::from_load_spec("z_image_turbo", &declared_refused),
             "a declaration refusal must not force a weights reload",
+        );
+        // sc-24806: an MLX load released from its declared Sequential policy cannot stage, so it
+        // must not warm-serve the declared Sequential load of the same weights, nor the reverse.
+        let released = base.clone().with_eligible_load_shape_declaration();
+        let declared_sequential = staged_deferred
+            .clone()
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released)
+                != LoadIdentity::from_load_spec("z_image_turbo", &declared_sequential),
+            cfg!(target_os = "macos"),
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released),
+            LoadIdentity::from_load_spec("z_image_turbo", &released.clone()),
         );
         assert_ne!(
             ExecutionPolicy::from_load_spec(&base),
