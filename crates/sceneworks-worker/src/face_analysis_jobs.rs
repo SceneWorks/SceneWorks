@@ -402,6 +402,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
         saving_message: "Saving face records.",
         join_error_label: "dataset face analysis task join",
         item_message: &|index, total| format!("Analyzed face {} of {}.", index + 1, total),
+        post_chunk_bytes: None,
     };
     run_batched_analysis_job(
         api,
@@ -414,9 +415,11 @@ pub(crate) async fn run_dataset_face_analysis_job(
         rx,
         blocking,
         face_records_payload,
-        |records, stored| {
+        |records, mut responses| {
+            // One POST (`post_chunk_bytes: None`), so exactly one response.
+            let stored = responses.pop().unwrap_or(Value::Null);
             let with_face = records.iter().filter(|r| !r.embedding.is_empty()).count();
-            analysis_progress(
+            Ok(analysis_progress(
                 JobStatus::Completed,
                 ProgressStage::Completed,
                 1.0,
@@ -426,7 +429,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
                 ),
                 Some(face_result(&dataset_id, records.len(), with_face, stored)),
                 backend,
-            )
+            ))
         },
     )
     .await?;

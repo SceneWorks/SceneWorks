@@ -26,6 +26,7 @@ export const GPU_REQUIRED_JOB_TYPES = new Set([
   "catalog_analysis",
   "dataset_upscale",
   "dataset_face_analysis",
+  "dataset_subject_mask",
   "face_likeness_compare",
 ]);
 

@@ -2140,3 +2140,39 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
         }
     }
 }
+
+/// sc-2126: `dataset_subject_mask` has no capability of its own — it requires the SAM3
+/// `image_segment` capability smart-select already advertises, so it routes exactly where SAM3
+/// lives, and (GPU-required) never to a CPU worker even if one claimed that capability.
+#[test]
+fn dataset_subject_mask_routes_by_the_sam3_image_segment_capability() {
+    let job = video_job("dataset_subject_mask", json!({ "datasetId": "ds_1" }));
+    let worker = |gpu_id: &str, capabilities: &[&str]| -> WorkerSnapshot {
+        serde_json::from_value(json!({
+            "id": "worker_sam3",
+            "gpuId": gpu_id,
+            "status": "idle",
+            "capabilities": capabilities,
+            "loadedModels": [],
+            "registeredAt": "2026-07-23T00:00:00Z",
+            "lastSeenAt": "2026-07-23T00:00:00Z"
+        }))
+        .expect("valid worker")
+    };
+    assert!(worker_supports_job(
+        &worker("mlx", &["gpu", "image_segment"]),
+        &job
+    ));
+    assert!(
+        !worker_supports_job(&worker("mlx", &["gpu", "dataset_subject_mask"]), &job),
+        "the job type is not itself a capability"
+    );
+    assert!(!worker_supports_job(
+        &worker("mlx", &["gpu", "image_generate"]),
+        &job
+    ));
+    assert!(!worker_supports_job(
+        &worker("cpu", &["image_segment"]),
+        &job
+    ));
+}

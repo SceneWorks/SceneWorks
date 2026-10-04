@@ -3964,6 +3964,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Face Analysis — {subject}"))
         }
+        JobType::DatasetSubjectMask => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Subject Masks — {subject}"))
+        }
         JobType::FaceLikenessCompare => {
             // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
             // user-facing subject of the row; fall back to a plain label when the payload omits it.
@@ -4997,6 +5003,9 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // is served by any worker that advertises the training capability — it has no dedicated
         // capability of its own (the real-run gate below additionally requires `lora_train_execute`).
         JobType::ControlTraining => WorkerCapability::LoraTrain.as_str(),
+        // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
+        // to any worker advertising `image_segment` instead of a capability of their own.
+        JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
         _ => job.job_type.as_str(),
     }
 }
@@ -5254,6 +5263,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::CatalogAnalysis
             | JobType::DatasetUpscale
             | JobType::DatasetFaceAnalysis
+            | JobType::DatasetSubjectMask
             | JobType::FaceLikenessCompare
     )
 }

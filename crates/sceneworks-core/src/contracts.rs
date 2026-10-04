@@ -312,6 +312,13 @@ string_enum! {
         // embedding + its frame fraction → the face sidecar. GPU-routed like dataset_analysis (the
         // native SCRFD+ArcFace stack), served by the Rust/MLX worker.
         DatasetFaceAnalysis => "dataset_face_analysis",
+        // Subject-mask generation over a training dataset (epic 2123, sc-2126): SAM3 "person"
+        // segmentation of every image, unioned over every detected person, POSTed to the dataset's
+        // content-hash-keyed mask sidecar (`training_subject_masks`) for the masked-loss trainer.
+        // GPU-routed; it has NO dedicated worker capability — it requires `image_segment`, the
+        // SAM3 capability the same native MLX/Candle workers already advertise (see
+        // jobs_store::required_capability), so it routes exactly where smart-select does.
+        DatasetSubjectMask => "dataset_subject_mask",
         // On-demand identity-likeness compare of two existing assets (epic 4406, sc-4415): a SOURCE
         // identity reference asset + a CANDIDATE asset, scored through the shared SCRFD+ArcFace
         // face-likeness scorer (face_likeness.rs) and returned as the standard
