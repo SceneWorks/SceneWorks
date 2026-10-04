@@ -57,6 +57,59 @@ import { useAppContext } from "../context/AppContext.js";
 // GPU memory cap (epic 7819). The persisted value is a fraction (0.1–0.99) of total unified
 // memory, or null/absent for "no limit". The slider works in whole percent; 100% means Off.
 const GPU_LIMIT_MIN_PERCENT = 10;
+const APP_VERSION = import.meta.env.VITE_APP_VERSION ?? "";
+
+// Settings → Updates (sc-8663): an on-demand version of the shell's startup/hourly update check.
+// The shell caches any offer and emits `app-update-changed`, so App's `useAppUpdate` hook (passed
+// in as `update`) picks it up and this group, like the sidebar, installs through that one flow —
+// there is never a second download/install path to keep in step.
+function DesktopUpdatesGroup({ update }) {
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState("");
+  const check = async () => {
+    setChecking(true);
+    setResult("");
+    try {
+      const version = await invoke("check_for_app_update");
+      setResult(version ? `SceneWorks ${version} is available.` : "You're up to date.");
+    } catch (error) {
+      setResult(`Couldn't check for updates: ${error?.message ?? String(error)}`);
+    } finally {
+      setChecking(false);
+    }
+  };
+  const busy = checking || Boolean(update?.phase);
+  return (
+    <>
+      <div className="settings-group-title">Updates</div>
+      <div className="settings-row">
+        <div>
+          <div className="settings-row-title">SceneWorks {APP_VERSION || "desktop"}</div>
+          <div className="settings-row-sub">
+            SceneWorks checks for updates when it starts and every hour while it runs.
+          </div>
+        </div>
+        <div className="settings-button-row">
+          <button className="settings-btn" disabled={busy} onClick={check} type="button">
+            {checking ? "Checking…" : "Check for updates"}
+          </button>
+          {update?.version ? (
+            <button className="settings-btn" disabled={busy} onClick={update.install} type="button">
+              Update to {update.version}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {result ? (
+        <p aria-live="polite" className="settings-note" role="status">
+          {result}
+        </p>
+      ) : null}
+      <div className="work-panel-divider" />
+    </>
+  );
+}
+
 function fractionToPercent(fraction) {
   if (typeof fraction !== "number" || !Number.isFinite(fraction) || fraction >= 1) return 100;
   return Math.min(100, Math.max(GPU_LIMIT_MIN_PERCENT, Math.round(fraction * 100)));
@@ -147,6 +200,8 @@ export function SettingsScreen({
   // adopted target, `null` when the picker was dismissed; rejects with the message to show.
   onChangeModelLibrary,
   sharingFocusRequest = 0,
+  // App's `useAppUpdate` state (sc-8663): the cached offer + the one install flow it owns.
+  appUpdate = null,
 }) {
   // theme/changeTheme and the worker registry come from the app context (the same values the
   // topbar toggle and Simple Settings read); accent + the Simple-mode default are drilled from
@@ -804,6 +859,8 @@ export function SettingsScreen({
             </div>
             <WorkflowEmbedDetails />
             <div className="work-panel-divider" />
+
+            {isDesktop ? <DesktopUpdatesGroup update={appUpdate} /> : null}
 
             {isDesktop ? (
               <>

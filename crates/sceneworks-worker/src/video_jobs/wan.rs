@@ -2284,8 +2284,8 @@ pub(super) fn run_video_generation(
 /// steps — the generation is treated as wedged and the job is failed with a clear error instead of
 /// heartbeating indefinitely.
 ///
-/// MiniMax-H3 is the one request-aware exception: one legitimate step grows with packed
-/// pixel-frames and can exceed this default on a legal long, full-canvas clip. See
+/// MiniMax-H3 and the Wan A14B engines are request-aware exceptions: one legitimate step grows
+/// with the request's workload and can exceed this default on a legal clip. See
 /// [`video_stall_timeout_policy`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
 /// override for every engine.
 #[cfg(any(
@@ -2330,18 +2330,22 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
         input.width,
         input.height,
         input.frames,
+        input.guidance,
     )
 }
 
 /// Resolve the forward-progress timeout without reading process-global state (the test seam).
 ///
-/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every existing engine
-/// retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
+/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every engine except
+/// MiniMax-H3 and the Wan A14B engines retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
 /// workload exceeds the measured shortest/full-canvas baseline: `768 * 1344 * 124`. The scale is
 /// linear, rounded up, and bounded at the engine's largest legal workload (`768 * 1344 * 345`).
 /// Small canvases and the shortest full-canvas request therefore retain the existing watchdog,
 /// while a legal 243-frame full-canvas step is not misclassified as the Metal wedge this watchdog
 /// was introduced to catch.
+///
+/// The Wan A14B dual-expert engines scale too (sc-10299); see [`wan_a14b_stall_timeout`].
+/// `guidance` is the resolved engine guidance (`None` ⇒ the engine's CFG-on default).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2352,6 +2356,7 @@ pub(super) fn video_stall_timeout_policy(
     width: u32,
     height: u32,
     frames: u32,
+    guidance: Option<f32>,
 ) -> VideoStallTimeoutPolicy {
     if let Some(seconds) = raw_override
         .and_then(|raw| raw.trim().parse::<u64>().ok())
@@ -2361,6 +2366,13 @@ pub(super) fn video_stall_timeout_policy(
             timeout: Duration::from_secs(seconds),
             basis: "operator_override",
         };
+    }
+
+    if matches!(
+        engine_id,
+        "wan2_2_t2v_14b" | "wan2_2_i2v_14b" | "wan2_2_vace_fun_14b"
+    ) {
+        return wan_a14b_stall_timeout(width, height, frames, guidance);
     }
 
     if engine_id != "minimax_h3" {
@@ -2393,6 +2405,95 @@ pub(super) fn video_stall_timeout_policy(
         } else {
             "minimax_h3_pixel_frames"
         },
+    }
+}
+
+/// Measured silent gap between consecutive denoise-step events of the candle Wan A14B engine at
+/// its shipped default request (sc-10299): 1280x720x77, packed q4 tier, Lightning 4-step (CFG off),
+/// one RTX PRO 6000 Blackwell, ~453 s per step. The MLX lane is not separately measured; it is
+/// covered by the headroom below and by never dropping under the global default. The engine emits one `Progress::Step` per denoise step
+/// and nothing between, so a single step is the shortest silent window the watchdog can see.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_REFERENCE_STEP_SECS: u64 = 453;
+
+/// DiT tokens at that reference geometry: `latent_frames x (h/16) x (w/16)` = `20 x 45 x 80`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_REFERENCE_TOKENS: u64 = 72_000;
+
+/// Headroom over the measured step for slower supported cards (sequential expert offload, per-block
+/// synchronisation, smaller GPUs, the MLX lane).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_STEP_HEADROOM: u64 = 3;
+
+/// Silence allowed before the first step event: the cold two-expert load (+ text encode) measured
+/// ~527 s on the reference card, doubled-and-rounded for slower disks, cards and cold page caches.
+/// It does not scale with geometry, so it gets its own allowance instead of the step headroom.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_LOAD_ALLOWANCE: Duration = Duration::from_secs(1200);
+
+/// Engine bounds for an A14B request: the `maxPixels` area cap and 81 frames (21 latent frames).
+/// The shipped 5 s @ 16 fps limit snaps to 77 frames; 81 is the engine's own bound.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_MAX_PIXELS: u64 = 1280 * 720;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const WAN_A14B_MAX_FRAMES: u32 = 81;
+
+/// Forward-progress budget for the Wan A14B dual-expert engines (T2V, I2V, VACE-Fun).
+///
+/// One A14B denoise step at the default 1280x720x77 request takes ~7.5 minutes on the fastest
+/// supported card, and the cold expert load precedes the first step event, so the flat 600 s
+/// default reaped healthy renders (sc-10299). The budget is [`WAN_A14B_LOAD_ALLOWANCE`] plus
+/// [`WAN_A14B_STEP_HEADROOM`] estimated steps. The step estimate scales linearly with DiT tokens
+/// from the measured reference (generous below it for the attention share, which is quadratic;
+/// fixed per-step costs such as expert swaps are absorbed by the load allowance) and doubles when
+/// classifier-free guidance runs a second forward (`guidance > 1.0`, or `None` = the engine's
+/// CFG-on default; the engines short-circuit to one forward at `guidance <= 1.0`). Dimensions and frames clamp to the
+/// largest legal request, so an out-of-contract input cannot inflate the budget without bound.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn wan_a14b_stall_timeout(
+    width: u32,
+    height: u32,
+    frames: u32,
+    guidance: Option<f32>,
+) -> VideoStallTimeoutPolicy {
+    let grid = (u64::from(width) / 16)
+        .saturating_mul(u64::from(height) / 16)
+        .min(WAN_A14B_MAX_PIXELS / 256);
+    let latent_frames = u64::from(frames.clamp(1, WAN_A14B_MAX_FRAMES).saturating_sub(1) / 4 + 1);
+    let tokens = grid.saturating_mul(latent_frames);
+    let passes = if guidance.is_none_or(|g| g > 1.0) {
+        2
+    } else {
+        1
+    };
+    let step_secs = (WAN_A14B_REFERENCE_STEP_SECS * passes)
+        .saturating_mul(tokens)
+        .div_ceil(WAN_A14B_REFERENCE_TOKENS);
+    VideoStallTimeoutPolicy {
+        timeout: WAN_A14B_LOAD_ALLOWANCE
+            + Duration::from_secs(WAN_A14B_STEP_HEADROOM.saturating_mul(step_secs)),
+        basis: "wan_a14b_token_work",
     }
 }
 

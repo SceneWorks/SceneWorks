@@ -973,17 +973,21 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
                 candidate["corpusSha256"],
                 "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
             );
+            // Preserve packaged provenance and validate its integrity. Current source
+            // currency is advisory; controlled JS fixtures cover source drift.
             let closure_check = std::process::Command::new("node")
                 .args([
-                    "scripts/starvector-production-closure.mjs",
-                    "check-manifest",
+                    "--input-type=module",
+                    "--eval",
+                    "import { validateProductionClosureShape } from './scripts/starvector-production-closure.mjs'; validateProductionClosureShape(JSON.parse(process.argv[1]));",
                 ])
+                .arg(candidate["productionClosure"].to_string())
                 .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
                 .output()
-                .expect("run the authoritative source-closure checker");
+                .expect("run the authoritative production-closure integrity checker");
             assert!(
                 closure_check.status.success(),
-                "source closure mismatch: {}",
+                "production closure integrity failure: {}",
                 String::from_utf8_lossy(&closure_check.stderr)
             );
             assert_eq!(

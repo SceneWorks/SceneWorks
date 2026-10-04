@@ -1708,9 +1708,23 @@ describe("ImageStudio model picker capability gating", () => {
     await act(async () => {});
     expect(tierPicker(container).value).toBe("q4");
     expect(floorNote()).toBeTruthy();
+    expect(floorNote().textContent).toContain("Your pick is honored.");
     // The explicit q4 is honored on Generate (not switched back to the floor).
     await click(generateButton());
     expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+  });
+
+  it("does not call a DERIVED below-floor tier the user's honored pick (sc-22246)", async () => {
+    // A variant-matrix model's clean fallback is q8 → q4, so with its q8 floor not installed the
+    // derived default lands on q4 — below the floor — without any user pick.
+    const model = { ...matrixModel(["q4", "bf16"]), minQualityTier: "q8" };
+    await render(baseContext({ imageModels: [model], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    expect(tierPicker(container).value).toBe("q4");
+    expect(floorNote()).toBeTruthy();
+    expect(floorNote().textContent).not.toContain("Your pick is honored.");
+    expect(container.querySelector(".quant-tier-suggested-note")).toBeTruthy();
   });
 
   it("does not flag or clamp a NON-floored model's q4 default (sc-10731, acceptance #3)", async () => {
@@ -1766,6 +1780,8 @@ describe("ImageStudio model picker capability gating", () => {
     setSelect(tierPicker(container), "q8");
     await act(async () => {});
     expect(tierPicker(container).value).toBe("q8");
+    // A deliberate pick is not labelled a suggestion (sc-22246).
+    expect(container.querySelector(".quant-tier-suggested-note")).toBeFalsy();
 
     // Simulate an app restart: tear the tree down and mount a FRESH one (React state is gone; only
     // the persisted sticky survives), then re-render the SAME model. (The Advanced panel's open
@@ -1778,8 +1794,35 @@ describe("ImageStudio model picker capability gating", () => {
       await act(async () => {});
     }
     // The sticky q8 now seeds the picker, winning over the declared default q4 — persistence +
-    // precedence (sticky > declared/base default) proven end-to-end.
+    // precedence (sticky > declared/base default) proven end-to-end. Still a chosen tier, not a suggestion.
     expect(tierPicker(container).value).toBe("q8");
+    expect(container.querySelector(".quant-tier-suggested-note")).toBeFalsy();
+  });
+
+  it("labels a derived tier as a suggestion until the user keeps it, which makes it explicit (sc-22246)", async () => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const model = matrixModel(["q4", "q8", "bf16"], "q4");
+    await render(baseContext({ createImageJob, imageModels: [model], macCapabilities: MAC_CAPS }));
+    await openAdvanced(container);
+    await act(async () => {});
+    const note = () => container.querySelector(".quant-tier-suggested-note");
+    // No sticky: q4 is a derived default — the picker says so, and the payload leaves it clampable.
+    expect(tierPicker(container).value).toBe("q4");
+    expect(note()).toBeTruthy();
+    await click(generateButton());
+    expect(createImageJob.mock.calls[0][0].advanced.mlxQuantize).toBe(4);
+    expect(createImageJob.mock.calls[0][0].advanced).not.toHaveProperty("mlxQuantizeExplicit");
+
+    // Keeping the suggested tier affirms it without switching tiers: the label goes away and the
+    // same tier now rides the payload as a deliberate pick the worker honors.
+    const keep = note().querySelector("button");
+    expect(keep.getAttribute("aria-label")).toBe("Keep Q4 (smallest) as your pick");
+    await click(keep);
+    expect(tierPicker(container).value).toBe("q4");
+    expect(note()).toBeFalsy();
+    await click(generateButton());
+    expect(createImageJob.mock.calls[1][0].advanced.mlxQuantize).toBe(4);
+    expect(createImageJob.mock.calls[1][0].advanced.mlxQuantizeExplicit).toBe(true);
   });
 
   it("keeps the sticky independent per model — a pick on model X does not affect model Y (sc-10727)", async () => {

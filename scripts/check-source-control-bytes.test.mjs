@@ -21,6 +21,8 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".mjs",
   ".cjs",
   ".mts",
+  ".orig",
+  ".stderr",
   ".ts",
   ".tsx",
   ".js",
@@ -33,6 +35,8 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".yml",
   ".yaml",
 ];
+
+const REQUIRED_TEXT_BASENAMES = ["COPYRIGHT"];
 
 const DECLARED_BINARY_EXTENSIONS = [
   ".bin",
@@ -123,6 +127,9 @@ test("explicit text attributes cover every path selected by the scanner", () => 
   for (const extension of REQUIRED_TEXT_EXTENSIONS) {
     assert.equal(SOURCE_EXTENSIONS.has(extension), true, `${extension} must be scanned`);
   }
+  for (const name of REQUIRED_TEXT_BASENAMES) {
+    assert.equal(SOURCE_BASENAMES.has(name), true, `${name} must be scanned`);
+  }
 });
 
 test("every currently tracked path is selected source or a declared binary format", () => {
@@ -144,6 +151,9 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
 
   initRepo(repo);
   writeFileSync(join(repo, "clean.mjs"), 'const separator = "\\t";\n');
+  writeFileSync(join(repo, "COPYRIGHT"), "Copyright notice.\n");
+  writeFileSync(join(repo, "Cargo.toml.orig"), "[package]\nname = \"fixture\"\n");
+  writeFileSync(join(repo, "fixture.stderr"), "error[E0001]: fixture\n");
   for (const extension of DECLARED_BINARY_EXTENSIONS) {
     writeFileSync(join(repo, `asset${extension}`), Buffer.from([0x00, 0x01, 0x02]));
   }
@@ -160,6 +170,14 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
   assert.equal(mutated.status, 1);
   assert.match(mutated.stderr, /clean\.mjs: byte offset 19: 0x00/);
   assert.match(mutated.stderr, /TAB \(0x09\), LF \(0x0a\), and CR \(0x0d\) only/);
+
+  writeFileSync(join(repo, "fixture.stderr"), Buffer.from("error\0message\n"));
+  const mutatedDiagnostic = spawnSync(process.execPath, [CHECKER], {
+    cwd: repo,
+    encoding: "utf8",
+  });
+  assert.equal(mutatedDiagnostic.status, 1);
+  assert.match(mutatedDiagnostic.stderr, /fixture\.stderr: byte offset 5: 0x00/);
 });
 
 test("explicit text attributes keep a NUL-bearing source diff textual", (t) => {

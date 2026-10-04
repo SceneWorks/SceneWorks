@@ -8,7 +8,7 @@
   "generatedFrom": {
     "candle": {
       "inferenceRevision": "012d5ca58a690b05b3b375ba48fd40d960f99612",
-      "audioInferenceRevision": "d1c2c8cfba975080840d87cf7e257a257b8db628"
+      "audioInferenceRevision": "8d625c68cfd0903213ad38f311ec8b072adeedfb"
     },
     "mlx": {
       "inferenceRevision": "d1c2c8cfba975080840d87cf7e257a257b8db628"

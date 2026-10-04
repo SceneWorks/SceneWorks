@@ -1,11 +1,14 @@
 FROM node:22-alpine
 
 WORKDIR /app
+RUN chown node:node /app
+ENV HOME=/home/node
+USER node
 
-COPY apps/web/package*.json ./
+COPY --chown=node:node apps/web/package*.json ./
 RUN npm ci
 
-COPY apps/web ./
+COPY --chown=node:node apps/web ./
 
 EXPOSE 5173
 

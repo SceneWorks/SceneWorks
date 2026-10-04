@@ -9,6 +9,7 @@
     "core:default",
     "core:window:allow-set-fullscreen",
     "allow-get-update-status",
+    "allow-check-for-app-update",
     "allow-download-app-update",
     "allow-install-app-update",
     "allow-discard-app-update",

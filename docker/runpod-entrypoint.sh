@@ -57,11 +57,11 @@ ensure_writable_dir() {
 
   require_absolute_path "${label}" "${dir}" || return 1
   if ! mkdir -p -- "${dir}"; then
-    log "cannot create ${label} at '${dir}'. The RunPod volume must be writable by the container root user."
+    log "cannot create ${label} at '${dir}'. The RunPod volume must permit initialization and writes by the configured service identity."
     return 1
   fi
   if ! probe="$(mktemp "${dir}/.sceneworks-write-test.XXXXXX")"; then
-    log "${label} at '${dir}' is not writable. This image runs as root and does not recursively chown network volumes; fix the mount's export/ACL permissions or choose a writable per-path override."
+    log "${label} at '${dir}' is not writable. Fix the mount's export/ACL permissions for the service UID or choose a writable per-path override; startup never falls back to a root service."
     return 1
   fi
   rm -f -- "${probe}"
@@ -216,10 +216,9 @@ if [[ -z "${jobs_db_parent}" && "${SCENEWORKS_JOBS_DB_PATH}" == /* ]]; then
 fi
 [[ "${jobs_db_parent}" != "${SCENEWORKS_JOBS_DB_PATH}" ]] || jobs_db_parent="."
 
-# The runtime is intentionally root so a newly attached root-owned volume and a
-# directory owned by a different numeric UID both work without a recursive
-# ownership walk over multi-gigabyte model caches. Restrict startup work to the
-# exact managed directories and verify writes before launching either child.
+# Validate every configured path before privileged initialization. The helper
+# grants only the service identity access, then execs this supervisor without
+# root or capabilities. The second pass write-probes as the actual service UID.
 require_absolute_path "SCENEWORKS_VOLUME" "${SCENEWORKS_VOLUME}" || exit 1
 require_absolute_path "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
 require_absolute_path "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
@@ -227,6 +226,18 @@ require_absolute_path "SceneWorks credentials directory" "${SCENEWORKS_CREDENTIA
 require_absolute_path "Hugging Face home" "${HF_HOME}" || exit 1
 require_absolute_path "Hugging Face hub cache" "${effective_hf_hub_cache}" || exit 1
 require_absolute_path "jobs.db parent directory" "${jobs_db_parent}" || exit 1
+if [[ "$(id -u)" == "0" ]]; then
+  # No environment flag bypass: a root invocation must complete the drop.
+  source "$(dirname "${BASH_SOURCE[0]}")/runpod-privileges.sh"
+  initialize_runpod_service \
+    "${SCENEWORKS_DATA_DIR}" "${SCENEWORKS_CONFIG_DIR}" \
+    "${SCENEWORKS_CREDENTIALS_DIR}" "${HF_HOME}" \
+    "${effective_hf_hub_cache}" "${jobs_db_parent}" || exit 1
+  exec setpriv --reuid="${service_uid}" --regid="${service_gid}" \
+    "${privilege_group_args[@]}" --bounding-set=-all --inh-caps=-all --ambient-caps=-all \
+    --no-new-privs bash "${BASH_SOURCE[0]}"
+fi
+
 ensure_writable_dir "SceneWorks data directory" "${SCENEWORKS_DATA_DIR}" || exit 1
 ensure_writable_dir "SceneWorks config directory" "${SCENEWORKS_CONFIG_DIR}" || exit 1
 ensure_writable_dir "SceneWorks credentials directory" "${SCENEWORKS_CREDENTIALS_DIR}" || exit 1

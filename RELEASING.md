@@ -190,6 +190,16 @@ Before creating either ref, verify all of the following:
   macOS job.
 - The signing Mac is online. Only the Mac holding the Developer ID certificate
   and notary key may carry `signing`.
+- Windows Authenticode signing (sc-1357) is configured: repository secrets
+  `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_SECRET` hold the
+  Artifact Signing service principal (role *Artifact Signing Certificate Profile
+  Signer* on the `sceneworks-signing` account), and its client secret has not
+  expired. Without `AZURE_CLIENT_ID` the Windows job still succeeds but ships
+  **unsigned** installers with a workflow warning. The endpoint, account and
+  certificate profile default to `https://eus.codesigning.azure.net`,
+  `sceneworks-signing` and `sceneworks-public`; the repository variables
+  `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT` and
+  `ARTIFACT_SIGNING_PROFILE` override them.
 - No `release/X.Y.Z` branch, `vX.Y.Z` tag, or GitHub Release already exists.
 - The checkout is clean and exactly matches `origin/release/next`.
 
@@ -236,6 +246,9 @@ Before pressing **Publish**, verify:
 - macOS, Windows, Linux, and RunPod workflows all succeeded;
 - the draft contains the DMG, macOS updater archive, Windows EXE and MSI, Linux
   AppImage and DEB, and the completed `latest.json`;
+- the Windows job log shows the installers signed (no "UNSIGNED" warning), and a
+  downloaded `-setup.exe` shows publisher **Michael Trefry** under
+  *Properties -> Digital Signatures*;
 - release notes and prerelease status are correct; and
 - the RunPod versioned image and `latest` were published by the successful run.
 
