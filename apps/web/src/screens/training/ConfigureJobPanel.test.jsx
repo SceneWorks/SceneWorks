@@ -538,3 +538,63 @@ describe("ConfigureJobPanel — missing control preprocessor", () => {
     expect(container.querySelector(".required-models-notice")).toBeNull();
   });
 });
+
+// sc-24826 (epic 2123): weight noising is an off-by-default advanced toggle. Checking it seeds the
+// upstream-suggested sigma into the draft (which `trainingConfigSnapshot` carries to the job);
+// unchecking clears it; the sigma input only exists while enabled and is outlined when invalid.
+describe("ConfigureJobPanel weight noise", () => {
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Weight noise"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function sigmaInput() {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Weight noise sigma"))
+      ?.querySelector("input");
+  }
+
+  it("is off by default and seeds 0.0125 when enabled", () => {
+    const calls = [];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, updateConfigDraft: (field, value) => calls.push([field, value]) })}
+      />,
+    );
+    expect(toggle()).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(sigmaInput()).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", "0.0125"]]);
+  });
+
+  it("shows the sigma input while enabled and clears the draft when disabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, weightNoiseSigma: "0.0125" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: draft,
+          configValidity: validityFor(draft),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(sigmaInput().value).toBe("0.0125");
+    expect(sigmaInput().getAttribute("max")).toBe("0.1");
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", ""]]);
+  });
+
+  it("outlines an above-limit sigma", () => {
+    const draft = { ...VALID_DRAFT, weightNoiseSigma: "0.5" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: draft, configValidity: validityFor(draft) })}
+      />,
+    );
+    expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
+  });
+});

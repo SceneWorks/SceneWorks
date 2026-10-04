@@ -269,6 +269,7 @@ mod driver {
         let items: Vec<TrainingItem> = image_files(&train_dir)
             .into_iter()
             .map(|image_path| TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,
@@ -386,6 +387,7 @@ mod driver {
         let items: Vec<TrainingItem> = image_files(&train_dir)
             .into_iter()
             .map(|image_path| TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,

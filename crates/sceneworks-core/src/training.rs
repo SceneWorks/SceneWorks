@@ -43,6 +43,19 @@ pub const TRAINING_PLAN_VERSION: u32 = 1;
 /// `advanced.timestepType`/`timestepBias`.
 pub const SUPPORTED_LR_SCHEDULERS: [&str; 3] = ["constant", "linear", "cosine"];
 
+/// `advanced` key of the relative-mode **weight noising** strength (epic 2123, sc-24826): after
+/// every optimizer update the native trainer perturbs each adapter tensor by
+/// `N(0,1) · sigma · rms(w)`. Absent or `0` is off.
+pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
+/// Inclusive upper bound submit-time validation accepts for [`WEIGHT_NOISE_SIGMA_KEY`]. The web
+/// form enforces the identical bound (`weightNoiseSigmaMax` in
+/// `apps/web/src/training/trainingConfig.js`; a parity test pins the two together, epic 2123 E6).
+/// The upstream suggested strength is [`WEIGHT_NOISE_SIGMA_SUGGESTED`]; 0.1 is eight times that —
+/// far into "destroys the adapter" territory, so anything above it is a typo, not a choice.
+pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
+/// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
+pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -2716,6 +2729,9 @@ pub enum TrainingPlanError {
     /// client. Kept structured so the API can return a field-specific error
     /// without scraping a human-facing sentence.
     TargetLimit(TrainingTargetLimitError),
+    /// A config field holds an invalid value (wrong type, out of range, or an incompatible
+    /// combination). Names the request `field` so the API returns a field-level error.
+    InvalidField { field: String, message: String },
 }
 
 /// A target-advertised limit rejected while normalizing a training request.
@@ -2813,6 +2829,7 @@ impl std::fmt::Display for TrainingPlanError {
             }
             Self::InvalidConfig(detail) => formatter.write_str(detail),
             Self::TargetLimit(error) => error.fmt(formatter),
+            Self::InvalidField { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -3253,6 +3270,37 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         ));
     }
     validate_lr_scheduler(config)?;
+    validate_weight_noise(config)?;
+    Ok(())
+}
+
+/// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a
+/// finite number in `0..=`[`WEIGHT_NOISE_SIGMA_MAX`], and a non-zero value cannot be combined with
+/// a full base fine-tune — weight noise perturbs adapter factors only (E5). Each failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field.
+fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let Some(value) = config.advanced.get(WEIGHT_NOISE_SIGMA_KEY) else {
+        return Ok(());
+    };
+    let field_error = |message: String| TrainingPlanError::InvalidField {
+        field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+        message,
+    };
+    let sigma = value
+        .as_f64()
+        .filter(|sigma| sigma.is_finite())
+        .ok_or_else(|| field_error(format!("{WEIGHT_NOISE_SIGMA_KEY} must be a number.")))?;
+    if !(0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(&sigma) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} ({sigma}) must be between 0 and {WEIGHT_NOISE_SIGMA_MAX}."
+        )));
+    }
+    if sigma > 0.0 && config_is_full_finetune(config) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} perturbs adapter weights only and cannot be combined with \
+             networkType '{NETWORK_TYPE_FULL}'."
+        )));
+    }
     Ok(())
 }
 

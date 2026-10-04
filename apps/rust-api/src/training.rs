@@ -1933,6 +1933,14 @@ fn training_plan_error_to_api_error(
                 context,
             )
         }
+        sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                message,
+                "training_field_error",
+                json!({ "field": field }),
+            )
+        }
         other => ApiError::bad_request(other.to_string()),
     }
 }
