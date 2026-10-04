@@ -182,4 +182,34 @@ describe("DatasetCaptionDialog", () => {
     expect(document.body.querySelector(".dataset-caption-mode-note").textContent).toContain("exactly its trigger words");
     expect(buttonByText(container, "Caption missing").disabled).toBe(false);
   });
+
+  it.each(["default", "subjectOnly", "triggerOnly"])("shows the trigger-words field in %s mode and reports an edit", async (mode) => {
+    const onChange = renderMode(mode);
+    const input = labelled("Trigger words");
+    expect(input).toBeTruthy();
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+      setter.call(input, "miraStyle");
+      input.dispatchEvent(new window.Event("input", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith("triggerWords", "miraStyle");
+  });
+
+  // E6: the dialog enforces the same limits the API does (16 words, 64 characters each).
+  it.each([
+    ["17 words", Array.from({ length: 17 }, (_, index) => `w${index}`).join(", "), "at most 16 trigger words"],
+    ["a 65-character word", "a".repeat(65), "at most 64 characters"],
+  ])("blocks Run on %s", (_label, triggerWords, message) => {
+    renderMode("triggerOnly", { settings: { ...baseSettings, mode: "triggerOnly", triggerWords } });
+    expect(document.body.querySelector("[role=alert]").textContent).toContain(message);
+    expect(buttonByText(container, "Caption missing").disabled).toBe(true);
+  });
+
+  it("accepts trigger words at the limits", () => {
+    // 16 words, the last exactly 64 characters.
+    const atLimits = [...Array.from({ length: 15 }, (_, index) => `w${index}`), "a".repeat(64)].join(", ");
+    renderMode("triggerOnly", { settings: { ...baseSettings, mode: "triggerOnly", triggerWords: atLimits } });
+    expect(document.body.querySelector("[role=alert]")).toBeNull();
+    expect(buttonByText(container, "Caption missing").disabled).toBe(false);
+  });
 });

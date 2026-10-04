@@ -1475,6 +1475,18 @@ fn rollback_file_renames(applied: &[AppliedRename]) {
     }
 }
 
+/// Refuses a caption whose `mode` is not one of the known caption modes (sc-24829, E6): an
+/// unrecognized string deserializes to `CaptionMode::Unknown` and would otherwise be stored
+/// silently on every dataset write path (create/update items, external items, caption sidecars).
+fn validate_caption_input_mode(caption: Option<&CaptionInput>) -> ProjectStoreResult<()> {
+    match caption.and_then(|caption| caption.mode.as_ref()) {
+        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::BadRequest(format!(
+            "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
+        ))),
+        _ => Ok(()),
+    }
+}
+
 fn apply_caption_patches(
     dataset: &mut TrainingDataset,
     inputs: Vec<TrainingDatasetCaptionSidecarItemInput>,
@@ -1482,6 +1494,7 @@ fn apply_caption_patches(
 ) -> ProjectStoreResult<()> {
     let mut seen_inputs = Vec::new();
     for input in inputs {
+        validate_caption_input_mode(Some(&input.caption))?;
         if !is_safe_id(&input.item_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset item ID".to_owned(),
@@ -1599,6 +1612,7 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    validate_caption_input_mode(input.item.caption.as_ref())?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1689,6 +1703,7 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    validate_caption_input_mode(input.caption.as_ref())?;
     let source = resolve_item_source(project_path, project_id, &input, modality)?;
     // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
     // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library
@@ -2393,6 +2408,50 @@ mod tests {
     /// Dataset Doctor ever sees a format it can't decode. macOS-only (relies on `sips`); the ffmpeg
     /// path off macOS is identical.
     #[cfg(target_os = "macos")]
+    // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
+    // before the source is even opened (the bogus source path would otherwise be NotFound).
+    #[test]
+    fn external_item_with_an_unknown_caption_mode_is_a_bad_request() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let input = ExternalTrainingDatasetItemInput {
+            item: TrainingDatasetItemInput {
+                id: Some("item_0001".to_owned()),
+                asset_id: None,
+                path: None,
+                display_name: None,
+                caption: Some(CaptionInput {
+                    text: "a caption".to_owned(),
+                    source: Some(CaptionSource::Auto),
+                    trigger_words: Vec::new(),
+                    mode: Some(CaptionMode::Unknown("faceOnly".to_owned())),
+                }),
+                width: None,
+                height: None,
+                control_image_path: None,
+                extra: Default::default(),
+            },
+            source_path: temp.path().join("missing.png"),
+            expected_content_hash: String::new(),
+            expected_width: 1,
+            expected_height: 1,
+            extra: Default::default(),
+        };
+        let error = materialize_external_item(
+            temp.path(),
+            &TrainingModality::Image,
+            input,
+            "item_0001".to_owned(),
+            "now",
+        )
+        .expect_err("unknown caption mode is refused");
+        match error {
+            ProjectStoreError::BadRequest(detail) => {
+                assert!(detail.contains("caption.mode \"faceOnly\""), "{detail}")
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
     #[test]
     fn create_dataset_transcodes_an_unsupported_item_source_to_png() {
         let dir = tempfile::tempdir().expect("temp dir");

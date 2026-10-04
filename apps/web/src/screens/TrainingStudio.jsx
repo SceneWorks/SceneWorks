@@ -13,6 +13,7 @@ import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
   joyCaptionModel,
+  parseCaptionTriggerWords,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
@@ -140,6 +141,9 @@ function trainingCaptionJobPayload(settings) {
   return {
     captioner: "joy_caption",
     mode,
+    // The dialog's trigger words (sc-24829): the API fills them into every item without its own,
+    // so trigger-only has words to write and default/subject-only captions get them prepended.
+    triggerWords: parseCaptionTriggerWords(settings.triggerWords),
     modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
     recaption: Boolean(settings.recaption),
     requestedGpu: settings.requestedGpu || "auto",
@@ -831,7 +835,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
-    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase, triggerWords: datasetTriggerPhrase }));
   }, [activeDataset]);
 
   useEffect(() => {

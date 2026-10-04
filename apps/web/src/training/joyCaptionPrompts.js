@@ -127,9 +127,35 @@ export const captionModes = [
   { value: "triggerOnly", label: "Trigger words only" },
 ];
 
+// Caption-job trigger words (sc-24829): the dialog's comma-separated field, sent as
+// `triggerWords` and filled by the API into every item that has none of its own. Limits mirror
+// TRAINING_CAPTION_TRIGGER_WORDS_MAX / TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS in
+// apps/rust-api/src/training.rs (E6).
+export const captionTriggerWordLimits = { maxWords: 16, maxLength: 64 };
+
+export function parseCaptionTriggerWords(text) {
+  return String(text ?? "")
+    .split(",")
+    .map((word) => word.trim())
+    .filter(Boolean);
+}
+
+// The field-level error for the trigger-words field, or "" when it is within the limits.
+export function captionTriggerWordsError(text) {
+  const words = parseCaptionTriggerWords(text);
+  if (words.length > captionTriggerWordLimits.maxWords) {
+    return `Use at most ${captionTriggerWordLimits.maxWords} trigger words.`;
+  }
+  if (words.some((word) => word.length > captionTriggerWordLimits.maxLength)) {
+    return `Each trigger word must be at most ${captionTriggerWordLimits.maxLength} characters.`;
+  }
+  return "";
+}
+
 export const defaultCaptionSettings = {
   captioner: "joy_caption",
   mode: "default",
+  triggerWords: "",
   modelNameOrPath: joyCaptionModel,
   recaption: false,
   requestedGpu: "auto",

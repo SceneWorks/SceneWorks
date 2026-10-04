@@ -481,6 +481,12 @@ pub(crate) struct TrainingCaptionJobRequest {
     /// Unknown strings deserialize to `CaptionMode::Unknown` and are refused by validation.
     #[serde(default = "default_training_caption_mode")]
     pub(crate) mode: sceneworks_core::training::CaptionMode,
+    /// Trigger words for the job (sc-24829): filled into every captioned item that carries none of
+    /// its own, in every mode — so a trigger-only caption has words to write, and default /
+    /// subject-only captions get them prepended. Limits mirror the caption dialog
+    /// (`captionTriggerWordLimits` in `joyCaptionPrompts.js`).
+    #[serde(default)]
+    pub(crate) trigger_words: Vec<String>,
     #[serde(default)]
     pub(crate) recaption: bool,
     #[serde(default = "default_requested_gpu")]

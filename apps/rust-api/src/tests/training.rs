@@ -540,6 +540,196 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
     assert!(detail["items"][1]["caption"].get("mode").is_none());
 }
 
+// sc-24829: the caption dialog's trigger words ride the caption-job request. They fill every
+// captioned item that has none of its own — in every mode — so a trigger-only job over a dataset
+// whose items carry no trigger words queues with exactly those words, and default / subject-only
+// jobs prepend them the same way. Limits mirror the dialog (E6). An unknown `caption.mode` on the
+// dataset write paths is a field error, never stored.
+#[tokio::test]
+async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_validated_on_writes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Caption Trigger Words" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let mut asset_ids = Vec::new();
+    for (name, bytes) in [
+        ("A.png", b"png-a".as_slice()),
+        ("B.png", b"png-b".as_slice()),
+    ] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            bytes,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let datasets_url = format!("/api/v1/projects/{project_id}/training/datasets");
+
+    // Dataset create with an unknown caption mode is refused (materialize_item).
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &datasets_url,
+        json!({
+            "name": "Bad Mode",
+            "items": [{ "assetId": asset_ids[0], "caption": { "text": "x", "mode": "faceOnly" } }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("caption.mode \"faceOnly\"")),
+        "{error}"
+    );
+
+    // Item 0 has no trigger words; item 1 has its own.
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_url,
+        json!({
+            "name": "Mira",
+            "items": [
+                { "assetId": asset_ids[0], "caption": { "text": "", "triggerWords": [] } },
+                { "assetId": asset_ids[1], "caption": { "text": "", "triggerWords": ["ownWord"] } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let first_id = dataset["items"][0]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+    let jobs_url = format!("{datasets_url}/{dataset_id}/caption-jobs");
+
+    // Without request trigger words a trigger-only job is refused (item 0 has none)...
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // ...with them it queues: item 0 takes the request words (trimmed), item 1 keeps its own.
+    let (status, trigger_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": ["miraStyle", " red coat "] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{trigger_job}");
+    let items = &trigger_job["payload"]["items"];
+    assert_eq!(items[0]["triggerWords"], json!(["miraStyle", "red coat"]));
+    assert_eq!(items[1]["triggerWords"], json!(["ownWord"]));
+
+    // Default and subject-only jobs fill the same way (the worker prepends them).
+    for mode in ["default", "subjectOnly"] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &jobs_url,
+            json!({ "mode": mode, "triggerWords": ["miraStyle"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{mode}: {job}");
+        assert_eq!(
+            job["payload"]["items"][0]["triggerWords"],
+            json!(["miraStyle"]),
+            "{mode}"
+        );
+        assert_eq!(
+            job["payload"]["items"][1]["triggerWords"],
+            json!(["ownWord"]),
+            "{mode}"
+        );
+    }
+
+    // Limits (E6): at most 16 words, none empty, each at most 64 characters.
+    let too_many = (0..17).map(|index| format!("w{index}")).collect::<Vec<_>>();
+    for (body, detail) in [
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": too_many }),
+            "triggerWords: use at most 16 trigger words.",
+        ),
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": ["ok", "   "] }),
+            "triggerWords: trigger words must not be empty.",
+        ),
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": ["a".repeat(65)] }),
+            "triggerWords: each trigger word must be at most 64 characters.",
+        ),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &jobs_url, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(error["detail"], detail);
+    }
+    // The boundary values are accepted.
+    let sixteen = (0..16).map(|index| format!("w{index}")).collect::<Vec<_>>();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": sixteen }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": ["a".repeat(64)] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // An unknown mode on the worker's caption-sidecars route is refused (apply_caption_patches)
+    // and nothing is stored.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!("{datasets_url}/{dataset_id}/caption-sidecars"),
+        json!({ "items": [{
+            "itemId": first_id,
+            "caption": { "text": "miraStyle", "source": "auto", "triggerWords": ["miraStyle"], "mode": "faceOnly" }
+        }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("caption.mode \"faceOnly\"")),
+        "{error}"
+    );
+    let (_, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("{datasets_url}/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert!(detail["items"][0]["caption"].get("mode").is_none());
+    assert_eq!(detail["items"][0]["caption"]["text"], "");
+}
+
 #[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

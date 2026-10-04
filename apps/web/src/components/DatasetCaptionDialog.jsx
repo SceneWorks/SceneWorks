@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Modal } from "./Modal.jsx";
-import { captionModes } from "../training/joyCaptionPrompts.js";
+import { captionModes, captionTriggerWordsError } from "../training/joyCaptionPrompts.js";
 
 // Caption settings modal (sc-2025). One dialog drives both "Caption all" and a
 // single image's "Re-Caption" — the dataset editor owns the captioner settings
@@ -62,7 +62,10 @@ export function DatasetCaptionDialog({
     }
   }, [modelMissing]);
 
-  const blockRun = joy && usesCaptioner && modelMissing;
+  // Trigger words (sc-24829) apply in every mode; out-of-limit input blocks Run (E6).
+  const triggerWordsError = joy ? captionTriggerWordsError(settings.triggerWords) : "";
+  const modelBlocked = joy && usesCaptioner && modelMissing;
+  const blockRun = modelBlocked || Boolean(triggerWordsError);
 
   async function handleDownloadModel() {
     if (typeof onDownloadModel !== "function") return;
@@ -98,7 +101,7 @@ export function DatasetCaptionDialog({
           </select>
         </label>
 
-        {blockRun ? (
+        {modelBlocked ? (
           <div className="caption-missing-model" role="alert">
             {downloadRequested ? (
               <p className="inline-warning">
@@ -136,6 +139,24 @@ export function DatasetCaptionDialog({
                 </option>
               ))}
             </select>
+          </label>
+        ) : null}
+        {joy ? (
+          <label>
+            Trigger words
+            <input
+              aria-invalid={triggerWordsError ? "true" : undefined}
+              onChange={(event) => onChange("triggerWords", event.target.value)}
+              placeholder="Comma-separated, e.g. miraStyle"
+              value={settings.triggerWords ?? ""}
+            />
+            {triggerWordsError ? (
+              <span className="inline-warning" role="alert">
+                {triggerWordsError}
+              </span>
+            ) : (
+              <span className="dataset-caption-field-hint">Added to every image that has no trigger words of its own.</span>
+            )}
           </label>
         ) : null}
         {joy && mode === "subjectOnly" ? (

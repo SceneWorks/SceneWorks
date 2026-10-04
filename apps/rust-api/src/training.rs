@@ -531,6 +531,11 @@ pub(crate) async fn create_training_dataset_caption_job(
         .item_ids
         .as_ref()
         .map(|ids| ids.iter().map(String::as_str).collect());
+    let request_trigger_words = payload
+        .trigger_words
+        .iter()
+        .map(|word| word.trim().to_owned())
+        .collect::<Vec<_>>();
     let items = dataset
         .items
         .iter()
@@ -539,11 +544,22 @@ pub(crate) async fn create_training_dataset_caption_job(
             None => payload.recaption || item.caption.text.trim().is_empty(),
         })
         .map(|item| {
+            // sc-24829: an item with no trigger words of its own takes the request's.
+            let own_words = item
+                .caption
+                .trigger_words
+                .iter()
+                .any(|word| !word.trim().is_empty());
+            let trigger_words = if own_words {
+                item.caption.trigger_words.clone()
+            } else {
+                request_trigger_words.clone()
+            };
             json!({
                 "itemId": item.id.clone(),
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "existingCaption": item.caption.text.clone(),
-                "triggerWords": item.caption.trigger_words.clone(),
+                "triggerWords": trigger_words,
             })
         })
         .collect::<Vec<_>>();
@@ -1410,6 +1426,11 @@ pub(crate) async fn strip_exif_training_dataset_items(
     ))
 }
 
+/// Caption-job trigger-word limits (sc-24829, E6) — mirror `captionTriggerWordLimits` in
+/// `apps/web/src/training/joyCaptionPrompts.js`.
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORDS_MAX: usize = 16;
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS: usize = 64;
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
@@ -1432,6 +1453,24 @@ pub(crate) fn validate_training_caption_job_request(
             return Err(ApiError::bad_request(
                 "Caption mode must be one of default, subjectOnly, or triggerOnly.",
             ));
+        }
+    }
+    if payload.trigger_words.len() > TRAINING_CAPTION_TRIGGER_WORDS_MAX {
+        return Err(ApiError::bad_request(format!(
+            "triggerWords: use at most {TRAINING_CAPTION_TRIGGER_WORDS_MAX} trigger words."
+        )));
+    }
+    for word in &payload.trigger_words {
+        let word = word.trim();
+        if word.is_empty() {
+            return Err(ApiError::bad_request(
+                "triggerWords: trigger words must not be empty.",
+            ));
+        }
+        if word.chars().count() > TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "triggerWords: each trigger word must be at most {TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS} characters."
+            )));
         }
     }
     if payload.model_name_or_path.trim().is_empty() {

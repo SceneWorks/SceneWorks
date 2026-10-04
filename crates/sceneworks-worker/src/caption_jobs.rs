@@ -69,8 +69,9 @@ use sceneworks_core::training::CaptionMode;
 pub(crate) const SUBJECT_ONLY_CAPTION_PROMPT: &str = "Write a short caption that describes only \
 the changeable parts of the main subject in this image: their clothing, facial expression, pose, \
 and any accessories they wear or hold. Do not describe the background, setting, location, \
-lighting, or camera. Do not describe fixed identity traits such as face shape, eye color, hair \
-color, skin tone, ethnicity, age, or body type. Do not name the subject.";
+lighting, or camera. Do not describe fixed identity traits such as facial features or face \
+shape, eye color, hair (color, length, or style), skin tone, ethnicity, age, or body type. Do not \
+name the subject.";
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1177,6 +1178,25 @@ mod tests {
             error.to_string().contains("Caption item item_1 imagePath"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn subject_only_prompt_excludes_background_and_every_fixed_identity_trait() {
+        for clause in [
+            "background",
+            "facial features or face shape",
+            "eye color",
+            "hair (color, length, or style)",
+            "skin tone",
+            "ethnicity",
+            "age",
+            "body type",
+        ] {
+            assert!(
+                SUBJECT_ONLY_CAPTION_PROMPT.contains(clause),
+                "subject-only prompt must exclude {clause:?}: {SUBJECT_ONLY_CAPTION_PROMPT}"
+            );
+        }
     }
 
     // ── sc-24829: subject-only and trigger-only caption modes, driven through the REAL job path ──

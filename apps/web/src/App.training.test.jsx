@@ -862,6 +862,8 @@ describe("SceneWorks app shell", () => {
     expect(createCaptionJob.mock.calls[0][1].itemIds).toBeUndefined();
     // The default mode sends the full-scene prompt the dialog built.
     expect(createCaptionJob.mock.calls[0][1].mode).toBe("default");
+    // The seeded trigger words (the dataset name) ride every mode (sc-24829).
+    expect(createCaptionJob.mock.calls[0][1].triggerWords).toEqual(["Portrait Set"]);
     expect(createCaptionJob.mock.calls[0][1].options.captionPrompt).not.toBe("");
     expect(container.textContent).toContain("Caption job queued (job-caption-1)");
   });
@@ -890,6 +892,9 @@ describe("SceneWorks app shell", () => {
       [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Caption all").click();
     });
     await changeField(field(document.body, "Mode"), mode);
+    // The dialog seeds the trigger words from the dataset name; the user's edit is what is sent.
+    expect(field(document.body, "Trigger words").value).toBe("Portrait Set");
+    await changeField(field(document.body, "Trigger words"), "miraStyle,  red coat ,");
     await act(async () => {
       [...document.body.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Caption")).click();
     });
@@ -899,6 +904,7 @@ describe("SceneWorks app shell", () => {
     const payload = createCaptionJob.mock.calls[0][1];
     expect(payload.mode).toBe(mode);
     expect(payload.options.captionPrompt).toBe("");
+    expect(payload.triggerWords).toEqual(["miraStyle", "red coat"]);
   });
 
   it("re-captions a single image with the itemIds filter (sc-2025)", async () => {
