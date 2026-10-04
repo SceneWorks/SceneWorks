@@ -18,6 +18,11 @@ import {
   timestepTypeOptionsForTarget,
   targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
+  gradientNoiseEtaMax,
+  gradientNoiseEtaSuggested,
+  gradientNoiseGammaDefault,
+  gradientNoiseGammaMax,
+  targetSupportsGradientNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
 } from "../../training/trainingConfig.js";
@@ -110,14 +115,21 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
-  // Weight noising is offered only where the target's trainer on this platform declares it
-  // (`limits.supportsWeightNoise` from the targets endpoint) — elsewhere the run would be refused.
-  // The toggle is checked for a positive sigma (a "0" draft is off); the sigma input stays visible
-  // while the draft holds any value so an out-of-range entry can be corrected in place.
+  // Adapter noise (epic 2123) is offered only where the target's trainer declares it — the targets
+  // endpoint's `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (every LoRA/LoKr target
+  // since sc-24827; never the control-branch target) — elsewhere the run would be refused.
+  // A toggle is checked for a positive value (a "0" draft is off); the input stays visible while the
+  // draft holds any value so an out-of-range entry can be corrected in place (and typing "0.0…"
+  // never unmounts the field mid-edit).
   const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
   const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
   const weightNoiseInputVisible =
     weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Gradient noise: the same on/visible split over eta; gamma is edited alongside it.
+  const gradientNoiseSupported = targetSupportsGradientNoise(selectedTarget);
+  const gradientNoiseEnabled = (numberFromDraft(configDraft.gradientNoiseEta) ?? 0) > 0;
+  const gradientNoiseInputVisible =
+    gradientNoiseSupported && String(configDraft.gradientNoiseEta ?? "").trim() !== "";
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -570,6 +582,34 @@ export function ConfigureJobPanel({
                   />
                 </label>
               ) : null}
+              {gradientNoiseInputVisible ? (
+                <>
+                  <label title="Gradient noise initial scale (eta): every optimizer step adds Gaussian noise of standard deviation eta / (1 + step)^gamma to each adapter gradient, after clipping. 0.01 is the suggested scale.">
+                    Gradient noise eta
+                    <input
+                      max={gradientNoiseEtaMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("gradientNoiseEta", event.target.value)}
+                      step="0.001"
+                      type="number"
+                      value={configDraft.gradientNoiseEta ?? ""}
+                      {...invalidProps(configValidity, "gradientNoiseEta")}
+                    />
+                  </label>
+                  <label title="Gradient noise annealing exponent (gamma): larger values fade the noise out faster over the run. 0.55 is the default.">
+                    Gradient noise gamma
+                    <input
+                      max={gradientNoiseGammaMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("gradientNoiseGamma", event.target.value)}
+                      step="0.05"
+                      type="number"
+                      value={configDraft.gradientNoiseGamma ?? ""}
+                      {...invalidProps(configValidity, "gradientNoiseGamma")}
+                    />
+                  </label>
+                </>
+              ) : null}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -696,6 +736,22 @@ export function ConfigureJobPanel({
                     type="checkbox"
                   />
                   Weight noise
+                </label>
+              ) : null}
+              {gradientNoiseSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Add seeded Gaussian noise to the adapter gradients that fades out over the run (eta / (1 + step)^gamma) — helps escape poor early minima. Off by default."
+                >
+                  <input
+                    checked={gradientNoiseEnabled}
+                    onChange={(event) => {
+                      updateConfigDraft("gradientNoiseEta", event.target.checked ? String(gradientNoiseEtaSuggested) : "");
+                      updateConfigDraft("gradientNoiseGamma", event.target.checked ? String(gradientNoiseGammaDefault) : "");
+                    }}
+                    type="checkbox"
+                  />
+                  Gradient noise
                 </label>
               ) : null}
             </div>

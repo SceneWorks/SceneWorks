@@ -2,16 +2,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sceneworks_core::training::{
-    build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
-    TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
-    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
-    WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
+    build_training_plan, builtin_training_targets, validate_training_config_for_target,
+    BuildTrainingPlan, LoraTrainingRequest, TrainingConfig, TrainingDataset, TrainingModality,
+    TrainingOutputKind, TrainingPlan, TrainingPlanError, TrainingPresetRegistry,
+    TrainingProvenance, TrainingTargetLimitError, TrainingTargetRegistry, GRADIENT_NOISE_ETA_KEY,
+    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_ETA_SUGGESTED, GRADIENT_NOISE_GAMMA_DEFAULT,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, TRAINING_CONTRACT_SCHEMA_VERSION,
+    TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
-use sceneworks_core::training::{
-    project_candle_training_limits, target_supports_weight_noise,
-    validate_training_config_for_target,
-};
+use sceneworks_core::training::{target_supports_gradient_noise, target_supports_weight_noise};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1793,57 +1793,216 @@ fn web_weight_noise_bound_matches_the_api_bound() {
     );
 }
 
-/// sc-24826 review: only targets whose platform trainer declares weight noise advertise it, and a
-/// non-zero sigma on any other target is a submit-time `weightNoiseSigma` field error (not a
-/// refusal after the job is queued). The Candle projection withdraws Z-Image's MLX-only support.
-#[test]
-fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+/// Build a Z-Image plan whose `advanced` carries `key = value` (and optionally a network type).
+fn build_plan_with_advanced(
+    key: &str,
+    value: Value,
+    network_type: Option<&str>,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
     let registry = builtin_training_targets();
-    let by_id = |id: &str| {
-        registry
-            .targets
-            .iter()
-            .find(|target| target.id == id)
-            .unwrap_or_else(|| panic!("{id} target present"))
-            .clone()
-    };
-    let with_sigma = |target: &sceneworks_core::training::TrainingTarget, sigma: Value| {
-        let mut config = target.defaults.clone();
-        config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
-        validate_training_config_for_target(target, &config)
-    };
-
-    let advertising: Vec<&str> = registry
+    let target = registry
         .targets
         .iter()
-        .filter(|target| target_supports_weight_noise(target))
-        .map(|target| target.id.as_str())
-        .collect();
-    assert_eq!(
-        advertising,
-        ["z_image_turbo_lora"],
-        "only Z-Image MLX declares weight noise"
-    );
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    config.advanced.insert(key.to_owned(), value);
+    if let Some(network_type) = network_type {
+        config
+            .advanced
+            .insert("networkType".to_owned(), json!(network_type));
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_gn",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_gn",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_gn"),
+        file_name: "gn.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
 
-    let z_image = by_id("z_image_turbo_lora");
-    with_sigma(&z_image, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)).expect("Z-Image MLX admits it");
-
-    let mut z_image_candle = z_image.clone();
-    project_candle_training_limits(&mut z_image_candle);
-    assert!(!target_supports_weight_noise(&z_image_candle));
-
-    for target in [by_id("sdxl_lora"), z_image_candle] {
-        // Off is always fine...
-        with_sigma(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
-        // ...on is a field error.
-        match with_sigma(&target, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)) {
+/// sc-24827 (epic 2123 E6): in-range gradient-noise eta/gamma survive into the plan verbatim;
+/// negative / above-limit / non-numeric values, and eta with a full fine-tune, are field-level
+/// errors naming the offending field.
+#[test]
+fn build_training_plan_validates_gradient_noise_as_field_errors() {
+    for (key, value) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(0)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_MAX)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(0)),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_DEFAULT),
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(GRADIENT_NOISE_GAMMA_MAX)),
+    ] {
+        let plan = build_plan_with_advanced(key, value.clone(), None)
+            .unwrap_or_else(|error| panic!("{key}={value} must be accepted: {error}"));
+        assert_eq!(plan.config.advanced[key], value);
+    }
+    for (key, value, network_type) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(-0.0001), None),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_MAX + 0.0001),
+            None,
+        ),
+        (GRADIENT_NOISE_ETA_KEY, json!("0.01"), None),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+            Some("full"),
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(-0.1), None),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_MAX + 0.0001),
+            None,
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!("0.55"), None),
+    ] {
+        match build_plan_with_advanced(key, value.clone(), network_type) {
             Err(TrainingPlanError::InvalidField { field, .. }) => {
-                assert_eq!(field, "weightNoiseSigma", "{}", target.id)
+                assert_eq!(field, key, "{key}={value}/{network_type:?}")
             }
             other => panic!(
-                "{}: expected a weightNoiseSigma field error, got {other:?}",
-                target.id
+                "{key}={value}/{network_type:?}: expected a {key} field error, got {other:?}"
             ),
         }
+    }
+}
+
+/// sc-24827 (epic 2123 E3): the control-branch target advertises neither adapter-noise flag (its
+/// native trainer trains a full-weight branch and declares neither), so both knobs are refused at
+/// submit time with a field-level error; a plain control request still validates.
+#[test]
+fn adapter_noise_is_refused_for_a_control_branch_target() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.output_kind == TrainingOutputKind::ControlBranch)
+        .expect("a control-branch target is registered");
+    validate_training_config_for_target(target, &target.defaults)
+        .expect("the control target's defaults validate");
+    for (key, value) in [
+        (WEIGHT_NOISE_SIGMA_KEY, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+    ] {
+        let mut config = target.defaults.clone();
+        config.advanced.insert(key.to_owned(), value);
+        match validate_training_config_for_target(target, &config) {
+            Err(TrainingPlanError::InvalidField { field, message }) => {
+                assert_eq!(field, key);
+                assert!(message.contains("does not support"), "{message}");
+            }
+            other => panic!("{key}: expected a field error, got {other:?}"),
+        }
+        // Explicitly off is fine.
+        let mut off = target.defaults.clone();
+        off.advanced.insert(key.to_owned(), json!(0));
+        validate_training_config_for_target(target, &off).expect("off validates");
+    }
+}
+
+/// sc-24827 (epic 2123 E6): the web form's gradient-noise bounds and defaults are the API's. The
+/// web constants live in `apps/web/src/training/trainingConfig.js`; read them so they cannot drift.
+#[test]
+fn web_gradient_noise_bounds_match_the_api_bounds() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("gradientNoiseEtaMax"), GRADIENT_NOISE_ETA_MAX);
+    assert_eq!(
+        read("gradientNoiseEtaSuggested"),
+        GRADIENT_NOISE_ETA_SUGGESTED
+    );
+    assert_eq!(read("gradientNoiseGammaMax"), GRADIENT_NOISE_GAMMA_MAX);
+    assert_eq!(
+        read("gradientNoiseGammaDefault"),
+        GRADIENT_NOISE_GAMMA_DEFAULT
+    );
+}
+
+/// sc-24826 review, updated for sc-24827: every LoRA/LoKr target advertises both adapter-noise
+/// flags (all their trainers declare both, on both backends) and admits both knobs; a target that
+/// does not advertise a flag gets a submit-time field error for that knob — never a refusal after
+/// the job is queued.
+#[test]
+fn adapter_noise_is_gated_on_the_target_flags() {
+    let registry = builtin_training_targets();
+    let lora_targets: Vec<_> = registry
+        .targets
+        .iter()
+        .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
+        .collect();
+    assert!(!lora_targets.is_empty());
+    for target in &lora_targets {
+        assert!(target_supports_weight_noise(target), "{}", target.id);
+        assert!(target_supports_gradient_noise(target), "{}", target.id);
+        for (key, value) in [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)),
+            (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+        ] {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(key.to_owned(), value);
+            validate_training_config_for_target(target, &config)
+                .unwrap_or_else(|e| panic!("{} {key}: {e}", target.id));
+        }
+    }
+
+    // Withdraw one flag at a time: that knob becomes a field error, the other stays admitted.
+    let z_image = lora_targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("Z-Image target");
+    for (flag, key, value, other_key, other_value) in [
+        (
+            "supportsWeightNoise",
+            WEIGHT_NOISE_SIGMA_KEY,
+            json!(WEIGHT_NOISE_SIGMA_SUGGESTED),
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+        ),
+        (
+            "supportsGradientNoise",
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+            WEIGHT_NOISE_SIGMA_KEY,
+            json!(WEIGHT_NOISE_SIGMA_SUGGESTED),
+        ),
+    ] {
+        let mut target = (*z_image).clone();
+        target.limits.remove(flag);
+        let with = |key: &str, value: &Value| {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(key.to_owned(), value.clone());
+            validate_training_config_for_target(&target, &config)
+        };
+        with(key, &json!(0)).unwrap_or_else(|e| panic!("{flag}: off must pass: {e}"));
+        match with(key, &value) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => assert_eq!(field, key, "{flag}"),
+            other => panic!("{flag}: expected a {key} field error, got {other:?}"),
+        }
+        with(other_key, &other_value)
+            .unwrap_or_else(|e| panic!("{flag}: the other technique must stay admitted: {e}"));
     }
 }

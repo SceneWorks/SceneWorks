@@ -24,7 +24,9 @@ use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::{
-    TrainingPlan, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -843,6 +845,36 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 gradient noise (sc-24827): same contract — adapter gradients only (refused for a
+    // full base fine-tune, E5) and only on a trainer that declares it (E3). Gamma is read strictly
+    // even while eta is off, so a malformed value never silently maps to the default.
+    let gradient_noise_eta = preflight_bounded_f64(
+        advanced,
+        GRADIENT_NOISE_ETA_KEY,
+        GRADIENT_NOISE_ETA_MAX,
+        0.0,
+    )?;
+    preflight_bounded_f64(
+        advanced,
+        GRADIENT_NOISE_GAMMA_KEY,
+        GRADIENT_NOISE_GAMMA_MAX,
+        GRADIENT_NOISE_GAMMA_DEFAULT,
+    )?;
+    if gradient_noise_eta > 0.0 {
+        if network_type == "full" {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Gradient noise ({GRADIENT_NOISE_ETA_KEY}) perturbs adapter gradients only and \
+                 cannot be combined with networkType 'full'."
+            )));
+        }
+        if !descriptor.techniques.gradient_noise {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support gradient noise \
+                 ({GRADIENT_NOISE_ETA_KEY})."
+            )));
+        }
+    }
+
     if descriptor.backend != "candle" {
         return Ok(engine_id);
     }
@@ -970,6 +1002,11 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Epic 2123: the engine's own technique floor on the MAPPED request (weight / gradient noise),
+    // so the worker refuses exactly what the trainer would — before any model load.
+    gen_core::train::validate_training_techniques(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -1123,16 +1160,31 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
 /// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
 /// submit-time bound `0..=WEIGHT_NOISE_SIGMA_MAX`, else a typed payload error — never a silent 0.
 fn preflight_weight_noise_sigma(advanced: &JsonObject) -> WorkerResult<f64> {
-    let Some(value) = advanced.get(WEIGHT_NOISE_SIGMA_KEY) else {
-        return Ok(0.0);
+    preflight_bounded_f64(
+        advanced,
+        WEIGHT_NOISE_SIGMA_KEY,
+        WEIGHT_NOISE_SIGMA_MAX,
+        0.0,
+    )
+}
+
+/// Strictly read an optional `advanced[key]` (absent ⇒ `default`): a finite number within the
+/// submit-time bound `0..=max`, else a typed payload error — never a silent default.
+fn preflight_bounded_f64(
+    advanced: &JsonObject,
+    key: &str,
+    max: f64,
+    default: f64,
+) -> WorkerResult<f64> {
+    let Some(value) = advanced.get(key) else {
+        return Ok(default);
     };
     value
         .as_f64()
-        .filter(|sigma| sigma.is_finite() && (0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(sigma))
+        .filter(|number| number.is_finite() && (0.0..=max).contains(number))
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
-                "Training config field '{WEIGHT_NOISE_SIGMA_KEY}' must be a number between 0 and \
-                 {WEIGHT_NOISE_SIGMA_MAX}."
+                "Training config field '{key}' must be a number between 0 and {max}."
             ))
         })
 }
@@ -1556,6 +1608,14 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // before. A malformed / out-of-range value never reaches here: the shared dry/real
         // preflight (`preflight_weight_noise_sigma`) refuses it first.
         weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
+        // Epic 2123 gradient noise (sc-24827). Absent eta ⇒ 0 ⇒ off; absent gamma ⇒ the upstream
+        // 0.55. Malformed / out-of-range values are refused by the shared preflight first.
+        gradient_noise_eta: advanced_f32(advanced, GRADIENT_NOISE_ETA_KEY, 0.0),
+        gradient_noise_gamma: advanced_f32(
+            advanced,
+            GRADIENT_NOISE_GAMMA_KEY,
+            GRADIENT_NOISE_GAMMA_DEFAULT as f32,
+        ),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -3301,21 +3361,21 @@ mod tests {
         assert!(mapped.gradient_checkpointing);
     }
 
-    /// sc-24826 review: the catalog's `supportsWeightNoise` flag (which gates the web toggle and
-    /// submit-time validation) must equal the linked trainer descriptor's
-    /// `techniques.weight_noise` for every target this runtime can train — the builtin (MLX) value
-    /// on macOS, the Candle projection off-Mac. Flip either side and this fails.
+    /// sc-24826 review, extended by sc-24827: the catalog's `supportsWeightNoise` and
+    /// `supportsGradientNoise` flags (which gate the web toggles and submit-time validation) must
+    /// equal the linked trainer descriptor's `techniques.weight_noise` / `techniques.gradient_noise`
+    /// for every target this runtime can train. The builtin catalog is served unprojected on both
+    /// platforms (every LoRA/LoKr trainer declares both techniques on MLX and Candle), so this runs
+    /// against the MLX descriptors on macOS and the Candle descriptors off-Mac. Flip either side and
+    /// this fails.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn catalog_weight_noise_flag_matches_the_linked_trainer_descriptors() {
+    fn catalog_technique_flags_match_the_linked_trainer_descriptors() {
         let mut checked = 0;
-        for mut target in sceneworks_core::training::builtin_training_targets().targets {
-            if !cfg!(target_os = "macos") {
-                sceneworks_core::training::project_candle_training_limits(&mut target);
-            }
+        for target in sceneworks_core::training::builtin_training_targets().targets {
             let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
                 continue;
             };
@@ -3328,6 +3388,13 @@ mod tests {
                 "{} ({engine_id}): catalog supportsWeightNoise disagrees with the trainer descriptor",
                 target.id
             );
+            assert_eq!(
+                sceneworks_core::training::target_supports_gradient_noise(&target),
+                descriptor.techniques.gradient_noise,
+                "{} ({engine_id}): catalog supportsGradientNoise disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
             checked += 1;
         }
         assert!(
@@ -3336,14 +3403,15 @@ mod tests {
         );
     }
 
-    /// sc-24826 (epic 2123): `advanced.weightNoiseSigma` reaches the engine's typed
-    /// `weight_noise_sigma`; absent stays 0 (off), so a legacy plan maps exactly as before.
+    /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
+    /// `gradientNoiseGamma` reach the engine's typed fields; absent stays off (eta 0, sigma 0, gamma
+    /// the upstream 0.55), so a legacy plan maps exactly as before.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn map_training_config_wires_weight_noise_sigma() {
+    fn map_training_config_wires_adapter_noise_fields() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let image = image.display().to_string();
@@ -3354,82 +3422,156 @@ mod tests {
             "lora",
             &[&image],
         );
-        assert_eq!(
-            map_training_config(&parse(value.clone()).config).weight_noise_sigma,
-            0.0
-        );
+        let legacy = map_training_config(&parse(value.clone()).config);
+        assert_eq!(legacy.weight_noise_sigma, 0.0);
+        assert_eq!(legacy.gradient_noise_eta, 0.0);
+        assert_eq!(legacy.gradient_noise_gamma, 0.55);
 
         let mut noisy = value;
         noisy["config"]["advanced"]["weightNoiseSigma"] = json!(0.0125);
-        assert_eq!(
-            map_training_config(&parse(noisy).config).weight_noise_sigma,
-            0.0125
-        );
+        noisy["config"]["advanced"]["gradientNoiseEta"] = json!(0.02);
+        noisy["config"]["advanced"]["gradientNoiseGamma"] = json!(0.75);
+        let mapped = map_training_config(&parse(noisy).config);
+        assert_eq!(mapped.weight_noise_sigma, 0.0125);
+        assert_eq!(mapped.gradient_noise_eta, 0.02);
+        assert_eq!(mapped.gradient_noise_gamma, 0.75);
     }
 
-    /// sc-24826 (epic 2123 E3/E5): the shared dry/real preflight refuses weight noise on a trainer
-    /// whose descriptor does not declare it, with a full base fine-tune, and out of range — and
-    /// admits it where the active runtime's trainer declares it (Z-Image on MLX).
+    /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
+        ("z_image_lora", "z_image_turbo"),
+        ("sdxl_lora", "sdxl"),
+        ("kolors_lora", "kolors"),
+        ("lens_lora", "lens"),
+        ("krea_lora", "krea_2_raw"),
+        ("krea_control", "krea_2_raw"),
+        ("sd3_lora", "sd3_5_large"),
+        ("sd3_lora", "sd3_5_medium"),
+        ("ltx_mlx_lora", "ltx_2_3"),
+        ("ltx_mlx_lora", "ltx_2_5"),
+        ("wan_lora", "wan_2_2"),
+        ("wan_moe_lora", "wan_2_2_t2v_14b"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b"),
+        ("anima_lora", "anima_base"),
+        ("mage_flow_lora", "mage_flow_base"),
+    ];
+
+    /// sc-24826/sc-24827 (epic 2123 E3/E5): the shared dry/real preflight admits weight noise and
+    /// gradient noise on every LoRA/LoKr trainer the active runtime registers (S2 put both on every
+    /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
+    /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
+    /// malformed values.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
-    fn preflight_refuses_weight_noise_the_trainer_cannot_honor() {
+    fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
         let dir = tempfile::tempdir().expect("tempdir");
         let image = dir.path().join("datasets").join("ds-1").join("x.png");
         let image = image.display().to_string();
-        let plan = |kernel: &str, base: &str, network: &str, sigma: Value| {
-            let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
-            value["config"]["advanced"]["weightNoiseSigma"] = sigma;
-            parse(value)
+        let plan = |kernel: &str, base: &str, network: &str, key: &str, value: Value| {
+            let mut plan = plan_json(dir.path(), kernel, base, network, &[&image]);
+            plan["config"]["advanced"][key] = value;
+            parse(plan)
         };
         let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
             Err(WorkerError::InvalidPayload(message)) => message,
             other => panic!("expected an InvalidPayload refusal, got {other:?}"),
         };
+        let techniques = [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(0.0125), "weight noise"),
+            (GRADIENT_NOISE_ETA_KEY, json!(0.01), "gradient noise"),
+        ];
 
-        // Off is always admitted — the noise gate must not refuse a plan that does not ask for it.
-        assert!(
-            validate_training_target_config(&plan("sdxl_lora", "sdxl", "lora", json!(0))).is_ok()
-        );
-
-        // SDXL declares no weight-noise support on either backend.
-        assert!(err(plan("sdxl_lora", "sdxl", "lora", json!(0.0125)))
-            .contains("does not support weight noise"));
-
-        // Z-Image follows its active descriptor: admitted on MLX, refused on Candle (until its story).
-        let z_image = plan("z_image_lora", "z_image_turbo", "lora", json!(0.0125));
-        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
-            .expect("z_image_turbo trainer registered")
-            .techniques
-            .weight_noise;
-        assert_eq!(
-            declared,
-            cfg!(target_os = "macos"),
-            "only Z-Image MLX declares weight noise today"
-        );
-        if declared {
-            validate_training_target_config(&z_image).expect("Z-Image MLX admits weight noise");
-        } else {
-            assert!(err(z_image).contains("does not support weight noise"));
+        let mut admitted = 0;
+        let mut refused = 0;
+        for &(kernel, base) in ROUTED_TRAINING_TARGETS {
+            let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
+            };
+            let network = if descriptor.supports_lora {
+                "lora"
+            } else {
+                "control"
+            };
+            // Off is always admitted — the gate must not refuse a plan that does not ask for it.
+            for (key, _, _) in techniques.clone() {
+                validate_training_target_config(&plan(kernel, base, network, key, json!(0)))
+                    .unwrap_or_else(|e| panic!("{kernel}/{base}: {key}=0 refused: {e}"));
+            }
+            let adapter_trainer = descriptor.supports_lora || descriptor.supports_lokr;
+            assert_eq!(
+                descriptor.techniques.weight_noise && descriptor.techniques.gradient_noise,
+                adapter_trainer,
+                "{engine_id}: every LoRA/LoKr trainer declares both adapter-noise techniques; a \
+                 non-adapter trainer declares neither"
+            );
+            for (key, on, name) in techniques.clone() {
+                let request = plan(kernel, base, network, key, on);
+                if adapter_trainer {
+                    validate_training_target_config(&request)
+                        .unwrap_or_else(|e| panic!("{kernel}/{base}: {name} refused: {e}"));
+                    admitted += 1;
+                } else {
+                    assert!(
+                        err(request).contains(&format!("does not support {name}")),
+                        "{kernel}/{base}: {name}"
+                    );
+                    refused += 1;
+                }
+            }
+        }
+        assert!(admitted > 0, "at least one adapter trainer is registered");
+        if cfg!(not(target_os = "macos")) {
+            assert!(
+                refused > 0,
+                "the candle Krea control trainer must be probed"
+            );
         }
 
-        // Full base fine-tune + weight noise is refused (Mage is the full-tune-capable trainer).
-        assert!(err(plan(
-            "mage_flow_lora",
-            "mage_flow_base",
-            "full",
-            json!(0.0125)
-        ))
-        .contains("networkType 'full'"));
-
-        // Out of range / malformed never silently maps to 0.
-        for bad in [json!(-0.01), json!(0.5), json!("0.0125")] {
+        // Full base fine-tune + either noise is refused (Mage is the full-tune-capable trainer).
+        for (key, on, _) in techniques.clone() {
             assert!(
-                err(plan("z_image_lora", "z_image_turbo", "lora", bad.clone()))
-                    .contains("must be a number between"),
-                "{bad}"
+                err(plan("mage_flow_lora", "mage_flow_base", "full", key, on))
+                    .contains("networkType 'full'"),
+                "{key}"
+            );
+        }
+
+        // Out of range / malformed never silently maps to the default.
+        for (key, bad) in [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(-0.01)),
+            (WEIGHT_NOISE_SIGMA_KEY, json!(0.5)),
+            (WEIGHT_NOISE_SIGMA_KEY, json!("0.0125")),
+            (GRADIENT_NOISE_ETA_KEY, json!(-0.01)),
+            (
+                GRADIENT_NOISE_ETA_KEY,
+                json!(GRADIENT_NOISE_ETA_MAX + 0.001),
+            ),
+            (GRADIENT_NOISE_ETA_KEY, json!("0.01")),
+            (GRADIENT_NOISE_GAMMA_KEY, json!(-0.5)),
+            (
+                GRADIENT_NOISE_GAMMA_KEY,
+                json!(GRADIENT_NOISE_GAMMA_MAX + 0.001),
+            ),
+            (GRADIENT_NOISE_GAMMA_KEY, json!("0.55")),
+        ] {
+            assert!(
+                err(plan(
+                    "z_image_lora",
+                    "z_image_turbo",
+                    "lora",
+                    key,
+                    bad.clone()
+                ))
+                .contains("must be a number between"),
+                "{key}={bad}"
             );
         }
     }
@@ -5062,6 +5204,8 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5177,6 +5321,8 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5295,6 +5441,8 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5451,6 +5599,8 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
