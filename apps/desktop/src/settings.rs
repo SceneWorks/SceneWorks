@@ -1240,7 +1240,9 @@ fn write_export_bytes(destination: &std::path::Path, image_bytes: &[u8]) -> Resu
     std::fs::write(destination, image_bytes).map_err(|error| error.to_string())
 }
 
-/// Save a browser-generated image through the native dialog. WebKitGTK and
+/// Save a browser-generated export through the native dialog: the Image Editor's
+/// PNGs and, via the web `saveExportFile` helper, JSON plan/pack/batch exports
+/// (sc-6554) — the bytes are written verbatim whatever they are. WebKitGTK and
 /// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
 /// path gives every desktop platform the intended filename and a real save
 /// destination. The explicit size ceiling prevents an untrusted webview payload
@@ -1252,10 +1254,10 @@ pub async fn save_image_export(
     suggested_filename: String,
 ) -> Result<Option<String>, String> {
     if image_bytes.is_empty() {
-        return Err("The exported image was empty.".to_owned());
+        return Err("The exported file was empty.".to_owned());
     }
     if image_bytes.len() > MAX_EXPORT_BYTES {
-        return Err("The exported image exceeds the 256 MB desktop limit.".to_owned());
+        return Err("The exported file exceeds the 256 MB desktop limit.".to_owned());
     }
 
     let destination = app
