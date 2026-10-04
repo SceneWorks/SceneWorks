@@ -9753,6 +9753,25 @@ details[open] > summary.lora-scope-group-heading::before,
   line-height: 1.4;
 }
 
+/* Derived (suggested) quant tier note + its "Keep" affirm control (sc-22246). */
+.quant-tier-suggested-note .link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.quant-tier-suggested-note .link-button:hover {
+  text-decoration: underline;
+}
+
+.quant-tier-suggested-note .link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .control-scale-field .field-hint {
   margin: 6px 10px 0;
   color: var(--text-muted);

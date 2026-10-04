@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { Icon } from "./Icons.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
@@ -32,7 +32,7 @@ import { savePresetDialogValidation } from "../generationValidation.js";
 import { useValidation } from "../validation/useValidation.js";
 import { ValidationSummary } from "../validation/Validation.jsx";
 import { StylePicker } from "./StylePicker.jsx";
-import { defaultTierSelection } from "../quantTier.js";
+import { defaultTierSelection, tierQuantize } from "../quantTier.js";
 import { readLastTier, writeLastTier } from "../lastTierStore.js";
 import { readDefaultGenerationQuality } from "../generationQuality.js";
 import { errorMessage } from "../errorMessage.js";
@@ -52,6 +52,9 @@ export function useQuantTierPicker({
 }) {
   const [quantTier, setQuantTier] = useState("");
   const [tierSwitching, setTierSwitching] = useState("");
+  // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
+  // selected tier itself does not change.
+  const [, setStickyRevision] = useState(0);
   const modelRef = useRef(null);
   const skipReseedRef = useRef(false);
   const availableTiersKey = availableTiers.join(",");
@@ -99,12 +102,29 @@ export function useQuantTierPicker({
     },
     [availableTiers, model, quantTier, screen],
   );
+  // sc-10733 / sc-22246: the shown tier is a DELIBERATE pick only when it equals this (screen, model)'s
+  // persisted sticky, which only a user action writes. Anything else (the Auto / quality / q8 base
+  // suggestion) is DERIVED and the worker may capability-clamp it, so the picker labels it a suggestion.
+  const tierExplicit = availableTiers.includes(quantTier) && readLastTier(screen, model) === quantTier;
+  // Only a bits tier rides `mlxQuantizeExplicit` (imageJobAdvanced.js); nvfp4 / int8-convrot never do and
+  // are never downtiered, so they — and an unresolved empty tier — are never labelled a suggestion.
+  const tierSuggested = !tierExplicit && tierQuantize(quantTier) !== null;
+  // Affirm the suggested tier as the user's own pick. A <select> cannot re-pick its current value, so
+  // this is the only route to make a suggested tier explicit without switching away and back.
+  const confirmTier = useCallback(() => {
+    if (!availableTiers.includes(quantTier)) return;
+    writeLastTier(screen, model, quantTier);
+    setStickyRevision((revision) => revision + 1);
+  }, [availableTiers, model, quantTier, screen]);
 
   return {
     quantTier,
     setQuantTier,
     tierSwitching,
     handleTierChange,
+    tierExplicit,
+    tierSuggested,
+    confirmTier,
     skipNextReseed: () => {
       skipReseedRef.current = true;
     },
@@ -113,11 +133,30 @@ export function useQuantTierPicker({
 
 // `className` lets the studios render this as a settings-bar cell (`settings-field`) instead of an
 // Advanced-panel label (studio-cleanup sc-15374) without a wrapper element around the <label>.
-export function TierPickerField({ value, onChange, items, tierSwitching, tierLabel, title, warning, className = "" }) {
+// `suggested` + `onConfirm` (sc-22246): a DERIVED tier (not the user's own pick) is labelled as a
+// suggestion the app may step down to fit memory, with a control to keep it as a deliberate pick.
+export function TierPickerField({
+  value,
+  onChange,
+  items,
+  tierSwitching,
+  tierLabel,
+  title,
+  warning,
+  className = "",
+  suggested = false,
+  onConfirm = null,
+}) {
+  const suggestedNoteId = useId();
+  const showSuggested = suggested && !tierSwitching;
   return (
     <label className={`quant-tier-picker${className ? ` ${className}` : ""}`} title={title}>
       Quant tier
-      <select onChange={(event) => onChange(event.target.value)} value={value}>
+      <select
+        aria-describedby={showSuggested ? suggestedNoteId : undefined}
+        onChange={(event) => onChange(event.target.value)}
+        value={value}
+      >
         {items.map((item) => (
           <option key={item.tier} value={item.tier} disabled={item.disabled}>
             {item.label}
@@ -126,6 +165,28 @@ export function TierPickerField({ value, onChange, items, tierSwitching, tierLab
       </select>
       {tierSwitching ? (
         <span className="field-hint" role="status">Loading {tierLabel(tierSwitching)}…</span>
+      ) : null}
+      {showSuggested ? (
+        <span
+          className="field-hint quant-tier-suggested-note"
+          id={suggestedNoteId}
+          title="Suggested for this machine, not yet your pick: the app may step it down if it doesn't fit memory. Keep it to make it your pick."
+        >
+          Suggested
+          {onConfirm ? (
+            <>
+              {" · "}
+              <button
+                aria-label={`Keep ${tierLabel(value)} as your pick`}
+                className="link-button"
+                onClick={onConfirm}
+                type="button"
+              >
+                Keep
+              </button>
+            </>
+          ) : null}
+        </span>
       ) : null}
       {warning}
     </label>
