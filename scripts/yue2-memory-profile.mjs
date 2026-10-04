@@ -49,7 +49,7 @@ import { fileURLToPath } from "node:url";
 
 import { inferencePinFromCargo, providerClosureDigest } from "./inference-closure-digest.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
-import { readOwnedReading, sharedDeviceProof } from "./lib/yue2-windows-owned-gpu.mjs";
+import { ownedSamplerFault, readOwnedReading, sharedDeviceProof } from "./lib/yue2-windows-owned-gpu.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const PLAN_PATH = "config/yue2-memory-profile-plan.json";
@@ -678,10 +678,8 @@ function startNvidiaSampler(gpuId, journalFile, intervalMs = 250, shared = null)
         fsyncSync(ownedJournal);
         ownedSamples.push(sample);
       } catch (cause) {
-        const beforeFirstAllocation = !processIdentity &&
-          cause?.message === "owned CUDA counter has no selected-PID/LUID rows";
-        if (cause?.code !== "ENOENT" && !beforeFirstAllocation) {
-          const fault = String(cause?.message ?? cause);
+        const fault = ownedSamplerFault(cause, Boolean(processIdentity));
+        if (fault !== null) {
           ownedFaults.push(fault);
           const line = `${JSON.stringify({ at: Date.now() / 1000, fault })}\n`;
           writeSync(faultJournal, line);

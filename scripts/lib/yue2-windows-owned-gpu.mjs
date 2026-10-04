@@ -91,3 +91,10 @@ export function readOwnedReading(shared, { cargoPid, cargoStartedAt, expectedIde
     luid: shared.proof.luid, expectedIdentity });
   return { pid, startedAt, raw: JSON.parse(raw), ...reading };
 }
+
+/** Only a not-yet-published process or counter may be absent without invalidating coverage. */
+export function ownedSamplerFault(cause, hasVerifiedProcess) {
+  if (!hasVerifiedProcess && (cause?.code === "ENOENT" ||
+      cause?.message === "owned CUDA counter has no selected-PID/LUID rows")) return null;
+  return String(cause?.message ?? cause);
+}

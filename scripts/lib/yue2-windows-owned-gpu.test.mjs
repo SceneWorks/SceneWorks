@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { parseOwnedCounter, readOwnedReading, sharedDeviceProof } from "./yue2-windows-owned-gpu.mjs";
+import { ownedSamplerFault, parseOwnedCounter, readOwnedReading, sharedDeviceProof } from "./yue2-windows-owned-gpu.mjs";
 
 const luid = "luid_0x00000000_0x0001f78f";
 const now = Date.parse("2026-10-04T20:00:10Z");
@@ -77,6 +77,15 @@ test("owned reading binds the native process file and stage request before attri
     await writeFile(path.join(dir, "request.json"), JSON.stringify({ processId: 999 }));
     assert.throws(() => readOwnedReading(shared, { cargoPid: 4321, cargoStartedAt }, query), /stage request changed owned test PID/);
     await writeFile(path.join(dir, "request.json"), JSON.stringify({ processId: 1234 }));
+    await unlink(shared.processFile);
+    let missing;
+    try {
+      readOwnedReading(shared, { cargoPid: 4321, cargoStartedAt, expectedIdentity: reading.identity }, query);
+    } catch (cause) { missing = cause; }
+    assert.equal(missing?.code, "ENOENT", "the published native PID file disappeared mid-capture");
+    assert.match(ownedSamplerFault(missing, true), /ENOENT/,
+      "a missing file after verified identity must enter the durable fault journal");
+    assert.equal(ownedSamplerFault(missing, false), null, "a process may not have published its first file yet");
     await writeFile(shared.marksFile, `${JSON.stringify({ stage: "done", at: Date.now() / 1000 })}\n`);
     assert.equal(readOwnedReading(shared, { cargoPid: 4321, cargoStartedAt }, () => { throw new Error("counter called after done"); }), null);
   } finally { await rm(dir, { recursive: true, force: true }); }
