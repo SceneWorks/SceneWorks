@@ -29,9 +29,16 @@ describe("subject mask report helpers", () => {
   it("indexes statuses by item id and versions the mask URL", () => {
     const byId = subjectMaskStatusByItemId({ items: [{ itemId: "a", maskPath: "training/datasets/d/masks/h.png" }] });
     expect(byId.get("a").maskPath).toBe("training/datasets/d/masks/h.png");
-    expect(subjectMaskUrl("p", { maskPath: "training/datasets/d/masks/h.png", updatedAt: "2026-10-04T00:00:00Z" })).toMatch(
-      /\/api\/v1\/projects\/p\/files\/training\/datasets\/d\/masks\/h\.png\?v=2026-10-04T00%3A00%3A00Z$/,
+    expect(subjectMaskUrl("p", { maskPath: "training/datasets/d/masks/h.png", revision: "0123456789abcdef" })).toMatch(
+      /\/api\/v1\/projects\/p\/files\/training\/datasets\/d\/masks\/h\.png\?v=0123456789abcdef$/,
     );
     expect(subjectMaskUrl("p", { hasMask: false })).toBe("");
+  });
+
+  it("versions the mask URL by content revision, not the 1-second updatedAt", () => {
+    // Two uploads in the same second with different bytes: same path and updatedAt, new revision.
+    const first = { maskPath: "training/datasets/d/masks/h.png", updatedAt: "2026-10-04T00:00:00Z", revision: "aaaaaaaaaaaaaaaa" };
+    const second = { ...first, revision: "bbbbbbbbbbbbbbbb" };
+    expect(subjectMaskUrl("p", second)).not.toBe(subjectMaskUrl("p", first));
   });
 });

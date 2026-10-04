@@ -73,6 +73,12 @@ pub struct SubjectMaskRecord {
     pub width: u32,
     pub height: u32,
     pub updated_at: String,
+    /// Content-derived version of the stored PNG: the first 16 hex chars of its SHA-256. The mask
+    /// path is fixed per image (content-hash keyed), so the editor appends this to the mask URL to
+    /// refetch a replaced mask — unlike `updated_at` (1-second resolution) it changes whenever the
+    /// stored bytes do, however close together two writes land.
+    #[serde(default)]
+    pub revision: String,
 }
 
 /// The on-disk mask index.
@@ -109,6 +115,9 @@ pub struct SubjectMaskItemStatus {
     pub source: Option<SubjectMaskSource>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
+    /// [`SubjectMaskRecord::revision`] of the stored mask — the editor's cache-busting URL version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
 }
 
 /// A dataset's mask coverage: `masked` of `total` items carry a mask; `empty` of those are all-black
@@ -122,6 +131,11 @@ pub struct SubjectMaskReport {
     pub empty: usize,
     pub uploaded: usize,
     pub items: Vec<SubjectMaskItemStatus>,
+    /// Content hashes of generated masks that were NOT stored because their image left the dataset
+    /// (removed, re-pointed, cropped, normalized) while the mask job ran. Only a
+    /// [`SubjectMaskSource::Auto`] write skips; an upload for a vanished image is an error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skipped_content_hashes: Vec<String>,
 }
 
 /// One image the mask job must segment: its item id, absolute image path and content hash.
@@ -268,6 +282,16 @@ fn encode_png(mask: &GrayImage) -> ProjectStoreResult<Vec<u8>> {
     Ok(out)
 }
 
+/// [`SubjectMaskRecord::revision`] of `png`: the first 16 hex chars of its SHA-256.
+fn mask_revision(png: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(png)
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 fn index_path(project_path: &Path, dataset_id: &str) -> PathBuf {
     dataset_root(project_path, dataset_id).join(SUBJECT_MASK_INDEX_NAME)
 }
@@ -361,10 +385,19 @@ impl TrainingDatasetStore {
             .collect()
     }
 
-    /// Persist generated (or uploaded) masks. Each write's content hash must belong to a current
-    /// dataset item; its PNG is normalized against that item's dimensions
-    /// ([`normalize_subject_mask`]) and stored at [`subject_mask_relative_path`]. Masks of images no
-    /// longer in the dataset are pruned. Metadata-only: no version bump. Returns the coverage report.
+    /// Persist generated (or uploaded) masks. Every write is validated before anything touches disk:
+    /// its content hash must be well-formed and belong to a current dataset item, and its PNG is
+    /// normalized against that item's dimensions ([`normalize_subject_mask`]). Only then are the masks
+    /// stored at [`subject_mask_relative_path`], so a bad write never leaves earlier masks half-written.
+    ///
+    /// A [`SubjectMaskSource::Auto`] write whose hash no longer matches a live item (the image left the
+    /// dataset while the GPU job ran) is skipped and listed in
+    /// [`SubjectMaskReport::skipped_content_hashes`] rather than failing the batch; an upload for a
+    /// vanished image is [`ProjectStoreError::NotFound`].
+    ///
+    /// Masks of images no longer in the dataset are pruned, together with any file under `masks/`
+    /// that has no index entry (an orphan from an interrupted write). Metadata-only: no version bump.
+    /// Returns the coverage report.
     pub fn write_subject_masks(
         &self,
         project_id: &str,
@@ -377,63 +410,93 @@ impl TrainingDatasetStore {
         self.backfill_content_hashes(&mut dataset)?;
         let root = dataset_root(self.project_path(), dataset_id);
         let mut index = read_index(self.project_path(), dataset_id)?;
-        let now = utc_now();
+
+        // Phase 1: validate + normalize every write; nothing is written yet.
+        let mut skipped = Vec::new();
+        let mut ready = Vec::with_capacity(writes.len());
         for write in writes {
             if !is_content_hash(&write.content_hash) {
                 return Err(ProjectStoreError::BadRequest(
                     "Subject mask contentHash must be a SHA-256 hex digest".to_owned(),
                 ));
             }
-            let item = dataset
+            let Some(item) = dataset
                 .items
                 .iter()
                 .find(|item| item.content_hash.as_deref() == Some(write.content_hash.as_str()))
-                .ok_or_else(|| {
-                    ProjectStoreError::NotFound(format!(
-                        "No training dataset image has content hash {}",
-                        write.content_hash
-                    ))
-                })?;
+            else {
+                if source == SubjectMaskSource::Auto {
+                    skipped.push(write.content_hash);
+                    continue;
+                }
+                return Err(ProjectStoreError::NotFound(format!(
+                    "No training dataset image has content hash {}",
+                    write.content_hash
+                )));
+            };
             let dims = item_dimensions(self.project_path(), &dataset, item)?;
             let (mask, empty) = normalize_subject_mask(&write.png, dims)?;
+            let encoded = encode_png(&mask)?;
+            ready.push((write.content_hash, mask.dimensions(), empty, encoded));
+        }
+
+        // Phase 2: store.
+        let now = utc_now();
+        for (content_hash, (width, height), empty, encoded) in ready {
             atomic_write(
-                &root.join(subject_mask_relative_path(&write.content_hash)),
-                &encode_png(&mask)?,
+                &root.join(subject_mask_relative_path(&content_hash)),
+                &encoded,
             )?;
             index.masks.insert(
-                write.content_hash,
+                content_hash,
                 SubjectMaskRecord {
                     source,
                     empty,
-                    width: mask.width(),
-                    height: mask.height(),
+                    width,
+                    height,
                     updated_at: now.clone(),
+                    revision: mask_revision(&encoded),
                 },
             );
         }
+
         // Prune masks whose image left the dataset (removed, re-pointed, cropped).
         let live: Vec<&str> = dataset
             .items
             .iter()
             .filter_map(|item| item.content_hash.as_deref())
             .collect();
-        let stale: Vec<String> = index
-            .masks
-            .keys()
-            .filter(|hash| !live.contains(&hash.as_str()))
-            .cloned()
-            .collect();
-        for hash in stale {
-            index.masks.remove(&hash);
-            match fs::remove_file(root.join(subject_mask_relative_path(&hash))) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(ProjectStoreError::Io(error)),
+        index.masks.retain(|hash, _| live.contains(&hash.as_str()));
+        // Then every mask file the index does not name: the files of the records just dropped, and
+        // orphans an interrupted write left behind.
+        match fs::read_dir(root.join(SUBJECT_MASK_DIR)) {
+            Ok(entries) => {
+                for entry in entries {
+                    let path = entry?.path();
+                    if !path.is_file() || path.extension().is_none_or(|ext| ext != "png") {
+                        continue;
+                    }
+                    let indexed = path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .is_some_and(|stem| index.masks.contains_key(stem));
+                    if !indexed {
+                        match fs::remove_file(&path) {
+                            Ok(()) => {}
+                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(error) => return Err(ProjectStoreError::Io(error)),
+                        }
+                    }
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(ProjectStoreError::Io(error)),
         }
         index.schema_version = SUBJECT_MASK_INDEX_SCHEMA_VERSION;
         write_json(&index_path(self.project_path(), dataset_id), &index)?;
-        self.build_subject_mask_report(&dataset, &index)
+        let mut report = self.build_subject_mask_report(&dataset, &index)?;
+        report.skipped_content_hashes = skipped;
+        Ok(report)
     }
 
     /// Install a user-uploaded replacement mask for one item, read from `source_path` (the API's
@@ -513,6 +576,7 @@ impl TrainingDatasetStore {
                     empty: record.empty,
                     source: Some(record.source),
                     updated_at: Some(record.updated_at.clone()),
+                    revision: Some(record.revision.clone()),
                 },
                 None => SubjectMaskItemStatus {
                     item_id: item.id.clone(),
@@ -522,6 +586,7 @@ impl TrainingDatasetStore {
                     empty: false,
                     source: None,
                     updated_at: None,
+                    revision: None,
                 },
             });
         }
@@ -538,6 +603,7 @@ impl TrainingDatasetStore {
                 .filter(|item| item.source == Some(SubjectMaskSource::Upload))
                 .count(),
             items,
+            skipped_content_hashes: Vec::new(),
         })
     }
 }

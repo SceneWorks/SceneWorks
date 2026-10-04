@@ -383,8 +383,9 @@ const MAX_JSON_BODY_BYTES: usize = 10 * 1024 * 1024;
 // still exceed the ordinary API ceiling by hundreds of megabytes.
 const MAX_PARQUET_FINALIZE_BODY_BYTES: usize = 512 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 2 * 1024 * 1024 * 1024;
-// sc-2126: the subject-mask worker POSTs every mask of a dataset as base64 PNG in one JSON body
-// (binary masks compress to a few KiB each, so this bounds a dataset of thousands of images).
+// sc-2126: the subject-mask worker POSTs a dataset's masks as base64 PNG in chunks of at most
+// 64 MiB of encoded items (`SUBJECT_MASK_POST_CHUNK_BYTES` in the worker's subject_mask_jobs.rs),
+// so any dataset size fits; this per-body ceiling leaves the chunk generous headroom.
 const MAX_SUBJECT_MASKS_BODY_BYTES: usize = 256 * 1024 * 1024;
 // One replacement-mask upload: the store's encoded-mask cap plus multipart framing headroom. The
 // store re-checks the exact limit and answers a field-level error past it.
@@ -1682,8 +1683,8 @@ fn create_app_with_state_mode(
         )
         .route(
             "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
-            // The worker POSTs every generated mask (base64 PNG) in one body; a large dataset
-            // exceeds the small JSON router default, so this route gets its own bounded limit.
+            // The worker POSTs generated masks (base64 PNG) in chunks of up to 64 MiB, beyond the
+            // small JSON router default, so this route gets its own bounded limit.
             get(get_training_dataset_subject_masks)
                 .post(write_training_dataset_subject_masks)
                 .layer(DefaultBodyLimit::max(MAX_SUBJECT_MASKS_BODY_BYTES)),

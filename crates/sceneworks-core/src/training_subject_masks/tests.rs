@@ -351,22 +351,155 @@ fn a_transparent_layer_mask_reads_alpha_as_background() {
     assert!(!empty);
 }
 
+fn mask_files(fx: &Fixture) -> Vec<String> {
+    let mut names: Vec<String> = match fs::read_dir(fx.root().join(SUBJECT_MASK_DIR)) {
+        Ok(entries) => entries
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read masks dir: {error}"),
+    };
+    names.sort();
+    names
+}
+
 #[test]
-fn a_mask_for_an_unknown_image_is_refused() {
+fn an_uploaded_mask_for_an_unknown_image_is_refused_before_anything_is_written() {
     let fx = Fixture::new(1, 4, 4);
     let error = fx
         .store
         .write_subject_masks(
             PROJECT,
             DATASET,
-            vec![SubjectMaskWrite {
-                content_hash: "0".repeat(64),
-                png: png(&GrayImage::new(4, 4)),
-            }],
-            SubjectMaskSource::Auto,
+            vec![
+                SubjectMaskWrite {
+                    content_hash: fx.hash(0),
+                    png: png(&subject_mask(4, 4)),
+                },
+                SubjectMaskWrite {
+                    content_hash: "0".repeat(64),
+                    png: png(&GrayImage::new(4, 4)),
+                },
+            ],
+            SubjectMaskSource::Upload,
         )
         .expect_err("unknown hash refused");
     assert!(matches!(error, ProjectStoreError::NotFound(_)), "{error:?}");
+    // Validate-then-write: the valid first mask was not stored ahead of the failing second one.
+    assert_eq!(mask_files(&fx), Vec::<String>::new());
+}
+
+#[test]
+fn a_generated_mask_for_a_vanished_image_is_skipped_and_the_live_one_stored() {
+    let fx = Fixture::new(2, 4, 4);
+    let live = fx.hash(0);
+    let removed = fx.hash(1);
+    // The image leaves the dataset while the GPU job runs.
+    let mut dataset = fx.dataset();
+    dataset.items.truncate(1);
+    fx.store.save_dataset(&dataset).unwrap();
+    let report = fx
+        .store
+        .write_subject_masks(
+            PROJECT,
+            DATASET,
+            vec![
+                SubjectMaskWrite {
+                    content_hash: live.clone(),
+                    png: png(&subject_mask(4, 4)),
+                },
+                SubjectMaskWrite {
+                    content_hash: removed.clone(),
+                    png: png(&subject_mask(4, 4)),
+                },
+            ],
+            SubjectMaskSource::Auto,
+        )
+        .expect("a vanished image does not fail the batch");
+    assert_eq!(report.skipped_content_hashes, vec![removed]);
+    assert_eq!((report.masked, report.total), (1, 1));
+    assert_eq!(mask_files(&fx), vec![format!("{live}.png")]);
+}
+
+#[test]
+fn an_orphan_mask_file_without_an_index_entry_is_pruned() {
+    let fx = Fixture::new(2, 4, 4);
+    // An interrupted write left a mask file for a live image with no index record, plus one for an
+    // image that is not in the dataset at all.
+    let masks = fx.root().join(SUBJECT_MASK_DIR);
+    fs::create_dir_all(&masks).unwrap();
+    fs::write(
+        masks.join(format!("{}.png", fx.hash(1))),
+        png(&subject_mask(4, 4)),
+    )
+    .unwrap();
+    fs::write(
+        masks.join(format!("{}.png", "c".repeat(64))),
+        png(&subject_mask(4, 4)),
+    )
+    .unwrap();
+    let report = fx
+        .store
+        .write_subject_masks(
+            PROJECT,
+            DATASET,
+            vec![SubjectMaskWrite {
+                content_hash: fx.hash(0),
+                png: png(&subject_mask(4, 4)),
+            }],
+            SubjectMaskSource::Auto,
+        )
+        .unwrap();
+    assert_eq!(mask_files(&fx), vec![format!("{}.png", fx.hash(0))]);
+    assert!(resolve_subject_mask_path(&fx.root(), &fx.dataset().items[1]).is_none());
+    assert_eq!(report.masked, 1);
+}
+
+#[test]
+fn a_later_write_keeps_an_earlier_writes_masks() {
+    // The worker POSTs a large dataset in chunks; chunk 2 must not prune chunk 1.
+    let fx = Fixture::new(2, 4, 4);
+    for index in 0..2 {
+        fx.store
+            .write_subject_masks(
+                PROJECT,
+                DATASET,
+                vec![SubjectMaskWrite {
+                    content_hash: fx.hash(index),
+                    png: png(&subject_mask(4, 4)),
+                }],
+                SubjectMaskSource::Auto,
+            )
+            .unwrap();
+    }
+    let report = fx.store.subject_mask_report(PROJECT, DATASET).unwrap();
+    assert_eq!((report.masked, report.total), (2, 2));
+    assert_eq!(mask_files(&fx).len(), 2);
+}
+
+#[test]
+fn the_mask_revision_follows_the_stored_bytes() {
+    let fx = Fixture::new(1, 4, 4);
+    let item = fx.dataset().items[0].id.clone();
+    let upload = |mask: &GrayImage| {
+        let path = fx.project_path.join("upload.png");
+        fs::write(&path, png(mask)).unwrap();
+        fx.store
+            .upload_subject_mask(PROJECT, DATASET, &item, &path)
+            .unwrap()
+            .items[0]
+            .revision
+            .clone()
+            .expect("revision")
+    };
+    // Two uploads in the same second with different bytes get different revisions (the editor's
+    // `?v=`), and the revision is the stored PNG's SHA-256 prefix.
+    let first = upload(&subject_mask(4, 4));
+    let second = upload(&GrayImage::new(4, 4));
+    assert_ne!(first, second);
+    let stored = fs::read(fx.root().join(subject_mask_relative_path(&fx.hash(0)))).unwrap();
+    assert_eq!(second, mask_revision(&stored));
+    assert_eq!(second.len(), 16);
 }
 
 #[test]

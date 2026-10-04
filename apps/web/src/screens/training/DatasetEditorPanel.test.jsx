@@ -223,8 +223,8 @@ describe("DatasetEditorPanel subject masks", () => {
     empty: 1,
     uploaded: 0,
     items: [
-      { itemId: "item_a", hasMask: true, empty: false, source: "auto", maskPath: "training/datasets/ds-1/masks/aaa.png", updatedAt: "t1" },
-      { itemId: "item_b", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/ds-1/masks/bbb.png", updatedAt: "t1" },
+      { itemId: "item_a", hasMask: true, empty: false, source: "auto", maskPath: "training/datasets/ds-1/masks/aaa.png", updatedAt: "t1", revision: "r1" },
+      { itemId: "item_b", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/ds-1/masks/bbb.png", updatedAt: "t1", revision: "r2" },
     ],
   };
 
@@ -261,7 +261,7 @@ describe("DatasetEditorPanel subject masks", () => {
     await act(async () => button("Show masks").click());
     const shown = overlays();
     expect(shown).toHaveLength(2);
-    expect(shown[0].getAttribute("src")).toContain("/api/v1/projects/proj-1/files/training/datasets/ds-1/masks/aaa.png?v=t1");
+    expect(shown[0].getAttribute("src")).toContain("/api/v1/projects/proj-1/files/training/datasets/ds-1/masks/aaa.png?v=r1");
     expect(shown[1].getAttribute("alt")).toBe("Subject mask for b.png");
 
     await act(async () => button("Hide masks").click());

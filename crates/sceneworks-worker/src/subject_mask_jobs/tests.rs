@@ -53,19 +53,54 @@ fn decode(png: &[u8]) -> image::DynamicImage {
     image::load_from_memory(png).expect("mask PNG decodes")
 }
 
+/// Run [`generate_subject_masks`] through the SAME build-once session loop the backends use
+/// (`segment_images_in_one_session`), with `segment` standing in for the one-frame SAM3 propagate.
+/// Returns the records plus how many times the batch seam and the session build ran.
+fn generate_with_fake_sam3(
+    items: Vec<SubjectMaskItem>,
+    cancel: CancelFlag,
+    tx: tokio::sync::mpsc::Sender<usize>,
+    mut segment: impl FnMut(&image::RgbImage) -> WorkerResult<Vec<Vec<u8>>>,
+) -> (WorkerResult<Vec<SubjectMaskRecord>>, usize, usize) {
+    let mut batches = 0;
+    let mut builds = 0;
+    let engine_cancel = cancel.clone();
+    let records = generate_subject_masks(items, cancel, tx, |count, load, finish| {
+        batches += 1;
+        crate::person_segment_sam3_common::segment_images_in_one_session(
+            count,
+            Some(&engine_cancel),
+            || {
+                builds += 1;
+                Ok(())
+            },
+            load,
+            |_, image| segment(image),
+            finish,
+        )
+    });
+    (records, batches, builds)
+}
+
 #[test]
 fn n_images_yield_n_single_channel_masks_at_image_size() {
     let dir = tempfile::tempdir().unwrap();
     let items = items_on_disk(dir.path(), 4, 6, 3);
     let (tx, mut rx) = tokio::sync::mpsc::channel(16);
     let mut calls = 0;
-    let records = generate_subject_masks(items, CancelFlag::new(), tx, |image| {
-        calls += 1;
-        let (w, h) = image.dimensions();
-        Ok(vec![left_block(w, h, 2)])
-    })
-    .expect("masks generate");
+    let (records, batches, builds) =
+        generate_with_fake_sam3(items, CancelFlag::new(), tx, |image| {
+            calls += 1;
+            let (w, h) = image.dimensions();
+            Ok(vec![left_block(w, h, 2)])
+        });
+    let records = records.expect("masks generate");
     assert_eq!(calls, 4, "the segmenter ran once per image");
+    assert_eq!(
+        (batches, builds),
+        (1, 1),
+        "one segmenter batch + one SAM3 session build per job, not one per image"
+    );
     assert_eq!(records.len(), 4);
     for (index, record) in records.iter().enumerate() {
         assert_eq!(record.content_hash, format!("hash_{index}"));
@@ -92,7 +127,7 @@ fn an_image_with_no_person_gets_an_all_black_mask_flagged_empty() {
     let items = items_on_disk(dir.path(), 2, 5, 4);
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let mut index = 0;
-    let records = generate_subject_masks(items, CancelFlag::new(), tx, |image| {
+    let (records, _, _) = generate_with_fake_sam3(items, CancelFlag::new(), tx, |image| {
         index += 1;
         let (w, h) = image.dimensions();
         // Second image: SAM3 found nobody.
@@ -101,8 +136,8 @@ fn an_image_with_no_person_gets_an_all_black_mask_flagged_empty() {
         } else {
             vec![left_block(w, h, 1)]
         })
-    })
-    .unwrap();
+    });
+    let records = records.unwrap();
     assert!(!records[0].empty);
     assert!(records[1].empty);
     let mask = decode(&records[1].png).to_luma8();
@@ -134,11 +169,53 @@ fn a_pre_tripped_cancel_stops_before_segmenting() {
     let (tx, _rx) = tokio::sync::mpsc::channel(16);
     let cancel = CancelFlag::new();
     cancel.cancel();
-    let error = generate_subject_masks(items, cancel, tx, |_| {
+    let (result, batches, builds) = generate_with_fake_sam3(items, cancel, tx, |_| {
         panic!("the segmenter must not run after cancel")
-    })
-    .expect_err("canceled");
+    });
+    let error = result.expect_err("canceled");
     assert!(matches!(error, WorkerError::Canceled(_)), "{error}");
+    assert_eq!((batches, builds), (0, 0), "no SAM3 session is built");
+}
+
+#[test]
+fn a_closed_progress_channel_stops_the_batch_after_the_current_image() {
+    let dir = tempfile::tempdir().unwrap();
+    let items = items_on_disk(dir.path(), 3, 2, 2);
+    let (tx, rx) = tokio::sync::mpsc::channel(16);
+    drop(rx);
+    let mut calls = 0;
+    let (result, _, _) = generate_with_fake_sam3(items, CancelFlag::new(), tx, |_| {
+        calls += 1;
+        Ok(Vec::new())
+    });
+    assert!(
+        matches!(result, Err(WorkerError::Canceled(_))),
+        "{result:?}"
+    );
+    assert_eq!(
+        calls, 1,
+        "the consumer is gone: no further image is segmented"
+    );
+}
+
+#[test]
+fn chunked_sidecar_responses_fold_into_one_result() {
+    let result = subject_mask_result(
+        "ds-1",
+        3,
+        1,
+        &[
+            json!({ "stored": 2, "skipped": [], "report": {} }),
+            json!({ "stored": 0, "skipped": ["gone"], "report": {} }),
+        ],
+    )
+    .unwrap();
+    assert_eq!(result["stored"], 2);
+    assert_eq!(result["skippedContentHashes"], json!(["gone"]));
+    assert_eq!(result["maskedItemCount"], 3);
+    let error = subject_mask_result("ds-1", 1, 0, &[json!({ "report": {} })])
+        .expect_err("a response without a stored count is a contract break");
+    assert!(matches!(error, WorkerError::Engine(_)), "{error}");
 }
 
 #[test]

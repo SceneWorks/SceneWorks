@@ -3,10 +3,12 @@
 //! The `dataset_subject_mask` job runs the shipped SAM3 text-concept ("person") segmenter over every
 //! image of a training dataset and POSTs one single-channel PNG mask per image to rust-api's
 //! content-hash-keyed mask sidecar (`.../subject-masks`, stored by
-//! `sceneworks_core::training_subject_masks`). Each image is segmented on its own (a one-frame PCS
-//! pass — dataset images are unrelated stills, so there is no track to carry between them) and every
-//! detected person is unioned into the subject: white = subject, black = background, at the image's
-//! own dimensions.
+//! `sceneworks_core::training_subject_masks`). The SAM3 model is built (and quantized) ONCE per job;
+//! each image is then segmented on its own (a one-frame PCS pass — dataset images are unrelated
+//! stills, so there is no track to carry between them) and every detected person is unioned into the
+//! subject: white = subject, black = background, at the image's own dimensions. Masks are POSTed in
+//! bounded chunks ([`SUBJECT_MASK_POST_CHUNK_BYTES`]) so a large dataset never exceeds the route's
+//! body limit after all the GPU work is done.
 //!
 //! The correctness linchpin mirrors the face pass: an image where SAM3 finds **no person** still gets
 //! a mask — an all-black one — so "examined, nothing found" is a stored, flaggable state rather than
@@ -36,6 +38,15 @@ const SUBJECT_MASK_SPACE: &str = "sam3-person";
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 const CANCEL_MESSAGE: &str = "Subject mask generation canceled by user.";
+/// Largest JSON-encoded mask payload per sidecar POST. Masks go up in chunks of at most this many
+/// bytes (rust-api's `/subject-masks` route accepts up to 256 MiB per body), so a dataset of any
+/// size never 413s after the GPU work. One mask is at most 32 MiB raw (~43 MiB base64), so a single
+/// mask always fits a chunk. The store treats each POST as an incremental write.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const SUBJECT_MASK_POST_CHUNK_BYTES: usize = 64 * 1024 * 1024;
 
 #[cfg(any(
     target_os = "macos",
@@ -97,94 +108,75 @@ fn encode_mask_png(mask: Vec<u8>, width: u32, height: u32) -> WorkerResult<Vec<u
     Ok(out)
 }
 
-/// Segment every item with `segment` (image → every detected person's binary mask at the image's
-/// dimensions), union, encode, and report each finished item's index on `tx`. The SAM3 segmenter is
-/// injected so the loop is testable without weights.
+/// Decodes dataset image `index` for the segmenter (see [`generate_subject_masks`]).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn generate_subject_masks<S>(
+type ImageLoader = Box<dyn FnMut(usize) -> WorkerResult<image::RgbImage> + Send>;
+
+/// Turns image `index` and every person SAM3 found on it into its stored record (see
+/// [`generate_subject_masks`]).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+type MaskFinisher =
+    Box<dyn FnMut(usize, &image::RgbImage, Vec<Vec<u8>>) -> WorkerResult<SubjectMaskRecord> + Send>;
+
+/// Segment every item with ONE call to `segment_batch(count, load, finish)` — the backend's
+/// `segment_persons_per_image`, which builds the SAM3 session once and, per image, calls `load`,
+/// runs a one-frame "person" propagate and hands the detected masks to `finish`. Here `load` decodes
+/// the item and `finish` unions every person, encodes the PNG and reports the item's index on `tx`.
+/// The segmenter is injected so the loop is testable without weights.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn generate_subject_masks<B>(
     items: Vec<SubjectMaskItem>,
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
-    mut segment: S,
+    segment_batch: B,
 ) -> WorkerResult<Vec<SubjectMaskRecord>>
 where
-    S: FnMut(&image::RgbImage) -> WorkerResult<Vec<Vec<u8>>>,
+    B: FnOnce(usize, ImageLoader, MaskFinisher) -> WorkerResult<Vec<SubjectMaskRecord>>,
 {
-    let mut out = Vec::with_capacity(items.len());
-    for (index, item) in items.into_iter().enumerate() {
-        if cancel.is_cancelled() {
-            return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
-        }
-        let image = crate::image_decode::decode_image_any(&item.image_path)
+    if cancel.is_cancelled() {
+        return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
+    }
+    let count = items.len();
+    let paths: Vec<PathBuf> = items.iter().map(|item| item.image_path.clone()).collect();
+    let hashes: Vec<String> = items.into_iter().map(|item| item.content_hash).collect();
+    let load: ImageLoader = Box::new(move |index| {
+        let path = &paths[index];
+        Ok(crate::image_decode::decode_image_any(path)
             .map_err(|error| {
                 WorkerError::InvalidPayload(format!(
                     "subject mask image {}: {error}",
-                    item.image_path.display()
+                    path.display()
                 ))
             })?
-            .to_rgb8();
+            .to_rgb8())
+    });
+    let finish: MaskFinisher = Box::new(move |index, image, persons| {
         let (width, height) = image.dimensions();
-        let persons = segment(&image)?;
         let subject = union_person_masks(&persons, width, height)?;
         let empty = subject.iter().all(|&value| value == 0);
-        out.push(SubjectMaskRecord {
-            content_hash: item.content_hash,
+        let record = SubjectMaskRecord {
+            content_hash: hashes[index].clone(),
             png: encode_mask_png(subject, width, height)?,
             empty,
-        });
+        };
         // A closed channel means the consumer loop returned early (POST failure / 409): trip the
-        // flag so the loop bails instead of running unheard (sc-8804, F-003).
+        // flag so the batch bails at its next per-image check instead of running unheard (sc-8804,
+        // F-003).
         if tx.blocking_send(index).is_err() {
             cancel.cancel();
         }
-    }
-    Ok(out)
-}
-
-/// SAM3 "person" segmentation of one still: a one-frame PCS pass, returning every detected person's
-/// mask at the image's dimensions (empty when nobody is found).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn sam3_person_masks(
-    model_path: &Path,
-    tokenizer_path: &Path,
-    image: &image::RgbImage,
-    cancel: &CancelFlag,
-) -> WorkerResult<Vec<Vec<u8>>> {
-    let frame = gen_core::Image {
-        width: image.width(),
-        height: image.height(),
-        pixels: image.as_raw().clone(),
-    };
-    #[cfg(target_os = "macos")]
-    let all = crate::person_segment_sam3::segment_all_persons_in_memory(
-        model_path,
-        tokenizer_path,
-        std::slice::from_ref(&frame),
-        Some(cancel.clone()),
-        None,
-    )?;
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let all = crate::person_segment_sam3_candle::segment_all_persons_in_memory(
-        model_path,
-        tokenizer_path,
-        std::slice::from_ref(&frame),
-        Some(cancel.clone()),
-        None,
-    )?;
-    Ok(all
-        .per_frame
-        .into_iter()
-        .next()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(_, mask)| mask)
-        .collect())
+        Ok(record)
+    });
+    segment_batch(count, load, finish)
 }
 
 #[cfg(any(
@@ -247,8 +239,27 @@ pub(crate) async fn run_dataset_subject_mask_job(
             json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
         );
         let engine_cancel = blocking_cancel.clone();
-        let records = generate_subject_masks(items, blocking_cancel, tx, |image| {
-            sam3_person_masks(&model_path, &tokenizer_path, image, &engine_cancel)
+        // One SAM3 session for the whole dataset: the model is built + quantized once, not per image.
+        let records = generate_subject_masks(items, blocking_cancel, tx, |count, load, finish| {
+            #[cfg(target_os = "macos")]
+            let masks = crate::person_segment_sam3::segment_persons_per_image(
+                model_path,
+                tokenizer_path,
+                count,
+                load,
+                finish,
+                Some(engine_cancel),
+            );
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let masks = crate::person_segment_sam3_candle::segment_persons_per_image(
+                model_path,
+                tokenizer_path,
+                count,
+                load,
+                finish,
+                Some(engine_cancel),
+            );
+            masks
         })?;
         emit_event(
             "dataset_subject_mask_complete",
@@ -265,6 +276,7 @@ pub(crate) async fn run_dataset_subject_mask_job(
         saving_message: "Saving subject masks.",
         join_error_label: "dataset subject mask task join",
         item_message: &|index, total| format!("Masked image {} of {}.", index + 1, total),
+        post_chunk_bytes: Some(SUBJECT_MASK_POST_CHUNK_BYTES),
     };
     run_batched_analysis_job(
         api,
@@ -277,24 +289,29 @@ pub(crate) async fn run_dataset_subject_mask_job(
         rx,
         blocking,
         subject_mask_records_payload,
-        |records, stored| {
+        |records, responses| {
             let empty = records.iter().filter(|record| record.empty).count();
-            analysis_progress(
+            let result = subject_mask_result(&dataset_id, records.len(), empty, &responses)?;
+            let skipped = result["skippedContentHashes"]
+                .as_array()
+                .map_or(0, Vec::len);
+            let mut message = format!(
+                "Masked {} image(s); {empty} with no person detected.",
+                records.len()
+            );
+            if skipped > 0 {
+                message.push_str(&format!(
+                    " {skipped} skipped: the image left the dataset while masking."
+                ));
+            }
+            Ok(analysis_progress(
                 JobStatus::Completed,
                 ProgressStage::Completed,
                 1.0,
-                &format!(
-                    "Masked {} image(s); {empty} with no person detected.",
-                    records.len()
-                ),
-                Some(subject_mask_result(
-                    &dataset_id,
-                    records.len(),
-                    empty,
-                    stored,
-                )),
+                &message,
+                Some(result),
                 backend,
-            )
+            ))
         },
     )
     .await?;
@@ -322,17 +339,37 @@ fn subject_mask_records_payload(records: &[SubjectMaskRecord]) -> Vec<Value> {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn subject_mask_result(dataset_id: &str, masked: usize, empty: usize, stored: Value) -> JsonObject {
+fn subject_mask_result(
+    dataset_id: &str,
+    masked: usize,
+    empty: usize,
+    responses: &[Value],
+) -> WorkerResult<JsonObject> {
+    // Fold the per-chunk sidecar responses: masks stored, and the hashes skipped because their image
+    // left the dataset while the job ran. A response without a numeric `stored` is a contract break.
+    let mut stored = 0u64;
+    let mut skipped = Vec::new();
+    for response in responses {
+        stored += response
+            .get("stored")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                WorkerError::Engine(format!(
+                    "subject mask sidecar response has no stored count: {response}"
+                ))
+            })?;
+        if let Some(hashes) = response.get("skipped").and_then(Value::as_array) {
+            skipped.extend(hashes.iter().cloned());
+        }
+    }
     let mut result = JsonObject::new();
     result.insert("space".to_owned(), json!(SUBJECT_MASK_SPACE));
     result.insert("datasetId".to_owned(), json!(dataset_id));
     result.insert("maskedItemCount".to_owned(), json!(masked));
     result.insert("emptyMaskCount".to_owned(), json!(empty));
-    result.insert(
-        "stored".to_owned(),
-        stored.get("stored").cloned().unwrap_or(Value::Null),
-    );
-    result
+    result.insert("stored".to_owned(), json!(stored));
+    result.insert("skippedContentHashes".to_owned(), Value::Array(skipped));
+    Ok(result)
 }
 
 #[cfg(any(

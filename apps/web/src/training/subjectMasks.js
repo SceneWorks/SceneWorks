@@ -28,8 +28,9 @@ export function subjectMaskStatusByItemId(report) {
   return new Map((report?.items ?? []).map((item) => [item.itemId, item]));
 }
 
-// Displayable URL of a mask. `updatedAt` is appended so a replaced mask (same content-hash path)
-// is refetched instead of served from the browser cache.
+// Displayable URL of a mask. The mask path is fixed per image (content-hash keyed), so the stored
+// PNG's content-derived `revision` is appended: a replaced mask is refetched instead of served from
+// the browser cache, even when two replacements land within the same second.
 export function subjectMaskUrl(projectId, status) {
   if (!projectId || !status?.maskPath) {
     return "";
@@ -39,6 +40,6 @@ export function subjectMaskUrl(projectId, status) {
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
     .join("/");
-  const version = status.updatedAt ? `?v=${encodeURIComponent(status.updatedAt)}` : "";
+  const version = status.revision ? `?v=${encodeURIComponent(status.revision)}` : "";
   return withMediaTicket(`${API_BASE_URL}/api/v1/projects/${projectId}/files/${path}${version}`);
 }

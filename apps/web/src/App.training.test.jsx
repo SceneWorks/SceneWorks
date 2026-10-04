@@ -870,7 +870,7 @@ describe("SceneWorks app shell", () => {
       masked: 1,
       empty: 1,
       uploaded: 0,
-      items: [{ itemId: "item_0001", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/dataset-a/masks/h.png", updatedAt: "t1" }],
+      items: [{ itemId: "item_0001", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/dataset-a/masks/h.png", updatedAt: "t1", revision: "r1" }],
     };
     const uploadedReport = {
       ...emptyReport,

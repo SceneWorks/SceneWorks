@@ -1257,7 +1257,7 @@ pub(crate) async fn write_training_dataset_subject_masks(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let stored = writes.len();
+    let submitted = writes.len();
     let report = project_call(state, move |store| {
         store.write_training_dataset_subject_masks(
             &project_id,
@@ -1267,7 +1267,14 @@ pub(crate) async fn write_training_dataset_subject_masks(
         )
     })
     .await?;
-    Ok(Json(json!({ "stored": stored, "report": report })))
+    // A mask whose image left the dataset while the job ran is skipped (not stored), never a 404
+    // that would discard the rest of the batch.
+    let skipped = report.skipped_content_hashes.clone();
+    Ok(Json(json!({
+        "stored": submitted - skipped.len(),
+        "skipped": skipped,
+        "report": report,
+    })))
 }
 
 /// The dataset's subject-mask coverage and per-image mask status (sc-2126).

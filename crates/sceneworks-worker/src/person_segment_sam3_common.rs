@@ -389,6 +389,56 @@ pub(crate) fn per_frame_masks<F: Sam3FrameOutput>(
         .collect::<WorkerResult<Vec<_>>>()
 }
 
+/// Every person SAM3 found on a ONE-frame propagate, as binary row-major `width*height` 0/255 masks
+/// (empty when nobody was found). A one-frame propagate yields exactly one output; any other count
+/// is an engine error, never read as "no person".
+pub(crate) fn single_frame_person_masks<F: Sam3FrameOutput>(
+    outputs: &[F],
+    width: u32,
+    height: u32,
+) -> WorkerResult<Vec<Vec<u8>>> {
+    if outputs.len() != 1 {
+        return Err(WorkerError::Engine(format!(
+            "sam3 one-frame propagate returned {} frame outputs",
+            outputs.len()
+        )));
+    }
+    Ok(per_frame_masks(outputs, width, height)?
+        .into_iter()
+        .flatten()
+        .map(|(_, mask)| mask)
+        .collect())
+}
+
+/// Segment `count` unrelated stills with ONE segmenter session (sc-2126 review): `build` assembles
+/// the session (model build + quantize + tokenizer/concept encode) exactly once, then each image is
+/// `load`ed, run through `segment` (a one-frame propagate — the engine resets its tracking state at
+/// every propagate, so stills never share identities), and handed with its person masks to `finish`,
+/// whose results are returned in order. The cancel flag is checked before each image. Shared by both
+/// SAM3 backends so the build-once contract is one tested copy; `count == 0` builds nothing.
+pub(crate) fn segment_images_in_one_session<S, T>(
+    count: usize,
+    cancel: Option<&CancelFlag>,
+    build: impl FnOnce() -> WorkerResult<S>,
+    mut load: impl FnMut(usize) -> WorkerResult<image::RgbImage>,
+    mut segment: impl FnMut(&mut S, &image::RgbImage) -> WorkerResult<Vec<Vec<u8>>>,
+    mut finish: impl FnMut(usize, &image::RgbImage, Vec<Vec<u8>>) -> WorkerResult<T>,
+) -> WorkerResult<Vec<T>> {
+    check_segment_canceled(cancel)?;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut session = build()?;
+    let mut out = Vec::with_capacity(count);
+    for index in 0..count {
+        check_segment_canceled(cancel)?;
+        let image = load(index)?;
+        let persons = segment(&mut session, &image)?;
+        out.push(finish(index, &image, persons)?);
+    }
+    Ok(out)
+}
+
 /// Every tracked person's per-frame mask + a stable left-to-right paint order — the input to the
 /// SCAIL-2 color-mask painter (sc-5448). Backend-neutral (pure mask bytes): both SAM3 modules build
 /// this and [`crate::scail2_masks`]'s painters consume it. Unlike the per-backend `segment_track`
@@ -442,6 +492,84 @@ mod tests {
         fn masks(&self) -> &[Vec<f32>] {
             &self.masks
         }
+    }
+
+    /// sc-2126 review: a dataset of N stills builds the segmenter session ONCE (not N model builds +
+    /// quantizations), segments every image in order with its own size, and finishes each.
+    #[test]
+    fn one_session_segments_every_image_and_builds_once() {
+        let sizes = [(4u32, 2u32), (3, 5), (6, 1)];
+        let mut builds = 0;
+        let mut segmented = Vec::new();
+        let finished = segment_images_in_one_session(
+            sizes.len(),
+            None,
+            || {
+                builds += 1;
+                Ok(0usize)
+            },
+            |index| Ok(image::RgbImage::new(sizes[index].0, sizes[index].1)),
+            |session: &mut usize, image| {
+                *session += 1;
+                segmented.push(image.dimensions());
+                Ok(vec![vec![255; (image.width() * image.height()) as usize]])
+            },
+            |index, image, persons| Ok((index, image.dimensions(), persons.len())),
+        )
+        .expect("segments");
+        assert_eq!(builds, 1, "the session is built once per batch");
+        assert_eq!(segmented, sizes.to_vec());
+        assert_eq!(
+            finished,
+            vec![(0, (4, 2), 1), (1, (3, 5), 1), (2, (6, 1), 1)]
+        );
+    }
+
+    #[test]
+    fn one_session_stops_at_cancel_and_builds_nothing_for_no_images() {
+        let cancel = CancelFlag::new();
+        let mut loads = 0;
+        let error = segment_images_in_one_session(
+            3,
+            Some(&cancel),
+            || Ok(()),
+            |_| {
+                loads += 1;
+                // Trip the flag after the first image: the second must not be loaded.
+                cancel.cancel();
+                Ok(image::RgbImage::new(1, 1))
+            },
+            |_, _| Ok(Vec::new()),
+            |_, _, _| Ok(()),
+        )
+        .expect_err("canceled");
+        assert!(matches!(error, WorkerError::Canceled(_)), "{error}");
+        assert_eq!(loads, 1);
+
+        let none: Vec<()> = segment_images_in_one_session(
+            0,
+            None,
+            || -> WorkerResult<()> { panic!("no images, no session") },
+            |_| unreachable!(),
+            |_, _| unreachable!(),
+            |_, _, _| unreachable!(),
+        )
+        .unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn single_frame_masks_union_input_and_refuse_a_wrong_frame_count() {
+        let grid = MASK_GRID;
+        let frame = TestFrame {
+            obj_ids: vec![1, 2],
+            masks: vec![vec![1.0; grid * grid], vec![-1.0; grid * grid]],
+        };
+        let masks = single_frame_person_masks(std::slice::from_ref(&frame), 2, 2).unwrap();
+        assert_eq!(masks.len(), 2, "every detected object is returned");
+        assert_eq!(masks[0], vec![255; 4]);
+        let error = single_frame_person_masks::<TestFrame>(&[], 2, 2).expect_err("no output");
+        assert!(matches!(error, WorkerError::Engine(_)), "{error}");
     }
 
     #[test]

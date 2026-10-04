@@ -270,3 +270,33 @@ async fn uploaded_replacement_mask_persists_and_invalid_uploads_are_field_errors
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+/// Review fix (sc-2126): a mask whose image left the dataset while the GPU job ran is skipped — the
+/// worker POST succeeds, the live mask is stored, and the vanished hash is reported, instead of a
+/// 404 that throws away every generated mask.
+#[tokio::test]
+async fn worker_masks_for_a_vanished_image_are_skipped_not_a_batch_failure() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id, dataset_id, _item_ids, hashes) = masked_dataset_fixture(&temp_dir).await;
+    let base = format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}");
+    let removed = "ab".repeat(32);
+    let b64 = |bytes: Vec<u8>| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let (status, stored) = request(
+        app.clone(),
+        "POST",
+        &format!("{base}/subject-masks"),
+        json!({
+            "space": "sam3-person",
+            "items": [
+                { "contentHash": hashes[0], "maskPng": b64(png_mask(16, 8, 255)) },
+                { "contentHash": removed, "maskPng": b64(png_mask(16, 8, 255)) },
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{stored}");
+    assert_eq!(stored["stored"], 1);
+    assert_eq!(stored["skipped"], json!([removed]));
+    assert_eq!(stored["report"]["masked"], 1);
+    assert_eq!(stored["report"]["items"][0]["hasMask"], true);
+}
