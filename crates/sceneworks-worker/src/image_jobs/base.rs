@@ -5972,6 +5972,84 @@ pub(crate) fn prepare_mlx_load_policy(
     Ok(spec)
 }
 
+/// The eager Resident counterpart of a spec that [`prepare_mlx_load_policy`] made Sequential only
+/// because the manifest's declaration row requires it (sc-24806). `None` unless the policy step
+/// introduced Sequential and the fit gate admits the eager spec Resident. The declaration stays
+/// `Eligible`, so generic shapers keep ignoring it and only a fresh exact evaluation can apply it.
+#[cfg(target_os = "macos")]
+pub(crate) fn declared_sequential_resident_alternative(
+    engine_id: &str,
+    before: &LoadSpec,
+    after: &LoadSpec,
+) -> Option<LoadSpec> {
+    if after.offload_policy != gen_core::OffloadPolicy::Sequential
+        || before.offload_policy == gen_core::OffloadPolicy::Sequential
+        || !matches!(
+            after.load_shape_declaration_result,
+            gen_core::LoadShapeDeclarationResult::Applied
+                | gen_core::LoadShapeDeclarationResult::Eligible
+        )
+    {
+        return None;
+    }
+    matches!(
+        crate::mlx_fit_gate::decide_residency_for_spec(engine_id, before),
+        crate::mlx_fit_gate::ResidencyOutcome::Resident
+    )
+    .then(|| before.clone().with_eligible_load_shape_declaration())
+}
+
+/// Whether an admitted request runs without whole-component staging or transformer block streaming.
+#[cfg(target_os = "macos")]
+fn admission_needs_no_staging(admission: &crate::mlx_fit_gate::MlxRequestAdmission) -> bool {
+    matches!(
+        admission,
+        crate::mlx_fit_gate::MlxRequestAdmission::Admitted(evaluation)
+            if !evaluation.memory.stage_residency && !evaluation.memory.stream_transformer_blocks
+    )
+}
+
+/// sc-24806 for the MLX lanes that bind the declared load policy themselves (the base lane does
+/// the same inside its tier chooser): keep `declared` unless both it and its eager Resident
+/// counterpart are admitted for this request without staging, and the Resident load passes the
+/// load gate. A failed pre-load probe keeps `declared`, whose own admission still runs at load.
+#[cfg(target_os = "macos")]
+pub(crate) async fn release_declared_sequential_for_request(
+    engine_id: &'static str,
+    model_id: &str,
+    before: &LoadSpec,
+    declared: LoadSpec,
+    plan: crate::mlx_fit_gate::MlxRequestPlan,
+    inputs: &crate::mlx_fit_gate::MlxRequestInputs,
+    rebuild_plan: impl FnOnce(&LoadSpec) -> WorkerResult<crate::mlx_fit_gate::MlxRequestPlan>,
+) -> WorkerResult<(LoadSpec, crate::mlx_fit_gate::MlxRequestPlan)> {
+    let Some(resident) = declared_sequential_resident_alternative(engine_id, before, &declared)
+    else {
+        return Ok((declared, plan));
+    };
+    let budget = crate::generator_cache::mlx_tier_budget(engine_id).await?;
+    let admits = |spec: &LoadSpec, plan: &crate::mlx_fit_gate::MlxRequestPlan| {
+        crate::mlx_fit_gate::preflight_request(spec, plan, inputs, budget)
+            .is_ok_and(|admission| admission_needs_no_staging(&admission))
+    };
+    if !admits(&declared, &plan) {
+        return Ok((declared, plan));
+    }
+    let resident_plan = rebuild_plan(&resident)?;
+    if admits(&resident, &resident_plan)
+        && crate::mlx_fit_gate::preflight_load_rejection(engine_id, &resident).is_none()
+    {
+        tracing::info!(
+            event = "mlx_declared_sequential_released_to_resident",
+            engine = %engine_id,
+            model = %model_id,
+            "request needs no staging; loading Resident instead of the declared Sequential policy"
+        );
+        return Ok((resident, resident_plan));
+    }
+    Ok((declared, plan))
+}
+
 /// Select deferred materialization for MLX routes with a measured load-exact contract. The fit gate
 /// still owns the independent Resident/Sequential decision; a constrained request adds Sequential
 /// and can then select the provider's bounded transformer rung. Lens has two deliberately separate
@@ -9500,6 +9578,9 @@ struct PreparedMlxImageTier {
     spec: LoadSpec,
     plan: crate::mlx_fit_gate::MlxRequestPlan,
     inputs: crate::mlx_fit_gate::MlxRequestInputs,
+    /// The manifest declaration alone made this spec Sequential while the fit gate admits the
+    /// eager Resident load (sc-24806); the tier chooser may re-prepare it Resident.
+    has_resident_alternative: bool,
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -9826,7 +9907,9 @@ async fn generate_stream(
     let memory_budget = crate::generator_cache::mlx_tier_budget(engine_id).await?;
     // Resolve every tier through the exact production composition BEFORE scoring it. No candidate
     // loads tensors, and the winning spec/plan are retained rather than rebuilt after selection.
-    let prepare = |weights_dir: PathBuf| -> WorkerResult<PreparedMlxImageTier> {
+    let prepare = |weights_dir: PathBuf,
+                   prefer_resident: bool|
+     -> WorkerResult<PreparedMlxImageTier> {
         let (quant, quant_bits) = mlx_candidate_quant(request, &model, &weights_dir);
         // A split-repo snapshot root (sc-24112's `qwen_image_2_1` bf16) names its tier only
         // through the catalog, so ask for it first; `None` for every other family.
@@ -9910,6 +9993,7 @@ async fn generate_stream(
             use_pid,
             has_phases: false,
         };
+        let pre_policy_spec = spec.clone();
         spec = prepare_mlx_load_policy(
             engine_id,
             effective_tier,
@@ -9920,6 +10004,12 @@ async fn generate_stream(
             plain_text_to_image,
             model.descriptor.capabilities.supports_sequential_offload,
         )?;
+        let resident_alternative =
+            declared_sequential_resident_alternative(engine_id, &pre_policy_spec, &spec);
+        let has_resident_alternative = resident_alternative.is_some();
+        if let Some(resident) = resident_alternative.filter(|_| prefer_resident) {
+            spec = resident;
+        }
         let decode_quality_binding =
             crate::mlx_fit_gate::bind_decode_quality_policies_from_manifest(
                 &request.model_manifest_entry,
@@ -10007,6 +10097,7 @@ async fn generate_stream(
             spec,
             plan: mlx_request_plan,
             inputs: mlx_request_inputs,
+            has_resident_alternative,
         })
     };
     let default_tier = tier_key_for_resolved_dir(&request.model_manifest_entry, &weights_dir);
@@ -10034,15 +10125,44 @@ async fn generate_stream(
         if calibration_opt_in || quality_opt_in {
             ensure_mlx_candidate_provenance(request, settings, repo, &dir).await?;
         }
-        let prepared = prepare(dir)?;
+        let mut prepared = prepare(dir.clone(), false)?;
         // Query/validate the provider before considering a legacy load refusal, so malformed
         // artifacts are never mistaken for a reason to silently select another tier.
-        let admission = crate::mlx_fit_gate::preflight_request(
+        let mut admission = crate::mlx_fit_gate::preflight_request(
             &prepared.spec,
             &prepared.plan,
             &prepared.inputs,
             memory_budget,
         )?;
+        // sc-24806: a manifest BTR/staging row binds Sequential even when this request needs no
+        // staging or block streaming. Re-prepare the same tier eager + Resident and keep it only if
+        // it is admitted without staging and passes the load gate; otherwise keep the declared spec.
+        if prepared.has_resident_alternative && admission_needs_no_staging(&admission) {
+            // A failed Resident probe keeps the admitted declared spec, as the shared helper does.
+            let released = prepare(dir, true).ok().and_then(|resident| {
+                let resident_admission = crate::mlx_fit_gate::preflight_request(
+                    &resident.spec,
+                    &resident.plan,
+                    &resident.inputs,
+                    memory_budget,
+                )
+                .ok()?;
+                (admission_needs_no_staging(&resident_admission)
+                    && crate::mlx_fit_gate::preflight_load_rejection(engine_id, &resident.spec)
+                        .is_none())
+                .then_some((resident, resident_admission))
+            });
+            if let Some((resident, resident_admission)) = released {
+                tracing::info!(
+                    event = "mlx_declared_sequential_released_to_resident",
+                    engine = %engine_id,
+                    model = %request.model,
+                    "request needs no staging; loading Resident instead of the declared Sequential policy"
+                );
+                prepared = resident;
+                admission = resident_admission;
+            }
+        }
         let admission = match admission {
             crate::mlx_fit_gate::MlxRequestAdmission::Admitted(evaluation) => {
                 match crate::mlx_fit_gate::preflight_load_rejection(engine_id, &prepared.spec) {
@@ -10068,6 +10188,7 @@ async fn generate_stream(
         spec,
         plan: mlx_request_plan,
         inputs: mlx_request_inputs,
+        has_resident_alternative: _,
     } = selected;
     // Descriptor-gated quant (mirrors the candle lane below): the MLX families advertise Q4/Q8
     // (`supported_quants`) and tolerate the Q8 default (a real quant on a dense convert, a no-op on an
@@ -17834,5 +17955,130 @@ mod text_style_gain_gate_tests {
             json!({ "textStyleGain": 1.75 }),
         );
         assert_eq!(resolve_text_style_gain(&undeclared), None);
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod declared_sequential_resident_tests {
+    use super::{admission_needs_no_staging, declared_sequential_resident_alternative};
+    use gen_core::{LoadShapeDeclarationResult, LoadSpec, OffloadPolicy, WeightsSource};
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// Sparse stand-ins for a Klein-sized bf16 artifact: the fit gate reads file lengths only.
+    fn klein_sized_dir() -> tempfile::TempDir {
+        let root = tempfile::tempdir().expect("temp dir");
+        for (component, bytes) in [("transformer", 18 * GIB), ("text_encoder", 14 * GIB)] {
+            let dir = root.path().join(component);
+            std::fs::create_dir_all(&dir).expect("component dir");
+            std::fs::File::create(dir.join("model.safetensors"))
+                .and_then(|file| file.set_len(bytes))
+                .expect("sparse weights");
+        }
+        root
+    }
+
+    fn declared_sequential(before: &LoadSpec) -> LoadSpec {
+        before
+            .clone()
+            .with_applied_load_shape_declaration()
+            .with_offload_policy(OffloadPolicy::Sequential)
+    }
+
+    #[test]
+    fn declared_sequential_is_released_only_when_the_eager_load_fits_resident() {
+        let root = klein_sized_dir();
+        let before = LoadSpec::new(WeightsSource::Dir(root.path().to_path_buf()))
+            .with_resolved_route("flux2_klein_9b_true_v2");
+        let after = declared_sequential(&before);
+        let cap = crate::mlx_fit_gate::MLX_MEMORY_CAP_ENV;
+
+        let resident = crate::test_env::temp_env_var(cap, "128", || {
+            declared_sequential_resident_alternative("flux2_klein_9b", &before, &after)
+        })
+        .expect("a 32 GiB pipeline fits a 128 GiB host resident");
+        assert_eq!(resident.offload_policy, OffloadPolicy::Resident);
+        assert_eq!(resident.load_shape, before.load_shape);
+        assert_eq!(
+            resident.load_shape_declaration_result,
+            LoadShapeDeclarationResult::Eligible
+        );
+
+        // A host where only the staged peak fits keeps the declared Sequential spec.
+        assert!(crate::test_env::temp_env_var(cap, "32", || {
+            declared_sequential_resident_alternative("flux2_klein_9b", &before, &after)
+        })
+        .is_none());
+        // Sequential chosen before the declaration step, or never chosen, is not ours to release.
+        let already = before.clone().with_offload_policy(OffloadPolicy::Sequential);
+        assert!(declared_sequential_resident_alternative(
+            "flux2_klein_9b",
+            &already,
+            &declared_sequential(&already)
+        )
+        .is_none());
+        assert!(
+            declared_sequential_resident_alternative("flux2_klein_9b", &before, &before).is_none()
+        );
+    }
+
+    /// The text from `declaration` to the end of its body; these lanes load real MLX weights, so
+    /// their wiring is what can be asserted without a GPU.
+    fn function_body(source: &'static str, declaration: &str) -> &'static str {
+        let body = &source[source.find(declaration).expect(declaration)..];
+        let mut depth = 0_usize;
+        for (offset, byte) in body.bytes().enumerate().skip(body.find('{').expect("body")) {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &body[..=offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body for {declaration}");
+    }
+
+    #[test]
+    fn every_lane_that_binds_a_declared_policy_offers_the_resident_release() {
+        let lanes = [
+            (include_str!("flux2.rs"), "async fn generate_flux2_edit_stream("),
+            (include_str!("flux2.rs"), "async fn generate_flux2_dev_control_stream("),
+            (include_str!("flux1_control.rs"), "async fn generate_flux1_dev_control_stream("),
+            (include_str!("pulid.rs"), "async fn generate_pulid_flux_stream("),
+        ];
+        for (source, declaration) in lanes {
+            let body = function_body(source, declaration);
+            let before = body.find("let pre_policy_spec = spec.clone();").expect(declaration);
+            let shaped = body
+                .find("evaluate_declared_mlx_load_shape_for_request(")
+                .expect(declaration);
+            let release = body
+                .find("release_declared_sequential_for_request(")
+                .expect(declaration);
+            let load = body
+                .find("start_cached_gen_stream_with_request_state(")
+                .expect(declaration);
+            assert!(before < shaped && shaped < release && release < load, "{declaration}");
+        }
+        let base = function_body(include_str!("base.rs"), "async fn generate_stream(");
+        let prepared = base.find("prepare_mlx_load_policy(").expect("base policy step");
+        let alternative = base
+            .find("declared_sequential_resident_alternative(engine_id, &pre_policy_spec, &spec)")
+            .expect("base release alternative");
+        assert!(base[..prepared].contains("let pre_policy_spec = spec.clone();"));
+        assert!(prepared < alternative);
+        assert!(base.contains("prepare(dir, true)"), "base tier chooser never re-prepares Resident");
+    }
+
+    #[test]
+    fn rejected_admission_never_counts_as_needing_no_staging() {
+        let rejected = crate::mlx_fit_gate::MlxRequestAdmission::Rejected(
+            crate::WorkerError::InvalidPayload("too big".to_owned()),
+        );
+        assert!(!admission_needs_no_staging(&rejected));
     }
 }
