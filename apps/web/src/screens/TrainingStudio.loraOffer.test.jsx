@@ -4,8 +4,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // sc-24815 — Training Studio offers to attach a finished run's adapter back to the
 // character that owns its dataset. These are the story's three named cases (accept,
-// decline, no character) plus the two ways the same completed job could otherwise
-// attach twice: a re-render and a reload.
+// decline, no character) plus the four ways the same completed job could otherwise attach
+// twice: a re-render, a reload, a project round trip with a blocked storage record, and a
+// second window answering the same run.
 //
 // The roster is held by the REAL useCharacters hook, not a stub, because "the
 // character's LoRAs panel lists it without a manual refresh" is a claim about that
@@ -23,7 +24,43 @@ import { useCharacters } from "../hooks/useCharacters.js";
 import { TrainingStudio } from "./TrainingStudio.jsx";
 
 const PROJECT = { id: "project-a", name: "Project A" };
+const PROJECT_B = { id: "project-b", name: "Project B" };
 const RECENT = new Date().toISOString();
+const DECISIONS_KEY = "sceneworks-trained-lora-offer:project-a";
+
+// A blocked or quota-limited record: this feature's key reads as absent and refuses
+// writes while the rest of storage keeps working. That is the case the in-memory
+// per-project record exists for — without it, an accepted job is re-offered after a
+// project round trip and a second accept prepends a duplicate link row.
+//
+// Replacing the accessor is the only thing that works: jsdom hands localStorage out
+// through a getter, so spying on the instance leaves the module's own lookups untouched —
+// an earlier version of this helper "passed" for exactly that reason and proved nothing.
+let restoreBlockedStorage = null;
+function blockOfferStorage() {
+  const prefix = "sceneworks-trained-lora-offer:";
+  const real = globalThis.localStorage;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    get() {
+      return {
+        getItem: (key) => (String(key).startsWith(prefix) ? null : real.getItem(key)),
+        setItem: (key, value) => {
+          if (String(key).startsWith(prefix)) {
+            throw new Error("quota exceeded");
+          }
+          real.setItem(key, value);
+        },
+        removeItem: (key) => real.removeItem(key),
+      };
+    },
+  });
+  restoreBlockedStorage = () => {
+    Object.defineProperty(globalThis, "localStorage", descriptor);
+    restoreBlockedStorage = null;
+  };
+}
 
 function character() {
   return { id: "char-mira", name: "Mira", loras: [] };
@@ -33,6 +70,12 @@ function dataset(overrides = {}) {
   return { id: "dataset-1", name: "Mira Set", version: 3, characterId: "char-mira", items: [], ...overrides };
 }
 
+// The PERSISTED job shape, deliberately. A lora_train payload carries only
+// dryRun/outputName/plan/manifestEntry/baseModel (apps/rust-api/src/training.rs:1872) —
+// no top-level datasetId — so the dataset association comes from the result
+// (crates/sceneworks-worker/src/training_jobs.rs:2625) and manifestEntry.provenance
+// (apps/rust-api/src/training.rs:1765). An earlier version of this fixture invented
+// payload.datasetId and every test passed while production could never fire the offer.
 function adapterJob(overrides = {}) {
   return {
     id: "job-train-1",
@@ -41,8 +84,9 @@ function adapterJob(overrides = {}) {
     projectId: "project-a",
     completedAt: RECENT,
     payload: {
-      datasetId: "dataset-1",
+      dryRun: false,
       outputName: "Mira v3",
+      plan: { output: { loraId: "mira_v3", format: "safetensors" } },
       manifestEntry: {
         id: "mira_v3",
         name: "Mira v3",
@@ -50,9 +94,11 @@ function adapterJob(overrides = {}) {
         family: "z-image",
         triggerWords: ["mira"],
         source: { provider: "training", path: "loras/mira_v3" },
+        provenance: { kind: "training", trainingJobId: "job-train-1", datasetId: "dataset-1" },
       },
+      baseModel: "z-image-turbo",
     },
-    result: { loraRegistered: true, loraId: "mira_v3" },
+    result: { loraRegistered: true, loraId: "mira_v3", datasetId: "dataset-1" },
     ...overrides,
   };
 }
@@ -138,6 +184,15 @@ async function reload(contextOverrides = {}) {
   await settle();
 }
 
+// Re-render in place — a project switch, NOT a remount. A remount would discard the
+// in-memory per-project record and so could not prove it survives.
+async function rerender(contextOverrides = {}) {
+  await act(async () => {
+    root.render(<Harness contextOverrides={contextOverrides}>{<TrainingStudio />}</Harness>);
+  });
+  await settle();
+}
+
 async function settle() {
   await act(async () => {
     for (let index = 0; index < 8; index += 1) {
@@ -184,14 +239,19 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
       root?.unmount();
     });
     container?.remove();
+    // Before clear(): the blocked stub has no clear(), and the real store must be back
+    // for the next test to start empty.
+    restoreBlockedStorage?.();
     window.localStorage.clear();
     vi.restoreAllMocks();
   });
 
   it("offers to attach the trained LoRA to the character, naming both", async () => {
     await render();
-    expect(offerPanel()?.textContent).toContain("Mira v3");
-    expect(offerPanel()?.textContent).toContain("Mira");
+    // Exact heading, not two substring hits on the same string: "Mira v3" contains
+    // "Mira", so toContain twice proves only one name.
+    expect(offerPanel()?.querySelector("h3")?.textContent).toBe("Attach “Mira v3” to Mira?");
+    expect(buttonByText("Attach to Mira")).not.toBeNull();
   });
 
   it("attaches on accept and the character's LoRAs panel lists it without a refresh", async () => {
@@ -202,10 +262,15 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     const [url, , options] = apiFetchMock.mock.calls[0];
     expect(url).toBe("/api/v1/projects/project-a/characters/char-mira/loras");
     expect(options.method).toBe("POST");
+    // sourcePath is null here because the Train route never hydrates the loras domain
+    // (apps/web/src/appHydration.js:38), so the only source is the run's manifest entry —
+    // whose source.path is RELATIVE and is rejected by the store
+    // (crates/sceneworks-core/src/character_store.rs:1351). null means "no file to copy"
+    // (character_store.rs:1362) and the link still resolves by catalog id.
     expect(JSON.parse(options.body)).toEqual({
       loraId: "mira_v3",
       name: "Mira v3",
-      sourcePath: "loras/mira_v3",
+      sourcePath: null,
       triggerWords: ["mira"],
       defaultWeight: 1,
       compatibility: { families: ["z-image"] },
@@ -259,5 +324,43 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     // Declining after a failed attempt still retires the offer.
     await click(buttonByText("Not now"));
     expect(offerPanel()).toBeNull();
+  });
+
+  it("keeps an accepted job answered across a project round trip when storage is blocked", async () => {
+    blockOfferStorage();
+    await render();
+    expect(offerPanel()).not.toBeNull();
+    await click(buttonByText("Attach to Mira"));
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+    expect(offerPanel()).toBeNull();
+
+    // Away to another project and back. Nothing readable was persisted, so only the
+    // in-memory per-project record can keep this answered — and a re-offer accepted again
+    // would prepend a second character_lora row for the same adapter.
+    await rerender({
+      activeProject: PROJECT_B,
+      trainingDatasetsProjectId: "project-b",
+      trainingDatasets: [],
+    });
+    await rerender();
+
+    expect(offerPanel()).toBeNull();
+    expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("retires a displayed offer when another window answers the same run", async () => {
+    await render();
+    expect(offerPanel()).not.toBeNull();
+
+    // What the other window's accept button writes, and the event the browser then fires
+    // over — without a listener this window keeps offering a job that is already linked.
+    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(["job-train-1"]));
+    act(() => {
+      window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
+    });
+    await settle();
+
+    expect(offerPanel()).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
   });
 });

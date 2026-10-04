@@ -54,8 +54,10 @@ import {
   trainingConfigSnapshot,
 } from "../training/trainingConfig.js";
 import {
+  mergeTrainedLoraOfferDecisions,
   readTrainedLoraOfferDecisions,
   rememberTrainedLoraOfferDecision,
+  trainedLoraDecisionsKey,
   trainedLoraOfferCandidate,
 } from "../training/trainedLoraOffer.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -298,8 +300,8 @@ function TrainingLiveProgress({ jobs, projectId, onCancel, onPreview }) {
 // never accepting something they cannot identify.
 function TrainedLoraOfferCard({ attaching, error, offer, onAccept, onDecline }) {
   return (
-    <section aria-label="Attach trained LoRA" className="trained-lora-offer" role="status">
-      <div className="trained-lora-offer-copy">
+    <section aria-label="Attach trained LoRA" className="trained-lora-offer">
+      <div className="trained-lora-offer-copy" role="status">
         <p className="eyebrow">Training complete</p>
         <h3>
           Attach &ldquo;{offer.loraName}&rdquo; to {offer.characterName}?
@@ -417,11 +419,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetLoadGenerationRef = useRef(0);
   const datasetDraftRevisionRef = useRef(0);
   const handledParquetImportJobsRef = useRef(new Set());
-  // sc-24815: the "attach this trained LoRA to <character>" offer. `decidedLoraJobs`
-  // mirrors the per-project localStorage record, so a reload cannot re-ask a job the
-  // user already answered; the offer itself is state rather than a derived value so a
-  // second run finishing cannot replace a question the user is still reading.
-  const [decidedLoraJobs, setDecidedLoraJobs] = useState(() => readTrainedLoraOfferDecisions(activeProject?.id));
+  // sc-24815: the "attach this trained LoRA to <character>" offer. An answer is recorded
+  // twice — per project in localStorage (survives a reload) and in this Map (survives a
+  // blocked or quota-limited store) — and every check unions the two through
+  // mergeTrainedLoraOfferDecisions rather than trusting a snapshot. The offer itself is
+  // state rather than a derived value so a second run finishing cannot replace a question
+  // the user is still reading.
+  const trainedLoraDecisionsRef = useRef(new Map());
+  const attachingTrainedLoraRef = useRef(false);
   const [trainedLoraOffer, setTrainedLoraOffer] = useState(null);
   const [attachingTrainedLora, setAttachingTrainedLora] = useState(false);
   const [trainedLoraOfferError, setTrainedLoraOfferError] = useState("");
@@ -1211,18 +1216,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   // sc-24815 — offer to attach a finished run's adapter back to the character that owns
   // the dataset it trained from. Single-fire is the entire safety story: `attach_lora`
-  // prepends a fresh link row per call (character_store.rs:612), so a second attach is a
-  // duplicate rather than an upsert. Three separate things can re-present the same
-  // completed job — a re-render, a reload, and the fact that BOTH Training panes stay
-  // mounted under keep-alive — so the answer is recorded per project in localStorage
-  // (reload) and in `decidedLoraJobs` (this session), and only the training-mode
-  // instance ever asks: the Data Sets pane renders this same component with
-  // `datasetLibraryMode` set, and two askers would mean two attaches.
+  // mints a fresh character_lora_<hex> id and prepends it per call
+  // (crates/sceneworks-core/src/character_store.rs:644), so a second attach is a
+  // duplicate rather than an upsert. Four separate things can re-present the same
+  // completed job — a re-render, a reload, a project switch, and the fact that BOTH
+  // Training panes stay mounted under keep-alive — so every check below reads the
+  // per-project answer FRESH (storage ∪ this window's Map) instead of depending on state
+  // that a sibling effect could still be stale about. Only the training-mode instance
+  // ever asks: the Data Sets pane renders this same component with `datasetLibraryMode`
+  // set, and two askers would mean two attaches.
   useEffect(() => {
-    // A project switch re-reads the record and drops any unanswered offer: the attach
-    // acts on the ACTIVE project, so a carried-over question could name a character the
-    // new project does not have.
-    setDecidedLoraJobs(readTrainedLoraOfferDecisions(activeProject?.id));
+    // A project switch drops any unanswered offer: the attach acts on the ACTIVE
+    // project, so a carried-over question could name a character the new project does
+    // not have. Nothing is cached here — the offer effect re-reads decisions per project.
     setTrainedLoraOffer(null);
     setTrainedLoraOfferError("");
   }, [activeProject?.id]);
@@ -1231,35 +1237,74 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (datasetLibraryMode || typeof attachCharacterLora !== "function") {
       return;
     }
+    const projectId = activeProject?.id;
+    const decided = mergeTrainedLoraOfferDecisions(
+      projectId,
+      trainedLoraDecisionsRef.current.get(projectId),
+    );
     const candidate = trainedLoraOfferCandidate({
       jobs,
       datasets,
       characters,
       loras,
-      projectId: activeProject?.id,
-      decidedJobIds: decidedLoraJobs,
+      projectId,
+      decidedJobIds: decided,
     });
     // Keep an unanswered question on screen (a second run finishing must not replace
-    // it); replace it only when it belongs to a project the user has left.
-    setTrainedLoraOffer((current) =>
-      current && current.projectId === activeProject?.id ? current : candidate,
-    );
-  }, [activeProject?.id, attachCharacterLora, characters, datasetLibraryMode, datasets, jobs, loras, decidedLoraJobs]);
+    // it), but replace one that belongs to a project the user has left OR that has since
+    // been answered — here, across a project round trip, or in another window.
+    setTrainedLoraOffer((current) => {
+      if (current && (current.projectId !== projectId || decided.has(current.jobId))) {
+        return candidate;
+      }
+      return current ?? candidate;
+    });
+  }, [activeProject?.id, attachCharacterLora, characters, datasetLibraryMode, datasets, jobs, loras]);
 
-  // Records the answer before the offer disappears, so neither a re-render nor a reload
-  // can present the same job id again.
-  function decideTrainedLoraOffer(jobId) {
-    rememberTrainedLoraOfferDecision(activeProject?.id, jobId);
-    setDecidedLoraJobs((current) => new Set([...current, jobId]));
-    setTrainedLoraOffer(null);
+  // A second window answering the same run must retire the offer in this one too, or
+  // each accept prepends its own link row.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    if (datasetLibraryMode || !projectId || typeof window === "undefined") {
+      return undefined;
+    }
+    const key = trainedLoraDecisionsKey(projectId);
+    function retireIfAnswered(event) {
+      if (event?.key && event.key !== key) {
+        return;
+      }
+      const answered = readTrainedLoraOfferDecisions(projectId);
+      setTrainedLoraOffer((current) =>
+        current && current.projectId === projectId && answered.includes(current.jobId) ? null : current,
+      );
+    }
+    window.addEventListener("storage", retireIfAnswered);
+    return () => window.removeEventListener("storage", retireIfAnswered);
+  }, [activeProject?.id, datasetLibraryMode]);
+
+  // Records the answer in BOTH places before the offer disappears, so neither a
+  // re-render, a project round trip, nor a reload can present the same job id again —
+  // including when the storage write itself is what failed.
+  function decideTrainedLoraOffer(projectId, jobId) {
+    if (!projectId || !jobId) {
+      return;
+    }
+    const session = trainedLoraDecisionsRef.current.get(projectId) ?? new Set();
+    session.add(jobId);
+    trainedLoraDecisionsRef.current.set(projectId, session);
+    rememberTrainedLoraOfferDecision(projectId, jobId);
+    setTrainedLoraOffer((current) => (current?.jobId === jobId ? null : current));
     setTrainedLoraOfferError("");
   }
 
   async function acceptTrainedLoraOffer() {
-    if (!trainedLoraOffer || attachingTrainedLora) {
+    // A ref, not the state flag: the cost of a second call is a duplicate link row, and a
+    // ref cannot be raced by another click that lands before React commits the state.
+    if (!trainedLoraOffer || attachingTrainedLoraRef.current) {
       return;
     }
     const offer = trainedLoraOffer;
+    attachingTrainedLoraRef.current = true;
     setAttachingTrainedLora(true);
     setTrainedLoraOfferError("");
     // `attachCharacterLora` reports failure through the shared error channel and
@@ -1268,6 +1313,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // for a retry and records nothing — an adapter that never attached must not be
     // written off as answered.
     const updated = await attachCharacterLora(offer.characterId, offer.payload).catch(() => null);
+    attachingTrainedLoraRef.current = false;
     setAttachingTrainedLora(false);
     if (!updated) {
       setTrainedLoraOfferError(
@@ -1276,14 +1322,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
       return;
     }
     setConfigMessage(`Attached ${offer.loraName} to ${offer.characterName} — see its LoRAs panel in Character Studio.`);
-    decideTrainedLoraOffer(offer.jobId);
+    decideTrainedLoraOffer(offer.projectId, offer.jobId);
   }
 
   function declineTrainedLoraOffer() {
-    if (!trainedLoraOffer || attachingTrainedLora) {
+    if (!trainedLoraOffer || attachingTrainedLoraRef.current) {
       return;
     }
-    decideTrainedLoraOffer(trainedLoraOffer.jobId);
+    decideTrainedLoraOffer(trainedLoraOffer.projectId, trainedLoraOffer.jobId);
   }
 
   // Drops a member (or an unavailable/orphaned id) from the dataset selection.

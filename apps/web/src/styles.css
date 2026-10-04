@@ -5284,7 +5284,7 @@ label {
 }
 
 .trained-lora-offer-error {
-  color: var(--danger, #d14343);
+  color: var(--danger);
   font-size: 12.5px;
 }
 
@@ -5293,6 +5293,14 @@ label {
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
+}
+
+/* The global .primary-action is 44px; every other control on the Train page is
+   --control-h (the config panel resets it the same way at .training-config-actions),
+   so the card would otherwise read taller than the panel it sits in. */
+.trained-lora-offer-actions .primary-action,
+.trained-lora-offer-actions .secondary-action {
+  min-height: var(--control-h);
 }
 
 /* .training-status-pill retired in sc-10654 — generalized to .ready-pill (<ReadyPill>),

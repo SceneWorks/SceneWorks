@@ -61,8 +61,21 @@ function completedAtMs(job) {
 // The attach payload, field for field identical to Character Studio's manual
 // "Attach imported LoRA" submit (`submitLora`, apps/web/src/screens/CharacterStudio.jsx:572),
 // so an offered attach and a hand-made one cannot drift into two link shapes.
-// `source` is the catalog LoRA when the catalog has already refreshed, else the run's
-// staged `manifestEntry` — both carry id/name/scope/family/triggerWords/source.path.
+//
+// `sourcePath` is deliberately catalog-only. Character Studio can only ever attach a
+// catalog entry, whose `installedPath` the API resolved to an absolute path
+// (apps/rust-api/src/loras.rs:858). A run's staged `manifestEntry` carries
+// `source.path` RELATIVE by design — "loras/<id>", kept that way on purpose at
+// apps/rust-api/src/jobs.rs:1851 so `normalize_lora_entry` can resolve it under the
+// scope root — and the store rejects a relative attach source: `copy_lora_into_project`
+// does `PathBuf::from(source_path)` then requires `.exists()` plus containment in
+// `data/loras` or `project/loras` (crates/sceneworks-core/src/character_store.rs:1351),
+// so sending it answers with 400 "LoRA source path not found: loras/<id>" on every
+// retry. `null` is the supported "no file to copy" answer — the same function returns
+// `Ok((None, false))` for it (character_store.rs:1362) and the link still resolves to
+// the catalog adapter by id. That matters because the Train route does NOT hydrate the
+// `loras` domain (apps/web/src/appHydration.js:38) and nothing refreshes the catalog on
+// training completion, so the manifest entry is frequently the only source available.
 export function characterLoraAttachPayload(source) {
   const loraId = typeof source?.id === "string" ? source.id : "";
   if (!loraId) {
@@ -72,12 +85,34 @@ export function characterLoraAttachPayload(source) {
   return {
     loraId,
     name,
-    sourcePath: source?.installedPath ?? source?.source?.path ?? null,
+    sourcePath: source?.installedPath ?? null,
     triggerWords: source?.triggerWords ?? [],
     defaultWeight: source?.defaultWeight ?? 1.0,
     compatibility: { families: extractFamilies(source) },
     scope: source?.scope ?? "global",
   };
+}
+
+// Where a completed run records the dataset it trained from.
+//
+// NOT `payload.datasetId`. A `lora_train` payload is assembled from scratch at
+// apps/rust-api/src/training.rs:1872 and carries only `dryRun`, `outputName`, `plan`,
+// `manifestEntry` and `baseModel`; the top-level `datasetId` belongs to the caption,
+// parquet-import, analysis, face-analysis and upscale jobs (training.rs:565, 706, 904,
+// 1004, 1188), so reading it here would match nothing and the offer would never appear.
+// The worker writes `datasetId` into the RESULT
+// (crates/sceneworks-worker/src/training_jobs.rs:2625), which is also the object the
+// registrar status is folded into (`result.extend(status)`, apps/rust-api/src/jobs.rs:1417).
+// The submit-time copy survives at `manifestEntry.provenance.datasetId`
+// (training.rs:1765, asserted by apps/rust-api/src/tests/training.rs:1988) and covers a
+// run whose result predates the result field.
+export function trainedLoraDatasetId(job) {
+  const fromResult = job?.result?.datasetId;
+  if (typeof fromResult === "string" && fromResult !== "") {
+    return fromResult;
+  }
+  const fromProvenance = job?.payload?.manifestEntry?.provenance?.datasetId;
+  return typeof fromProvenance === "string" && fromProvenance !== "" ? fromProvenance : "";
 }
 
 // The single candidate to offer right now, or null. `jobs` is newest-first
@@ -115,8 +150,8 @@ export function trainedLoraOfferCandidate({
     if (finishedAt === null || reference - finishedAt > windowMs) {
       continue;
     }
-    const datasetId = job.payload?.datasetId;
-    if (typeof datasetId !== "string" || !datasetId) {
+    const datasetId = trainedLoraDatasetId(job);
+    if (!datasetId) {
       continue;
     }
     const characterId = datasetsById.get(datasetId)?.characterId;
@@ -147,7 +182,9 @@ export function trainedLoraOfferCandidate({
   return null;
 }
 
-function decisionsKey(projectId) {
+// Exported so the caller can listen for the storage event on exactly this key: another
+// window answering the same run must retire the offer here too.
+export function trainedLoraDecisionsKey(projectId) {
   return DECISIONS_KEY_PREFIX + projectId;
 }
 
@@ -160,7 +197,7 @@ export function readTrainedLoraOfferDecisions(projectId) {
     return [];
   }
   try {
-    const raw = globalThis.localStorage?.getItem(decisionsKey(projectId));
+    const raw = globalThis.localStorage?.getItem(trainedLoraDecisionsKey(projectId));
     if (!raw) {
       return [];
     }
@@ -178,11 +215,27 @@ export function rememberTrainedLoraOfferDecision(projectId, jobId) {
   try {
     const remembered = readTrainedLoraOfferDecisions(projectId).filter((id) => id !== jobId);
     globalThis.localStorage?.setItem(
-      decisionsKey(projectId),
+      trainedLoraDecisionsKey(projectId),
       JSON.stringify([jobId, ...remembered].slice(0, MAX_REMEMBERED_DECISIONS)),
     );
   } catch {
-    // localStorage blocked (private mode, quota) — the decision still holds for this
-    // session through the caller's state; only a reload could re-ask.
+    // localStorage blocked (private mode, quota). The caller's in-memory per-project
+    // record still holds it — mergeTrainedLoraOfferDecisions unions the two — so the
+    // answer survives a project round trip in this window; only a reload can re-ask.
   }
+}
+
+// The decided set the offer must consult: what this window answered in memory, keyed by
+// project, UNION what storage recorded. Neither half is sufficient alone — storage does
+// not survive a blocked/quota-limited store, and the in-memory map does not survive a
+// reload. Both are read on every check, so an answer recorded by another window or a
+// project switch cannot leave a stale offer standing.
+export function mergeTrainedLoraOfferDecisions(projectId, sessionDecisions) {
+  const merged = new Set(readTrainedLoraOfferDecisions(projectId));
+  const session =
+    sessionDecisions instanceof Set ? sessionDecisions : new Set(sessionDecisions ?? []);
+  for (const jobId of session) {
+    merged.add(jobId);
+  }
+  return merged;
 }
