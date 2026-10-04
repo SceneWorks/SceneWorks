@@ -1,11 +1,29 @@
 # MLX app lifecycle evidence (E11)
 
-Dispatch `.github/workflows/qwen-image-2-1-app-lifecycle.yml` after the reviewed
-inference repair has merged and SceneWorks has its final permanent pin. Set
-`source_sha` to the exact 40-character SceneWorks feature commit and
-`inference_sha` to its exact 40-character inference pin. The controller rejects
-a dirty checkout or mismatched manifest/lock revisions. Dispatch runs only;
-ordinary pushes and PRs never launch this campaign.
+Dispatch the already registered `.github/workflows/memory-catalog-campaign.yml`
+after the reviewed inference repair has merged and SceneWorks has its final
+permanent pin. Set `profile=qwen-image-2-1-app-lifecycle`, `ref` to the exact
+40-character SceneWorks feature commit, and `inference_sha` to its exact
+40-character inference pin. Dispatch the workflow itself on the published
+`SOURCE_BRANCH` whose current tip is that frozen `SOURCE_SHA`:
+
+```bash
+gh workflow run memory-catalog-campaign.yml --ref "$SOURCE_BRANCH" \
+  -f profile=qwen-image-2-1-app-lifecycle \
+  -f ref="$SOURCE_SHA" -f inference_sha="$INFERENCE_SHA"
+```
+
+GitHub's [dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event)
+uses a branch or tag for the workflow reference. The reusable workflow rejects
+the run before checkout/build if its resolved `GITHUB_SHA` differs from the
+supplied source SHA; keep the published branch frozen until dispatch acceptance.
+The dispatcher calls the reusable app workflow from that same commit; it does
+not require registering the new workflow on `main` first. App dispatch skips
+both catalog jobs entirely, including their plan/walk, branch, push and PR steps.
+Omitted/default `profile` retains the original catalog behavior. The reusable
+workflow checks the dispatch SHA against the checkout input, and the controller
+rejects a dirty checkout or mismatched manifest/lock revisions. Ordinary pushes
+and PRs never launch this campaign.
 
 Reserve the idle **primary** `nax-macos` runner with the unique `rw-starvector`
 label (128 GB M5 Max). Run it after the separate inference real-weight probe,
@@ -20,6 +38,8 @@ The engine lane must already have staged the immutable dense snapshot in
 `~/sceneworks-rw-weights/hub/models--Qwen--Qwen-Image-2.1/snapshots/790c92633540aa0cb11d9abf19eb46d861714758`.
 The app uses this same physical task-owned hub offline, verifies the resolved
 API plan uses that snapshot, and never downloads, copies or deletes model weights.
+The frozen dense snapshot's tokenizer files must be present under `processor/`
+(`tokenizer_config.json` and `tokenizer.json`), as required by Qwen 2.1.
 The task-owned weights survive the run for the epic's remaining evidence; remove
 that directory only during the separately authorized epic-end cleanup.
 

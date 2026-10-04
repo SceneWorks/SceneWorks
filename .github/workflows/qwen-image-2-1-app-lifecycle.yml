@@ -1,8 +1,9 @@
 # sc-24163 E11: app lifecycle only; engine evidence owns learned effect and memory.
-# Dispatch after the final repair pin lands, while the primary Mac is idle.
+# Called by the registered catalog dispatcher at the exact feature commit;
+# run after the final repair pin lands, while the primary Mac is idle.
 name: Qwen Image 2.1 MLX app lifecycle
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
       source_sha:
         description: Exact SceneWorks feature commit containing the final inference pin (40 hex)
@@ -32,6 +33,7 @@ jobs:
       - name: Require the primary Mac and immutable inputs
         run: |
           test "$RUNNER_NAME" = nax-macos
+          test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"
           [[ "$QWEN_APP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$QWEN_APP_INFERENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

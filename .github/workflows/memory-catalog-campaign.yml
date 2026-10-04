@@ -12,6 +12,11 @@
 # here, so this workflow can never become a required check and can never be selected as one: a
 # `workflow_dispatch`-only workflow reports no context on any PR.
 #
+# The optional qwen-image-2-1-app-lifecycle profile is a separate app proof. It calls
+# the reusable workflow at this dispatch's exact commit and skips BOTH catalog
+# jobs, including every plan/walk/branch/push/PR step described below. Catalog is
+# still the default profile; no app run can publish catalog measurements.
+#
 # WHAT IT PRODUCES. A NEW branch `story/<campaign>-<backend>-campaign-<run_id>` carrying one commit
 # per measured anchor, pushed as the walk proceeds (never only at the end), plus a work-dir artifact
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
@@ -60,6 +65,19 @@ name: Memory catalog campaign
 on:
   workflow_dispatch:
     inputs:
+      profile:
+        description: "Catalog by default; Qwen app lifecycle runs only the reusable app proof, with no catalog walk or publication."
+        required: false
+        type: choice
+        options:
+          - catalog
+          - qwen-image-2-1-app-lifecycle
+        default: catalog
+      inference_sha:
+        description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
+        required: false
+        type: string
+        default: ""
       backend:
         description: "Which lane to walk. mlx runs on a Mac, candle on the Windows CUDA box."
         required: true
@@ -116,7 +134,7 @@ on:
         type: boolean
         default: false
       ref:
-        description: "Branch to walk from. The campaign branch is cut from this ref and the PR targets it."
+        description: "Catalog: branch to walk and PR target. App lifecycle: exact source SHA, identical to the workflow dispatch --ref."
         required: true
         type: string
         default: feature/sc-22723-memory-anchor-measurability
@@ -204,8 +222,18 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
+  qwen-app-lifecycle:
+    if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
+    permissions:
+      contents: read
+    # Relative reusable-workflow calls resolve at the caller's exact commit. This
+    # registered dispatcher is usable before the new reusable file reaches main.
+    uses: ./.github/workflows/qwen-image-2-1-app-lifecycle.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
   mlx:
-    if: ${{ inputs.backend == 'mlx' }}
+    if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
     # `rw-krea` and `nax` are the two macOS label sets verified as carried by a live runner
     # (nax-macos-2 and nax-macos respectively). A label NO runner carries does not fail the
@@ -340,7 +368,7 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ inputs.backend == 'candle' }}
+    if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle' }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: both Windows runners are processes on ONE box.

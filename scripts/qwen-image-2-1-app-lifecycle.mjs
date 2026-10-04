@@ -113,6 +113,12 @@ async function safetensorsMetadata(file) {
 async function physicalDirectory(directory) {
   const entry = await lstat(directory); requireFact(entry.isDirectory() && !entry.isSymbolicLink() && await realpath(directory) === directory, "physical task-owned directory required");
 }
+export async function assertDenseSnapshotLayout(base) {
+  // Frozen Qwen 2.1 uses Qwen3-VL's processor tree, not the older tokenizer/ layout.
+  for (const file of ["model_index.json", "transformer/config.json", "text_encoder/config.json", "vae/config.json", "processor/tokenizer_config.json", "processor/tokenizer.json"]) {
+    const entry = await stat(path.join(base, file)); requireFact(entry.isFile() && entry.size > 0, `staged dense snapshot incomplete: ${file}`);
+  }
+}
 async function snapshotInventory(base, hub) {
   const files = [];
   const walk = async (directory) => {
@@ -173,7 +179,7 @@ export async function runLifecycle(env = process.env) {
     const home = await realpath(env.HOME), weights = path.join(home, "sceneworks-rw-weights"), hub = path.join(weights, "hub"), repo = path.join(hub, "models--Qwen--Qwen-Image-2.1"), snapshots = path.join(repo, "snapshots"), base = path.join(snapshots, BASE_REVISION);
     for (const directory of [weights, hub, repo, snapshots, base]) await physicalDirectory(directory);
     requireFact((await readdir(snapshots)).every((name) => name === BASE_REVISION), "dense repo must contain only the frozen snapshot");
-    for (const file of ["model_index.json", "transformer/config.json", "text_encoder/config.json", "vae/config.json", "tokenizer/tokenizer_config.json"]) requireFact((await stat(path.join(base, file))).size > 0, "staged dense snapshot incomplete");
+    await assertDenseSnapshotLayout(base);
     receipt.snapshot_files = await snapshotInventory(base, hub);
     const state = path.join(output, "state"); await mkdir(state); await mkdir(path.join(state, "data")); await mkdir(path.join(state, "credentials")); await cp(path.join(root, "config"), path.join(state, "config"), { recursive: true });
     const workerId = `qwen-app-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`, url = "http://127.0.0.1:17921";

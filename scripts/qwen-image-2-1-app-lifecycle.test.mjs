@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { inflateSync } from "node:zlib";
-import { assertCompleted, assertPins, assertPlan, assertResume, assertWorker, BASE_REVISION, LICENSE_URL, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { assertCompleted, assertDenseSnapshotLayout, assertPins, assertPlan, assertResume, assertWorker, BASE_REVISION, LICENSE_URL, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), hash = "b".repeat(64), workerId = "owned-qwen-worker";
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -112,24 +112,73 @@ test("public synthetic image pairs have valid PNG payloads and distinct source/t
 
 function assertWorkflowScope(workflow) {
   const trigger = workflow.slice(workflow.indexOf("on:"), workflow.indexOf("permissions:"));
-  assert.match(trigger, /workflow_dispatch:/); assert.doesNotMatch(trigger, /\b(push|pull_request|schedule):/);
+  assert.match(trigger, /workflow_call:/); assert.doesNotMatch(trigger, /\b(workflow_dispatch|push|pull_request|schedule):/);
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);
   assert.match(workflow, /test "\$RUNNER_NAME" = nax-macos\s*$/m);
+  assert.match(workflow, /test "\$GITHUB_SHA" = "\$QWEN_APP_SOURCE_SHA"\s*$/m);
   assert.match(workflow, /ref: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /QWEN_APP_SOURCE_SHA: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /cancel-in-progress: false/); assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /--build-type Release --github-env/);
   assert.doesNotMatch(workflow, /measure-memory|download-missing|gh pr|git push|bump-inference/);
 }
-test("manual app workflow preserves exclusive primary-runner and immutable evidence scope", () => {
+test("reusable app workflow preserves exclusive primary-runner and immutable caller scope", () => {
   const workflow = read(".github/workflows/qwen-image-2-1-app-lifecycle.yml"); assertWorkflowScope(workflow);
-  for (const mutant of [workflow.replace("workflow_dispatch:", "push:"), workflow.replace("ARM64, rw-starvector", "ARM64, nax"), workflow.replace("= nax-macos", "= nax-macos-2"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
+  for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace("ARM64, rw-starvector", "ARM64, nax"), workflow.replace("= nax-macos", "= nax-macos-2"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace('test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"', 'test -n "$GITHUB_SHA"'), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
   const harness = read("scripts/qwen-image-2-1-app-lifecycle.mjs");
   assert.match(harness, /SCENEWORKS_CREDENTIALS_DIR: path.join\(state, "credentials"\)/);
   assert.match(harness, /HF_HUB_OFFLINE: "1"/); assert.match(harness, /SCENEWORKS_WORKER_ONLY: "1"/);
   assert.doesNotMatch(harness, /\/loras\/import|\/models\/download|\.cache[\\/]huggingface/);
   assert.match(harness, /process.kill\(-child.pid, "SIGTERM"\)/);
   assert.equal(BASE_REVISION, "790c92633540aa0cb11d9abf19eb46d861714758");
+});
+
+function assertDispatcherIsolation(workflow) {
+  assert.match(workflow, /profile:[\s\S]*?default: catalog/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml/);
+  assert.match(workflow, /source_sha: \$\{\{ inputs.ref \}\}/);
+  assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
+  assert.deepEqual(jobs, ["qwen-app-lifecycle", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  const runs = (profile, backend) => jobs.filter((job) => {
+    const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
+    assert.ok(condition, `missing ${job} dispatch predicate`);
+    // Evaluate only the tiny predicate grammar, never a workflow step or command.
+    assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
+    return Function("inputs", `return (${condition})`)({ profile, backend });
+  });
+  for (const backend of ["mlx", "candle"]) {
+    assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
+    assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
+    assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
+    assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
+  }
+}
+test("registered dispatcher isolates app proof from both catalog lanes and their publication", () => {
+  const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
+  assertDispatcherIsolation(workflow);
+  const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
+  const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
+  for (const mutant of mutants) assert.throws(() => assertDispatcherIsolation(mutant));
+});
+
+test("frozen dense snapshot uses processor tokenizer files and rejects the older tokenizer layout", async () => {
+  const base = await mkdtemp(path.join(tmpdir(), "qwen-21-layout-"));
+  try {
+    for (const file of ["model_index.json", "transformer/config.json", "text_encoder/config.json", "vae/config.json", "processor/tokenizer_config.json", "processor/tokenizer.json"]) {
+      await mkdir(path.dirname(path.join(base, file)), { recursive: true }); await writeFile(path.join(base, file), "{}");
+    }
+    await assertDenseSnapshotLayout(base);
+    await mkdir(path.join(base, "tokenizer"));
+    for (const file of ["tokenizer_config.json", "tokenizer.json"]) { await writeFile(path.join(base, "tokenizer", file), "{}"); await rm(path.join(base, "processor", file)); }
+    await assert.rejects(assertDenseSnapshotLayout(base), /processor/);
+    await writeFile(path.join(base, "processor", "tokenizer_config.json"), "{}");
+    await assert.rejects(assertDenseSnapshotLayout(base), /processor.*tokenizer.json/);
+    await writeFile(path.join(base, "processor", "tokenizer.json"), "");
+    await assert.rejects(assertDenseSnapshotLayout(base), /incomplete.*processor/);
+  } finally {
+    assert.ok(path.resolve(base).startsWith(path.resolve(tmpdir()) + path.sep)); await rm(base, { recursive: true, force: true });
+  }
 });
 
 test("wrong runtime writes a failed receipt before any native build or service starts", async () => {
