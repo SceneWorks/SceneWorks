@@ -5678,6 +5678,8 @@ mod tests {
                 generated_tokens,
                 generated_bytes,
                 finish_reason,
+                // Fused compressed KV report (inference epic sc-20669): the fakes ran no cache.
+                kv_cache: None,
             },
             events,
         )
@@ -5735,6 +5737,7 @@ mod tests {
                 generated_tokens: 3,
                 generated_bytes: svg.len(),
                 finish_reason: StarVectorFinishReason::CompleteRoot,
+                kv_cache: None,
             };
             let mut events = Vec::new();
             for (index, fragment) in self.0.into_iter().zip(["<svg", ">", "</svg>"]) {
