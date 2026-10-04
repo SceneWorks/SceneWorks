@@ -19,8 +19,8 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    caption_with_trigger_words, Caption, CaptionSource, TrainingDataset, TrainingDatasetItem,
-    TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
+    caption_with_trigger_words, Caption, CaptionMode, CaptionSource, TrainingDataset,
+    TrainingDatasetItem, TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
@@ -142,6 +142,9 @@ pub struct CaptionInput {
     pub source: Option<CaptionSource>,
     #[serde(default)]
     pub trigger_words: Vec<String>,
+    /// The auto-caption mode that produced `text` (sc-24829); carried through unchanged.
+    #[serde(default)]
+    pub mode: Option<CaptionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1501,6 +1504,7 @@ fn apply_caption_patches(
             text: input.caption.text,
             source: input.caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: input.caption.trigger_words,
+            mode: input.caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         };
@@ -1651,6 +1655,7 @@ fn materialize_external_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Imported),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1747,6 +1752,7 @@ fn materialize_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -2332,6 +2338,7 @@ mod tests {
                 text: String::new(),
                 source: CaptionSource::Manual,
                 trigger_words: Vec::new(),
+                mode: None,
                 updated_at: None,
                 extra: Default::default(),
             },
@@ -2476,6 +2483,7 @@ mod tests {
             text: "a photo of Mira".to_owned(),
             source: CaptionSource::Auto,
             trigger_words: vec!["mira".to_owned()],
+            mode: None,
             updated_at: Some("then".to_owned()),
             extra: Default::default(),
         };

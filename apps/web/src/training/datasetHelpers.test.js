@@ -1,7 +1,51 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "../validation/issues.js";
-import { datasetPayload, datasetSaveValidation, selectionAfterDuplicateRemoval } from "./datasetHelpers.js";
+import {
+  captionDraftsFromDataset,
+  datasetPayload,
+  datasetSaveValidation,
+  selectionAfterDuplicateRemoval,
+} from "./datasetHelpers.js";
+
+describe("caption mode round-trip (sc-24829)", () => {
+  const selection = "dataset-item:ds1:item_1";
+  const activeDataset = {
+    id: "ds1",
+    items: [{
+      id: "item_1",
+      path: "images/item_1.png",
+      displayName: "one",
+      caption: { text: "miraStyle, a red jacket", source: "auto", triggerWords: ["miraStyle"], mode: "subjectOnly" },
+    }],
+  };
+  const assetsById = new Map([[selection, {
+    id: selection,
+    datasetOwned: true,
+    displayName: "one",
+    file: { path: "training/datasets/ds1/images/item_1.png" },
+  }]]);
+  const save = (captionDraftById) =>
+    datasetPayload({ activeDataset, assetsById, captionDraftById, name: "Mira", selectedAssetIds: [selection] });
+
+  it("keeps an auto caption's mode through the draft a save is built from", () => {
+    const drafts = captionDraftsFromDataset(activeDataset);
+    expect(drafts[selection]).toEqual({ text: "miraStyle, a red jacket", source: "auto", mode: "subjectOnly" });
+    expect(save(drafts).items[0].caption).toEqual({
+      text: "miraStyle, a red jacket",
+      source: "auto",
+      triggerWords: ["miraStyle"],
+      mode: "subjectOnly",
+    });
+  });
+
+  it("keeps the mode when no draft exists, and drops it once the caption is edited by hand", () => {
+    expect(save({}).items[0].caption.mode).toBe("subjectOnly");
+    const edited = save({ [selection]: { text: "my own words", source: "manual" } }).items[0].caption;
+    expect(edited.source).toBe("manual");
+    expect(edited.mode).toBeUndefined();
+  });
+});
 
 it("preserves prepared bundle extras and stable item ids across dataset saves", () => {
   const activeDataset = {

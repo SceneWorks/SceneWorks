@@ -374,6 +374,172 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
         .exists());
 }
 
+// sc-24829: caption modes. The API validates the mode, carries it on the job payload, refuses a
+// trigger-only job whose images lack trigger words, sends a trigger-only job without a model
+// source (it loads no captioner), and persists the mode a caption sidecar reports.
+#[tokio::test]
+async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Caption Modes" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let mut asset_ids = Vec::new();
+    for (name, bytes) in [
+        ("A.png", b"png-a".as_slice()),
+        ("B.png", b"png-b".as_slice()),
+    ] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            bytes,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Mira",
+            "items": [
+                { "assetId": asset_ids[0], "caption": { "text": "", "triggerWords": ["miraStyle"] } },
+                { "assetId": asset_ids[1], "caption": { "text": "", "triggerWords": [] } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let first_id = dataset["items"][0]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+    let jobs_url =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-jobs");
+
+    // An unknown mode is a field error, not a silent `default`.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "faceOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode must be one of default, subjectOnly, or triggerOnly."
+    );
+
+    // subjectOnly owns its prompt; a caller prompt alongside it is refused, not ignored.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "subjectOnly", "options": { "captionPrompt": "Describe the room." } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty."
+    );
+
+    // An absent mode is `default`, and a default job carries the captioner's model source.
+    let (status, default_job) = request(app.clone(), "POST", &jobs_url, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(default_job["payload"]["mode"], "default");
+    assert!(
+        default_job["payload"].get("modelManifestEntry").is_some()
+            || default_job["payload"].get("modelManifestEntries").is_some(),
+        "{}",
+        default_job["payload"]
+    );
+
+    let (status, subject_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "subjectOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(subject_job["payload"]["mode"], "subjectOnly");
+
+    // triggerOnly over an image with no trigger words would write an empty caption: refused.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode triggerOnly needs trigger words on every image; 1 image(s) have none."
+    );
+
+    // Scoped to the image that has trigger words it queues — with no model source, since the
+    // worker loads no captioner for it.
+    let (status, trigger_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "itemIds": [first_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(trigger_job["payload"]["mode"], "triggerOnly");
+    assert!(trigger_job["payload"].get("modelManifestEntry").is_none());
+    assert!(trigger_job["payload"].get("modelManifestEntries").is_none());
+
+    // The worker's caption-sidecars write stores the mode on the caption.
+    let (status, sidecars) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-sidecars"),
+        json!({ "items": [{
+            "itemId": first_id,
+            "caption": {
+                "text": "miraStyle, a red jacket",
+                "source": "auto",
+                "triggerWords": ["miraStyle"],
+                "mode": "subjectOnly"
+            }
+        }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sidecars["dataset"]["items"][0]["caption"]["mode"],
+        "subjectOnly"
+    );
+    let (status, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["items"][0]["caption"]["mode"], "subjectOnly");
+    assert_eq!(detail["items"][0]["caption"]["source"], "auto");
+    // A manual caption carries no mode.
+    assert!(detail["items"][1]["caption"].get("mode").is_none());
+}
+
 #[tokio::test]
 async fn training_dataset_routes_persist_and_validate_project_assets() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

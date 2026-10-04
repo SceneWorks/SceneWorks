@@ -476,6 +476,11 @@ pub(crate) struct TrainingCaptionJobRequest {
     pub(crate) captioner: String,
     #[serde(default = "default_training_caption_model")]
     pub(crate) model_name_or_path: String,
+    /// Caption mode (sc-24829): `default` (the full-scene JoyCaption prompt), `subjectOnly` (the
+    /// worker's subject-only prompt) or `triggerOnly` (exactly the trigger words, no captioner).
+    /// Unknown strings deserialize to `CaptionMode::Unknown` and are refused by validation.
+    #[serde(default = "default_training_caption_mode")]
+    pub(crate) mode: sceneworks_core::training::CaptionMode,
     #[serde(default)]
     pub(crate) recaption: bool,
     #[serde(default = "default_requested_gpu")]

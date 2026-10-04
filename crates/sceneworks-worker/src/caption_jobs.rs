@@ -49,8 +49,28 @@ use gen_core::CAPTION_TRIGGER_WORD_CONFORMANCE;
 ))]
 use gen_core::{
     apply_caption_trigger_words, CancelFlag, CaptionOptions, CaptionRequest, CaptionSampling,
-    Image, LoadSpec, Progress, WeightsSource,
+    Captioner, Image, LoadSpec, Progress, WeightsSource,
 };
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+use sceneworks_core::training::CaptionMode;
+
+/// The JoyCaption prompt a `subjectOnly` caption job sends (epic 2123, sc-24829). It keeps the
+/// caption to what changes between images of one character (clothing, expression, pose,
+/// accessories) and leaves out the background and the fixed identity traits, so a character LoRA
+/// binds that identity to the trigger words (still prepended after generation) instead of to
+/// caption tokens.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) const SUBJECT_ONLY_CAPTION_PROMPT: &str = "Write a short caption that describes only \
+the changeable parts of the main subject in this image: their clothing, facial expression, pose, \
+and any accessories they wear or hold. Do not describe the background, setting, location, \
+lighting, or camera. Do not describe fixed identity traits such as face shape, eye color, hair \
+color, skin tone, ethnicity, age, or body type. Do not name the subject.";
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -70,6 +90,66 @@ struct CaptionItem {
 struct CaptionJobOptions {
     options: CaptionOptions,
     sampling: CaptionSampling,
+}
+
+/// The job's caption mode (sc-24829). An absent `mode` is `default` (jobs queued before modes
+/// existed); an unrecognised one is refused rather than captioned as `default`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn caption_job_mode(payload: &JsonObject) -> WorkerResult<CaptionMode> {
+    match payload.get("mode") {
+        None | Some(Value::Null) => Ok(CaptionMode::Default),
+        Some(Value::String(mode)) => match mode.as_str() {
+            "default" => Ok(CaptionMode::Default),
+            "subjectOnly" => Ok(CaptionMode::SubjectOnly),
+            "triggerOnly" => Ok(CaptionMode::TriggerOnly),
+            other => Err(WorkerError::InvalidPayload(format!(
+                "Unsupported training caption mode {other:?}; use default, subjectOnly, or triggerOnly."
+            ))),
+        },
+        Some(other) => Err(WorkerError::InvalidPayload(format!(
+            "Training caption mode must be a string, got {other}."
+        ))),
+    }
+}
+
+/// The prompt actually sent to the captioner for `mode`: the subject-only prompt for
+/// `subjectOnly`, otherwise the caller's prompt override (empty means the provider renders its
+/// type/length template, today's behaviour). `triggerOnly` never reaches a captioner.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn caption_prompt_for_mode(mode: &CaptionMode, options: &CaptionOptions) -> String {
+    match mode {
+        CaptionMode::SubjectOnly => SUBJECT_ONLY_CAPTION_PROMPT.to_owned(),
+        _ => options.custom_prompt.clone(),
+    }
+}
+
+/// One stored caption as the `/caption-sidecars` route takes it: auto-sourced, stamped with the
+/// mode that produced it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn caption_sidecar_item(
+    item_id: &str,
+    text: &str,
+    trigger_words: &[String],
+    mode: &CaptionMode,
+) -> Value {
+    json!({
+        "itemId": item_id,
+        "caption": {
+            "text": text,
+            "source": "auto",
+            "triggerWords": trigger_words,
+            "mode": mode,
+        }
+    })
 }
 
 #[cfg(any(
@@ -108,6 +188,24 @@ pub(crate) async fn run_training_caption_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    run_training_caption_job_using(api, settings, job, crate::inference_runtime::load_captioner)
+        .await
+}
+
+/// [`run_training_caption_job`] with the captioner loader injected (sc-24829), so a test drives the
+/// REAL job path against a stub [`Captioner`] and can prove a `triggerOnly` job never calls it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn run_training_caption_job_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    load_captioner: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Captioner>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     if job
         .payload
         .get("captioner")
@@ -129,6 +227,11 @@ pub(crate) async fn run_training_caption_job(
         return Err(WorkerError::InvalidPayload(
             "Training caption job has no items to caption.".to_owned(),
         ));
+    }
+    let mode = caption_job_mode(&job.payload)?;
+    if mode == CaptionMode::TriggerOnly {
+        return run_trigger_only_caption_job(api, settings, job, &project_id, &dataset_id, &items)
+            .await;
     }
     let options = caption_job_options(&job.payload);
     let model_name_or_path = job
@@ -188,6 +291,7 @@ pub(crate) async fn run_training_caption_job(
     // The active backend label (mlx / candle / cpu), owned into the blocking task so its engine-error
     // strings name the REAL backend instead of a hardcoded "MLX" (sc-8916, F-114).
     let blocking_backend = backend.to_owned();
+    let blocking_mode = mode.clone();
     let job_id = job.id.clone();
     let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
         emit_event(
@@ -197,7 +301,7 @@ pub(crate) async fn run_training_caption_job(
                 "engine": JOY_CAPTION_MODEL,
             }),
         );
-        let captioner = crate::inference_runtime::load_captioner(
+        let captioner = load_captioner(
             JOY_CAPTION_MODEL,
             &LoadSpec::new(WeightsSource::Dir(weights_dir)),
         )
@@ -228,7 +332,10 @@ pub(crate) async fn run_training_caption_job(
                 cancel: blocking_cancel.clone(),
                 ..Default::default()
             };
-            request.prompt = request.options.custom_prompt.clone();
+            // The prompt that produced the caption is the mode's; the options' override field
+            // mirrors it, as the gen-core contract asks (`custom_prompt` is `prompt`'s source).
+            request.prompt = caption_prompt_for_mode(&blocking_mode, &request.options);
+            request.options.custom_prompt = request.prompt.clone();
             // sc-24029: JoyCaption decodes up to 4096 tokens on the same mlx-llm KV cache, which
             // grows per token. Scoped to ONE item so each caption's terminal clear runs before the
             // next item's decode begins. MLX's freed-buffer cache is PROCESS-GLOBAL, not per-thread,
@@ -316,14 +423,7 @@ pub(crate) async fn run_training_caption_job(
             event = rx.recv() => {
                 match event {
                     Some(CaptionedItem { index, item_id, text, trigger_words }) => {
-                        captions.push(json!({
-                            "itemId": item_id,
-                            "caption": {
-                                "text": text,
-                                "source": "auto",
-                                "triggerWords": trigger_words,
-                            }
-                        }));
+                        captions.push(caption_sidecar_item(&item_id, &text, &trigger_words, &mode));
                         let progress = 0.12 + 0.76 * ((index + 1) as f64 / items.len() as f64);
                         update_job(
                             api,
@@ -405,6 +505,54 @@ pub(crate) async fn run_training_caption_job(
     }
     join_result?;
 
+    save_caption_results(
+        api,
+        job,
+        CaptionSave {
+            project_id: &project_id,
+            dataset_id: &dataset_id,
+            model_name_or_path: &model_name_or_path,
+            mode: &mode,
+            backend,
+        },
+        captions,
+    )
+    .await
+}
+
+/// Where and how a finished caption job's captions are saved.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+struct CaptionSave<'a> {
+    project_id: &'a str,
+    dataset_id: &'a str,
+    model_name_or_path: &'a str,
+    mode: &'a CaptionMode,
+    backend: &'a str,
+}
+
+/// POST the captions to the dataset's `/caption-sidecars` route and complete the job: the shared
+/// tail of the captioner and trigger-only paths.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn save_caption_results(
+    api: &ApiClient,
+    job: &JobSnapshot,
+    save: CaptionSave<'_>,
+    captions: Vec<Value>,
+) -> WorkerResult<()> {
+    let CaptionSave {
+        project_id,
+        dataset_id,
+        model_name_or_path,
+        mode,
+        backend,
+    } = save;
+    let captioned_count = captions.len();
     update_job(
         api,
         &job.id,
@@ -433,11 +581,12 @@ pub(crate) async fn run_training_caption_job(
             JobStatus::Completed,
             ProgressStage::Completed,
             1.0,
-            &format!("Created captions for {} training item(s).", items.len()),
+            &format!("Created captions for {captioned_count} training item(s)."),
             Some(caption_result(
-                &model_name_or_path,
-                &dataset_id,
-                items.len(),
+                model_name_or_path,
+                dataset_id,
+                mode,
+                captioned_count,
                 sidecars,
             )),
             backend,
@@ -445,6 +594,84 @@ pub(crate) async fn run_training_caption_job(
     )
     .await?;
     Ok(())
+}
+
+/// A `triggerOnly` caption job (sc-24829): every image's caption is exactly its trigger words,
+/// written without resolving weights or loading a captioner.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn run_trigger_only_caption_job(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    project_id: &str,
+    dataset_id: &str,
+    items: &[CaptionItem],
+) -> WorkerResult<()> {
+    let mode = CaptionMode::TriggerOnly;
+    let captions = trigger_only_captions(items, &mode)?;
+    let backend = backend_label(&settings.gpu_id);
+    heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
+    update_job(
+        api,
+        &job.id,
+        caption_progress(
+            JobStatus::Running,
+            ProgressStage::Running,
+            0.5,
+            &format!(
+                "Writing trigger-word captions for {} image(s).",
+                items.len()
+            ),
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, CANCEL_MESSAGE).await?;
+    save_caption_results(
+        api,
+        job,
+        CaptionSave {
+            project_id,
+            dataset_id,
+            model_name_or_path: "",
+            mode: &mode,
+            backend,
+        },
+        captions,
+    )
+    .await
+}
+
+/// The trigger-only sidecar items: each caption is the item's trigger words joined by the shared
+/// gen-core trigger policy over an empty caption. An item with no trigger words would get an empty
+/// caption, so it is refused (the API refuses the same job before queuing it).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn trigger_only_captions(items: &[CaptionItem], mode: &CaptionMode) -> WorkerResult<Vec<Value>> {
+    items
+        .iter()
+        .map(|item| {
+            let text = apply_caption_trigger_words("", &item.trigger_words);
+            if text.is_empty() {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Caption item {} has no trigger words for a triggerOnly caption.",
+                    item.item_id
+                )));
+            }
+            Ok(caption_sidecar_item(
+                &item.item_id,
+                &text,
+                &item.trigger_words,
+                mode,
+            ))
+        })
+        .collect()
 }
 
 #[cfg(not(any(
@@ -499,12 +726,17 @@ fn caption_progress(
 fn caption_result(
     model_name_or_path: &str,
     dataset_id: &str,
+    mode: &CaptionMode,
     captioned_count: usize,
     sidecars: Value,
 ) -> JsonObject {
     let mut result = JsonObject::new();
     result.insert("captioner".to_owned(), json!("joy_caption"));
-    result.insert("modelNameOrPath".to_owned(), json!(model_name_or_path));
+    result.insert("mode".to_owned(), json!(mode));
+    // A trigger-only job loads no model, so it names none.
+    if !model_name_or_path.is_empty() {
+        result.insert("modelNameOrPath".to_owned(), json!(model_name_or_path));
+    }
     result.insert("datasetId".to_owned(), json!(dataset_id));
     result.insert(
         "datasetVersion".to_owned(),
@@ -945,5 +1177,343 @@ mod tests {
             error.to_string().contains("Caption item item_1 imagePath"),
             "{error}"
         );
+    }
+
+    // ── sc-24829: subject-only and trigger-only caption modes, driven through the REAL job path ──
+
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    use axum::{
+        extract::{Path as AxumPath, State},
+        response::{IntoResponse, Response},
+        routing::{get, post},
+        Json, Router,
+    };
+    use gen_core::{CaptionCapabilities, CaptionOutput, CaptionerDescriptor};
+
+    /// What the stub API saw: every progress POST and every `/caption-sidecars` body.
+    #[derive(Clone, Default)]
+    struct CaptionApi {
+        progress: Arc<Mutex<Vec<Value>>>,
+        sidecars: Arc<Mutex<Vec<Value>>>,
+    }
+
+    fn caption_job_value(job_id: &str, payload: Value) -> Value {
+        json!({
+            "id": job_id, "type": "training_caption", "status": "running",
+            "projectId": null, "projectName": null, "payload": payload, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.0, "stage": "queued", "message": "queued", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
+            "createdAt": "2026-10-04T00:00:00Z", "updatedAt": "2026-10-04T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    async fn spawn_caption_api() -> (String, CaptionApi) {
+        async fn job_route(AxumPath(job_id): AxumPath<String>) -> Response {
+            Json(caption_job_value(&job_id, json!({}))).into_response()
+        }
+        async fn progress_route(
+            State(state): State<CaptionApi>,
+            AxumPath(job_id): AxumPath<String>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            state.progress.lock().expect("progress lock").push(body);
+            Json(caption_job_value(&job_id, json!({}))).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            Json(json!({})).into_response()
+        }
+        async fn sidecars_route(
+            State(state): State<CaptionApi>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            state.sidecars.lock().expect("sidecars lock").push(body);
+            Json(json!({ "dataset": { "version": 2 }, "sidecars": [] })).into_response()
+        }
+        let state = CaptionApi::default();
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .route(
+                "/api/v1/projects/:project_id/training/datasets/:dataset_id/caption-sidecars",
+                post(sidecars_route),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let address = listener.local_addr().expect("listener has address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("stub serves");
+        });
+        (format!("http://{address}"), state)
+    }
+
+    /// A captioner that records the prompt of every request and answers a fixed caption.
+    struct RecordingCaptioner {
+        descriptor: CaptionerDescriptor,
+        prompts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Captioner for RecordingCaptioner {
+        fn descriptor(&self) -> &CaptionerDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _req: &CaptionRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn caption(
+            &self,
+            req: &CaptionRequest,
+            _on_progress: &mut dyn FnMut(Progress),
+        ) -> gen_core::Result<CaptionOutput> {
+            self.prompts
+                .lock()
+                .expect("prompts lock")
+                .push(req.prompt.clone());
+            Ok(CaptionOutput {
+                text: "a red jacket".to_owned(),
+                generated_tokens: None,
+                finish_reason: None,
+            })
+        }
+    }
+
+    /// A data dir holding one dataset image and a JoyCaption weights dir the loader is pointed at.
+    struct CaptionStage {
+        _dir: tempfile::TempDir,
+        settings: Settings,
+        dataset_root: PathBuf,
+        weights_dir: PathBuf,
+    }
+
+    fn caption_stage(api_url: String) -> CaptionStage {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut settings = test_settings(dir.path());
+        settings.api_url = api_url;
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40]))
+            .save(dataset_root.join("item_1.png"))
+            .expect("dataset image writes");
+        let weights_dir = dir.path().join("models").join("joycaption");
+        std::fs::create_dir_all(&weights_dir).expect("weights dir");
+        CaptionStage {
+            _dir: dir,
+            settings,
+            dataset_root,
+            weights_dir,
+        }
+    }
+
+    fn caption_payload(stage: &CaptionStage, mode: Option<&str>, items: Value) -> Value {
+        let mut payload = json!({
+            "captioner": "joy_caption",
+            "modelNameOrPath": stage.weights_dir.display().to_string(),
+            "projectId": "project-1",
+            "datasetId": "ds-1",
+            "datasetRoot": stage.dataset_root.display().to_string(),
+            "options": { "captionPrompt": "Describe everything you see." },
+            "items": items,
+        });
+        if let Some(mode) = mode {
+            payload["mode"] = json!(mode);
+        }
+        payload
+    }
+
+    fn one_item(stage: &CaptionStage) -> Value {
+        json!([{
+            "itemId": "item_1",
+            "imagePath": stage.dataset_root.join("item_1.png").display().to_string(),
+            "triggerWords": ["miraStyle"],
+        }])
+    }
+
+    /// Run a caption job through the real path with a recording loader. Returns the job result,
+    /// the prompts the captioner received, and whether the loader ran at all.
+    async fn run_caption(
+        api: &ApiClient,
+        stage: &CaptionStage,
+        payload: Value,
+    ) -> (WorkerResult<()>, Vec<String>, bool) {
+        let job: JobSnapshot =
+            serde_json::from_value(caption_job_value("caption-job", payload)).expect("job");
+        let prompts = Arc::new(Mutex::new(Vec::new()));
+        let loaded = Arc::new(AtomicBool::new(false));
+        let (loader_prompts, loader_flag) = (prompts.clone(), loaded.clone());
+        let result = run_training_caption_job_using(api, &stage.settings, &job, move |_, _| {
+            loader_flag.store(true, Ordering::SeqCst);
+            Ok(Box::new(RecordingCaptioner {
+                descriptor: CaptionerDescriptor {
+                    id: "joy_caption",
+                    family: "joycaption",
+                    backend: "stub",
+                    capabilities: CaptionCapabilities::default(),
+                },
+                prompts: loader_prompts,
+            }) as Box<dyn Captioner>)
+        })
+        .await;
+        let prompts = prompts.lock().expect("prompts lock").clone();
+        (result, prompts, loaded.load(Ordering::SeqCst))
+    }
+
+    fn posted_captions(api: &CaptionApi) -> Vec<Value> {
+        let sidecars = api.sidecars.lock().expect("sidecars lock");
+        assert_eq!(sidecars.len(), 1, "exactly one caption-sidecars POST");
+        sidecars[0]["items"].as_array().expect("items").clone()
+    }
+
+    fn completed_result(api: &CaptionApi) -> Value {
+        api.progress
+            .lock()
+            .expect("progress lock")
+            .iter()
+            .find(|body| body["status"] == "completed")
+            .expect("job completed")["result"]
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn subject_only_mode_sends_the_subject_only_prompt_and_records_the_mode() {
+        let (url, api_state) = spawn_caption_api().await;
+        let stage = caption_stage(url);
+        let api = ApiClient::new(&stage.settings);
+        let payload = caption_payload(&stage, Some("subjectOnly"), one_item(&stage));
+        let (result, prompts, loaded) = run_caption(&api, &stage, payload).await;
+        result.expect("subject-only caption job succeeds");
+        assert!(loaded, "subject-only captions run JoyCaption");
+        // The captioner saw the subject-only prompt, not the caller's full-scene prompt.
+        assert_eq!(prompts, vec![SUBJECT_ONLY_CAPTION_PROMPT.to_owned()]);
+        let captions = posted_captions(&api_state);
+        assert_eq!(captions.len(), 1);
+        assert_eq!(captions[0]["itemId"], "item_1");
+        assert_eq!(captions[0]["caption"]["mode"], "subjectOnly");
+        assert_eq!(captions[0]["caption"]["source"], "auto");
+        // Trigger words are still prepended to the generated caption.
+        assert_eq!(captions[0]["caption"]["text"], "miraStyle, a red jacket");
+        assert_eq!(completed_result(&api_state)["mode"], "subjectOnly");
+    }
+
+    #[tokio::test]
+    async fn default_mode_keeps_the_callers_prompt_and_records_default() {
+        let (url, api_state) = spawn_caption_api().await;
+        let stage = caption_stage(url);
+        let api = ApiClient::new(&stage.settings);
+        // No `mode` at all: a job queued before modes existed is captioned exactly as before.
+        let payload = caption_payload(&stage, None, one_item(&stage));
+        let (result, prompts, loaded) = run_caption(&api, &stage, payload).await;
+        result.expect("default caption job succeeds");
+        assert!(loaded);
+        assert_eq!(prompts, vec!["Describe everything you see.".to_owned()]);
+        let captions = posted_captions(&api_state);
+        assert_eq!(captions[0]["caption"]["mode"], "default");
+        assert_eq!(captions[0]["caption"]["text"], "miraStyle, a red jacket");
+    }
+
+    #[tokio::test]
+    async fn trigger_only_mode_writes_exactly_the_trigger_words_without_loading_the_captioner() {
+        let (url, api_state) = spawn_caption_api().await;
+        let stage = caption_stage(url);
+        let api = ApiClient::new(&stage.settings);
+        let mut payload = caption_payload(
+            &stage,
+            Some("triggerOnly"),
+            json!([
+                {
+                    "itemId": "item_1",
+                    "imagePath": stage.dataset_root.join("item_1.png").display().to_string(),
+                    "triggerWords": ["miraStyle", "red coat"],
+                },
+                {
+                    // No image on disk: trigger-only never opens the image either.
+                    "itemId": "item_2",
+                    "imagePath": stage.dataset_root.join("item_2.png").display().to_string(),
+                    "triggerWords": ["miraStyle"],
+                },
+            ]),
+        );
+        // A model that is not installed: trigger-only must not resolve weights.
+        payload["modelNameOrPath"] = json!("missing/joycaption-not-cached");
+        let (result, prompts, loaded) = run_caption(&api, &stage, payload).await;
+        result.expect("trigger-only caption job succeeds");
+        assert!(!loaded, "trigger-only must never load the captioner");
+        assert!(prompts.is_empty());
+        let captions = posted_captions(&api_state);
+        let texts: Vec<_> = captions
+            .iter()
+            .map(|item| {
+                (
+                    item["itemId"].as_str().unwrap().to_owned(),
+                    item["caption"]["text"].as_str().unwrap().to_owned(),
+                    item["caption"]["mode"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                (
+                    "item_1".to_owned(),
+                    "miraStyle, red coat".to_owned(),
+                    "triggerOnly".to_owned()
+                ),
+                (
+                    "item_2".to_owned(),
+                    "miraStyle".to_owned(),
+                    "triggerOnly".to_owned()
+                ),
+            ]
+        );
+        let result = completed_result(&api_state);
+        assert_eq!(result["mode"], "triggerOnly");
+        assert!(result.get("modelNameOrPath").is_none(), "{result}");
+    }
+
+    #[tokio::test]
+    async fn trigger_only_mode_refuses_an_image_without_trigger_words() {
+        let (url, api_state) = spawn_caption_api().await;
+        let stage = caption_stage(url);
+        let api = ApiClient::new(&stage.settings);
+        let payload = caption_payload(
+            &stage,
+            Some("triggerOnly"),
+            json!([{
+                "itemId": "item_1",
+                "imagePath": stage.dataset_root.join("item_1.png").display().to_string(),
+                "triggerWords": ["  "],
+            }]),
+        );
+        let (result, _, loaded) = run_caption(&api, &stage, payload).await;
+        let error = result.expect_err("an empty trigger-only caption is refused");
+        assert!(error.to_string().contains("no trigger words"), "{error}");
+        assert!(!loaded);
+        assert!(
+            api_state.sidecars.lock().unwrap().is_empty(),
+            "nothing saved"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unknown_caption_mode_is_refused_before_loading() {
+        let (url, api_state) = spawn_caption_api().await;
+        let stage = caption_stage(url);
+        let api = ApiClient::new(&stage.settings);
+        let payload = caption_payload(&stage, Some("faceOnly"), one_item(&stage));
+        let (result, _, loaded) = run_caption(&api, &stage, payload).await;
+        let error = result.expect_err("unknown mode refused");
+        assert!(matches!(error, WorkerError::InvalidPayload(_)), "{error}");
+        assert!(error.to_string().contains("faceOnly"), "{error}");
+        assert!(!loaded);
+        assert!(api_state.sidecars.lock().unwrap().is_empty());
     }
 }

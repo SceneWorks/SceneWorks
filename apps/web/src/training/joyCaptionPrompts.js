@@ -118,8 +118,18 @@ export const joyCaptionPromptMap = {
     "Write a {length} caption for this image as if it were being used for a social media post.",
   ],
 };
+// Caption modes (sc-24829), mirroring the API's `mode` enum. `default` is the full-scene JoyCaption
+// prompt; `subjectOnly` uses the worker's subject-only prompt (changeable traits only);
+// `triggerOnly` writes exactly the trigger words and loads no captioner.
+export const captionModes = [
+  { value: "default", label: "Full description" },
+  { value: "subjectOnly", label: "Subject only (clothing, expression, pose)" },
+  { value: "triggerOnly", label: "Trigger words only" },
+];
+
 export const defaultCaptionSettings = {
   captioner: "joy_caption",
+  mode: "default",
   modelNameOrPath: joyCaptionModel,
   recaption: false,
   requestedGpu: "auto",

@@ -860,7 +860,45 @@ describe("SceneWorks app shell", () => {
 
     expect(createCaptionJob).toHaveBeenCalledWith("dataset-a", expect.objectContaining({ captioner: "joy_caption" }));
     expect(createCaptionJob.mock.calls[0][1].itemIds).toBeUndefined();
+    // The default mode sends the full-scene prompt the dialog built.
+    expect(createCaptionJob.mock.calls[0][1].mode).toBe("default");
+    expect(createCaptionJob.mock.calls[0][1].options.captionPrompt).not.toBe("");
     expect(container.textContent).toContain("Caption job queued (job-caption-1)");
+  });
+
+  // sc-24829: the chosen caption mode reaches the job request; a non-default mode sends no prompt
+  // (subject-only uses the worker's own; trigger-only runs no captioner).
+  it.each(["subjectOnly", "triggerOnly"])("queues a %s caption job without a caller prompt", async (mode) => {
+    const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-mode", type: "training_caption" }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          createCaptionJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset: vi.fn(async () => singleItemDataset()),
+          updateDataset,
+        }),
+      );
+    });
+    await openPortraitSet();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Caption all").click();
+    });
+    await changeField(field(document.body, "Mode"), mode);
+    await act(async () => {
+      [...document.body.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Caption")).click();
+    });
+    await settle();
+
+    expect(createCaptionJob).toHaveBeenCalledTimes(1);
+    const payload = createCaptionJob.mock.calls[0][1];
+    expect(payload.mode).toBe(mode);
+    expect(payload.options.captionPrompt).toBe("");
   });
 
   it("re-captions a single image with the itemIds filter (sc-2025)", async () => {

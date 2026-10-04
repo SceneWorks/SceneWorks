@@ -88,7 +88,11 @@ impl RuntimeSourceGuard {
         }
         let model_free_dry_run = matches!(job_type, JobType::LoraTrain | JobType::ControlTraining)
             && payload.get("dryRun").and_then(serde_json::Value::as_bool) == Some(true);
-        if explicit_download || model_free_dry_run {
+        // sc-24829: a trigger-only caption job writes the trigger words and loads no captioner, so
+        // the API sends it without model carriers (the identical exemption on that side).
+        let model_free_trigger_only_caption = matches!(job_type, JobType::TrainingCaption)
+            && payload.get("mode").and_then(serde_json::Value::as_str) == Some("triggerOnly");
+        if explicit_download || model_free_dry_run || model_free_trigger_only_caption {
             return Ok(Self::none());
         }
 
@@ -3548,5 +3552,28 @@ mod tests {
         RuntimeSourceGuard::begin(&JobType::ControlTraining, &dry, &settings).unwrap();
         let real = JsonObject::new();
         assert!(RuntimeSourceGuard::begin(&JobType::LoraTrain, &real, &settings).is_err());
+    }
+
+    // sc-24829: only a trigger-only caption job is model-free; a default or subject-only caption
+    // job still loads JoyCaption and must carry its model source.
+    #[test]
+    fn trigger_only_caption_is_model_free_but_other_caption_modes_are_not() {
+        let temp = TempDir::new().unwrap();
+        let settings = settings(temp.path().join("data"));
+        let trigger_only = json!({ "mode": "triggerOnly" })
+            .as_object()
+            .unwrap()
+            .clone();
+        RuntimeSourceGuard::begin(&JobType::TrainingCaption, &trigger_only, &settings).unwrap();
+        for mode in ["default", "subjectOnly"] {
+            let captioned = json!({ "mode": mode }).as_object().unwrap().clone();
+            assert!(
+                RuntimeSourceGuard::begin(&JobType::TrainingCaption, &captioned, &settings)
+                    .is_err(),
+                "{mode} caption jobs load a model"
+            );
+        }
+        // The exemption is keyed on the caption job type, not on the bare field.
+        assert!(RuntimeSourceGuard::begin(&JobType::LoraTrain, &trigger_only, &settings).is_err());
     }
 }

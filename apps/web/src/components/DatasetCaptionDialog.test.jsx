@@ -129,4 +129,57 @@ describe("DatasetCaptionDialog", () => {
     expect(document.body.querySelector(".caption-missing-model").textContent).toContain("Downloading");
     expect(onDownloadModel).toHaveBeenCalledTimes(2);
   });
+
+  // sc-24829: caption modes.
+  function labelled(text) {
+    const label = [...document.body.querySelectorAll("label")].find((item) => item.childNodes[0]?.textContent.trim() === text);
+    return label?.querySelector("input, select, textarea");
+  }
+
+  function renderMode(mode, extra = {}) {
+    const onChange = vi.fn();
+    render(
+      <DatasetCaptionDialog
+        settings={{ ...baseSettings, mode }}
+        onChange={onChange}
+        onRun={vi.fn()}
+        onToggleExtra={vi.fn()}
+        onClose={vi.fn()}
+        scope={{ type: "all" }}
+        extraOptions={[{ value: "lighting", label: "Mention lighting" }]}
+        {...extra}
+      />,
+    );
+    return onChange;
+  }
+
+  it("offers the three caption modes and reports a change", async () => {
+    const onChange = renderMode("default");
+    const select = labelled("Mode");
+    expect([...select.options].map((option) => option.value)).toEqual(["default", "subjectOnly", "triggerOnly"]);
+    await act(async () => {
+      select.value = "subjectOnly";
+      select.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    expect(onChange).toHaveBeenCalledWith("mode", "subjectOnly");
+  });
+
+  it("keeps the captioner controls but drops the prompt controls in subject-only mode", () => {
+    renderMode("subjectOnly");
+    expect(labelled("Model")).toBeTruthy();
+    expect(labelled("Temperature")).toBeTruthy();
+    expect(labelled("Caption prompt")).toBeUndefined();
+    expect(labelled("Type")).toBeUndefined();
+    expect(document.body.textContent).not.toContain("Mention lighting");
+    expect(document.body.querySelector(".dataset-caption-mode-note").textContent).toContain("clothing, expression, pose");
+  });
+
+  it("runs trigger-only without the captioner, even when the captioning model is missing", () => {
+    renderMode("triggerOnly", { modelMissing: true, onDownloadModel: vi.fn() });
+    expect(labelled("Model")).toBeUndefined();
+    expect(labelled("Caption prompt")).toBeUndefined();
+    expect(document.body.querySelector(".caption-missing-model")).toBeNull();
+    expect(document.body.querySelector(".dataset-caption-mode-note").textContent).toContain("exactly its trigger words");
+    expect(buttonByText(container, "Caption missing").disabled).toBe(false);
+  });
 });

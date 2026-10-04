@@ -125,6 +125,19 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// How an auto caption was produced (epic 2123, sc-24829). `Default` is the captioner's
+    /// ordinary full-scene prompt; `SubjectOnly` asks the captioner to describe only the subject's
+    /// changeable attributes (clothing, expression, pose, accessories) so a character LoRA absorbs
+    /// the fixed identity into the trigger; `TriggerOnly` writes exactly the trigger words and loads
+    /// no captioner. Recorded on [`Caption::mode`] alongside `source: auto`.
+    pub enum CaptionMode {
+        Default => "default",
+        SubjectOnly => "subjectOnly",
+        TriggerOnly => "triggerOnly",
+    }
+}
+
 /// A training dataset: an ordered collection of captioned items owned and
 /// persisted by Rust (see story 1410 for the store).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -200,6 +213,10 @@ pub struct Caption {
     pub text: String,
     pub source: CaptionSource,
     pub trigger_words: Vec<String>,
+    /// The caption mode that produced an auto caption (sc-24829); `None` for manual/imported
+    /// captions and for auto captions written before modes existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<CaptionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(flatten)]
