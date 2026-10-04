@@ -598,3 +598,67 @@ describe("ConfigureJobPanel weight noise", () => {
     expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
   });
 });
+
+// sc-2125 (epic 2123): depth anchoring is an off-by-default advanced toggle. Checking it seeds the
+// upstream DA2-Small weight; its knobs only exist while it is on, and an invalid knob is outlined.
+describe("ConfigureJobPanel depth anchoring", () => {
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Depth anchoring"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+
+  it("is off by default and seeds 0.1 when enabled", () => {
+    const calls = [];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, updateConfigDraft: (name, value) => calls.push([name, value]) })}
+      />,
+    );
+    expect(toggle()).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(field("Depth anchoring weight")).toBeUndefined();
+    expect(field("Depth model")).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", "0.1"]]);
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: draft,
+          configValidity: validityFor(draft),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(field("Depth anchoring weight").value).toBe("0.1");
+    expect(field("Depth anchoring weight").getAttribute("max")).toBe("1");
+    expect([...field("Depth model").options].map((o) => o.value)).toEqual(["small", "base", "large"]);
+    expect(field("Depth every N steps").getAttribute("max")).toBe("16");
+    expect(field("Depth window min")).toBeTruthy();
+    expect(field("Depth window max")).toBeTruthy();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", ""]]);
+  });
+
+  it("outlines an out-of-range alternation period", () => {
+    const draft = { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small", depthAnchoringEvery: "40" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: draft, configValidity: validityFor(draft) })}
+      />,
+    );
+    expect(field("Depth every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});

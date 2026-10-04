@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 107,
+    "modelCount": 111,
     "importedFamilyCount": 4,
-    "cellCount": 1004,
+    "cellCount": 1008,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
@@ -22,14 +22,14 @@
     "descriptorMlxRuntime": "197f7346873849461bd9fdb5875e998b229df95a2a8baa632cd673015ed18f91",
     "descriptorPreviewFacts": "d7195a5005fef9ff583da7db55ddb6da497bac8d5b96de93d04df2eb837977b1",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "c9367b3a18b838c08b55b09647dec3889d67d6e928ec33d8139191b22abf98ec",
+    "manifest": "882f1aea6147004285f75b67d938a53bba17684f6f0329daf11494c80dec8b3f",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "d082a1afddc8bda1ab75438d2913dad33af5e4ed34a0ace4ed90eecaafb9a43b",
-    "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
+    "trainingCatalog": "8fbdd08eb9208cf2e1eaa39119261af40518317d6ef9ffa0349c420fce9b687a",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -44,9 +44,9 @@
     "webVideoStudio": "9d6e6d3f542df81fba3a976b8cf0ca4e1a316f5afbe6649494ce532d48d7223c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
-    "workerAudioDispatch": "348ff0b372e15cbc6ec7608dc278a8e07e4a5f92c88fed91f3ed4fd67a4ca20c",
+    "workerAudioDispatch": "2947298a3d2d63327ba981f180500c4cbce64a3077640813b28df33cbc4d54db",
     "workerDispatch": "9df9a88168d4e57db4495452ed6fc30fb951f8315bb8727fb268f84f767795f6",
-    "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
+    "workerEngineTable": "684f426196987ec977de150868f564b9e24ba17f95e38ab4a47f94e0de299250",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "4c6abf0e436ec63c44040575b2ec2d41ece2fcae52fa0e6e260e95bec60935d8",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
@@ -55,19 +55,19 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "b8fc3d6b70910e042a52af1c2527bc01b8c95e1c1a83e8b2ec02c4fca3adef79",
+    "workerTrainingDispatch": "abe3f4a54a1d6466ceb8b0668947336b592a012a0658b31b17a74a2661e21195",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
-    "workerVideoDispatch": "49128e0bc2b57f0186a1dc1d83b3c296453844247dab50c47e6a0813c107957b",
+    "workerVideoDispatch": "dc57f228a66f3afd1beb4cd50a886157f77626007951024627fe0a3965bfc920",
     "workerVideoKreaRealtime": "590b65273e5d87c350feec0f677ee05295aa05835cac12348e2f5520fc1724e7",
     "workerVideoLtx": "c6cb857c118b310bef3ae3398db11be5a7aaba813d9c6ef5efaecb48fbfa6607",
     "workerVideoMochi": "5a0868693b1cbf1c08a6acfc5151c3e3542d812b7cec6f73bfa53d701883dcbc",
     "workerVideoScail2": "b1c0f7d3e934afd7d9f612a497db768283c5b2a1a1bdd964a5db6213c98b9682",
-    "workerVideoSeedvr2": "6b3f135483af0b81e835549264579f0f1fd59022e2686700e3ee931c554bd434",
+    "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "ac0ccbab8225051ab23a1e08c3c6a97b61c98e5cd75d12eb62a03c4e5460f2ba",
-    "workerVideoWan": "4ca8cb873e4b2b365ac8de46e8bb1fde364770a7134a03f907901f1bcb2ef1ed"
+    "workerVideoWan": "556a4cf9ab40f784bffbe47cf289e9a67db7fe418c04e5a694d02b88f3f990e5"
   },
   "models": [
     {
@@ -1021,6 +1021,57 @@
           "candle": true
         }
       ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_base",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_large",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_small",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
       "conditioningShape": [],
       "userAdapters": [],
       "precisionTier": [],
@@ -6037,6 +6088,23 @@
         "capability": "live_preview",
         "mlx": false,
         "candle": false
+      }
+    },
+    {
+      "id": "taef1",
+      "family": "taef1",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {

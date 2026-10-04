@@ -28632,6 +28632,126 @@
           ]
         }
       }
+    },
+    {
+      // TAEF1 (madebyollin) — the tiny differentiable FLUX.1-latent decoder the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-2125). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEF1_MODEL (parity test).
+      "id": "taef1",
+      "autoDownload": false,
+      "name": "TAEF1 Tiny Decoder",
+      "family": "taef1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taef1",
+          "revision": "b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9848636,
+          "footprint": { "diskSizeBytes": 9848636 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taef1"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taef1/tree/b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+      "ui": {
+        "label": "TAEF1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the FLUX.1 latent family (Z-Image). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Small — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_small",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Small",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Small-hf",
+          "revision": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 99173660,
+          "footprint": { "diskSizeBytes": 99173660 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Small-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf/tree/5426e4f0f36572d16453bbda7a8389317b1bef99",
+      "ui": {
+        "label": "Depth Anything V2 Small",
+        "description": "Monocular depth estimator (ViT-S) used by LoRA training's depth anchoring to keep a character's geometry consistent - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Base — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_base",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Base",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Base-hf",
+          "revision": "b1958afc87fb45a9e3746cb387596094de553ed8",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 389916980,
+          "footprint": { "diskSizeBytes": 389916980 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Base-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Base-hf/tree/b1958afc87fb45a9e3746cb387596094de553ed8",
+      "ui": {
+        "label": "Depth Anything V2 Base",
+        "description": "Monocular depth estimator (ViT-B) used by LoRA training's depth anchoring - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Depth-Anything-V2 Large — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
+      "id": "depth_anything_v2_large",
+      "autoDownload": false,
+      "name": "Depth Anything V2 Large",
+      "family": "depth_anything_v2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "depth-anything/Depth-Anything-V2-Large-hf",
+          "revision": "7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1341322868,
+          "footprint": { "diskSizeBytes": 1341322868 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/depth-anything/Depth-Anything-V2-Large-hf"
+      },
+      "licenseUrl": "https://huggingface.co/depth-anything/Depth-Anything-V2-Large-hf/tree/7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+      "ui": {
+        "label": "Depth Anything V2 Large",
+        "description": "Monocular depth estimator (ViT-L) used by LoRA training's depth anchoring; larger gradients, so use a much smaller weight - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
     }
   ]
 }

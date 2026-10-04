@@ -56,6 +56,10 @@ pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
 /// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
 pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
 
+/// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
+/// catalog models.
+pub mod depth_anchoring;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -3271,6 +3275,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     }
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
+    depth_anchoring::validate(config)?;
     Ok(())
 }
 
