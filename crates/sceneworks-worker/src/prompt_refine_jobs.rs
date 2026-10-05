@@ -4428,6 +4428,7 @@ mod tests {
                 // The PE checkpoints carry their vision tower inside the snapshot (`model.visual.*`),
                 // like every other `qwen3_5` wrapper, so there is no separate projector to point at.
                 projector_source: None,
+                ..Default::default()
             },
             &ModelRequirements::from_request(&request),
         )
