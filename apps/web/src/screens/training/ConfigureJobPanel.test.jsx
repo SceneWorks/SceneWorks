@@ -612,4 +612,115 @@ describe("ConfigureJobPanel weight noise", () => {
     mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0.5" } });
     expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
   });
+
+  // sc-24827: a "0" draft is off, but the input stays mounted so a user typing "0.02" through "0"
+  // never loses the field; re-checking seeds the suggestion.
+  it("keeps the sigma input mounted for a zero draft and re-seeds on check", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0" } });
+    expect(sigmaInput().value).toBe("0");
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", "0.0125"]]);
+  });
+});
+
+// sc-24827 (epic 2123): annealed gradient noise is an off-by-default advanced toggle, offered only
+// for a target whose trainer declares it (`limits.supportsGradientNoise`). Checking it seeds the
+// upstream eta (0.01) and gamma (0.55); unchecking clears both; the eta/gamma inputs exist while the
+// eta draft holds a value, carry the API maxima, and are outlined when invalid.
+describe("ConfigureJobPanel gradient noise", () => {
+  const SUPPORTING = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsWeightNoise: true, supportsGradientNoise: true },
+  };
+  const WEIGHT_ONLY = { ...SUPPORTING, limits: { supportsWeightNoise: true } };
+  const CONTROL = {
+    id: "krea_pose_control",
+    name: "Krea Pose Control",
+    outputKind: "control_branch",
+    defaults: { advanced: { controlType: "pose" } },
+    limits: {},
+  };
+
+  function toggle(label) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === label)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function input(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input");
+  }
+  function mountWith({ target = SUPPORTING, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds eta 0.01 + gamma 0.55 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle("Gradient noise")).toBeTruthy();
+    expect(toggle("Gradient noise").checked).toBe(false);
+    expect(input("Gradient noise eta")).toBeUndefined();
+    expect(input("Gradient noise gamma")).toBeUndefined();
+    act(() => toggle("Gradient noise").click());
+    expect(calls).toEqual([
+      ["gradientNoiseEta", "0.01"],
+      ["gradientNoiseGamma", "0.55"],
+    ]);
+  });
+
+  it("shows eta/gamma with the API maxima while enabled and clears both when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0.01", gradientNoiseGamma: "0.55" } });
+    expect(toggle("Gradient noise").checked).toBe(true);
+    expect(input("Gradient noise eta").value).toBe("0.01");
+    expect(input("Gradient noise eta").getAttribute("max")).toBe("0.1");
+    expect(input("Gradient noise gamma").value).toBe("0.55");
+    expect(input("Gradient noise gamma").getAttribute("max")).toBe("1");
+    act(() => toggle("Gradient noise").click());
+    expect(calls).toEqual([
+      ["gradientNoiseEta", ""],
+      ["gradientNoiseGamma", ""],
+    ]);
+  });
+
+  it("reads a zero eta as off", () => {
+    mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0" } });
+    expect(toggle("Gradient noise").checked).toBe(false);
+    expect(input("Gradient noise eta").value).toBe("0");
+  });
+
+  it("outlines an above-limit eta and gamma", () => {
+    mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0.5", gradientNoiseGamma: "3" } });
+    expect(input("Gradient noise eta").getAttribute("aria-invalid")).toBe("true");
+    expect(input("Gradient noise gamma").getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("gates each toggle on its own flag", () => {
+    mountWith({ target: WEIGHT_ONLY });
+    expect(toggle("Weight noise")).toBeTruthy();
+    expect(toggle("Gradient noise")).toBeUndefined();
+  });
+
+  it("offers neither toggle (nor their inputs) on the control-branch target", () => {
+    mountWith({
+      target: CONTROL,
+      draft: { ...VALID_DRAFT, weightNoiseSigma: "0.0125", gradientNoiseEta: "0.01" },
+    });
+    expect(toggle("Weight noise")).toBeUndefined();
+    expect(toggle("Gradient noise")).toBeUndefined();
+    expect(input("Weight noise sigma")).toBeUndefined();
+    expect(input("Gradient noise eta")).toBeUndefined();
+  });
 });

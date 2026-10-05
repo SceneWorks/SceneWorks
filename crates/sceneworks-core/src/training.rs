@@ -55,30 +55,53 @@ pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
 pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
 /// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
 pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
-/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
-/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. The
-/// builtin catalog carries the MLX truth (like every other builtin default);
-/// [`project_candle_training_limits`] removes it for targets whose Candle trainer does not declare
-/// it. The web form shows the weight-noise toggle only where this is `true`, and submit-time
-/// validation refuses a non-zero sigma elsewhere. A worker test pins both projections to the linked
-/// trainer descriptors, so the flag cannot drift from what the engine actually implements.
+/// Target `limits` flag: `true` when this target's native trainer honors
+/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. Since
+/// sc-24827 every LoRA/LoKr trainer declares it on BOTH backends (MLX and Candle), so the builtin
+/// value is the truth on every platform; the Krea control-branch target (a full-weight ControlNet
+/// branch, no adapter) does not carry it. The web form shows the weight-noise toggle only where this
+/// is `true`, and submit-time validation refuses a non-zero sigma elsewhere. A worker test pins the
+/// flag to the linked trainer descriptors on each platform, so it cannot drift from the engine.
 pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
+/// Target `limits` flag for [`GRADIENT_NOISE_ETA_KEY`] (`TrainerDescriptor::techniques
+/// .gradient_noise`, sc-24827) — same contract, gating, and drift test as
+/// [`WEIGHT_NOISE_SUPPORT_LIMIT`].
+pub const GRADIENT_NOISE_SUPPORT_LIMIT: &str = "supportsGradientNoise";
 
-/// Whether `target` (as projected for the serving platform) advertises weight-noise support.
+fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
+    target.limits.get(flag).and_then(Value::as_bool) == Some(true)
+}
+
+/// Whether `target` advertises weight-noise support.
 pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
-    target
-        .limits
-        .get(WEIGHT_NOISE_SUPPORT_LIMIT)
-        .and_then(Value::as_bool)
-        == Some(true)
+    target_limit_flag(target, WEIGHT_NOISE_SUPPORT_LIMIT)
 }
 
-/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend: no
-/// Candle trainer declares weight noise yet (epic 2123 adds them story by story), so the flag is
-/// removed for every target. Callers that serve the Candle catalog (the API off macOS) apply it.
-pub fn project_candle_training_limits(target: &mut TrainingTarget) {
-    target.limits.remove(WEIGHT_NOISE_SUPPORT_LIMIT);
+/// Whether `target` advertises gradient-noise support.
+pub fn target_supports_gradient_noise(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, GRADIENT_NOISE_SUPPORT_LIMIT)
 }
+
+/// `advanced` key of the annealed **gradient noise** initial scale `eta` (epic 2123, sc-24827):
+/// on every optimizer update `t` the native trainer adds `N(0,1) · eta / (1 + t)^gamma` to each
+/// adapter gradient (after the norm clip, before the step). Absent or `0` is off.
+pub const GRADIENT_NOISE_ETA_KEY: &str = "gradientNoiseEta";
+/// `advanced` key of the gradient-noise annealing exponent `gamma` (absent ⇒
+/// [`GRADIENT_NOISE_GAMMA_DEFAULT`]; only meaningful while eta is on).
+pub const GRADIENT_NOISE_GAMMA_KEY: &str = "gradientNoiseGamma";
+/// Inclusive upper bound for [`GRADIENT_NOISE_ETA_KEY`]. The web form enforces the identical bound
+/// (`gradientNoiseEtaMax` in `apps/web/src/training/trainingConfig.js`; a parity test pins them,
+/// epic 2123 E6). Ten times the upstream suggestion [`GRADIENT_NOISE_ETA_SUGGESTED`]: the noise is
+/// per element, so even 0.1 already dwarfs a unit-norm-clipped gradient on any real adapter.
+pub const GRADIENT_NOISE_ETA_MAX: f64 = 0.1;
+/// The upstream (ai-toolkit-perceptual `neelakantan` mode) suggested eta when enabled.
+pub const GRADIENT_NOISE_ETA_SUGGESTED: f64 = 0.01;
+/// Inclusive upper bound for [`GRADIENT_NOISE_GAMMA_KEY`] (web parity: `gradientNoiseGammaMax`).
+/// The annealed-noise analysis (Neelakantan et al. 2015, after Welling & Teh) needs `gamma <= 1`;
+/// larger exponents switch the noise off within a handful of updates.
+pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
+/// Default annealing exponent (the paper's and upstream's 0.55).
+pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
 
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
@@ -1446,7 +1469,10 @@ fn mage_flow_lora_target(
             // Order is adapter kinds first, then the non-adapter path.
             "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": name,
@@ -1524,9 +1550,9 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
             "outputScopes": ["project", "global"],
-            // Epic 2123 weight noising (sc-24826): the Z-Image MLX trainer declares it. Removed for
-            // Candle by `project_candle_training_limits`.
-            "supportsWeightNoise": true
+            // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -1638,7 +1664,10 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // target modules above.
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -1740,7 +1769,10 @@ fn krea_raw_lora_target() -> TrainingTarget {
             // inference (the `mlx-gen-krea` trainer builds both; the apply path handles both).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
@@ -1928,7 +1960,10 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -2012,7 +2047,10 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2117,7 +2155,10 @@ fn ltx_lora_target(
         "batchSize": [1, 2],
         "networkTypes": ["lora"],
         "lrSchedulers": ["constant", "linear", "cosine"],
-        "outputScopes": ["project", "global"]
+        "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
     }));
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
@@ -2267,7 +2308,10 @@ fn wan_lora_target() -> TrainingTarget {
             // by both single-DiT providers rather than filtered at install.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -2353,7 +2397,10 @@ fn wan_moe_lora_target(
                 json!(["lora"])
             },
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": name,
@@ -2466,7 +2513,10 @@ fn sdxl_lora_target() -> TrainingTarget {
             // the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -2547,7 +2597,10 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -2618,7 +2671,10 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -2699,7 +2755,10 @@ fn kolors_lora_target() -> TrainingTarget {
             // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -3052,7 +3111,7 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
-    validate_weight_noise_support(target, config)?;
+    validate_technique_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3316,29 +3375,44 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     }
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
+    validate_gradient_noise(config)?;
     Ok(())
 }
 
-/// Refuses a non-zero `advanced.weightNoiseSigma` on a target that does not advertise
-/// [`WEIGHT_NOISE_SUPPORT_LIMIT`] — a field error at submit time instead of a refusal after the job
-/// is queued. Runs after [`validate_weight_noise`], so the value is already a valid number here.
-fn validate_weight_noise_support(
+/// Refuses a non-zero `advanced.weightNoiseSigma` / `gradientNoiseEta` on a target that does not
+/// advertise [`WEIGHT_NOISE_SUPPORT_LIMIT`] / [`GRADIENT_NOISE_SUPPORT_LIMIT`] — a field error at
+/// submit time instead of a refusal after the job is queued. Runs after [`validate_weight_noise`]
+/// and [`validate_gradient_noise`], so the values are already valid numbers here.
+fn validate_technique_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    let sigma = config
-        .advanced
-        .get(WEIGHT_NOISE_SIGMA_KEY)
-        .and_then(Value::as_f64)
-        .unwrap_or(0.0);
-    if sigma > 0.0 && !target_supports_weight_noise(target) {
-        return Err(TrainingPlanError::InvalidField {
-            field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
-            message: format!(
-                "{} does not support weight noise ({WEIGHT_NOISE_SIGMA_KEY}) on this platform.",
-                target.name
-            ),
-        });
+    for (key, supported, technique) in [
+        (
+            WEIGHT_NOISE_SIGMA_KEY,
+            target_supports_weight_noise(target),
+            "weight noise",
+        ),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            target_supports_gradient_noise(target),
+            "gradient noise",
+        ),
+    ] {
+        let value = config
+            .advanced
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if value > 0.0 && !supported {
+            return Err(TrainingPlanError::InvalidField {
+                field: key.to_owned(),
+                message: format!(
+                    "{} does not support {technique} ({key}) on this platform.",
+                    target.name
+                ),
+            });
+        }
     }
     Ok(())
 }
@@ -3369,6 +3443,51 @@ fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanErro
             "{WEIGHT_NOISE_SIGMA_KEY} perturbs adapter weights only and cannot be combined with \
              networkType '{NETWORK_TYPE_FULL}'."
         )));
+    }
+    Ok(())
+}
+
+/// Reads an optional finite number in `0..=max` from `advanced[key]` (absent ⇒ `None`), as a
+/// field-level [`TrainingPlanError::InvalidField`] on any other value.
+fn advanced_bounded_number(
+    config: &TrainingConfig,
+    key: &str,
+    max: f64,
+) -> Result<Option<f64>, TrainingPlanError> {
+    let Some(value) = config.advanced.get(key) else {
+        return Ok(None);
+    };
+    let field_error = |message: String| TrainingPlanError::InvalidField {
+        field: key.to_owned(),
+        message,
+    };
+    let number = value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| field_error(format!("{key} must be a number.")))?;
+    if !(0.0..=max).contains(&number) {
+        return Err(field_error(format!(
+            "{key} ({number}) must be between 0 and {max}."
+        )));
+    }
+    Ok(Some(number))
+}
+
+/// Validates `advanced.gradientNoiseEta` / `gradientNoiseGamma` (epic 2123 gradient noise,
+/// sc-24827): each, when present, a finite number within its bound ([`GRADIENT_NOISE_ETA_MAX`],
+/// [`GRADIENT_NOISE_GAMMA_MAX`]); a non-zero eta cannot be combined with a full base fine-tune —
+/// the noise perturbs adapter gradients only (E5). Each failure names its field.
+fn validate_gradient_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let eta = advanced_bounded_number(config, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX)?;
+    advanced_bounded_number(config, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX)?;
+    if eta.is_some_and(|eta| eta > 0.0) && config_is_full_finetune(config) {
+        return Err(TrainingPlanError::InvalidField {
+            field: GRADIENT_NOISE_ETA_KEY.to_owned(),
+            message: format!(
+                "{GRADIENT_NOISE_ETA_KEY} perturbs adapter gradients only and cannot be combined \
+                 with networkType '{NETWORK_TYPE_FULL}'."
+            ),
+        });
     }
     Ok(())
 }
@@ -3484,7 +3603,10 @@ fn anima_base_lora_target() -> TrainingTarget {
             // LoKr through the shared `apply_anima_adapters` seam (sc-10521).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",

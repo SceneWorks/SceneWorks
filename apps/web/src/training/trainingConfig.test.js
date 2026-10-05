@@ -8,6 +8,11 @@ import {
   ltx25WorkflowPlan,
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
+  gradientNoiseEtaMax,
+  gradientNoiseEtaSuggested,
+  gradientNoiseGammaDefault,
+  gradientNoiseGammaMax,
+  targetSupportsGradientNoise,
   trainingConfigSnapshot,
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
@@ -649,6 +654,92 @@ describe("weight noise (sc-24826)", () => {
       expect(fieldIssues({ ...whole, weightNoiseSigma: bad }).map((entry) => entry.kind)).toEqual(["error"]);
     }
     expect(fieldIssues({ ...whole, networkType: "full", weightNoiseSigma: "0.0125" })).toHaveLength(1);
+  });
+});
+
+// sc-24827 (epic 2123): annealed gradient noise is off by default, round-trips eta (+ gamma, which
+// only travels with an eta) from the draft into the job snapshot, and is bounded by the API's max.
+describe("gradient noise (sc-24827)", () => {
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: target,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+
+  it("seeds off and leaves a default snapshot without either key", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(draft.gradientNoiseEta).toBe("");
+    expect(draft.gradientNoiseGamma).toBe("");
+    expect(snap(draft).config.advanced).not.toHaveProperty("gradientNoiseEta");
+    expect(snap(draft).config.advanced).not.toHaveProperty("gradientNoiseGamma");
+  });
+
+  it("round-trips eta and gamma into the snapshot as numbers; gamma never travels alone", () => {
+    const base = configDraftFromTarget(target, dataset, ["auto"]);
+    const on = { ...base, gradientNoiseEta: String(gradientNoiseEtaSuggested), gradientNoiseGamma: "0.7" };
+    expect(snap(on).config.advanced.gradientNoiseEta).toBe(0.01);
+    expect(snap(on).config.advanced.gradientNoiseGamma).toBe(0.7);
+    const gammaOnly = { ...base, gradientNoiseGamma: "0.7" };
+    expect(snap(gammaOnly).config.advanced).not.toHaveProperty("gradientNoiseGamma");
+    const seeded = configDraftFromTarget(
+      { ...target, defaults: { ...target.defaults, advanced: { networkType: "lora", gradientNoiseEta: 0.02, gradientNoiseGamma: 0.6 } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.gradientNoiseEta).toBe("0.02");
+    expect(seeded.gradientNoiseGamma).toBe("0.6");
+  });
+
+  it("uses the API's bounds and the upstream defaults", () => {
+    expect(gradientNoiseEtaMax).toBe(0.1);
+    expect(gradientNoiseEtaSuggested).toBe(0.01);
+    expect(gradientNoiseGammaMax).toBe(1);
+    expect(gradientNoiseGammaDefault).toBe(0.55);
+  });
+
+  it("flags out-of-range eta/gamma and eta with a full fine-tune on their own fields", () => {
+    const ctx = { activeDataset: dataset, selectedTarget: target };
+    const fieldIssues = (draft, field) => configValidation(draft, ctx).filter((entry) => entry.field === field);
+    for (const ok of ["", "0", "0.01", String(gradientNoiseEtaMax)]) {
+      expect(fieldIssues({ ...whole, gradientNoiseEta: ok }, "gradientNoiseEta")).toEqual([]);
+    }
+    for (const bad of ["-0.01", String(gradientNoiseEtaMax + 0.001), "abc"]) {
+      expect(fieldIssues({ ...whole, gradientNoiseEta: bad }, "gradientNoiseEta").map((e) => e.kind)).toEqual(["error"]);
+    }
+    expect(fieldIssues({ ...whole, networkType: "full", gradientNoiseEta: "0.01" }, "gradientNoiseEta")).toHaveLength(1);
+    for (const ok of ["", "0", "0.55", String(gradientNoiseGammaMax)]) {
+      expect(fieldIssues({ ...whole, gradientNoiseGamma: ok }, "gradientNoiseGamma")).toEqual([]);
+    }
+    for (const bad of ["-0.1", String(gradientNoiseGammaMax + 0.001), "x"]) {
+      expect(fieldIssues({ ...whole, gradientNoiseGamma: bad }, "gradientNoiseGamma").map((e) => e.kind)).toEqual(["error"]);
+    }
+  });
+
+  it("reads only explicit true flags as support and blocks a carried-over eta without it", () => {
+    expect(targetSupportsGradientNoise({ limits: { supportsGradientNoise: true } })).toBe(true);
+    expect(targetSupportsGradientNoise({ limits: { supportsGradientNoise: "true" } })).toBe(false);
+    expect(targetSupportsGradientNoise({ limits: { supportsWeightNoise: true } })).toBe(false);
+    expect(targetSupportsGradientNoise(null)).toBe(false);
+    const message = "This target does not support gradient noise — clear it or pick a supporting target";
+    const unsupported = { ...target, limits: { ...target.limits, supportsGradientNoise: undefined } };
+    const issues = configValidation({ ...whole, gradientNoiseEta: "0.01" }, { activeDataset: dataset, selectedTarget: unsupported });
+    expect(issues.map((entry) => entry.message)).toContain(message);
+    const supported = { ...target, limits: { ...target.limits, supportsGradientNoise: true } };
+    expect(configValidation({ ...whole, gradientNoiseEta: "0.01" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, gradientNoiseEta: "0" }, { activeDataset: dataset, selectedTarget: unsupported })).toEqual([]);
   });
 });
 

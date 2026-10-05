@@ -29,12 +29,24 @@ export const lrSchedulerOptions = ["constant", "linear", "cosine"];
 // crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
 export const weightNoiseSigmaMax = 0.1;
 export const weightNoiseSigmaSuggested = 0.0125;
+// Annealed gradient noise (epic 2123, sc-24827): on optimizer update t the trainer adds
+// N(0,1)·eta/(1+t)^gamma to every adapter gradient (after the norm clip). Off (empty/0) by default;
+// enabling it seeds the upstream eta and the paper's gamma. The maxima are the API's bounds
+// (GRADIENT_NOISE_ETA_MAX / GRADIENT_NOISE_GAMMA_MAX in crates/sceneworks-core/src/training.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const gradientNoiseEtaMax = 0.1;
+export const gradientNoiseEtaSuggested = 0.01;
+export const gradientNoiseGammaMax = 1;
+export const gradientNoiseGammaDefault = 0.55;
 
-// Whether the target's trainer on the serving platform honors weight noise — the API projects the
-// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
-// test). Absent means unsupported.
+// Whether the target's trainer honors weight noise / gradient noise — the targets endpoint's
+// `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (pinned to the trainer descriptors
+// by a worker test). Absent means unsupported.
 export function targetSupportsWeightNoise(target) {
   return target?.limits?.supportsWeightNoise === true;
+}
+export function targetSupportsGradientNoise(target) {
+  return target?.limits?.supportsGradientNoise === true;
 }
 export const optimizerLabels = {
   adam: "Adam",
@@ -348,6 +360,9 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
     // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
     weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
+    // Empty = gradient noise off (the default); the toggle seeds eta + gamma together.
+    gradientNoiseEta: numericDraft(advanced.gradientNoiseEta),
+    gradientNoiseGamma: numericDraft(advanced.gradientNoiseGamma),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -485,6 +500,24 @@ export function configValidation(
       issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
     }
   }
+  // Gradient noise (sc-24827): same bounds as the API (E6); eta is adapter-only (E5).
+  if (String(configDraft.gradientNoiseEta ?? "").trim()) {
+    const eta = numberFromDraft(configDraft.gradientNoiseEta);
+    if (eta === null || eta < 0 || eta > gradientNoiseEtaMax) {
+      issues.push(issue.error("gradientNoiseEta", `Gradient noise eta must be between 0 and ${gradientNoiseEtaMax}`));
+    } else if (eta > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
+      issues.push(issue.error("gradientNoiseEta", "Gradient noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (eta > 0 && selectedTarget && !targetSupportsGradientNoise(selectedTarget)) {
+      // As for weight noise: the controls are hidden for such a target, so this names no input.
+      issues.push(issue.error(null, "This target does not support gradient noise — clear it or pick a supporting target"));
+    }
+  }
+  if (String(configDraft.gradientNoiseGamma ?? "").trim()) {
+    const gamma = numberFromDraft(configDraft.gradientNoiseGamma);
+    if (gamma === null || gamma < 0 || gamma > gradientNoiseGammaMax) {
+      issues.push(issue.error("gradientNoiseGamma", `Gradient noise gamma must be between 0 and ${gradientNoiseGammaMax}`));
+    }
+  }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
   // in the Train button's one validity summary rather than a separate `disabled` term.
   // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
@@ -620,6 +653,11 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
     // Omitted when off (empty draft), so a default job's snapshot is unchanged.
     weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
+    // Gradient noise: omitted when off; gamma only travels with an eta (it means nothing alone).
+    gradientNoiseEta: numberFromDraft(configDraft.gradientNoiseEta),
+    gradientNoiseGamma: String(configDraft.gradientNoiseEta ?? "").trim()
+      ? numberFromDraft(configDraft.gradientNoiseGamma)
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),

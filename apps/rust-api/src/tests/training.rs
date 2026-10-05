@@ -113,20 +113,30 @@ fn ltx_workflow_options(name: &str) -> (Option<Value>, Option<Value>) {
     }
 }
 
-/// sc-24826 review: the targets endpoint advertises weight-noise support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
+/// sc-24826 review, updated for sc-24827: the targets endpoint advertises adapter-noise support
+/// per target. Every LoRA/LoKr trainer declares weight AND gradient noise on both backends, so both
+/// platform catalogs advertise both flags on every target except the Krea control branch (a
+/// full-weight ControlNet branch whose trainer declares neither).
 #[test]
-fn platform_effective_training_catalog_projects_weight_noise_support() {
-    let advertising = |candle: bool| -> Vec<String> {
-        crate::training::effective_training_targets_for_candle(candle)
-            .targets
-            .iter()
-            .filter(|target| sceneworks_core::training::target_supports_weight_noise(target))
-            .map(|target| target.id.clone())
-            .collect()
-    };
-    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
-    assert!(advertising(true).is_empty());
+fn platform_effective_training_catalog_advertises_adapter_noise_support() {
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for target in &registry.targets {
+            let adapter = target.id != "krea_2_control";
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(target),
+                adapter,
+                "{} weight noise (candle={candle})",
+                target.id
+            );
+            assert_eq!(
+                sceneworks_core::training::target_supports_gradient_noise(target),
+                adapter,
+                "{} gradient noise (candle={candle})",
+                target.id
+            );
+        }
+    }
 }
 
 #[test]
@@ -2619,15 +2629,13 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
         );
     }
 
-    // In-range values pass validation where the platform's Z-Image trainer declares weight noise
-    // (MLX); the Candle catalog withdraws the flag, so a non-zero sigma is a field error there.
-    let supported = cfg!(target_os = "macos");
+    // In-range values pass validation: since sc-24827 the Z-Image trainer declares weight noise
+    // on both platforms, and the targets endpoint advertises it. (A target without the flag is a
+    // submit-time field error — pinned in the core `adapter_noise_is_gated_on_the_target_flags`.)
     assert_eq!(
-        target["limits"]["supportsWeightNoise"]
-            .as_bool()
-            .unwrap_or(false),
-        supported,
-        "the targets endpoint advertises the platform-effective weight-noise support"
+        target["limits"]["supportsWeightNoise"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises weight-noise support"
     );
     for sigma in [
         json!(0),
@@ -2635,43 +2643,97 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
         json!(sceneworks_core::training::WEIGHT_NOISE_SIGMA_MAX),
     ] {
         let (status, error) = submit(sigma.clone(), "lora").await;
-        if supported || sigma == json!(0) {
-            assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
-            assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
-        } else {
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{sigma}: {error}");
-            assert_eq!(error["context"]["field"], "weightNoiseSigma", "{sigma}");
-        }
+        assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
     }
+}
 
-    // A target whose trainer does not declare weight noise (SDXL) is not advertised, and a
-    // non-zero sigma there is refused at submit with the field error — never queued.
-    let sdxl = registry["targets"]
+/// sc-24827 (epic 2123 E6): `advanced.gradientNoiseEta` / `gradientNoiseGamma` are validated at
+/// the API boundary with field-level errors — negative, above the shared limit, non-numeric, or
+/// (eta) combined with a full fine-tune — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_gradient_noise_with_a_field_error() {
+    use sceneworks_core::training::{
+        GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_KEY,
+        GRADIENT_NOISE_GAMMA_MAX,
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Gradient noise boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
         .as_array()
         .expect("target list")
         .iter()
-        .find(|target| target["id"] == "sdxl_lora")
-        .expect("SDXL target")
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
         .clone();
-    assert!(sdxl["limits"].get("supportsWeightNoise").is_none());
-    let mut config = sdxl["defaults"].clone();
-    config["advanced"]["weightNoiseSigma"] = json!(0.0125);
-    let (status, error) = request(
-        app.clone(),
-        "POST",
-        &path,
-        json!({
-            "targetId": "sdxl_lora",
-            "datasetId": "ds_missing",
-            "config": config,
-            "outputName": "Weight noise",
-            "dryRun": true
-        }),
-    )
-    .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
-    assert_eq!(error["code"], "training_field_error");
-    assert_eq!(error["context"]["field"], "weightNoiseSigma");
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |key: &str, value: Value, network_type: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"][key] = value;
+        config["advanced"]["networkType"] = json!(network_type);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Gradient noise",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (key, value, network_type) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(-0.01), "lora"),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_MAX + 0.001),
+            "lora",
+        ),
+        (GRADIENT_NOISE_ETA_KEY, json!("0.01"), "lora"),
+        (GRADIENT_NOISE_ETA_KEY, json!(0.01), "full"),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(-0.5), "lora"),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_MAX + 0.001),
+            "lora",
+        ),
+    ] {
+        let (status, error) = submit(key, value.clone(), network_type).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key}={value}/{network_type}"
+        );
+        assert_eq!(error["code"], "training_field_error", "{key}={value}");
+        assert_eq!(error["context"]["field"], key, "{key}={value}");
+    }
+
+    for (key, value) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(0)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_MAX)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(0.55)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(GRADIENT_NOISE_GAMMA_MAX)),
+    ] {
+        let (status, error) = submit(key, value.clone(), "lora").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key}={value}: {error}");
+        assert_eq!(
+            error["detail"], "Training dataset not found",
+            "{key}={value}"
+        );
+    }
 }
 
 #[tokio::test]

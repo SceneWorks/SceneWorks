@@ -23,7 +23,6 @@ pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTar
     if candle {
         for target in &mut registry.targets {
             apply_candle_training_defaults(&target.kernel, &mut target.defaults);
-            sceneworks_core::training::project_candle_training_limits(target);
         }
     }
     registry
