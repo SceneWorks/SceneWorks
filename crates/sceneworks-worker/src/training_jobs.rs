@@ -1287,7 +1287,7 @@ fn apply_depth_anchoring(
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
 ) -> WorkerResult<()> {
-    use sceneworks_core::training::depth_anchoring::{depth_anything_v2_model, X0DecoderSource};
+    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
 
     let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
