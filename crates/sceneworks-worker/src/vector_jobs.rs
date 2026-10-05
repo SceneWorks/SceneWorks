@@ -5730,6 +5730,7 @@ mod tests {
                 generated_tokens,
                 generated_bytes,
                 finish_reason,
+                // Fused compressed KV report (inference epic sc-20669): the fakes ran no cache.
                 kv_cache: None,
             },
             events,

@@ -913,6 +913,8 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
+                // Instruction-edit references (sc-24161, inference Qwen Image 2.1 LoRA): this tree's
+                // dataset plan carries none yet, so every item trains captioned/control-only.
                 reference_image_paths: Vec::new(),
             })
         })
