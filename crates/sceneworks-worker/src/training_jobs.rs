@@ -29,8 +29,8 @@ use sceneworks_core::training::depth_anchoring::{
 use sceneworks_core::training::{
     parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
-    GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY,
-    TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, SubjectMaskLookup,
@@ -3907,7 +3907,6 @@ mod tests {
         assert_eq!(unsupported, expected);
     }
 
-
     /// sc-24826 review, extended by sc-24827: the catalog's `supportsWeightNoise` and
     /// `supportsGradientNoise` flags (which gate the web toggles and submit-time validation) must
     /// equal the linked trainer descriptor's `techniques.weight_noise` / `techniques.gradient_noise`
@@ -3989,7 +3988,6 @@ mod tests {
         );
     }
 
-
     /// sc-2127 review: the catalog's `supportsResolutionBuckets` flag (which gates the web toggle
     /// and submit-time validation) must equal the linked trainer descriptor's
     /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
@@ -4029,7 +4027,6 @@ mod tests {
         // The refusal side is exercised, not just the agreeing side.
         assert_eq!(withheld, ["ltx_2_5_video_lora"]);
     }
-
 
     /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
     /// `gradientNoiseGamma` reach the engine's typed fields; absent stays off (eta 0, sigma 0, gamma

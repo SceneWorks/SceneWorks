@@ -7,11 +7,11 @@ use sceneworks_core::training::{
     TrainingOutputKind, TrainingPlan, TrainingPlanError, TrainingPresetRegistry,
     TrainingProvenance, TrainingTargetLimitError, TrainingTargetRegistry, GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_ETA_SUGGESTED, GRADIENT_NOISE_GAMMA_DEFAULT,
-    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, TRAINING_CONTRACT_SCHEMA_VERSION,
-    TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
-    WEIGHT_NOISE_SIGMA_SUGGESTED,
-    RESOLUTION_BUCKETS_MAX, RESOLUTION_BUCKET_REPEATS_MAX, RESOLUTION_BUCKET_STRIDE,
-    SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT, SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT, SUBJECT_MASK_WEIGHT_MAX,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_MAX,
+    RESOLUTION_BUCKET_REPEATS_MAX, RESOLUTION_BUCKET_STRIDE,
+    SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT, SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
+    SUBJECT_MASK_WEIGHT_MAX, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
 use sceneworks_core::training::{
     project_candle_training_limits, target_supports_resolution_buckets,
@@ -1799,7 +1799,9 @@ fn web_weight_noise_bound_matches_the_api_bound() {
 }
 
 /// Build a Z-Image plan whose `advanced` carries the given extra keys.
-fn build_plan_with_depth_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+fn build_plan_with_depth_advanced(
+    extra: &[(&str, Value)],
+) -> Result<TrainingPlan, TrainingPlanError> {
     let dataset = dataset_fixture();
     let registry = builtin_training_targets();
     let target = registry
@@ -1969,7 +1971,6 @@ fn web_subject_mask_bounds_match_the_api_bounds() {
         SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
     );
 }
-
 
 /// sc-2125 (epic 2123 E6): in-range depth-anchoring values survive into the plan verbatim; every
 /// out-of-range / wrong-type value is a field-level error naming the offending key.
@@ -2243,7 +2244,6 @@ fn web_resolution_bucket_limits_match_the_api_limits() {
     );
     assert_eq!(read("resolutionBucketStride"), RESOLUTION_BUCKET_STRIDE);
 }
-
 
 /// Build a Z-Image plan whose `advanced` carries `key = value` (and optionally a network type).
 fn build_plan_with_advanced(
