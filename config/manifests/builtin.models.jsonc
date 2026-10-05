@@ -28664,6 +28664,186 @@
       }
     },
     {
+      // TAESDXL (madebyollin/taesdxl) — the tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESDXL_MODEL (parity test).
+      "id": "taesdxl",
+      "autoDownload": false,
+      "name": "TAESDXL Tiny Decoder",
+      "family": "taesdxl",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taesdxl",
+          "revision": "b20258aaef75ef61e659c1e0f14f251cf0ad153e",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9793292,
+          "footprint": { "diskSizeBytes": 9793292 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taesdxl"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taesdxl/tree/b20258aaef75ef61e659c1e0f14f251cf0ad153e",
+      "ui": {
+        "label": "TAESDXL Tiny Decoder",
+        "description": "Tiny differentiable decoder for the SDXL latent family (SDXL, Illustrious, Kolors). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAESD3 (madebyollin/taesd3) — the tiny differentiable decoder for the SD3 latent family (SD3.5 Large / Medium) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAESD3_MODEL (parity test).
+      "id": "taesd3",
+      "autoDownload": false,
+      "name": "TAESD3 Tiny Decoder",
+      "family": "taesd3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taesd3",
+          "revision": "d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
+          "files": ["diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 9848636,
+          "footprint": { "diskSizeBytes": 9848636 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taesd3"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taesd3/tree/d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
+      "ui": {
+        "label": "TAESD3 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the SD3 latent family (SD3.5 Large / Medium). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEF2 (madebyollin/taef2) — the tiny differentiable decoder for the FLUX.2 latent family (Lens) that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEF2_MODEL (parity test).
+      "id": "taef2",
+      "autoDownload": false,
+      "name": "TAEF2 Tiny Decoder",
+      "family": "taef2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "madebyollin/taef2",
+          "revision": "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
+          "files": ["taef2.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 10723524,
+          "footprint": { "diskSizeBytes": 10723524 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/madebyollin/taef2"
+      },
+      "licenseUrl": "https://huggingface.co/madebyollin/taef2/tree/bd244ebfe4398c84fbf312a2f1c868c676b500e3",
+      "ui": {
+        "label": "TAEF2 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the FLUX.2 latent family (Lens). Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEW2.1 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the Wan 2.1 latent family (Wan 2.2 A14B, and the Qwen-Image VAE of Krea 2 and Anima), run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEW2_1_MODEL (parity test).
+      "id": "taew2_1",
+      "autoDownload": false,
+      "name": "TAEW2.1 Tiny Decoder",
+      "family": "taew2_1",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/WanVideo_comfy",
+          "revision": "8260d429d19fd7a72304cad059160b95d843913f",
+          "files": ["taew2_1.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 22642926,
+          "footprint": { "diskSizeBytes": 22642926 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/WanVideo_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/WanVideo_comfy/tree/8260d429d19fd7a72304cad059160b95d843913f",
+      "ui": {
+        "label": "TAEW2.1 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Wan 2.1 latent family (Wan 2.2 A14B, and the Qwen-Image VAE of Krea 2 and Anima), run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAEW2.2 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the Wan 2.2 TI2V-5B latent family, run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAEW2_2_MODEL (parity test).
+      "id": "taew2_2",
+      "autoDownload": false,
+      "name": "TAEW2.2 Tiny Decoder",
+      "family": "taew2_2",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/WanVideo_comfy",
+          "revision": "8260d429d19fd7a72304cad059160b95d843913f",
+          "files": ["taew2_2.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 22848080,
+          "footprint": { "diskSizeBytes": 22848080 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/WanVideo_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/WanVideo_comfy/tree/8260d429d19fd7a72304cad059160b95d843913f",
+      "ui": {
+        "label": "TAEW2.2 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the Wan 2.2 TI2V-5B latent family, run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // TAELTX2.3 (madebyollin/taehv (Kijai re-upload)) — the tiny differentiable decoder for the LTX-2.3 latent family, run per frame that the native trainer's decoded-x0 perceptual losses run through (epic 2123, sc-24830). componentOnly: staged by the training lane. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::TAELTX2_3_MODEL (parity test).
+      "id": "taeltx2_3",
+      "autoDownload": false,
+      "name": "TAELTX2.3 Tiny Decoder",
+      "family": "taeltx2_3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Kijai/LTX2.3_comfy",
+          "revision": "6d980fde0d330f2fed6ff8dfdfddb06d88a004e5",
+          "files": ["vae/taeltx2_3.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 23531296,
+          "footprint": { "diskSizeBytes": 23531296 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Kijai/LTX2.3_comfy"
+      },
+      "licenseUrl": "https://huggingface.co/Kijai/LTX2.3_comfy/tree/6d980fde0d330f2fed6ff8dfdfddb06d88a004e5",
+      "ui": {
+        "label": "TAELTX2.3 Tiny Decoder",
+        "description": "Tiny differentiable decoder for the LTX-2.3 latent family, run per frame. Used by LoRA training's depth anchoring to decode the model's prediction into pixels - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
       // Depth-Anything-V2 Small — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
       "id": "depth_anything_v2_small",
       "autoDownload": false,

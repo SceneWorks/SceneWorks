@@ -230,17 +230,6 @@ pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
 /// Default annealing exponent (the paper's and upstream's 0.55).
 pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
 
-/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend. Since
-/// sc-24827 every adapter-noise and resolution-bucket flag is the same on both backends, so the only
-/// flag left to withdraw is depth anchoring: the Z-Image MLX trainer declares it and no Candle
-/// trainer does yet (sc-2125; S8 adds them). Callers that serve the Candle catalog (the API off
-/// macOS) apply it, and the worker drift test pins the projected flag to the Candle descriptors.
-pub fn project_candle_training_limits(target: &mut TrainingTarget) {
-    target
-        .limits
-        .remove(depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT);
-}
-
 /// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
 /// catalog models.
 pub mod depth_anchoring;
@@ -1664,6 +1653,9 @@ fn mage_flow_lora_target(
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -1745,8 +1737,7 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
             "supportsGradientNoise": true,
-            // Epic 2123 depth anchoring (sc-2125): the Z-Image MLX trainer declares it. Removed for
-            // Candle by `project_candle_training_limits`.
+            // Epic 2123 depth anchoring (sc-2125, sc-24830): declared on MLX and Candle alike.
             "supportsDepthAnchoring": true,
             // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
             "supportsSubjectMaskLoss": true
@@ -1867,6 +1858,9 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -1975,6 +1969,9 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
@@ -2169,6 +2166,9 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2259,6 +2259,9 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2374,6 +2377,12 @@ fn ltx_lora_target(
     // trainers refuse it and it is not advertised.
     if !is_ltx_2_5 {
         limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
+        // Epic 2123 depth anchoring (sc-24830): LTX-2.3 decodes x0 per frame through TAELTX2.3;
+        // LTX-2.5's prepared latent bundles carry no decodable image, so it refuses depth too.
+        limits.insert(
+            depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
+            json!(true),
+        );
     }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
@@ -2529,6 +2538,9 @@ fn wan_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2621,6 +2633,9 @@ fn wan_moe_lora_target(
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2740,6 +2755,9 @@ fn sdxl_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2827,6 +2845,9 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2904,6 +2925,9 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2991,6 +3015,9 @@ fn kolors_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -3991,6 +4018,9 @@ fn anima_base_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
             // both MLX and Candle (pinned per platform by a worker drift test).
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({

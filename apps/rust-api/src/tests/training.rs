@@ -139,9 +139,10 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     }
 }
 
-/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
-/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+/// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
+/// platforms — every LoRA target except the Krea ControlNet branch and LTX-2.5 (their trainers
+/// cannot decode x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     let advertising = |candle: bool| -> Vec<String> {
@@ -154,8 +155,23 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
             .map(|target| target.id.clone())
             .collect()
     };
-    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
-    assert!(advertising(true).is_empty());
+    let mlx = advertising(false);
+    assert_eq!(
+        mlx,
+        advertising(true),
+        "MLX and Candle advertise the same targets"
+    );
+    let all: Vec<String> = crate::training::effective_training_targets_for_candle(false)
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .filter(|id| id != "krea_2_control" && id != "ltx_2_5_video_lora")
+        .collect();
+    assert_eq!(mlx, all);
+    assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
+    assert!(mlx
+        .iter()
+        .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
 }
 
 #[test]

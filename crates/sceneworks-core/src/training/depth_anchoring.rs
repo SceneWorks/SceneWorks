@@ -37,11 +37,11 @@ pub const DEPTH_ANCHORING_MODELS: [&str; 3] = ["small", "base", "large"];
 
 /// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
 /// depth anchoring (its `TrainerDescriptor::techniques.depth_anchoring`). Absent = no. The same
-/// gating as weight noise ([`super::WEIGHT_NOISE_SUPPORT_LIMIT`]), but the flag differs per
-/// platform: the builtin catalog carries the MLX truth,
-/// [`super::project_candle_training_limits`] removes it for Candle, the web form
-/// shows the toggle only where it is `true`, submit-time validation refuses a non-zero weight
-/// elsewhere, and a worker test pins the flag to the linked trainer descriptors.
+/// gating as weight noise ([`super::WEIGHT_NOISE_SUPPORT_LIMIT`]): every LoRA trainer declares it
+/// on MLX and Candle alike except the Krea ControlNet branch and LTX-2.5 (sc-24830), so the builtin
+/// catalog flag is static per target; the web form shows the toggle only where it is `true`,
+/// submit-time validation refuses a non-zero weight elsewhere, and a worker test pins the flag to
+/// the linked trainer descriptors on each platform.
 pub const DEPTH_ANCHORING_SUPPORT_LIMIT: &str = "supportsDepthAnchoring";
 
 /// Whether `target` (as projected for the serving platform) advertises depth-anchoring support.
@@ -101,6 +101,73 @@ pub const TAEF1_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "diffusion_pytorch_model.safetensors",
 };
 
+/// TAESDXL — the tiny decoder for the SDXL 4-channel latent family (SDXL / Illustrious, Kolors).
+pub const TAESDXL_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taesdxl",
+    label: "TAESDXL tiny decoder",
+    repo: "madebyollin/taesdxl",
+    revision: "b20258aaef75ef61e659c1e0f14f251cf0ad153e",
+    file: "diffusion_pytorch_model.safetensors",
+};
+
+/// TAESD3 — the tiny decoder for the SD3 16-channel latent family (SD3.5 Large / Medium).
+pub const TAESD3_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taesd3",
+    label: "TAESD3 tiny decoder",
+    repo: "madebyollin/taesd3",
+    revision: "d58dcaccd2b36fcb7a6b9e93c1cc507acab5a778",
+    file: "diffusion_pytorch_model.safetensors",
+};
+
+/// TAEF2 — the tiny decoder for the FLUX.2 32-channel latent family (Lens).
+pub const TAEF2_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taef2",
+    label: "TAEF2 tiny decoder",
+    repo: "madebyollin/taef2",
+    revision: "bd244ebfe4398c84fbf312a2f1c868c676b500e3",
+    file: "taef2.safetensors",
+};
+
+/// TAEW2.1 (TAEHV) — the tiny decoder for the Wan 2.1 16-channel latent family, which Wan 2.2
+/// A14B and the Qwen-Image VAE (Krea 2, Anima) share; run per frame. madebyollin publishes it on
+/// GitHub only, so the catalog installs Kijai's Hugging Face re-upload.
+pub const TAEW2_1_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taew2_1",
+    label: "TAEW2.1 tiny decoder",
+    repo: "Kijai/WanVideo_comfy",
+    revision: "8260d429d19fd7a72304cad059160b95d843913f",
+    file: "taew2_1.safetensors",
+};
+
+/// TAEW2.2 (TAEHV) — the tiny decoder for the Wan 2.2 TI2V-5B 48-channel latent family.
+pub const TAEW2_2_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taew2_2",
+    label: "TAEW2.2 tiny decoder",
+    repo: "Kijai/WanVideo_comfy",
+    revision: "8260d429d19fd7a72304cad059160b95d843913f",
+    file: "taew2_2.safetensors",
+};
+
+/// TAELTX2.3 (TAEHV) — the tiny decoder for the LTX-2.3 128-channel latent family.
+pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "taeltx2_3",
+    label: "TAELTX2.3 tiny decoder",
+    repo: "Kijai/LTX2.3_comfy",
+    revision: "6d980fde0d330f2fed6ff8dfdfddb06d88a004e5",
+    file: "vae/taeltx2_3.safetensors",
+};
+
+/// Every cataloged tiny x0 decoder (a parity test pins each to its `builtin.models.jsonc` entry).
+pub const X0_DECODER_MODELS: [AuxTrainingModel; 7] = [
+    TAEF1_MODEL,
+    TAESDXL_MODEL,
+    TAESD3_MODEL,
+    TAEF2_MODEL,
+    TAEW2_1_MODEL,
+    TAEW2_2_MODEL,
+    TAELTX2_3_MODEL,
+];
+
 /// Depth-Anything-V2 checkpoints by size (`DEPTH_ANCHORING_MODELS` order).
 pub const DEPTH_ANYTHING_V2_MODELS: [AuxTrainingModel; 3] = [
     AuxTrainingModel {
@@ -134,14 +201,35 @@ pub fn depth_anything_v2_model(size: &str) -> Option<&'static AuxTrainingModel> 
         .map(|i| &DEPTH_ANYTHING_V2_MODELS[i])
 }
 
-/// The tiny x0 decoder for a native trainer's latent family (keyed by the engine trainer id), if
-/// one is cataloged. Only the FLUX.1-latent Z-Image trainer has one today (TAEF1); a trainer
-/// without one cannot run a decoded-x0 perceptual loss.
-pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<&'static AuxTrainingModel> {
-    match trainer_id {
-        "z_image_turbo" => Some(&TAEF1_MODEL),
-        _ => None,
-    }
+/// Where a native trainer's decoded-x0 perceptual losses get their x0 decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum X0DecoderSource {
+    /// A cataloged tiny decoder for the trainer's latent family (installed through the Model
+    /// Manager; its snapshot directory is handed to the trainer).
+    Catalog(&'static AuxTrainingModel),
+    /// No tiny decoder matches the family, so the trainer decodes through its own full VAE (from the
+    /// base model it already loads — Mage-Flow's one-step Mage-VAE). Nothing extra to install.
+    BaseModelVae,
+}
+
+/// The x0 decoder for a native trainer's latent family (keyed by the engine trainer id, sc-24830).
+/// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch,
+/// LTX-2.5's prepared latent bundles).
+pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
+    use X0DecoderSource::{BaseModelVae, Catalog};
+    Some(match trainer_id {
+        "z_image_turbo" => Catalog(&TAEF1_MODEL),
+        "sdxl" | "kolors" => Catalog(&TAESDXL_MODEL),
+        "sd3_5_large" | "sd3_5_medium" => Catalog(&TAESD3_MODEL),
+        "lens" => Catalog(&TAEF2_MODEL),
+        "krea_2_raw" | "anima_base" | "wan2_2_t2v_14b" | "wan2_2_i2v_14b" => {
+            Catalog(&TAEW2_1_MODEL)
+        }
+        "wan2_2_ti2v_5b" => Catalog(&TAEW2_2_MODEL),
+        "ltx_2_3" => Catalog(&TAELTX2_3_MODEL),
+        "mage_flow_base" => BaseModelVae,
+        _ => return None,
+    })
 }
 
 /// A validated, **enabled** depth-anchoring request.

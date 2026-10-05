@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use sceneworks_core::training::target_supports_resolution_buckets;
 use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, validate_training_config_for_target,
     BuildTrainingPlan, LoraTrainingRequest, TrainingConfig, TrainingDataset, TrainingModality,
@@ -12,9 +13,6 @@ use sceneworks_core::training::{
     SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT, SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
     SUBJECT_MASK_WEIGHT_MAX, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
     WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
-};
-use sceneworks_core::training::{
-    project_candle_training_limits, target_supports_resolution_buckets,
 };
 use sceneworks_core::training::{target_supports_gradient_noise, target_supports_weight_noise};
 use serde::de::DeserializeOwned;
@@ -2082,14 +2080,16 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
 }
 
-/// sc-2125: every auxiliary model depth anchoring loads is a `componentOnly` utility entry in the
-/// shipped catalog whose repo / revision / file are exactly the worker's resolution constants — so
-/// "install it from the Models screen" installs the bytes the trainer loads.
+/// sc-2125 / sc-24830: every auxiliary model depth anchoring loads — each family's tiny x0 decoder
+/// and every Depth-Anything-V2 size — is a `componentOnly` utility entry in the shipped catalog
+/// whose repo / revision / file are exactly the worker's resolution constants, so "install it from
+/// the Models screen" installs the bytes the trainer loads. Mutation: drop or re-pin one decoder
+/// entry in `builtin.models.jsonc` ⇒ red.
 #[test]
 fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
     use sceneworks_core::jsonc::strip_jsonc_comments;
-    use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
+    use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, X0_DECODER_MODELS};
 
     let raw = BUILTIN_MANIFESTS
         .iter()
@@ -2098,7 +2098,10 @@ fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
         .expect("builtin.models.jsonc embedded");
     let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
     let models = catalog["models"].as_array().unwrap();
-    for aux in std::iter::once(&TAEF1_MODEL).chain(DEPTH_ANYTHING_V2_MODELS.iter()) {
+    for aux in X0_DECODER_MODELS
+        .iter()
+        .chain(DEPTH_ANYTHING_V2_MODELS.iter())
+    {
         let entry = models
             .iter()
             .find(|m| m["id"] == aux.id)
@@ -2118,6 +2121,39 @@ fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
             aux.id,
             aux.file
         );
+    }
+}
+
+/// sc-24830: each native trainer's latent family maps to its x0 decoder — the matching tiny
+/// decoder, or the trainer's own VAE for Mage-Flow (no tiny decoder exists for its 128-channel
+/// latent) — and the two trainers that cannot decode x0 have none. Mutation: map Wan 2.2 TI2V-5B
+/// (48-channel latent) to TAEW2.1 ⇒ red.
+#[test]
+fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
+    use sceneworks_core::training::depth_anchoring::{
+        x0_decoder_for_trainer, X0DecoderSource, TAEF1_MODEL, TAEF2_MODEL, TAELTX2_3_MODEL,
+        TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL, TAEW2_2_MODEL,
+    };
+    use X0DecoderSource::{BaseModelVae, Catalog};
+    for (trainer, expected) in [
+        ("z_image_turbo", Catalog(&TAEF1_MODEL)),
+        ("sdxl", Catalog(&TAESDXL_MODEL)),
+        ("kolors", Catalog(&TAESDXL_MODEL)),
+        ("sd3_5_large", Catalog(&TAESD3_MODEL)),
+        ("sd3_5_medium", Catalog(&TAESD3_MODEL)),
+        ("lens", Catalog(&TAEF2_MODEL)),
+        ("krea_2_raw", Catalog(&TAEW2_1_MODEL)),
+        ("anima_base", Catalog(&TAEW2_1_MODEL)),
+        ("wan2_2_t2v_14b", Catalog(&TAEW2_1_MODEL)),
+        ("wan2_2_i2v_14b", Catalog(&TAEW2_1_MODEL)),
+        ("wan2_2_ti2v_5b", Catalog(&TAEW2_2_MODEL)),
+        ("ltx_2_3", Catalog(&TAELTX2_3_MODEL)),
+        ("mage_flow_base", BaseModelVae),
+    ] {
+        assert_eq!(x0_decoder_for_trainer(trainer), Some(expected), "{trainer}");
+    }
+    for trainer in ["krea_2_control", "ltx_2_5", "unknown"] {
+        assert_eq!(x0_decoder_for_trainer(trainer), None, "{trainer}");
     }
 }
 
@@ -2506,11 +2542,11 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
     }
 }
 
-/// sc-2125 review (S1 mechanism): only targets whose platform trainer declares depth anchoring
-/// advertise it, and an enabled depth weight on any other target is a submit-time
-/// `depthAnchoringWeight` field error. The Candle projection withdraws Z-Image's MLX-only support.
+/// sc-2125 / sc-24830: only targets whose trainer declares depth anchoring advertise it — every
+/// LoRA target except the Krea ControlNet branch and LTX-2.5, on both platforms — and an enabled
+/// depth weight on any other target is a submit-time `depthAnchoringWeight` field error.
 /// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
-/// the SDXL case is accepted ⇒ red.
+/// the Krea ControlNet case is accepted ⇒ red.
 #[test]
 fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
     use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
@@ -2531,43 +2567,38 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         validate_training_config_for_target(target, &config)
     };
 
-    let advertising: Vec<&str> = registry
+    let unsupported: Vec<&str> = registry
         .targets
         .iter()
-        .filter(|target| target_supports_depth_anchoring(target))
+        .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(
-        advertising,
-        ["z_image_turbo_lora"],
-        "only Z-Image MLX declares depth anchoring"
-    );
+    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
 
-    let z_image = by_id("z_image_turbo_lora");
-    with_weight(&z_image, json!(0.1)).expect("Z-Image MLX admits it");
-
-    let mut z_image_candle = z_image.clone();
-    project_candle_training_limits(&mut z_image_candle);
-    assert!(!target_supports_depth_anchoring(&z_image_candle));
-
-    for target in [by_id("sdxl_lora"), z_image_candle] {
-        with_weight(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
-        match with_weight(&target, json!(0.1)) {
-            Err(TrainingPlanError::InvalidField { field, .. }) => {
+    for target in &registry.targets {
+        with_weight(target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match (
+            with_weight(target, json!(0.1)),
+            target_supports_depth_anchoring(target),
+        ) {
+            (Ok(()), true) => {}
+            (Err(TrainingPlanError::InvalidField { field, .. }), false) => {
                 assert_eq!(field, "depthAnchoringWeight", "{}", target.id)
             }
-            other => panic!(
-                "{}: expected a depthAnchoringWeight field error, got {other:?}",
+            (other, supported) => panic!(
+                "{} (advertised {supported}): unexpected depth validation {other:?}",
                 target.id
             ),
         }
     }
+    let z_image = by_id("z_image_turbo_lora");
+    with_weight(&z_image, json!(0.1)).expect("Z-Image admits depth anchoring");
 }
 
 /// sc-24828 review: every LoRA target advertises subject-masked loss except LTX-2.5 (prepared
 /// latent bundles) and the Krea ControlNet branch; mask loss on a non-advertising target is a
 /// submit-time `subjectMaskLoss` field error (never queued), and off is always admitted. The flag
-/// is static (no Candle projection touches it).
+/// is static per target (served identically on both platforms).
 #[test]
 fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
     use sceneworks_core::training::target_supports_subject_mask_loss;
@@ -2588,14 +2619,6 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
     assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
     for target in &registry.targets {
         with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
-        let mut candle = target.clone();
-        project_candle_training_limits(&mut candle);
-        assert_eq!(
-            target_supports_subject_mask_loss(&candle),
-            target_supports_subject_mask_loss(target),
-            "{}: the Candle projection must not change subject-mask support",
-            target.id
-        );
         match (
             with_mask(target, true),
             target_supports_subject_mask_loss(target),
