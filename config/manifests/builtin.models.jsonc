@@ -28568,7 +28568,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "bf28a1e2077767bc1de851a5805a271d5171d1a4b29c8858af4fa7709bcea7c4",
+              "sha256": "eac3c763fa64790fdb102f61948716afc6fb4ad1130de1d18e8a13a64ffbb09c",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28597,8 +28597,8 @@
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 73853,
-                  "sha256": "cd962acf4bd8d019df949124f20692787b2fcd34839e15677e137d8545ca1400"
+                  "byteSize": 74515,
+                  "sha256": "50f37331e5f3f398c803c15afee3a5f54cbbcab265e233d02098377ad78d9ac9"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
@@ -28647,8 +28647,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 149623,
-                  "sha256": "af2b746c459018ac6cc8c455e4fe71c94d13ab5b9dd30daf03160994709bb4a5"
+                  "byteSize": 149970,
+                  "sha256": "e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -28662,8 +28662,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 250492,
-                  "sha256": "210410d6ebcc96c337bc010f95e33a2b6d006804ee71bfe3808d9851ba55628c"
+                  "byteSize": 250530,
+                  "sha256": "13f61bcbc1c5b3f1b2e0df4b8a6a1074b4f2f213cf2c9d81fd7e28546beed75a"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -28682,8 +28682,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 8003,
-                  "sha256": "c814bf496d72ca669541705470a08e88ef62d39a37bff66661ca2a781c9d37b7"
+                  "byteSize": 8040,
+                  "sha256": "2b41a0c38fd4bc2b3bb0ba3731cab4dfe09c99497382dd6dc7fb4d13392a9dbd"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",
