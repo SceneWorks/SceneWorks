@@ -30,8 +30,8 @@ use runtime_cuda::providers::sam3::{
 
 use crate::person_segment_sam3_common::{
     check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
-    per_frame_masks, select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE,
-    CONCEPT_PROMPT, INPUT_SIZE,
+    per_frame_masks, segment_images_in_one_session, select_object, single_frame_person_masks,
+    BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE, CONCEPT_PROMPT, INPUT_SIZE,
 };
 use crate::{WorkerError, WorkerResult};
 
@@ -75,20 +75,19 @@ fn parse_quant(value: &str) -> Option<Quant> {
 }
 
 /// The parsed SAM3 checkpoint is cached process-wide (the multi-GB safetensors parse is the expensive
-/// part). A **fresh** `Sam3VideoModel` is assembled from it per clip: the model carries per-session
-/// tracking state (obj ids, memory banks) with no reset, so reusing one across clips would leak
-/// identities. Mirrors the MLX module's cache + poison-recovery idiom.
+/// part). A fresh `Sam3VideoModel` is assembled from it per clip. The engine resets its per-session
+/// tracking state at every `propagate` (F-093), which is what lets [`segment_persons_per_image`]
+/// reuse ONE built model across a whole dataset of stills. Mirrors the MLX module's cache +
+/// poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
 
-fn propagate_person_concept(
+/// Run `f` with the process-wide cached SAM3 checkpoint (parsed on first use), holding its lock for
+/// the duration — the one place both the per-clip and the per-image-batch paths acquire it.
+fn with_sam3_weights<R>(
     model_path: &Path,
-    tokenizer_path: &Path,
-    frames: &[Tensor],
     device: &Device,
-    cancel: Option<&CancelFlag>,
-    mut progress: Option<SegmentProgress>,
-) -> WorkerResult<Vec<VideoFrameOutput>> {
-    check_segment_canceled(cancel)?;
+    f: impl FnOnce(&Weights) -> WorkerResult<R>,
+) -> WorkerResult<R> {
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| {
         let mut guard = poisoned.into_inner();
@@ -100,38 +99,121 @@ fn propagate_person_concept(
             .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
         *guard = Some(weights);
     }
-    let weights = guard.as_ref().expect("weights loaded");
+    f(guard.as_ref().expect("weights loaded"))
+}
 
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    if let Some(quant) = quant_level() {
-        model
-            .quantize(quant)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT, device)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    check_segment_canceled(cancel)?;
+/// A built (optionally quantized) `Sam3VideoModel` with the `"person"` concept already tokenized.
+/// `propagate` resets the engine's session state on entry (F-093), so one session serves any number
+/// of independent propagations (a clip, or a dataset's stills one frame at a time).
+struct PersonConceptSession {
+    model: Sam3VideoModel,
+    input_ids: Tensor,
+    text_mask: Vec<i32>,
+}
 
-    model
-        .propagate(
-            frames,
-            &input_ids,
-            &text_mask,
-            cancel,
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_cuda::media::CandleError::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+impl PersonConceptSession {
+    fn build(
+        weights: &Weights,
+        tokenizer_path: &Path,
+        device: &Device,
+        cancel: Option<&CancelFlag>,
+    ) -> WorkerResult<Self> {
+        let mut model = Sam3VideoModel::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+        if let Some(quant) = quant_level() {
+            model
+                .quantize(quant)
+                .map_err(|e| WorkerError::Engine(format!("sam3 quantize: {e}")))?;
+        }
+        let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+        let (input_ids, text_mask) = tokenizer
+            .encode(CONCEPT_PROMPT, device)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+        check_segment_canceled(cancel)?;
+        Ok(Self {
+            model,
+            input_ids,
+            text_mask,
         })
+    }
+
+    fn propagate(
+        &mut self,
+        frames: &[Tensor],
+        cancel: Option<&CancelFlag>,
+        mut progress: Option<SegmentProgress>,
+    ) -> WorkerResult<Vec<VideoFrameOutput>> {
+        self.model
+            .propagate(
+                frames,
+                &self.input_ids,
+                &self.text_mask,
+                cancel,
+                progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+            )
+            .map_err(|e| match e {
+                runtime_cuda::media::CandleError::Canceled => {
+                    WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+                }
+                e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+            })
+    }
+}
+
+fn propagate_person_concept(
+    model_path: &Path,
+    tokenizer_path: &Path,
+    frames: &[Tensor],
+    device: &Device,
+    cancel: Option<&CancelFlag>,
+    progress: Option<SegmentProgress>,
+) -> WorkerResult<Vec<VideoFrameOutput>> {
+    check_segment_canceled(cancel)?;
+    with_sam3_weights(model_path, device, |weights| {
+        PersonConceptSession::build(weights, tokenizer_path, device, cancel)?
+            .propagate(frames, cancel, progress)
+    })
+}
+
+/// SAM3 "person" masks for `count` unrelated stills with ONE model build + concept tokenize
+/// (sc-2126 review) — the candle twin of `crate::person_segment_sam3::segment_persons_per_image`:
+/// each image is `load`ed, segmented by a one-frame propagate at its own size, and handed with every
+/// detected person's binary `width*height` mask (0/255, empty when nobody is found) to `finish`; the
+/// results come back in order. The clip and single-image entry points are unchanged. Run under
+/// `spawn_blocking` (decode + GPU inference are blocking).
+pub(crate) fn segment_persons_per_image<T, L, F>(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    count: usize,
+    load: L,
+    finish: F,
+    cancel: Option<CancelFlag>,
+) -> WorkerResult<Vec<T>>
+where
+    T: Send + 'static,
+    L: FnMut(usize) -> WorkerResult<image::RgbImage> + Send + 'static,
+    F: FnMut(usize, &image::RgbImage, Vec<Vec<u8>>) -> WorkerResult<T> + Send + 'static,
+{
+    let cancel = cancel.as_ref();
+    check_segment_canceled(cancel)?;
+    let device = default_device().map_err(|e| WorkerError::Engine(format!("sam3 device: {e}")))?;
+    with_sam3_weights(&model_path, &device, |weights| {
+        segment_images_in_one_session(
+            count,
+            cancel,
+            || PersonConceptSession::build(weights, &tokenizer_path, &device, cancel),
+            load,
+            |session, image| {
+                let (width, height) = image.dimensions();
+                let outputs = session.propagate(&[input_tensor(image, &device)?], cancel, None)?;
+                single_frame_person_masks(&outputs, width, height)
+            },
+            finish,
+        )
+    })
 }
 
 /// Preprocess an RGB frame to the SAM3 input tensor: resize to a 1008×1008 square (bilinear, fixed-

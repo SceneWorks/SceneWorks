@@ -907,6 +907,75 @@ describe("SceneWorks app shell", () => {
     expect(payload.triggerWords).toEqual(["miraStyle", "red coat"]);
   });
 
+  it("generates subject masks, reports coverage, and uploads a replacement mask (sc-2126)", async () => {
+    const emptyReport = {
+      datasetId: "dataset-a",
+      total: 1,
+      masked: 1,
+      empty: 1,
+      uploaded: 0,
+      items: [{ itemId: "item_0001", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/dataset-a/masks/h.png", updatedAt: "t1", revision: "r1" }],
+    };
+    const uploadedReport = {
+      ...emptyReport,
+      empty: 0,
+      uploaded: 1,
+      items: [{ ...emptyReport.items[0], empty: false, source: "upload", updatedAt: "t2" }],
+    };
+    const loadSubjectMasks = vi.fn(async () => emptyReport);
+    const createSubjectMaskJob = vi.fn(async () => ({ id: "job-mask-1", type: "dataset_subject_mask" }));
+    const uploadSubjectMask = vi.fn(async () => uploadedReport);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset: vi.fn(async () => singleItemDataset()),
+          updateDataset: vi.fn(async () => singleItemDataset()),
+          loadSubjectMasks,
+          createSubjectMaskJob,
+          uploadSubjectMask,
+        }),
+      );
+    });
+    await openPortraitSet();
+
+    expect(loadSubjectMasks).toHaveBeenCalledWith("dataset-a", "project-a", expect.anything());
+    expect(container.querySelector('[aria-label="Subject mask coverage"]').textContent).toBe("1/1 masked");
+    expect(container.textContent).toContain("No subject in mask");
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate subject masks").click();
+    });
+    await settle();
+    expect(createSubjectMaskJob).toHaveBeenCalledWith("dataset-a", {});
+    expect(container.textContent).toContain("Subject mask job queued (job-mask-1)");
+
+    const input = container.querySelector('input[aria-label^="Upload subject mask for"]');
+    const choose = async (file) => {
+      Object.defineProperty(input, "files", { configurable: true, value: [file] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await settle();
+    };
+
+    // Over the shared 32 MiB limit: refused in the browser, never uploaded.
+    const oversized = new File(["x"], "huge.png", { type: "image/png" });
+    Object.defineProperty(oversized, "size", { value: 32 * 1024 * 1024 + 1 });
+    await choose(oversized);
+    expect(uploadSubjectMask).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]').textContent).toContain("32 MiB");
+
+    const mask = new File([new Uint8Array([1])], "mask.png", { type: "image/png" });
+    await choose(mask);
+    expect(uploadSubjectMask).toHaveBeenCalledWith("dataset-a", "item_0001", mask);
+    expect(container.textContent).toContain("Mask uploaded");
+    expect(container.textContent).not.toContain("No subject in mask");
+  });
+
   it("re-captions a single image with the itemIds filter (sc-2025)", async () => {
     const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
     const createCaptionJob = vi.fn(async () => ({ id: "job-caption-2", type: "training_caption" }));

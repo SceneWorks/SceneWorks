@@ -3264,6 +3264,13 @@ fn gpu_job_rows(
             json!({ "datasetId": "probe" }),
         ),
         (
+            "dataset_subject_mask",
+            "utility",
+            JobType::DatasetSubjectMask,
+            "sam3_person_segment",
+            json!({ "datasetId": "probe" }),
+        ),
+        (
             "face_likeness_compare",
             "utility",
             JobType::FaceLikenessCompare,

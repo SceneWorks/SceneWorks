@@ -203,6 +203,10 @@ impl TrainingDatasetStore {
         }
     }
 
+    pub(crate) fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
     pub fn list_datasets(
         &self,
         project_id: &str,
@@ -952,7 +956,10 @@ impl TrainingDatasetStore {
         })
     }
 
-    fn read_dataset_by_id(&self, dataset_id: &str) -> ProjectStoreResult<TrainingDataset> {
+    pub(crate) fn read_dataset_by_id(
+        &self,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
         if !is_safe_id(dataset_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset ID".to_owned(),
@@ -967,7 +974,7 @@ impl TrainingDatasetStore {
         read_dataset(&manifest_path)
     }
 
-    fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+    pub(crate) fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
         let manifest_path = dataset_manifest_path(&self.project_path, &dataset.id);
         write_json(&manifest_path, dataset)?;
         index_dataset(&self.project_path, dataset, &manifest_path)
@@ -2016,7 +2023,10 @@ fn ensure_supported_item_mime(path: &Path, modality: &TrainingModality) -> Proje
     Ok(())
 }
 
-fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+pub(crate) fn ensure_dataset_project(
+    project_id: &str,
+    dataset: &TrainingDataset,
+) -> ProjectStoreResult<()> {
     if dataset.project_id.as_deref() != Some(project_id) {
         return Err(ProjectStoreError::NotFound(
             "Training dataset not found".to_owned(),
@@ -2273,7 +2283,7 @@ fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     atomic_write(path, payload.as_bytes())
 }
 
-fn dataset_item_path(
+pub(crate) fn dataset_item_path(
     project_path: &Path,
     dataset: &TrainingDataset,
     item: &TrainingDatasetItem,

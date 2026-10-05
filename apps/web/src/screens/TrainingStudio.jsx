@@ -16,6 +16,7 @@ import {
   parseCaptionTriggerWords,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import { subjectMaskFileError } from "../training/subjectMasks.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
   captionDraftsFromDataset,
@@ -330,6 +331,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -421,6 +425,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
+  // Subject masks (sc-2126): the saved dataset's /subject-masks report (coverage + per-image status),
+  // refetched on dataset version / mask-job completion, replaced by an upload's response.
+  const [subjectMasks, setSubjectMasks] = useState(null);
   // The config-draft basis, keyed on (target, dataset, default-preset). Value-preserving
   // across an async trainingPresets load (sc-11970): a preset-only basis flip no longer
   // wipes the user's config edits. See the basis effect below.
@@ -519,6 +526,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
           job.status === "completed" &&
           job.payload?.datasetId === activeDataset?.id,
       ) ?? null,
+    [jobs, activeDataset?.id],
+  );
+  // The newest completed subject-mask job for this dataset (sc-2126): its id keys the mask-report
+  // refetch, so the editor picks up masks the moment the worker finishes.
+  const completedSubjectMaskJobId = useMemo(
+    () =>
+      jobs.find(
+        (job) =>
+          job.type === "dataset_subject_mask" &&
+          job.status === "completed" &&
+          job.payload?.datasetId === activeDataset?.id,
+      )?.id ?? "",
     [jobs, activeDataset?.id],
   );
   const completedParquetImportId = completedParquetImport?.id ?? "";
@@ -766,6 +785,36 @@ export function TrainingStudio({ mode = "training" } = {}) {
     readinessQuery,
     readinessRefreshTick,
     loadTrainingDatasetReadiness,
+  ]);
+
+  // Subject-mask report for the SAVED dataset (sc-2126). Advisory like readiness: a failed fetch
+  // drops back to "no masks yet" rather than blocking editing.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const datasetId = activeDataset?.id;
+    if (!projectId || !datasetId || typeof loadTrainingDatasetSubjectMasks !== "function") {
+      setSubjectMasks(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    loadTrainingDatasetSubjectMasks(datasetId, projectId, { signal: controller.signal })
+      .then((report) => {
+        if (!controller.signal.aborted) {
+          setSubjectMasks(report ?? null);
+        }
+      })
+      .catch((err) => {
+        if (!isAbortError(err) && !controller.signal.aborted) {
+          setSubjectMasks(null);
+        }
+      });
+    return () => controller.abort();
+  }, [
+    activeProject?.id,
+    activeDataset?.id,
+    activeDataset?.version,
+    completedSubjectMaskJobId,
+    loadTrainingDatasetSubjectMasks,
   ]);
 
   // Dismiss/undo a single quality finding on an image (sc-6534). The endpoint replaces the item's
@@ -1716,6 +1765,50 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // Subject masks (sc-2126): enqueue SAM3 person segmentation over the whole dataset. Saves first so
+  // the job sees the live items; async (GPU), the mask report refreshes when the job completes.
+  async function generateSubjectMasks() {
+    if (savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before generating subject masks.");
+        return;
+      }
+      const job = await createTrainingDatasetSubjectMaskJob(saved.id, {});
+      setDatasetMessage(
+        `Subject mask job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the masks appear when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
+  // Replace one image's subject mask with an uploaded file (sc-2126). The file is checked against the
+  // same limits the API enforces first; a server field error is rethrown for the card to show.
+  async function uploadSubjectMask(member, file) {
+    const fileError = subjectMaskFileError(file);
+    if (fileError) {
+      throw new Error(fileError);
+    }
+    const itemId = resolveSavedItemId(activeDataset, member);
+    if (!activeDataset?.id || !itemId || typeof uploadTrainingDatasetSubjectMask !== "function") {
+      throw new Error("Save this dataset item before uploading its subject mask.");
+    }
+    const report = await uploadTrainingDatasetSubjectMask(activeDataset.id, itemId, file);
+    // The upload answers with the updated report — authoritative, so no refetch.
+    setSubjectMasks(report ?? null);
+    setDatasetMessage(`Subject mask replaced for ${member.displayName ?? imageAssetName(member)}.`);
+    return report;
+  }
+
   // One-tap smart-crop (sc-6539): synchronously crop the crop-loss-flagged items toward a trainable
   // aspect, then reload the dataset (re-derives selection — re-pointed items become dataset-owned).
   async function smartCropItems(itemIds) {
@@ -1901,6 +1994,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
                   importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                }}
+                maskSession={{
+                  projectId: activeProject?.id,
+                  report: subjectMasks,
+                  onGenerateMasks: generateSubjectMasks,
+                  onUploadMask: uploadSubjectMask,
                 }}
               />
             ) : (

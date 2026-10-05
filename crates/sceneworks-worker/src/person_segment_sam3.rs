@@ -36,8 +36,8 @@ use runtime_macos::providers::sam3::{
 
 use crate::person_segment_sam3_common::{
     check_segment_canceled, frame_mask_for_object, mask_to_frame, normalize_chw, paint_order,
-    per_frame_masks, select_object, BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE,
-    CONCEPT_PROMPT, INPUT_SIZE,
+    per_frame_masks, segment_images_in_one_session, select_object, single_frame_person_masks,
+    BoxNorm, Sam3FrameOutput, SegmentProgress, CANCEL_MESSAGE, CONCEPT_PROMPT, INPUT_SIZE,
 };
 use crate::{WorkerError, WorkerResult};
 
@@ -86,20 +86,18 @@ fn validate_square_mask_len(grid: usize, len: usize) -> WorkerResult<()> {
 }
 
 /// The parsed SAM3 checkpoint is cached process-wide (the 3.2 GB safetensors parse is the
-/// expensive part). A **fresh** `Sam3VideoModel` is assembled from it per clip: the model carries
-/// per-session tracking state (obj ids, memory banks) and exposes no reset, so reusing one across
-/// clips would leak identities. Building from cached weights is cheap (layer assembly over
-/// already-resident arrays). Mirrors the SAM2 predictor cache + poison-recovery idiom.
+/// expensive part). A fresh `Sam3VideoModel` is assembled from it per clip (layer assembly over
+/// already-resident arrays + quantize). The engine resets its per-session tracking state at every
+/// `propagate` (F-040), which is what lets [`segment_persons_per_image`] reuse ONE built model across
+/// a whole dataset of stills. Mirrors the SAM2 predictor cache + poison-recovery idiom.
 static WEIGHTS: OnceLock<Mutex<Option<Weights>>> = OnceLock::new();
 
-fn propagate_person_concept(
+/// Run `f` with the process-wide cached SAM3 checkpoint (parsed on first use), holding its lock for
+/// the duration — the one place both the per-clip and the per-image-batch paths acquire it.
+fn with_sam3_weights<R>(
     model_path: &Path,
-    tokenizer_path: &Path,
-    frames: &[Array],
-    cancel: Option<&CancelFlag>,
-    mut progress: Option<SegmentProgress>,
-) -> WorkerResult<Vec<VideoFrameOutput>> {
-    check_segment_canceled(cancel)?;
+    f: impl FnOnce(&Weights) -> WorkerResult<R>,
+) -> WorkerResult<R> {
     let cell = WEIGHTS.get_or_init(|| Mutex::new(None));
     let mut guard = cell.lock().unwrap_or_else(|poisoned| {
         let mut guard = poisoned.into_inner();
@@ -111,38 +109,120 @@ fn propagate_person_concept(
             .map_err(|e| WorkerError::Engine(format!("sam3 weights load: {e}")))?;
         *guard = Some(weights);
     }
-    let weights = guard.as_ref().expect("weights loaded");
+    f(guard.as_ref().expect("weights loaded"))
+}
 
-    let mut model = Sam3VideoModel::from_weights(weights)
-        .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
-    if let Some(bits) = quant_bits() {
-        model
-            .quantize(bits)
-            .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
-    }
-    let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
-    let (input_ids, text_mask) = tokenizer
-        .encode(CONCEPT_PROMPT)
-        .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
-    check_segment_canceled(cancel)?;
+/// A built + quantized `Sam3VideoModel` with the `"person"` concept already tokenized. `propagate`
+/// resets the engine's tracking state on entry, so one session serves any number of independent
+/// propagations (a clip, or a dataset's stills one frame at a time).
+struct PersonConceptSession {
+    model: Sam3VideoModel,
+    input_ids: Array,
+    text_mask: Vec<i32>,
+}
 
-    model
-        .propagate(
-            frames,
-            &input_ids,
-            &text_mask,
-            cancel,
-            progress
-                .as_deref_mut()
-                .map(|cb| cb as &mut dyn FnMut(usize, usize)),
-        )
-        .map_err(|e| match e {
-            runtime_macos::media::Error::Canceled => {
-                WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
-            }
-            e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+impl PersonConceptSession {
+    fn build(
+        weights: &Weights,
+        tokenizer_path: &Path,
+        cancel: Option<&CancelFlag>,
+    ) -> WorkerResult<Self> {
+        let mut model = Sam3VideoModel::from_weights(weights)
+            .map_err(|e| WorkerError::Engine(format!("sam3 model build: {e}")))?;
+        if let Some(bits) = quant_bits() {
+            model
+                .quantize(bits)
+                .map_err(|e| WorkerError::Engine(format!("sam3 quantize q{bits}: {e}")))?;
+        }
+        let tokenizer = Sam3Tokenizer::from_file(tokenizer_path, &Sam3TextConfig::sam3())
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenizer load: {e}")))?;
+        let (input_ids, text_mask) = tokenizer
+            .encode(CONCEPT_PROMPT)
+            .map_err(|e| WorkerError::Engine(format!("sam3 tokenize: {e}")))?;
+        check_segment_canceled(cancel)?;
+        Ok(Self {
+            model,
+            input_ids,
+            text_mask,
         })
+    }
+
+    fn propagate(
+        &mut self,
+        frames: &[Array],
+        cancel: Option<&CancelFlag>,
+        mut progress: Option<SegmentProgress>,
+    ) -> WorkerResult<Vec<VideoFrameOutput>> {
+        self.model
+            .propagate(
+                frames,
+                &self.input_ids,
+                &self.text_mask,
+                cancel,
+                progress
+                    .as_deref_mut()
+                    .map(|cb| cb as &mut dyn FnMut(usize, usize)),
+            )
+            .map_err(|e| match e {
+                runtime_macos::media::Error::Canceled => {
+                    WorkerError::Canceled(CANCEL_MESSAGE.to_owned())
+                }
+                e => WorkerError::Engine(format!("sam3 propagate: {e}")),
+            })
+    }
+}
+
+fn propagate_person_concept(
+    model_path: &Path,
+    tokenizer_path: &Path,
+    frames: &[Array],
+    cancel: Option<&CancelFlag>,
+    progress: Option<SegmentProgress>,
+) -> WorkerResult<Vec<VideoFrameOutput>> {
+    check_segment_canceled(cancel)?;
+    with_sam3_weights(model_path, |weights| {
+        PersonConceptSession::build(weights, tokenizer_path, cancel)?
+            .propagate(frames, cancel, progress)
+    })
+}
+
+/// SAM3 "person" masks for `count` unrelated stills with ONE model build + quantize + concept
+/// tokenize (sc-2126 review): each image is `load`ed, segmented by a one-frame propagate at its own
+/// size, and handed with every detected person's binary `width*height` mask (0/255, empty when
+/// nobody is found) to `finish`; the results come back in order. Everything — including `load`'s
+/// decode — runs on the dedicated SAM3 thread (the `!Send` model lives there for the whole batch);
+/// the clip and single-image entry points are unchanged.
+pub(crate) fn segment_persons_per_image<T, L, F>(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    count: usize,
+    load: L,
+    finish: F,
+    cancel: Option<CancelFlag>,
+) -> WorkerResult<Vec<T>>
+where
+    T: Send + 'static,
+    L: FnMut(usize) -> WorkerResult<image::RgbImage> + Send + 'static,
+    F: FnMut(usize, &image::RgbImage, Vec<Vec<u8>>) -> WorkerResult<T> + Send + 'static,
+{
+    check_segment_canceled(cancel.as_ref())?;
+    run_on_sam3_thread(move || {
+        let cancel = cancel.as_ref();
+        with_sam3_weights(&model_path, |weights| {
+            segment_images_in_one_session(
+                count,
+                cancel,
+                || PersonConceptSession::build(weights, &tokenizer_path, cancel),
+                load,
+                |session, image| {
+                    let (width, height) = image.dimensions();
+                    let outputs = session.propagate(&[input_tensor(image)], cancel, None)?;
+                    single_frame_person_masks(&outputs, width, height)
+                },
+                finish,
+            )
+        })
+    })
 }
 
 /// Run a whole SAM3 **video** clip on the dedicated SAM3 thread (sc-11180): build the frame

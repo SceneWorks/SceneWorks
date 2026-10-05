@@ -978,6 +978,7 @@ fn job_requires_typed_model_source(job_type: &JobType) -> bool {
         | JobType::CatalogAnalysis
         | JobType::DatasetUpscale
         | JobType::DatasetFaceAnalysis
+        | JobType::DatasetSubjectMask
         | JobType::FaceLikenessCompare
         | JobType::PromptRefine
         | JobType::Unknown(_) => true,
