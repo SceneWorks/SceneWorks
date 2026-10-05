@@ -118,12 +118,17 @@ function assertWorkflowScope(workflow) {
   assert.match(workflow, /test "\$GITHUB_SHA" = "\$QWEN_APP_SOURCE_SHA"\s*$/m);
   assert.match(workflow, /ref: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /QWEN_APP_SOURCE_SHA: \$\{\{ inputs.source_sha \}\}/);
+  assert.match(workflow, /- name: Build and exercise the owned API and MLX worker\n        run: node scripts\/qwen-image-2-1-app-lifecycle\.mjs\n        env:\n          QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/evidence\//);
+  assert.doesNotMatch(workflow, /^      QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}/m, "runner.temp is unavailable in job-level env");
   assert.match(workflow, /cancel-in-progress: false/); assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /--build-type Release --github-env/);
   assert.doesNotMatch(workflow, /measure-memory|download-missing|gh pr|git push|bump-inference/);
 }
 test("reusable app workflow preserves exclusive primary-runner and immutable caller scope", () => {
   const workflow = read(".github/workflows/qwen-image-2-1-app-lifecycle.yml"); assertWorkflowScope(workflow);
+  const runnerTempAtJobScope = workflow.replace("      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}", "      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}\n      QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}");
+  assert.throws(() => assertWorkflowScope(runnerTempAtJobScope), /runner\.temp is unavailable in job-level env/);
   for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace("ARM64, rw-starvector", "ARM64, nax"), workflow.replace("= nax-macos", "= nax-macos-2"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace('test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"', 'test -n "$GITHUB_SHA"'), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
   const harness = read("scripts/qwen-image-2-1-app-lifecycle.mjs");
   assert.match(harness, /SCENEWORKS_CREDENTIALS_DIR: path.join\(state, "credentials"\)/);

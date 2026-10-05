@@ -28,7 +28,6 @@ jobs:
     env:
       QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}
       QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
-      QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Require the primary Mac and immutable inputs
         run: |
@@ -61,11 +60,13 @@ jobs:
           fi
       - name: Build and exercise the owned API and MLX worker
         run: node scripts/qwen-image-2-1-app-lifecycle.mjs
+        env:
+          QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Retain lifecycle receipt, owned logs and generated previews
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: qwen-image-2-1-mlx-app-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.QWEN_APP_OUTPUT }}/evidence/
+          path: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
           if-no-files-found: error
           retention-days: 30
