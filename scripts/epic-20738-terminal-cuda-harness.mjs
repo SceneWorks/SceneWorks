@@ -178,9 +178,9 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned by sc-19383: `config/download-pattern-evidence.json` was re-recorded when the catalog
-// gained the YuE lyrics2song entries — six stage-1 re-hosts, the stage-2 re-host and the xcodec
-// re-host (117 repo@revision keys incl. the two frozen importer authorities; sc-24114 left 109).
+// Re-pinned by sc-2125: `config/download-pattern-evidence.json` was re-recorded when the catalog
+// gained the depth-anchoring auxiliary models — TAEF1 and Depth Anything V2 Small/Base/Large
+// (121 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
 const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "cb54ff8c7da946581379f418ab978bbe76fa1724bb951c9b54bd0dcd40a17e69";
