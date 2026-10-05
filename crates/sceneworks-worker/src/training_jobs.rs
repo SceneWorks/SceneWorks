@@ -27,6 +27,10 @@ use sceneworks_core::training::body_losses::{body_loss_settings, BodyLoss};
 use sceneworks_core::training::depth_anchoring::{
     depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
 };
+use sceneworks_core::training::face_losses::{
+    face_landmark_loss_settings, identity_loss_settings, FACE_LANDMARK_LOSS_WEIGHT_KEY,
+    IDENTITY_LOSS_WEIGHT_KEY,
+};
 use sceneworks_core::training::{
     parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
@@ -942,6 +946,42 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
             )));
         }
     }
+    // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride the
+    // same decoded-x0 path as depth anchoring, so they are refused the same way — strictly parsed
+    // (the API's parser), refused for a trainer that does not declare them (E3) or whose latent
+    // family has no cataloged tiny x0 decoder. Installation is checked by `apply_face_losses`.
+    let identity = identity_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let landmark = face_landmark_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    for (enabled, declared, name, key) in [
+        (
+            identity.is_some(),
+            descriptor.techniques.identity_loss,
+            "the identity loss",
+            IDENTITY_LOSS_WEIGHT_KEY,
+        ),
+        (
+            landmark.is_some(),
+            descriptor.techniques.face_landmark_loss,
+            "the face-landmark loss",
+            FACE_LANDMARK_LOSS_WEIGHT_KEY,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        if !declared {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support {name} ({key})."
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no x0 decoder for {name} ({key})."
+            )));
+        }
+    }
 
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
@@ -1074,6 +1114,7 @@ fn training_request_from_plan(
     let mut config = finalize_training_config(map_training_config(&plan.config), plan);
     apply_depth_anchoring(settings, plan, &mut config)?;
     apply_body_losses(settings, plan, &mut config)?;
+    apply_face_losses(settings, plan, &mut config)?;
     // The weights were validated by `validate_training_target_config` (same reader), so a
     // malformed value is already refused; this propagates rather than defaulting regardless.
     config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
@@ -1301,18 +1342,13 @@ fn apply_depth_anchoring(
                 plan.target.kernel, plan.target.base_model
             ))
         })?;
-    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "Native trainer '{engine_id}' has no x0 decoder for depth anchoring."
-        ))
-    })?;
     let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
     })?;
-    config.perceptual_decoder_dir = Some(resolve_x0_decoder_dir(
+    config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
         settings,
         plan,
-        decoder,
+        engine_id,
         "Depth anchoring",
     )?);
     config.depth_anchoring = gen_core::DepthAnchoringConfig {
@@ -1363,12 +1399,8 @@ fn apply_body_losses(
                 plan.target.kernel, plan.target.base_model
             ))
         })?;
-    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
-        WorkerError::InvalidPayload(format!(
-            "Native trainer '{engine_id}' has no tiny x0 decoder for the body losses."
-        ))
-    })?;
-    config.perceptual_decoder_dir = Some(resolve_x0_decoder_dir(settings, plan, decoder, PURPOSE)?);
+    config.perceptual_decoder_dir =
+        Some(perceptual_decoder_dir(settings, plan, engine_id, PURPOSE)?);
     let schedule = |loss: BodyLoss| {
         body.schedule(loss)
             .map(|s| gen_core::AuxLossSchedule {
@@ -1409,22 +1441,29 @@ fn apply_body_losses(
     Ok(())
 }
 
-/// The directory the engine loads the trainer family's x0 decoder from: the installed catalog
-/// decoder, or — a family that decodes through its own VAE — the base-model snapshot it loads.
-/// `purpose` names the technique in a refusal.
+/// The x0 decoder directory every decoded-x0 perceptual loss (depth anchoring, the identity and
+/// face-landmark losses, the body losses) hands the trainer as `perceptual_decoder_dir` — ONE resolution for all of
+/// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `technique`
+/// labels the refusal.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-fn resolve_x0_decoder_dir(
+fn perceptual_decoder_dir(
     settings: &Settings,
     plan: &TrainingPlan,
-    decoder: sceneworks_core::training::depth_anchoring::X0DecoderSource,
-    purpose: &str,
+    engine_id: &str,
+    technique: &str,
 ) -> WorkerResult<PathBuf> {
     use sceneworks_core::training::depth_anchoring::X0DecoderSource;
+    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' has no x0 decoder for {}.",
+            technique.to_lowercase()
+        ))
+    })?;
     match decoder {
-        X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model, purpose),
+        X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model, technique),
         // The trainer decodes through its own VAE, resolved from the base model it loads; the
         // shared engine floor still wants the decoder location named, so name the base snapshot.
         X0DecoderSource::BaseModelVae => resolve_app_managed_model_dir(
@@ -1438,7 +1477,7 @@ fn resolve_x0_decoder_dir(
 /// The installed snapshot directory of an auxiliary training model (its pinned revision with the
 /// weight file present), installed through the Model Manager into the app-managed Hugging Face
 /// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
-/// model and the technique (`purpose`) that needs it.
+/// model and the `technique` that needs it.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1446,7 +1485,7 @@ fn resolve_x0_decoder_dir(
 fn installed_aux_model_dir(
     settings: &Settings,
     model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
-    purpose: &str,
+    technique: &str,
 ) -> WorkerResult<PathBuf> {
     if let Some(dir) = crate::model_jobs::huggingface_pinned_snapshot_dir(
         &settings.data_dir,
@@ -1458,10 +1497,94 @@ fn installed_aux_model_dir(
         }
     }
     Err(WorkerError::InvalidPayload(format!(
-        "{purpose} needs the '{}' model ({}), which is not installed. Install it from the Models \
-         screen.",
+        "{technique} needs the '{}' model ({}), which is not installed. Install it from the \
+         Models screen.",
         model.label, model.id
     )))
+}
+
+/// Epic 2123 face losses (sc-24831): map the strictly parsed `advanced.identityLoss*` /
+/// `advanced.faceLandmarkLoss*` keys onto the engine's typed [`gen_core::IdentityLossConfig`] /
+/// [`gen_core::FaceLandmarkLossConfig`] and resolve what they load from the installed model library:
+/// the trainer family's x0 decoder (the same [`perceptual_decoder_dir`] depth anchoring uses), the
+/// `instantid_face_stack` bundle (its SCRFD detector for both losses; its glintr100 ArcFace for the
+/// identity loss — the shipped ArcFace, in place of upstream's buffalo_l `w600k_r50`, see
+/// `sceneworks_core::training::face_losses`) and, for the landmark loss, the rehosted FaceMesh-v2.
+/// A missing checkpoint is refused naming the catalog model; off leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_face_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::face_losses::{
+        FaceLossSchedule, FACEMESH_V2_MODEL, FACE_STACK_ARCFACE, FACE_STACK_SCRFD,
+    };
+
+    let advanced = &plan.config.advanced;
+    let identity = identity_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let landmark = face_landmark_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if identity.is_none() && landmark.is_none() {
+        return Ok(());
+    }
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let technique = if identity.is_some() {
+        "The identity loss"
+    } else {
+        "The face-landmark loss"
+    };
+    let schedule = |s: &FaceLossSchedule| gen_core::AuxLossSchedule {
+        weight: s.weight as f32,
+        t_min: s.min_t as f32,
+        t_max: s.max_t as f32,
+        every_n: s.every,
+    };
+    config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
+        settings, plan, engine_id, technique,
+    )?);
+    config.face_analysis_dir = Some(installed_aux_model_dir(
+        settings,
+        &FACE_STACK_SCRFD,
+        technique,
+    )?);
+    if let Some(id) = identity {
+        // The ArcFace lives in the same pinned bundle snapshot; require its file too.
+        installed_aux_model_dir(settings, &FACE_STACK_ARCFACE, "The identity loss")?;
+        config.identity_loss = gen_core::IdentityLossConfig {
+            schedule: schedule(&id.schedule),
+            min_cos: id.min_cos as f32,
+            reference_mode: gen_core::IdentityReferenceMode::parse(id.reference).ok_or_else(
+                || {
+                    WorkerError::InvalidPayload(format!(
+                        "Unknown identity reference mode '{}'.",
+                        id.reference
+                    ))
+                },
+            )?,
+        };
+    }
+    if let Some(lm) = landmark {
+        config.face_landmark_loss = gen_core::FaceLandmarkLossConfig {
+            schedule: schedule(&lm),
+            model_dir: Some(installed_aux_model_dir(
+                settings,
+                &FACEMESH_V2_MODEL,
+                "The face-landmark loss",
+            )?),
+        };
+    }
+    Ok(())
 }
 
 /// Most images a missing-subject-mask refusal names before summarising the rest as "and N more".
@@ -2008,6 +2131,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         perceptual_decoder_dir: None,
         // Epic 2123 body losses (sc-24832) start off here; `apply_body_losses` fills them in.
         body_losses: Default::default(),
+        // Epic 2123 face losses (sc-24831) likewise start off; `apply_face_losses` fills them in.
+        identity_loss: Default::default(),
+        face_landmark_loss: Default::default(),
+        face_analysis_dir: None,
         // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
         // whose fallible reader refuses malformed weights instead of defaulting them to off.
         subject_mask_loss: None,
@@ -3818,20 +3945,28 @@ mod tests {
         let partial = subject_mask_dataset(&data_dir, 3, &[0], &[]);
         match preflight_subject_mask_paths(&settings, &plan_for(&partial, true)) {
             Err(WorkerError::InvalidPayload(message)) => {
-                assert!(message.contains("subject-restricted normal loss"), "{message}");
+                assert!(
+                    message.contains("subject-restricted normal loss"),
+                    "{message}"
+                );
                 assert!(message.contains("img01.png"), "{message}");
             }
             other => panic!("expected a payload refusal, got {other:?}"),
         }
-        assert!(preflight_subject_mask_paths(&settings, &plan_for(&partial, false))
-            .unwrap()
-            .is_none());
+        assert!(
+            preflight_subject_mask_paths(&settings, &plan_for(&partial, false))
+                .unwrap()
+                .is_none()
+        );
         let dir2 = tempfile::tempdir().expect("tempdir");
         let data_dir2 = dir2.path().canonicalize().expect("canonical data root");
         let settings2 = test_settings(&data_dir2);
         let full = subject_mask_dataset(&data_dir2, 2, &[0, 1], &[]);
         let mut full_plan = masked_plan(&data_dir2, &full, false);
-        full_plan.config.advanced.insert("normalWeight".to_owned(), json!(0.1));
+        full_plan
+            .config
+            .advanced
+            .insert("normalWeight".to_owned(), json!(0.1));
         full_plan
             .config
             .advanced
@@ -4935,6 +5070,132 @@ mod tests {
             assert!(message.contains(key), "{key}={bad}: {message}");
         }
     }
+    /// sc-24831 (S1 mechanism): the catalog's `supportsIdentityLoss` / `supportsFaceLandmarkLoss`
+    /// flags equal the linked trainer descriptor's `techniques.identity_loss` /
+    /// `techniques.face_landmark_loss` for every target this runtime trains — the static builtin
+    /// catalog against the active platform's descriptors — and a declaring trainer always resolves
+    /// an x0 decoder source. Mutations: stop deriving either flag from depth anchoring ⇒ red; set it
+    /// on a target whose trainer does not declare it ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_face_loss_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::face_losses::{
+            target_supports_face_landmark_loss, target_supports_identity_loss,
+        };
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            if descriptor.techniques.identity_loss || descriptor.techniques.face_landmark_loss {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) declares a face loss but has no x0 decoder source",
+                    target.id
+                );
+            }
+            assert_eq!(
+                target_supports_identity_loss(&target),
+                descriptor.techniques.identity_loss,
+                "{} ({engine_id}): catalog supportsIdentityLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            assert_eq!(
+                target_supports_face_landmark_loss(&target),
+                descriptor.techniques.face_landmark_loss,
+                "{} ({engine_id}): catalog supportsFaceLandmarkLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-24831 (E3): the shared dry/real preflight refuses a face loss on a trainer whose
+    /// descriptor does not declare it (the Krea ControlNet branch, where registered), refuses
+    /// malformed values naming the key, and admits both losses on every LoRA trainer the active
+    /// runtime registers (SDXL, Z-Image, Mage). Mutation: drop the `declared` check ⇒ the control
+    /// case is admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_face_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let identity = [("identityLossWeight", json!(0.1))];
+        let landmark = [("faceLandmarkLossWeight", json!(0.1))];
+
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("identityLossWeight", json!(0))]
+        ))
+        .is_ok());
+        for (key, name) in [
+            ("identityLossWeight", "the identity loss"),
+            ("faceLandmarkLossWeight", "the face-landmark loss"),
+        ] {
+            let control_on = [(key, json!(0.1)), ("networkType", json!("control"))];
+            let control = err(plan("krea_control", "krea_2_raw", &control_on));
+            if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+                assert!(
+                    control.contains(&format!("does not support {name}")),
+                    "{control}"
+                );
+            } else {
+                assert!(control.contains("not registered"), "{control}");
+            }
+        }
+        for (kernel, base) in [
+            ("sdxl_lora", "sdxl"),
+            ("z_image_lora", "z_image_turbo"),
+            ("mage_flow_lora", "mage_flow_base"),
+        ] {
+            for on in [&identity, &landmark] {
+                validate_training_target_config(&plan(kernel, base, on))
+                    .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
+            }
+        }
+
+        for (key, bad) in [
+            ("identityLossWeight", json!(-0.1)),
+            ("identityLossWeight", json!(1.5)),
+            ("identityLossMinCos", json!(1.5)),
+            ("identityLossReference", json!("random")),
+            ("identityLossMaxT", json!(2)),
+            ("identityLossEvery", json!(0)),
+            ("faceLandmarkLossWeight", json!("0.1")),
+            ("faceLandmarkLossEvery", json!(17)),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
 
     /// sc-24832: an enabled body-loss plan maps onto the engine's typed `BodyLossesConfig` — per-loss
     /// schedules with upstream's default windows, the knobs — and resolves the tiny decoder and
@@ -5079,6 +5340,139 @@ mod tests {
         assert_eq!(body.shape_min_cos, 0.5);
         assert_eq!(body.normal.weight, 0.3);
         assert!(body.normal_restrict_to_subject);
+    }
+    /// sc-24831: an enabled identity loss maps onto the engine's typed config (schedule, gate,
+    /// reference mode) and resolves the TAEF1 decoder and the `instantid_face_stack` bundle from the
+    /// installed library at its pinned revision, requiring BOTH files; a missing / wrong-revision /
+    /// half-installed bundle is refused naming the catalog model; an enabled landmark loss maps its
+    /// schedule and resolves the pinned FaceMesh-v2 (refused naming it until installed); off leaves
+    /// the config untouched. Mutations: skip the ArcFace file check ⇒ the half-installed case
+    /// resolves ⇒ red; drop the `min_cos` mapping ⇒ red; resolve the landmark model from the face
+    /// stack ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn identity_loss_maps_the_schedule_and_resolves_the_installed_face_stack() {
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        use sceneworks_core::training::face_losses::{FACE_STACK_ARCFACE, FACE_STACK_SCRFD};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("identityLossWeight", json!(0.05)),
+            ("identityLossMinT", json!(0.1)),
+            ("identityLossMaxT", json!(0.8)),
+            ("identityLossEvery", json!(1)),
+            ("identityLossMinCos", json!(0.35)),
+            ("identityLossReference", json!("per_image")),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value.clone());
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_face_losses(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_face_losses(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.identity_loss.schedule.is_enabled());
+        assert_eq!(config.face_analysis_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(FACE_STACK_SCRFD.id));
+        fake_snapshot(
+            &hub,
+            FACE_STACK_SCRFD.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            FACE_STACK_SCRFD.file,
+        );
+        assert!(refusal(&plan).contains(FACE_STACK_SCRFD.id));
+        let stack = fake_snapshot(
+            &hub,
+            FACE_STACK_SCRFD.repo,
+            FACE_STACK_SCRFD.revision,
+            FACE_STACK_SCRFD.file,
+        );
+        // Half installed (no ArcFace file) is not installed.
+        assert!(refusal(&plan).contains(FACE_STACK_ARCFACE.id));
+        std::fs::write(stack.join(FACE_STACK_ARCFACE.file), b"weights").unwrap();
+
+        let mut config = map_training_config(&plan.config);
+        apply_face_losses(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.face_analysis_dir.as_ref().unwrap()),
+            canon(&stack)
+        );
+        assert!(config.perceptual_decoder_dir.is_some());
+        assert_eq!(
+            config.identity_loss,
+            gen_core::IdentityLossConfig {
+                schedule: gen_core::AuxLossSchedule {
+                    weight: 0.05,
+                    t_min: 0.1,
+                    t_max: 0.8,
+                    every_n: 1,
+                },
+                min_cos: 0.35,
+                reference_mode: gen_core::IdentityReferenceMode::PerImage,
+            }
+        );
+
+        // Landmark loss on top: refused naming FaceMesh-v2 until it is installed, then mapped.
+        use sceneworks_core::training::face_losses::FACEMESH_V2_MODEL;
+        value["config"]["advanced"]["faceLandmarkLossWeight"] = json!(0.2);
+        value["config"]["advanced"]["faceLandmarkLossEvery"] = json!(4);
+        let both = parse(value);
+        assert!(refusal(&both).contains(FACEMESH_V2_MODEL.id));
+        let mesh = fake_snapshot(
+            &hub,
+            FACEMESH_V2_MODEL.repo,
+            FACEMESH_V2_MODEL.revision,
+            FACEMESH_V2_MODEL.file,
+        );
+        let mut config = map_training_config(&both.config);
+        apply_face_losses(&settings, &both, &mut config).unwrap();
+        assert_eq!(
+            canon(config.face_landmark_loss.model_dir.as_ref().unwrap()),
+            canon(&mesh)
+        );
+        assert_eq!(
+            config.face_landmark_loss.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.2,
+                t_min: 0.0,
+                t_max: 1.0,
+                every_n: 4,
+            }
+        );
+        assert_eq!(
+            canon(config.face_analysis_dir.as_ref().unwrap()),
+            canon(&stack)
+        );
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
@@ -6730,6 +7124,9 @@ mod tests {
             depth_anchoring: Default::default(),
             body_losses: Default::default(),
             perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -6853,6 +7250,9 @@ mod tests {
             depth_anchoring: Default::default(),
             body_losses: Default::default(),
             perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -6979,6 +7379,9 @@ mod tests {
             depth_anchoring: Default::default(),
             body_losses: Default::default(),
             perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -7143,6 +7546,9 @@ mod tests {
             depth_anchoring: Default::default(),
             body_losses: Default::default(),
             perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {

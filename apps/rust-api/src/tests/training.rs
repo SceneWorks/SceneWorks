@@ -198,6 +198,34 @@ fn platform_effective_training_catalog_projects_body_loss_support() {
     }
 }
 
+/// sc-24831: the targets endpoint advertises the identity and face-landmark losses identically on
+/// both platforms (static flags, sc-24830) — on exactly the targets advertising depth anchoring
+/// (same builder arms + x0 decoder). Mutation: stop deriving the flags from depth ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_face_loss_support() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    use sceneworks_core::training::face_losses::{
+        target_supports_face_landmark_loss, target_supports_identity_loss,
+    };
+    let advertising = |candle: bool, f: fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| f(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = advertising(false, target_supports_depth_anchoring);
+    assert!(depth.iter().any(|id| id == "z_image_turbo_lora"));
+    for candle in [false, true] {
+        assert_eq!(advertising(candle, target_supports_identity_loss), depth);
+        assert_eq!(
+            advertising(candle, target_supports_face_landmark_loss),
+            depth
+        );
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

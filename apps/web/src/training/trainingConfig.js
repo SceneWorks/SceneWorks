@@ -83,6 +83,55 @@ export const bodyLosses = [
   { prefix: "normal", limit: "supportsNormalLoss", window: [0.4, 0.8], label: "Surface normals" },
 ];
 
+// Face losses (epic 2123, sc-24831): the ArcFace identity loss pulls the decoded prediction's face
+// toward the training images' identity; the FaceMesh landmark loss keeps the face shape. Off (empty
+// weight) by default; enabling seeds the upstream starting weight. These bounds are the API's
+// (crates/sceneworks-core/src/training/face_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const faceLossWeightMax = 1;
+export const faceLossWeightSuggested = 0.1;
+export const faceLossEveryMax = 16;
+export const faceLossEveryDefault = 2;
+export const identityLossMinCosDefault = 0.2;
+export const identityLossReferenceOptions = ["dataset_average", "per_image"];
+export const identityLossReferenceLabels = {
+  dataset_average: "Average of all images",
+  per_image: "Each image's own face",
+};
+
+// Whether the target's trainer on the serving platform honors the identity / face-landmark loss —
+// the API projects the platform-effective `limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss` (pinned to the trainer descriptors by a worker test).
+export function targetSupportsIdentityLoss(target) {
+  return target?.limits?.supportsIdentityLoss === true;
+}
+export function targetSupportsFaceLandmarkLoss(target) {
+  return target?.limits?.supportsFaceLandmarkLoss === true;
+}
+
+// Why a face loss (`label`) cannot run for this target + draft even though the target advertises
+// it, or null — mirrors the API's `face_loss_combination_refusal` (sc-24831), the same rules as
+// depth anchoring's: a full base fine-tune trains no adapter step, and an LTX-2.5 workflow with no
+// generated video has nothing to decode.
+export function faceLossCombinationRefusal(target, configDraft, label) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `${label} needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the identity / face-landmark control is offered for this target + draft.
+export function identityLossAvailable(target, configDraft) {
+  return targetSupportsIdentityLoss(target) && faceLossCombinationRefusal(target, configDraft, "Identity loss") === null;
+}
+export function faceLandmarkLossAvailable(target, configDraft) {
+  return targetSupportsFaceLandmarkLoss(target) && faceLossCombinationRefusal(target, configDraft, "Face landmark loss") === null;
+}
+
 // Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
 // trainer's per-element loss — background cells by the background weight, subject cells by the
 // subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
@@ -529,6 +578,17 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
     // Empty weight = that body loss off (the default); its knobs only reach the job while it is on.
     ...bodyLossesDraft(advanced),
+    // Empty weight = the face loss is off (the default); see faceLossWeightSuggested.
+    identityLossWeight: numericDraft(advanced.identityLossWeight),
+    identityLossMinT: numericDraft(advanced.identityLossMinT),
+    identityLossMaxT: numericDraft(advanced.identityLossMaxT),
+    identityLossEvery: numericDraft(advanced.identityLossEvery),
+    identityLossMinCos: numericDraft(advanced.identityLossMinCos),
+    identityLossReference: asText(advanced.identityLossReference || identityLossReferenceOptions[0]),
+    faceLandmarkLossWeight: numericDraft(advanced.faceLandmarkLossWeight),
+    faceLandmarkLossMinT: numericDraft(advanced.faceLandmarkLossMinT),
+    faceLandmarkLossMaxT: numericDraft(advanced.faceLandmarkLossMaxT),
+    faceLandmarkLossEvery: numericDraft(advanced.faceLandmarkLossEvery),
     // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
     subjectMaskLoss: advanced.subjectMaskLoss === true,
     subjectMaskBackgroundWeight: numericDraft(
@@ -752,6 +812,9 @@ export function configValidation(
   for (const [field, message] of bodyLossIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
+  for (const [field, message] of faceLossIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
   // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
   // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
@@ -934,6 +997,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       : undefined,
     ...depthAnchoringSnapshot(configDraft),
     ...bodyLossSnapshot(configDraft),
+    ...faceLossSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
     subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
     subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
@@ -1066,6 +1130,112 @@ export function depthAnchoringSnapshot(configDraft) {
     depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
     depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
   });
+}
+
+// A face loss is on whenever the draft carries its weight (empty = off).
+export function identityLossEnabled(configDraft) {
+  return String(configDraft?.identityLossWeight ?? "").trim() !== "";
+}
+export function faceLandmarkLossEnabled(configDraft) {
+  return String(configDraft?.faceLandmarkLossWeight ?? "").trim() !== "";
+}
+
+// Shared schedule checks for one face loss (weight / noise window / alternation period), the API's
+// bounds (E6). `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss"). Marks the
+// returned issues `blocked` when the loss cannot run here at all (unsupported target or refused
+// combination), so the caller skips its loss-specific knobs.
+function faceLossScheduleIssues(configDraft, prefix, label, supported, selectedTarget) {
+  const issues = [];
+  const weightKey = `${prefix}Weight`;
+  const weight = numberFromDraft(configDraft[weightKey]);
+  if (weight === null || weight < 0 || weight > faceLossWeightMax) {
+    issues.push([weightKey, `${label} weight must be between 0 and ${faceLossWeightMax}`]);
+  } else if (weight > 0 && !supported) {
+    // The control is hidden for such a target, so this names no input (field null): the value can
+    // only arrive from a carried-over draft, and the API would refuse it anyway.
+    issues.push([null, `This target does not support the ${label.toLowerCase()} — clear it or pick a supporting target`]);
+    issues.blocked = true;
+    return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = faceLossCombinationRefusal(selectedTarget, configDraft, label);
+    if (refusal) {
+      issues.push([weightKey, refusal]);
+      issues.blocked = true;
+      return issues;
+    }
+  }
+  const window = {};
+  for (const field of [`${prefix}MinT`, `${prefix}MaxT`]) {
+    if (!String(configDraft[field] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[field]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([field, "Noise window bounds must be between 0 and 1"]);
+    } else {
+      window[field] = t;
+    }
+  }
+  if ((window[`${prefix}MinT`] ?? 0) > (window[`${prefix}MaxT`] ?? 1)) {
+    issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
+  }
+  const everyKey = `${prefix}Every`;
+  if (String(configDraft[everyKey] ?? "").trim()) {
+    const every = numberFromDraft(configDraft[everyKey]);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > faceLossEveryMax) {
+      issues.push([everyKey, `Alternation period must be a whole number from 1 to ${faceLossEveryMax}`]);
+    }
+  }
+  return issues;
+}
+
+// Field issues for the face-loss knobs (checked only while each loss is enabled).
+export function faceLossIssues(configDraft, selectedTarget) {
+  const issues = [];
+  if (identityLossEnabled(configDraft)) {
+    const supported = !selectedTarget || targetSupportsIdentityLoss(selectedTarget);
+    const scheduleIssues = faceLossScheduleIssues(configDraft, "identityLoss", "Identity loss", supported, selectedTarget);
+    issues.push(...scheduleIssues);
+    if (!scheduleIssues.blocked) {
+      if (String(configDraft.identityLossMinCos ?? "").trim()) {
+        const minCos = numberFromDraft(configDraft.identityLossMinCos);
+        if (minCos === null || minCos < -1 || minCos > 1) {
+          issues.push(["identityLossMinCos", "Identity gate must be between -1 and 1"]);
+        }
+      }
+      if (!identityLossReferenceOptions.includes(asText(configDraft.identityLossReference).trim())) {
+        issues.push(["identityLossReference", `Identity reference must be one of ${identityLossReferenceOptions.join(", ")}`]);
+      }
+    }
+  }
+  if (faceLandmarkLossEnabled(configDraft)) {
+    const supported = !selectedTarget || targetSupportsFaceLandmarkLoss(selectedTarget);
+    issues.push(...faceLossScheduleIssues(configDraft, "faceLandmarkLoss", "Face landmark loss", supported, selectedTarget));
+  }
+  return issues;
+}
+
+// The face-loss keys a job snapshot carries: none while off (a default job's snapshot is
+// unchanged); the weight plus every set knob while on (unset knobs take the API defaults).
+export function faceLossSnapshot(configDraft) {
+  const snapshot = {};
+  if (identityLossEnabled(configDraft)) {
+    Object.assign(snapshot, compactObject({
+      identityLossWeight: numberFromDraft(configDraft.identityLossWeight),
+      identityLossMinT: numberFromDraft(configDraft.identityLossMinT),
+      identityLossMaxT: numberFromDraft(configDraft.identityLossMaxT),
+      identityLossEvery: numberFromDraft(configDraft.identityLossEvery),
+      identityLossMinCos: numberFromDraft(configDraft.identityLossMinCos),
+      identityLossReference: asText(configDraft.identityLossReference).trim(),
+    }));
+  }
+  if (faceLandmarkLossEnabled(configDraft)) {
+    Object.assign(snapshot, compactObject({
+      faceLandmarkLossWeight: numberFromDraft(configDraft.faceLandmarkLossWeight),
+      faceLandmarkLossMinT: numberFromDraft(configDraft.faceLandmarkLossMinT),
+      faceLandmarkLossMaxT: numberFromDraft(configDraft.faceLandmarkLossMaxT),
+      faceLandmarkLossEvery: numberFromDraft(configDraft.faceLandmarkLossEvery),
+    }));
+  }
+  return snapshot;
 }
 
 // The body-loss draft fields of a target/preset `advanced` bag (empty weight = off).

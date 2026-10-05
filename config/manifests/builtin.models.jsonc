@@ -28844,6 +28844,36 @@
       }
     },
     {
+      // MediaPipe FaceMesh-v2 landmark detector — the frozen perceptor of the native trainer's face-landmark loss (epic 2123, sc-24831). Upstream py-feat/mp_facemesh_v2 @ 39eb85054cf76fe0f57b7e12d6765ae89d89f2b5 (Apache-2.0) lowered to the native fx-program format by inference tools/convert_mp_facemesh_v2.py (commit 1d87a8eb2; self-check max abs 0.0) and rehosted. componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::face_losses::FACEMESH_V2_MODEL (parity test).
+      "id": "mp_facemesh_v2",
+      "autoDownload": false,
+      "name": "MediaPipe FaceMesh v2",
+      "family": "mp_facemesh",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/mp-facemesh-v2",
+          "revision": "4e65de94fd007bde5eccd557bd83f067cbd3d596",
+          "files": ["face_landmarks_detector.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 4997792,
+          "footprint": { "diskSizeBytes": 4997792 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/mp-facemesh-v2"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/mp-facemesh-v2/tree/4e65de94fd007bde5eccd557bd83f067cbd3d596",
+      "ui": {
+        "label": "MediaPipe FaceMesh v2",
+        "description": "Face-landmark detector (478 points) used by LoRA training's face-landmark loss to keep a character's face shape - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
+    },
+    {
       // Depth-Anything-V2 Small — the frozen perceptor of the native trainer's depth-anchoring loss (epic 2123, sc-2125). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::depth_anchoring::DEPTH_ANYTHING_V2_MODELS (parity test).
       "id": "depth_anything_v2_small",
       "autoDownload": false,

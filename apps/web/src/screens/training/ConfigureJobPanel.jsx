@@ -50,7 +50,79 @@ import {
   bodyLossWeightSuggested,
   bodyShapeMinCosDefault,
   bodyLossAvailable,
+  faceLandmarkLossEnabled,
+  faceLossEveryDefault,
+  faceLossEveryMax,
+  faceLossWeightMax,
+  faceLossWeightSuggested,
+  identityLossEnabled,
+  identityLossMinCosDefault,
+  identityLossReferenceLabels,
+  identityLossReferenceOptions,
+  faceLandmarkLossAvailable,
+  identityLossAvailable,
 } from "../../training/trainingConfig.js";
+
+// The weight / noise window / alternation knobs of one decoded-x0 face loss (sc-24831), shown
+// while the loss is on. `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss").
+function FaceLossScheduleFields({ prefix, label, configDraft, configValidity, updateConfigDraft }) {
+  const field = (suffix) => `${prefix}${suffix}`;
+  return (
+    <>
+      <label title={`${label} weight. Upstream suggests starting between 0.01 and 0.1.`}>
+        {label} weight
+        <input
+          max={faceLossWeightMax}
+          min="0"
+          onChange={(event) => updateConfigDraft(field("Weight"), event.target.value)}
+          step="0.01"
+          type="number"
+          value={configDraft[field("Weight")] ?? ""}
+          {...invalidProps(configValidity, field("Weight"))}
+        />
+      </label>
+      <label title={`Lowest noise level (0 = clean image, 1 = pure noise) at which the ${label.toLowerCase()} applies. Empty = 0.`}>
+        {label} window min
+        <input
+          max="1"
+          min="0"
+          onChange={(event) => updateConfigDraft(field("MinT"), event.target.value)}
+          placeholder="0"
+          step="0.05"
+          type="number"
+          value={configDraft[field("MinT")] ?? ""}
+          {...invalidProps(configValidity, field("MinT"))}
+        />
+      </label>
+      <label title={`Highest noise level at which the ${label.toLowerCase()} applies. Empty = 1.`}>
+        {label} window max
+        <input
+          max="1"
+          min="0"
+          onChange={(event) => updateConfigDraft(field("MaxT"), event.target.value)}
+          placeholder="1"
+          step="0.05"
+          type="number"
+          value={configDraft[field("MaxT")] ?? ""}
+          {...invalidProps(configValidity, field("MaxT"))}
+        />
+      </label>
+      <label title={`Every Nth step trains the ${label.toLowerCase()} alone; the steps between train the normal loss. 1 adds it to every step instead.`}>
+        {label} every N steps
+        <input
+          max={faceLossEveryMax}
+          min="1"
+          onChange={(event) => updateConfigDraft(field("Every"), event.target.value)}
+          placeholder={String(faceLossEveryDefault)}
+          step="1"
+          type="number"
+          value={configDraft[field("Every")] ?? ""}
+          {...invalidProps(configValidity, field("Every"))}
+        />
+      </label>
+    </>
+  );
+}
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
 // page-frame standard (sc-10475): one work-panel holding the twelve basic plan
@@ -181,6 +253,13 @@ export function ConfigureJobPanel({
   // declares it and its weights are cataloged (`limits.supportsBodyProportionLoss` / …ShapeLoss /
   // …NormalLoss); on whenever the draft carries its weight, knobs shown while on.
   const supportedBodyLosses = bodyLosses.filter((loss) => bodyLossAvailable(selectedTarget, loss, configDraft));
+  // The face losses (sc-24831) follow the same target-support mechanism
+  // (`limits.supportsIdentityLoss` / `limits.supportsFaceLandmarkLoss`).
+  // A full fine-tune or an LTX-2.5 workflow with no generated video hides them too.
+  const identityLossSupported = identityLossAvailable(selectedTarget, configDraft);
+  const identityLossOn = identityLossEnabled(configDraft);
+  const faceLandmarkLossSupported = faceLandmarkLossAvailable(selectedTarget, configDraft);
+  const faceLandmarkLossOn = faceLandmarkLossEnabled(configDraft);
   // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
   // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
   // through configValidation instead of rendering a toggle the run would refuse.
@@ -834,6 +913,53 @@ export function ConfigureJobPanel({
                     ) : null}
                   </React.Fragment>
                 ))}
+              {identityLossSupported && identityLossOn ? (
+                <>
+                  <FaceLossScheduleFields
+                    configDraft={configDraft}
+                    configValidity={configValidity}
+                    label="Identity loss"
+                    prefix="identityLoss"
+                    updateConfigDraft={updateConfigDraft}
+                  />
+                  <label title="A step whose predicted face is no more similar to the reference than this (cosine, -1 to 1) adds no identity loss, so blobs that are not faces are never pushed. Empty = 0.2.">
+                    Identity gate (min similarity)
+                    <input
+                      max="1"
+                      min="-1"
+                      onChange={(event) => updateConfigDraft("identityLossMinCos", event.target.value)}
+                      placeholder={String(identityLossMinCosDefault)}
+                      step="0.05"
+                      type="number"
+                      value={configDraft.identityLossMinCos ?? ""}
+                      {...invalidProps(configValidity, "identityLossMinCos")}
+                    />
+                  </label>
+                  <label title="What each image's face is pulled toward: the average identity of every training image (steadier), or that image's own face.">
+                    Identity reference
+                    <select
+                      onChange={(event) => updateConfigDraft("identityLossReference", event.target.value)}
+                      value={configDraft.identityLossReference ?? ""}
+                      {...invalidProps(configValidity, "identityLossReference")}
+                    >
+                      {identityLossReferenceOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {identityLossReferenceLabels[option] ?? option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              ) : null}
+              {faceLandmarkLossSupported && faceLandmarkLossOn ? (
+                <FaceLossScheduleFields
+                  configDraft={configDraft}
+                  configValidity={configValidity}
+                  label="Face landmark loss"
+                  prefix="faceLandmarkLoss"
+                  updateConfigDraft={updateConfigDraft}
+                />
+              ) : null}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -1030,6 +1156,42 @@ export function ConfigureJobPanel({
                   {loss.label} loss
                 </label>
               ))}
+              {identityLossSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Keep the character's face: the model's prediction is decoded and a frozen face recognizer (ArcFace) compares the face to the training images'. Images without a detectable face are skipped. Needs the TAEF1 decoder and the InstantID face analysis stack installed. Off by default."
+                >
+                  <input
+                    checked={identityLossOn}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "identityLossWeight",
+                        event.target.checked ? String(faceLossWeightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Identity loss
+                </label>
+              ) : null}
+              {faceLandmarkLossSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Keep the character's face shape: a frozen face-mesh model compares the predicted face's landmarks (jaw, lips, eyes, nose) to the training image's. Needs the TAEF1 decoder, the InstantID face analysis stack and MediaPipe FaceMesh v2 installed. Off by default."
+                >
+                  <input
+                    checked={faceLandmarkLossOn}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "faceLandmarkLossWeight",
+                        event.target.checked ? String(faceLossWeightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Face landmark loss
+                </label>
+              ) : null}
               {subjectMaskLossSupported ? (
                 <label
                   className="training-checkbox-field"

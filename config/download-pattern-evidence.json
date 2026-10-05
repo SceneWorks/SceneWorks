@@ -3551,6 +3551,19 @@
       ]
     },
     {
+      "key": "SceneWorks/mp-facemesh-v2@4e65de94fd007bde5eccd557bd83f067cbd3d596",
+      "repo": "SceneWorks/mp-facemesh-v2",
+      "revision": "4e65de94fd007bde5eccd557bd83f067cbd3d596",
+      "resolvedSha": "4e65de94fd007bde5eccd557bd83f067cbd3d596",
+      "servedRepo": "SceneWorks/mp-facemesh-v2",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "face_landmarks_detector.safetensors"
+      ]
+    },
+    {
       "key": "SceneWorks/perth-implicit@80b60f9caead09b8d3b512bda0b24038f28c08ec",
       "repo": "SceneWorks/perth-implicit",
       "revision": "80b60f9caead09b8d3b512bda0b24038f28c08ec",

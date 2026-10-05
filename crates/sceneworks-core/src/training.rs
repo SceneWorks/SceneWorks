@@ -238,6 +238,10 @@ pub mod body_losses;
 /// catalog models.
 pub mod depth_anchoring;
 
+/// Face losses (epic 2123, sc-24831): the ArcFace identity loss and the FaceMesh landmark loss —
+/// keys, bounds, the shared strict parsers, support flags and auxiliary catalog models.
+pub mod face_losses;
+
 /// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
 /// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
 /// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
@@ -770,6 +774,18 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
     // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
     // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
     for target in &mut registry.targets {
+        // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride
+        // the same shared perceptual builder arms and x0 decoder as depth anchoring, and every
+        // trainer that declares depth anchoring declares both — so each target advertising depth
+        // anchoring advertises them too (the worker drift test pins all three to the descriptors).
+        if depth_anchoring::target_supports_depth_anchoring(target) {
+            for key in [
+                face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
+                face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
+            ] {
+                target.limits.insert(key.to_owned(), Value::Bool(true));
+            }
+        }
         if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
             target.limits.insert(
                 RESOLUTION_BUCKETS_SUPPORT_LIMIT.to_owned(),
@@ -3455,6 +3471,7 @@ pub fn validate_training_config_for_target(
     validate_technique_support(target, config)?;
     depth_anchoring::validate_support(target, config)?;
     body_losses::validate_support(target, config)?;
+    face_losses::validate_support(target, config)?;
     validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -3728,6 +3745,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     })?;
     depth_anchoring::validate(config)?;
     body_losses::validate(config)?;
+    face_losses::validate(config)?;
     validate_subject_mask_loss(config)?;
     Ok(())
 }

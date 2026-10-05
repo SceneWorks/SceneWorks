@@ -3002,3 +3002,271 @@ fn body_losses_refuse_the_combinations_the_engine_refuses() {
         other => panic!("expected a normalRestrictToSubject field error, got {other:?}"),
     }
 }
+
+/// Build a Z-Image plan whose `advanced` carries the given face-loss keys (sc-24831).
+fn build_face_plan(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_face",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_face",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_face"),
+        file_name: "face.safetensors".to_owned(),
+        created_at: "2026-10-05T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24831 (epic 2123 E6): in-range identity-loss values survive into the plan verbatim; every
+/// out-of-range / wrong-type identity or landmark value is a field-level error naming the key.
+/// Mutation: drop the `min_cos` range in `identity_loss_settings` ⇒ the 1.5 case is accepted ⇒ red.
+#[test]
+fn build_training_plan_validates_face_losses_as_field_errors() {
+    use sceneworks_core::training::face_losses::*;
+    let good = [
+        (IDENTITY_LOSS_WEIGHT_KEY, json!(FACE_LOSS_WEIGHT_SUGGESTED)),
+        (IDENTITY_LOSS_MIN_T_KEY, json!(0.1)),
+        (IDENTITY_LOSS_MAX_T_KEY, json!(0.9)),
+        (IDENTITY_LOSS_EVERY_KEY, json!(FACE_LOSS_EVERY_MAX)),
+        (IDENTITY_LOSS_MIN_COS_KEY, json!(-0.5)),
+        (IDENTITY_LOSS_REFERENCE_KEY, json!("per_image")),
+    ];
+    let plan = build_face_plan(&good).expect("in-range identity loss is accepted");
+    for (key, value) in &good {
+        assert_eq!(&plan.config.advanced[*key], value, "{key}");
+    }
+    let settings = identity_loss_settings(&plan.config.advanced)
+        .unwrap()
+        .expect("weight > 0 is on");
+    assert_eq!(settings.reference, "per_image");
+    assert_eq!(settings.min_cos, -0.5);
+    assert_eq!(settings.schedule.every, FACE_LOSS_EVERY_MAX as u32);
+    let defaults = identity_loss_settings(
+        &build_face_plan(&[(IDENTITY_LOSS_WEIGHT_KEY, json!(0.1))])
+            .unwrap()
+            .config
+            .advanced,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(defaults.reference, IDENTITY_LOSS_REFERENCES[0]);
+    assert_eq!(defaults.min_cos, IDENTITY_LOSS_MIN_COS_DEFAULT);
+    assert_eq!(defaults.schedule.every, FACE_LOSS_EVERY_DEFAULT);
+    let off = build_face_plan(&[(IDENTITY_LOSS_WEIGHT_KEY, json!(0))]).unwrap();
+    assert_eq!(identity_loss_settings(&off.config.advanced).unwrap(), None);
+
+    for (key, value) in [
+        (IDENTITY_LOSS_WEIGHT_KEY, json!(-0.01)),
+        (
+            IDENTITY_LOSS_WEIGHT_KEY,
+            json!(FACE_LOSS_WEIGHT_MAX + 0.001),
+        ),
+        (IDENTITY_LOSS_WEIGHT_KEY, json!("0.1")),
+        (IDENTITY_LOSS_MIN_T_KEY, json!(-0.1)),
+        (IDENTITY_LOSS_MAX_T_KEY, json!(1.5)),
+        (IDENTITY_LOSS_EVERY_KEY, json!(0)),
+        (IDENTITY_LOSS_EVERY_KEY, json!(2.5)),
+        (IDENTITY_LOSS_MIN_COS_KEY, json!(1.5)),
+        (IDENTITY_LOSS_MIN_COS_KEY, json!(-1.01)),
+        (IDENTITY_LOSS_REFERENCE_KEY, json!("random")),
+        (FACE_LANDMARK_LOSS_WEIGHT_KEY, json!(-1)),
+        (FACE_LANDMARK_LOSS_MAX_T_KEY, json!(7)),
+        (FACE_LANDMARK_LOSS_EVERY_KEY, json!(FACE_LOSS_EVERY_MAX + 1)),
+    ] {
+        match build_face_plan(&[(key, value.clone())]) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, key, "{key}={value}")
+            }
+            other => panic!("{key}={value}: expected a field error naming {key}, got {other:?}"),
+        }
+    }
+    // A window with min > max names the max key.
+    match build_face_plan(&[
+        (IDENTITY_LOSS_MIN_T_KEY, json!(0.7)),
+        (IDENTITY_LOSS_MAX_T_KEY, json!(0.2)),
+    ]) {
+        Err(TrainingPlanError::InvalidField { field, .. }) => {
+            assert_eq!(field, IDENTITY_LOSS_MAX_T_KEY)
+        }
+        other => panic!("expected a window error, got {other:?}"),
+    }
+}
+
+/// sc-24831 (epic 2123 E6): the web form's face-loss bounds are the API's bounds.
+#[test]
+fn web_face_loss_bounds_match_the_api_bounds() {
+    use sceneworks_core::training::face_losses::*;
+    let num = |name: &str| -> f64 {
+        web_training_const(name)
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not numeric ({error})"))
+    };
+    assert_eq!(num("faceLossWeightMax"), FACE_LOSS_WEIGHT_MAX);
+    assert_eq!(num("faceLossWeightSuggested"), FACE_LOSS_WEIGHT_SUGGESTED);
+    assert_eq!(num("faceLossEveryMax"), FACE_LOSS_EVERY_MAX as f64);
+    assert_eq!(num("faceLossEveryDefault"), FACE_LOSS_EVERY_DEFAULT as f64);
+    assert_eq!(
+        num("identityLossMinCosDefault"),
+        IDENTITY_LOSS_MIN_COS_DEFAULT
+    );
+    let references: Vec<String> =
+        serde_json::from_str(&web_training_const("identityLossReferenceOptions"))
+            .expect("identityLossReferenceOptions is a JSON-compatible string array");
+    assert_eq!(references, IDENTITY_LOSS_REFERENCES.to_vec());
+}
+
+/// sc-24831: every model the face losses load is a `componentOnly` catalog entry at exactly the
+/// worker's resolution revision, downloading the file the loss reads — the shipped
+/// `instantid_face_stack` (SCRFD + ArcFace) and the rehosted FaceMesh-v2. Mutation: point
+/// `FACE_STACK_SCRFD` or `FACEMESH_V2_MODEL` at another revision ⇒ red.
+#[test]
+fn identity_loss_face_stack_is_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::face_losses::{
+        FACEMESH_V2_MODEL, FACE_STACK_ARCFACE, FACE_STACK_SCRFD,
+    };
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    for aux in [&FACE_STACK_SCRFD, &FACE_STACK_ARCFACE, &FACEMESH_V2_MODEL] {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == aux.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", aux.id));
+        assert_eq!(entry["componentOnly"], true, "{}", aux.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], aux.repo, "{}", aux.id);
+        assert_eq!(download["revision"], aux.revision, "{}", aux.id);
+        assert!(
+            download["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == aux.file),
+            "{} does not download {}",
+            aux.id,
+            aux.file
+        );
+    }
+}
+
+/// sc-24831 (S1 mechanism): the face-loss flags are static per target and follow depth anchoring
+/// (same builder arms + x0 decoder): every target but the Krea ControlNet branch advertises both;
+/// an enabled weight on a non-advertising target is a submit-time field error naming the key, and
+/// off is always admitted. Mutation: drop `face_losses::validate_support` from
+/// `validate_training_config_for_target` ⇒ the control case is accepted ⇒ red.
+#[test]
+fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    use sceneworks_core::training::face_losses::{
+        target_supports_face_landmark_loss, target_supports_identity_loss,
+        FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
+    };
+    let registry = builtin_training_targets();
+    let with = |target: &sceneworks_core::training::TrainingTarget, key: &str, weight: Value| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert(key.to_owned(), weight);
+        validate_training_config_for_target(target, &config)
+    };
+    for (key, supports) in [
+        (
+            IDENTITY_LOSS_WEIGHT_KEY,
+            target_supports_identity_loss as fn(&sceneworks_core::training::TrainingTarget) -> bool,
+        ),
+        (
+            FACE_LANDMARK_LOSS_WEIGHT_KEY,
+            target_supports_face_landmark_loss,
+        ),
+    ] {
+        let unsupported: Vec<&str> = registry
+            .targets
+            .iter()
+            .filter(|target| !supports(target))
+            .map(|target| target.id.as_str())
+            .collect();
+        assert_eq!(unsupported, ["krea_2_control"], "{key}");
+        for target in &registry.targets {
+            assert_eq!(
+                supports(target),
+                target_supports_depth_anchoring(target),
+                "{key} {}",
+                target.id
+            );
+            with(target, key, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+            match (with(target, key, json!(0.1)), supports(target)) {
+                (Ok(()), true) => {}
+                (Err(TrainingPlanError::InvalidField { field, .. }), false) => {
+                    assert_eq!(field, key, "{}", target.id)
+                }
+                (other, supported) => panic!(
+                    "{} {key} (advertised {supported}): unexpected validation {other:?}",
+                    target.id
+                ),
+            }
+        }
+    }
+}
+
+/// sc-24831: submit refuses the face-loss combinations the engine refuses even on an advertising
+/// target — a Mage full base fine-tune and each LTX-2.5 workflow with no generated video — as a
+/// field error naming the loss's weight key; the adapter run and a video LTX-2.5 workflow are
+/// admitted (mirrors sc-24830's depth refusal). Mutation: drop the `face_loss_combination_refusal`
+/// checks from `face_losses::validate_support` ⇒ the refused cases are admitted ⇒ red.
+#[test]
+fn face_losses_refuse_full_finetune_and_no_video_ltx_workflows_at_submit() {
+    use sceneworks_core::training::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS;
+    use sceneworks_core::training::face_losses::{
+        FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
+    };
+    let registry = builtin_training_targets();
+    let target = |pred: &dyn Fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        registry
+            .targets
+            .iter()
+            .find(|t| pred(t))
+            .expect("target")
+            .clone()
+    };
+    let mage = target(&|t| t.base_model == "mage_flow_base");
+    let ltx = target(&|t| t.id == "ltx_2_5_video_lora");
+    for key in [IDENTITY_LOSS_WEIGHT_KEY, FACE_LANDMARK_LOSS_WEIGHT_KEY] {
+        let with = |t: &sceneworks_core::training::TrainingTarget, extra: &[(&str, Value)]| {
+            let mut config = t.defaults.clone();
+            config.advanced.insert(key.to_owned(), json!(0.1));
+            for (k, v) in extra {
+                config.advanced.insert((*k).to_owned(), v.clone());
+            }
+            validate_training_config_for_target(t, &config)
+        };
+        let refused = |r: Result<(), TrainingPlanError>, what: &str| match r {
+            Err(TrainingPlanError::InvalidField { field, .. }) => assert_eq!(field, key, "{what}"),
+            other => panic!("{what}: expected a {key} field error, got {other:?}"),
+        };
+        with(&mage, &[("networkType", json!("lora"))]).expect("Mage LoRA admits it");
+        refused(with(&mage, &[("networkType", json!("full"))]), "mage full");
+        with(&ltx, &[("ltxWorkflow", json!("t2v_lora"))]).expect("LTX-2.5 t2v admits it");
+        for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
+            refused(with(&ltx, &[("ltxWorkflow", json!(workflow))]), workflow);
+        }
+    }
+}
