@@ -1026,3 +1026,83 @@ describe("ConfigureJobPanel subject-masked loss", () => {
     expect(weightInput("Subject weight").getAttribute("aria-invalid")).toBe("true");
   });
 });
+
+// sc-24831 (epic 2123): the identity / face-landmark losses are off-by-default advanced toggles,
+// offered only for a target whose platform trainer declares them (`limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss`). Checking one seeds 0.1; its knobs exist only while it is on.
+describe("ConfigureJobPanel face losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsIdentityLoss: true },
+  };
+  const BOTH = { ...Z_IMAGE, limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("offers the identity loss off by default, seeds 0.1, and hides the landmark loss", () => {
+    const calls = mountWith();
+    expect(toggle("Identity loss").checked).toBe(false);
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    act(() => toggle("Identity loss").click());
+    expect(calls).toEqual([["identityLossWeight", "0.1"]]);
+  });
+
+  // Mutation: render the toggles unconditionally ⇒ red.
+  it("offers no toggle or knobs for a target that supports neither (SDXL)", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, identityLossWeight: "0.1", faceLandmarkLossWeight: "0.1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("Identity loss")).toBeUndefined();
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    expect(field("Face landmark loss weight")).toBeUndefined();
+  });
+
+  it("shows each loss's knobs while enabled and outlines an invalid gate", () => {
+    const calls = mountWith({
+      target: BOTH,
+      draft: {
+        ...VALID_DRAFT,
+        identityLossWeight: "0.1",
+        identityLossReference: "dataset_average",
+        identityLossMinCos: "2",
+        faceLandmarkLossWeight: "0.1",
+      },
+    });
+    expect(toggle("Identity loss").checked).toBe(true);
+    expect(field("Identity loss weight").getAttribute("max")).toBe("1");
+    expect(field("Identity loss every N steps").getAttribute("max")).toBe("16");
+    expect([...field("Identity reference").options].map((o) => o.value)).toEqual(["dataset_average", "per_image"]);
+    expect(field("Identity gate").getAttribute("aria-invalid")).toBe("true");
+    expect(field("Face landmark loss weight").value).toBe("0.1");
+    expect(field("Face landmark loss window max")).toBeTruthy();
+    act(() => toggle("Face landmark loss").click());
+    expect(calls).toEqual([["faceLandmarkLossWeight", ""]]);
+  });
+});

@@ -158,6 +158,34 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     assert!(advertising(true).is_empty());
 }
 
+/// sc-24831: the targets endpoint advertises the identity and face-landmark losses per platform —
+/// Z-Image on the MLX catalog, nothing on the Candle catalog. Mutation: drop either flag removal
+/// from `project_candle_training_limits` ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_face_loss_support() {
+    use sceneworks_core::training::face_losses::{
+        target_supports_face_landmark_loss, target_supports_identity_loss,
+    };
+    let advertising = |candle: bool, f: fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| f(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        advertising(false, target_supports_identity_loss),
+        ["z_image_turbo_lora"]
+    );
+    assert!(advertising(true, target_supports_identity_loss).is_empty());
+    assert_eq!(
+        advertising(false, target_supports_face_landmark_loss),
+        ["z_image_turbo_lora"]
+    );
+    assert!(advertising(true, target_supports_face_landmark_loss).is_empty());
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

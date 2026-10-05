@@ -2,16 +2,16 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 107,
+    "modelCount": 112,
     "importedFamilyCount": 4,
-    "cellCount": 1005,
+    "cellCount": 1010,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
   },
   "sources": {
     "apiContractEntry": "a443b88144a7b7bb903046b55bf8585fb5be5f9bc03f183e1282213810906203",
-    "apiDto": "a1cd6ac05c39f4f8c35e345d7384b883a659eebe8e80f582c3e39502d33aacec",
+    "apiDto": "60bd7d130c6e0a778512a56d15e598ba685dcf5e148f06d7b6dc92374c2049f5",
     "apiGeneration": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4",
     "apiValidation": "60a46aa0b42f00caf0cdb7a6f720f5627589f93e54ba31da4d2917ac8e44d9a7",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
@@ -22,14 +22,14 @@
     "descriptorMlxRuntime": "e2298d047fccb330306cd08561543de1e71668f0d885421560c80386b944c870",
     "descriptorPreviewFacts": "960aaacfa29aba99e932d0c44e0a226cc00241890a1aa5c6848e49917269d7a4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "c9367b3a18b838c08b55b09647dec3889d67d6e928ec33d8139191b22abf98ec",
+    "manifest": "feef11c52546eef684922d8b4c94c9c766d2478baaef67055b3956b00dd3314b",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "14749024735790cc33f3d4f3e968241b4bbcf5e0a30546b52038be39f0988a41",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "678145d02f75ba41158b389c94dcb67c8b7ae3a66932b5875fda5b61c821a008",
-    "trainingCatalog": "ec411410a97f1f8c190c29b036d5b068cc97e498adb8224a140950400cb9059a",
+    "trainingCatalog": "1e86828c4ecf9a529bbdd5f411e5cf2692dc037dc6458f68aae4395b547d33f9",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "f93232d68ca90080fcc2758405a3c8b9b96927e412793cfdd1c19d4cdd171010",
+    "workerTrainingDispatch": "ebf7594102628ecb178d37727ac89834f69a52e1253c3ef419b5021bdc1dc587",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -1021,6 +1021,57 @@
           "candle": true
         }
       ],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_base",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_large",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "depth_anything_v2_small",
+      "family": "depth_anything_v2",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
       "conditioningShape": [],
       "userAdapters": [],
       "precisionTier": [],
@@ -3927,6 +3978,23 @@
       }
     },
     {
+      "id": "mp_facemesh_v2",
+      "family": "mp_facemesh",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "openvoice_v2",
       "family": "openvoice",
       "modelType": "audio",
@@ -6037,6 +6105,23 @@
         "capability": "live_preview",
         "mlx": false,
         "candle": false
+      }
+    },
+    {
+      "id": "taef1",
+      "family": "taef1",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {

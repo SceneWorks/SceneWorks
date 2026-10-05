@@ -83,7 +83,9 @@
           6000
         ],
         "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true

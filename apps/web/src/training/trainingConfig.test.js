@@ -24,6 +24,12 @@ import {
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
   depthAnchoringWeightSuggested,
+  faceLossEveryMax,
+  faceLossWeightMax,
+  faceLossWeightSuggested,
+  identityLossReferenceOptions,
+  targetSupportsFaceLandmarkLoss,
+  targetSupportsIdentityLoss,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -1127,5 +1133,125 @@ describe("subject-masked loss (sc-24828)", () => {
       missing: 2,
       complete: false,
     });
+  });
+});
+
+// sc-24831 (epic 2123): the face losses are off by default, round-trip from the draft into the job
+// snapshot only while on, are bounded by the API's limits (E6), and follow the target-support
+// mechanism (`limits.supportsIdentityLoss` / `limits.supportsFaceLandmarkLoss`).
+describe("face losses (sc-24831)", () => {
+  const faceTarget = {
+    ...target,
+    limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true },
+  };
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    identityLossReference: "dataset_average",
+  };
+  const snap = (draft, selectedTarget = faceTarget) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget,
+    });
+  const issuesOn = (draft, field, selectedTarget = faceTarget) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget }).filter(
+      (entry) => entry.field === field,
+    );
+
+  it("seeds off and leaves a default snapshot without any face-loss key", () => {
+    const draft = configDraftFromTarget(faceTarget, dataset, ["auto"]);
+    expect(draft.identityLossWeight).toBe("");
+    expect(draft.faceLandmarkLossWeight).toBe("");
+    expect(draft.identityLossReference).toBe("dataset_average");
+    for (const key of Object.keys(snap(draft).config.advanced)) {
+      expect(key.startsWith("identityLoss") || key.startsWith("faceLandmarkLoss")).toBe(false);
+    }
+  });
+
+  it("round-trips enabled configurations into the snapshot as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(faceTarget, dataset, ["auto"]),
+      identityLossWeight: String(faceLossWeightSuggested),
+      identityLossMinT: "0.1",
+      identityLossMaxT: "0.9",
+      identityLossEvery: "1",
+      identityLossMinCos: "0.3",
+      identityLossReference: "per_image",
+      faceLandmarkLossWeight: "0.05",
+      faceLandmarkLossEvery: "4",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.identityLossWeight).toBe(0.1);
+    expect(advanced.identityLossMinT).toBe(0.1);
+    expect(advanced.identityLossMaxT).toBe(0.9);
+    expect(advanced.identityLossEvery).toBe(1);
+    expect(advanced.identityLossMinCos).toBe(0.3);
+    expect(advanced.identityLossReference).toBe("per_image");
+    expect(advanced.faceLandmarkLossWeight).toBe(0.05);
+    expect(advanced.faceLandmarkLossEvery).toBe(4);
+    const seeded = configDraftFromTarget(
+      {
+        ...target,
+        defaults: {
+          ...target.defaults,
+          advanced: { networkType: "lora", identityLossWeight: 0.2, identityLossReference: "per_image" },
+        },
+      },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.identityLossWeight).toBe("0.2");
+    expect(seeded.identityLossReference).toBe("per_image");
+  });
+
+  it("uses the API's bounds", () => {
+    expect(faceLossWeightMax).toBe(1);
+    expect(faceLossEveryMax).toBe(16);
+    expect(identityLossReferenceOptions).toEqual(["dataset_average", "per_image"]);
+  });
+
+  // Mutation: drop the identityLossMinCos range check ⇒ the 1.5 case passes ⇒ red.
+  it("flags out-of-range knobs on their own fields, only while enabled", () => {
+    expect(issuesOn({ identityLossEvery: "0" }, "identityLossEvery")).toEqual([]);
+    const on = { identityLossWeight: "0.1" };
+    expect(issuesOn(on, "identityLossWeight")).toEqual([]);
+    for (const bad of ["-0.1", String(faceLossWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ identityLossWeight: bad }, "identityLossWeight")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, identityLossMinCos: "1.5" }, "identityLossMinCos")).toHaveLength(1);
+    expect(issuesOn({ ...on, identityLossMinCos: "-0.5" }, "identityLossMinCos")).toEqual([]);
+    expect(issuesOn({ ...on, identityLossReference: "random" }, "identityLossReference")).toHaveLength(1);
+    expect(issuesOn({ ...on, identityLossMinT: "0.7", identityLossMaxT: "0.3" }, "identityLossMaxT")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(faceLossEveryMax + 1)]) {
+      expect(issuesOn({ ...on, identityLossEvery: bad }, "identityLossEvery")).toHaveLength(1);
+    }
+    const lm = { faceLandmarkLossWeight: "0.1" };
+    expect(issuesOn(lm, "faceLandmarkLossWeight")).toEqual([]);
+    expect(issuesOn({ ...lm, faceLandmarkLossMaxT: "3" }, "faceLandmarkLossMaxT")).toHaveLength(1);
+  });
+
+  // Mutation: read a truthy (not strictly true) flag as support ⇒ the "true"-string case passes ⇒ red.
+  it("reads only an explicit true flag as support and refuses a carried-over weight elsewhere", () => {
+    expect(targetSupportsIdentityLoss({ limits: { supportsIdentityLoss: true } })).toBe(true);
+    expect(targetSupportsIdentityLoss({ limits: { supportsIdentityLoss: "true" } })).toBe(false);
+    expect(targetSupportsFaceLandmarkLoss({ limits: {} })).toBe(false);
+    const unsupported = configValidation(
+      { ...whole, identityLossWeight: "0.1", faceLandmarkLossWeight: "0.1" },
+      { activeDataset: dataset, selectedTarget: target },
+    ).filter((entry) => entry.field === null);
+    expect(unsupported.map((entry) => entry.message)).toEqual([
+      "This target does not support the identity loss — clear it or pick a supporting target",
+      "This target does not support the face landmark loss — clear it or pick a supporting target",
+    ]);
   });
 });
