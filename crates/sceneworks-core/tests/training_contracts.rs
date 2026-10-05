@@ -6,6 +6,11 @@ use sceneworks_core::training::{
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
     TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
     TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
+};
+use sceneworks_core::training::{
+    project_candle_training_limits, target_supports_weight_noise,
+    validate_training_config_for_target,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -1697,4 +1702,148 @@ fn trainer_capability_optimizer_and_unknown_numeric_limits_fail_closed() {
             ref field
         }) if field == "futureNumericBudget"
     ));
+}
+
+/// Build a Z-Image plan whose `advanced` carries `weightNoiseSigma` (and optionally a network type).
+fn build_plan_with_weight_noise(
+    sigma: Value,
+    network_type: Option<&str>,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
+    if let Some(network_type) = network_type {
+        config
+            .advanced
+            .insert("networkType".to_owned(), json!(network_type));
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_wn",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_wn",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_wn"),
+        file_name: "wn.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24826 (epic 2123 E6): an in-range weight-noise sigma survives into the plan's config
+/// snapshot verbatim; negative / above-limit / non-numeric values and the full-fine-tune
+/// combination are field-level errors naming `weightNoiseSigma`.
+#[test]
+fn build_training_plan_validates_weight_noise_sigma_as_a_field_error() {
+    for sigma in [
+        json!(0),
+        json!(WEIGHT_NOISE_SIGMA_SUGGESTED),
+        json!(WEIGHT_NOISE_SIGMA_MAX),
+    ] {
+        let plan = build_plan_with_weight_noise(sigma.clone(), None)
+            .unwrap_or_else(|error| panic!("{sigma} must be accepted: {error}"));
+        assert_eq!(plan.config.advanced["weightNoiseSigma"], sigma);
+    }
+    for (sigma, network_type) in [
+        (json!(-0.0001), None),
+        (json!(WEIGHT_NOISE_SIGMA_MAX + 0.0001), None),
+        (json!("0.0125"), None),
+        (json!(WEIGHT_NOISE_SIGMA_SUGGESTED), Some("full")),
+    ] {
+        match build_plan_with_weight_noise(sigma.clone(), network_type) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "weightNoiseSigma", "{sigma}/{network_type:?}")
+            }
+            other => panic!(
+                "{sigma}/{network_type:?}: expected a weightNoiseSigma field error, got {other:?}"
+            ),
+        }
+    }
+}
+
+/// sc-24826 (epic 2123 E6): the web form's weight-noise bound is the API's bound. The web
+/// constant lives in `apps/web/src/training/trainingConfig.js`; read it so the two cannot drift.
+#[test]
+fn web_weight_noise_bound_matches_the_api_bound() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("weightNoiseSigmaMax"), WEIGHT_NOISE_SIGMA_MAX);
+    assert_eq!(
+        read("weightNoiseSigmaSuggested"),
+        WEIGHT_NOISE_SIGMA_SUGGESTED
+    );
+}
+
+/// sc-24826 review: only targets whose platform trainer declares weight noise advertise it, and a
+/// non-zero sigma on any other target is a submit-time `weightNoiseSigma` field error (not a
+/// refusal after the job is queued). The Candle projection withdraws Z-Image's MLX-only support.
+#[test]
+fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_sigma = |target: &sceneworks_core::training::TrainingTarget, sigma: Value| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
+        validate_training_config_for_target(target, &config)
+    };
+
+    let advertising: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| target_supports_weight_noise(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        advertising,
+        ["z_image_turbo_lora"],
+        "only Z-Image MLX declares weight noise"
+    );
+
+    let z_image = by_id("z_image_turbo_lora");
+    with_sigma(&z_image, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)).expect("Z-Image MLX admits it");
+
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    assert!(!target_supports_weight_noise(&z_image_candle));
+
+    for target in [by_id("sdxl_lora"), z_image_candle] {
+        // Off is always fine...
+        with_sigma(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        // ...on is a field error.
+        match with_sigma(&target, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "weightNoiseSigma", "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a weightNoiseSigma field error, got {other:?}",
+                target.id
+            ),
+        }
+    }
 }

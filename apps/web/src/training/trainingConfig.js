@@ -23,6 +23,19 @@ export const lossTypeOptions = ["mse", "mae"];
 // fixed; linear/cosine decay it over the run). Distinct from the timestep/noise
 // scheduler above. The target's `limits.lrSchedulers` overrides this fallback.
 export const lrSchedulerOptions = ["constant", "linear", "cosine"];
+// Relative-mode weight noising (epic 2123, sc-24826): after every optimizer update the trainer
+// adds N(0,1)·sigma·rms(w) to each adapter tensor. Off (empty/0) by default; enabling it seeds the
+// upstream-suggested strength. The max is the API's bound (WEIGHT_NOISE_SIGMA_MAX in
+// crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
+export const weightNoiseSigmaMax = 0.1;
+export const weightNoiseSigmaSuggested = 0.0125;
+
+// Whether the target's trainer on the serving platform honors weight noise — the API projects the
+// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
+// test). Absent means unsupported.
+export function targetSupportsWeightNoise(target) {
+  return target?.limits?.supportsWeightNoise === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -333,6 +346,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     weightDecay: numericDraft(advanced.weightDecay),
     lrScheduler: asText(advanced.lrScheduler || "constant"),
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
+    // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
+    weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -454,6 +469,20 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
+    }
+  }
+  // Weight noising: optional, but when set it must sit inside the API's bound (same max, E6),
+  // and it only perturbs adapter weights, so a full base fine-tune cannot use it (E5).
+  if (String(configDraft.weightNoiseSigma ?? "").trim()) {
+    const sigma = numberFromDraft(configDraft.weightNoiseSigma);
+    if (sigma === null || sigma < 0 || sigma > weightNoiseSigmaMax) {
+      issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
+    } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
+      issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (sigma > 0 && selectedTarget && !targetSupportsWeightNoise(selectedTarget)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -589,6 +618,8 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
+    // Omitted when off (empty draft), so a default job's snapshot is unchanged.
+    weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),

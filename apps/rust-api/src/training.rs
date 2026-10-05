@@ -23,6 +23,7 @@ pub(crate) fn effective_training_targets_for_candle(candle: bool) -> TrainingTar
     if candle {
         for target in &mut registry.targets {
             apply_candle_training_defaults(&target.kernel, &mut target.defaults);
+            sceneworks_core::training::project_candle_training_limits(target);
         }
     }
     registry
@@ -2203,6 +2204,14 @@ fn training_plan_error_to_api_error(
                 detail,
                 "training_target_limit",
                 context,
+            )
+        }
+        sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                message,
+                "training_field_error",
+                json!({ "field": field }),
             )
         }
         other => ApiError::bad_request(other.to_string()),

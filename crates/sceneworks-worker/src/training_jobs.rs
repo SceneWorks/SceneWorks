@@ -23,7 +23,9 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
-use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
+use sceneworks_core::training::{
+    TrainingPlan, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -822,6 +824,25 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         )));
     }
 
+    // Epic 2123 weight noising (sc-24826): perturbs adapter factors only, so it is refused for a
+    // full base fine-tune (E5), and refused for any trainer whose descriptor does not declare it
+    // (E3) — before any load, on both the dry and the real path.
+    let weight_noise_sigma = preflight_weight_noise_sigma(advanced)?;
+    if weight_noise_sigma > 0.0 {
+        if network_type == "full" {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Weight noise ({WEIGHT_NOISE_SIGMA_KEY}) perturbs adapter weights only and cannot \
+                 be combined with networkType 'full'."
+            )));
+        }
+        if !descriptor.techniques.weight_noise {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support weight noise \
+                 ({WEIGHT_NOISE_SIGMA_KEY})."
+            )));
+        }
+    }
+
     if descriptor.backend != "candle" {
         return Ok(engine_id);
     }
@@ -889,6 +910,7 @@ fn training_request_from_plan(
         .iter()
         .map(|item| {
             Ok(TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path: resolve_dataset_item_path(
                     settings,
                     &plan.dataset.root_path,
@@ -1096,6 +1118,23 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
             "Training config field '{key}' must be a non-negative integer."
         ))),
     }
+}
+
+/// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
+/// submit-time bound `0..=WEIGHT_NOISE_SIGMA_MAX`, else a typed payload error — never a silent 0.
+fn preflight_weight_noise_sigma(advanced: &JsonObject) -> WorkerResult<f64> {
+    let Some(value) = advanced.get(WEIGHT_NOISE_SIGMA_KEY) else {
+        return Ok(0.0);
+    };
+    value
+        .as_f64()
+        .filter(|sigma| sigma.is_finite() && (0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(sigma))
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Training config field '{WEIGHT_NOISE_SIGMA_KEY}' must be a number between 0 and \
+                 {WEIGHT_NOISE_SIGMA_MAX}."
+            ))
+        })
 }
 
 /// Dry-run: validate the plan and active trainer descriptor, then report what a real run would
@@ -1513,6 +1552,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Preserve submitted resume intent. Each backend either implements it or the shared
         // dry/real preflight rejects it before any model load.
         resume: advanced_bool(advanced, "resume", false),
+        // Epic 2123 weight noising (sc-24826). Absent ⇒ 0 ⇒ off, so legacy plans train exactly as
+        // before. A malformed / out-of-range value never reaches here: the shared dry/real
+        // preflight (`preflight_weight_noise_sigma`) refuses it first.
+        weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -3258,6 +3301,139 @@ mod tests {
         assert!(mapped.gradient_checkpointing);
     }
 
+    /// sc-24826 review: the catalog's `supportsWeightNoise` flag (which gates the web toggle and
+    /// submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.weight_noise` for every target this runtime can train — the builtin (MLX) value
+    /// on macOS, the Candle projection off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_weight_noise_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(&target),
+                descriptor.techniques.weight_noise,
+                "{} ({engine_id}): catalog supportsWeightNoise disagrees with the trainer descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-24826 (epic 2123): `advanced.weightNoiseSigma` reaches the engine's typed
+    /// `weight_noise_sigma`; absent stays 0 (off), so a legacy plan maps exactly as before.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_wires_weight_noise_sigma() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        assert_eq!(
+            map_training_config(&parse(value.clone()).config).weight_noise_sigma,
+            0.0
+        );
+
+        let mut noisy = value;
+        noisy["config"]["advanced"]["weightNoiseSigma"] = json!(0.0125);
+        assert_eq!(
+            map_training_config(&parse(noisy).config).weight_noise_sigma,
+            0.0125
+        );
+    }
+
+    /// sc-24826 (epic 2123 E3/E5): the shared dry/real preflight refuses weight noise on a trainer
+    /// whose descriptor does not declare it, with a full base fine-tune, and out of range — and
+    /// admits it where the active runtime's trainer declares it (Z-Image on MLX).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_weight_noise_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, network: &str, sigma: Value| {
+            let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+            value["config"]["advanced"]["weightNoiseSigma"] = sigma;
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+
+        // Off is always admitted — the noise gate must not refuse a plan that does not ask for it.
+        assert!(
+            validate_training_target_config(&plan("sdxl_lora", "sdxl", "lora", json!(0))).is_ok()
+        );
+
+        // SDXL declares no weight-noise support on either backend.
+        assert!(err(plan("sdxl_lora", "sdxl", "lora", json!(0.0125)))
+            .contains("does not support weight noise"));
+
+        // Z-Image follows its active descriptor: admitted on MLX, refused on Candle (until its story).
+        let z_image = plan("z_image_lora", "z_image_turbo", "lora", json!(0.0125));
+        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques
+            .weight_noise;
+        assert_eq!(
+            declared,
+            cfg!(target_os = "macos"),
+            "only Z-Image MLX declares weight noise today"
+        );
+        if declared {
+            validate_training_target_config(&z_image).expect("Z-Image MLX admits weight noise");
+        } else {
+            assert!(err(z_image).contains("does not support weight noise"));
+        }
+
+        // Full base fine-tune + weight noise is refused (Mage is the full-tune-capable trainer).
+        assert!(err(plan(
+            "mage_flow_lora",
+            "mage_flow_base",
+            "full",
+            json!(0.0125)
+        ))
+        .contains("networkType 'full'"));
+
+        // Out of range / malformed never silently maps to 0.
+        for bad in [json!(-0.01), json!(0.5), json!("0.0125")] {
+            assert!(
+                err(plan("z_image_lora", "z_image_turbo", "lora", bad.clone()))
+                    .contains("must be a number between"),
+                "{bad}"
+            );
+        }
+    }
+
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
     /// families (Z-Image, LTX-2.3, and both Wan A14B variants), so `finalize_training_config` must force gradient
     /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
@@ -4885,9 +5061,11 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -4998,9 +5176,11 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5114,9 +5294,11 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5268,9 +5450,11 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5455,6 +5639,7 @@ mod tests {
         let preview_guidance = config.sample_guidance_scale;
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
@@ -5695,6 +5880,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("output");
         let request = TrainingRequest {
             items: vec![TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,

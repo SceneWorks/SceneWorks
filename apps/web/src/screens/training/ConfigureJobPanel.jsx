@@ -6,6 +6,7 @@ import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx"
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
+import { numberFromDraft } from "../../training/drafts.js";
 import {
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -15,7 +16,10 @@ import {
   qualityPresetLabel,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
+  targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
+  weightNoiseSigmaMax,
+  weightNoiseSigmaSuggested,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -106,6 +110,14 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
+  // Weight noising is offered only where the target's trainer on this platform declares it
+  // (`limits.supportsWeightNoise` from the targets endpoint) — elsewhere the run would be refused.
+  // The toggle is checked for a positive sigma (a "0" draft is off); the sigma input stays visible
+  // while the draft holds any value so an out-of-range entry can be corrected in place.
+  const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
+  const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
+  const weightNoiseInputVisible =
+    weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -544,6 +556,20 @@ export function ConfigureJobPanel({
                   value={configDraft.lrWarmupSteps ?? ""}
                 />
               </label>
+              {weightNoiseInputVisible ? (
+                <label title="Weight noise strength (sigma): after every optimizer step each adapter weight gets Gaussian noise scaled by sigma times that tensor's RMS. 0.0125 is the suggested strength.">
+                  Weight noise sigma
+                  <input
+                    max={weightNoiseSigmaMax}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("weightNoiseSigma", event.target.value)}
+                    step="0.0025"
+                    type="number"
+                    value={configDraft.weightNoiseSigma ?? ""}
+                    {...invalidProps(configValidity, "weightNoiseSigma")}
+                  />
+                </label>
+              ) : null}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -657,6 +683,21 @@ export function ConfigureJobPanel({
                   Gradient checkpointing
                 </label>
               )}
+              {weightNoiseSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
+                >
+                  <input
+                    checked={weightNoiseEnabled}
+                    onChange={(event) =>
+                      updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
+                    }
+                    type="checkbox"
+                  />
+                  Weight noise
+                </label>
+              ) : null}
             </div>
           </AdvancedSection>
 

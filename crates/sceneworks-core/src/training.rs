@@ -43,6 +43,43 @@ pub const TRAINING_PLAN_VERSION: u32 = 1;
 /// `advanced.timestepType`/`timestepBias`.
 pub const SUPPORTED_LR_SCHEDULERS: [&str; 3] = ["constant", "linear", "cosine"];
 
+/// `advanced` key of the relative-mode **weight noising** strength (epic 2123, sc-24826): after
+/// every optimizer update the native trainer perturbs each adapter tensor by
+/// `N(0,1) · sigma · rms(w)`. Absent or `0` is off.
+pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
+/// Inclusive upper bound submit-time validation accepts for [`WEIGHT_NOISE_SIGMA_KEY`]. The web
+/// form enforces the identical bound (`weightNoiseSigmaMax` in
+/// `apps/web/src/training/trainingConfig.js`; a parity test pins the two together, epic 2123 E6).
+/// The upstream suggested strength is [`WEIGHT_NOISE_SIGMA_SUGGESTED`]; 0.1 is eight times that —
+/// far into "destroys the adapter" territory, so anything above it is a typo, not a choice.
+pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
+/// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
+pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. The
+/// builtin catalog carries the MLX truth (like every other builtin default);
+/// [`project_candle_training_limits`] removes it for targets whose Candle trainer does not declare
+/// it. The web form shows the weight-noise toggle only where this is `true`, and submit-time
+/// validation refuses a non-zero sigma elsewhere. A worker test pins both projections to the linked
+/// trainer descriptors, so the flag cannot drift from what the engine actually implements.
+pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
+
+/// Whether `target` (as projected for the serving platform) advertises weight-noise support.
+pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(WEIGHT_NOISE_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend: no
+/// Candle trainer declares weight noise yet (epic 2123 adds them story by story), so the flag is
+/// removed for every target. Callers that serve the Candle catalog (the API off macOS) apply it.
+pub fn project_candle_training_limits(target: &mut TrainingTarget) {
+    target.limits.remove(WEIGHT_NOISE_SUPPORT_LIMIT);
+}
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -1486,7 +1523,10 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // (LyCORIS Kronecker) is advertised on the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 weight noising (sc-24826): the Z-Image MLX trainer declares it. Removed for
+            // Candle by `project_candle_training_limits`.
+            "supportsWeightNoise": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -2733,6 +2773,9 @@ pub enum TrainingPlanError {
     /// client. Kept structured so the API can return a field-specific error
     /// without scraping a human-facing sentence.
     TargetLimit(TrainingTargetLimitError),
+    /// A config field holds an invalid value (wrong type, out of range, or an incompatible
+    /// combination). Names the request `field` so the API returns a field-level error.
+    InvalidField { field: String, message: String },
 }
 
 /// A target-advertised limit rejected while normalizing a training request.
@@ -2830,6 +2873,7 @@ impl std::fmt::Display for TrainingPlanError {
             }
             Self::InvalidConfig(detail) => formatter.write_str(detail),
             Self::TargetLimit(error) => error.fmt(formatter),
+            Self::InvalidField { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -3008,6 +3052,7 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_weight_noise_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3270,6 +3315,61 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         ));
     }
     validate_lr_scheduler(config)?;
+    validate_weight_noise(config)?;
+    Ok(())
+}
+
+/// Refuses a non-zero `advanced.weightNoiseSigma` on a target that does not advertise
+/// [`WEIGHT_NOISE_SUPPORT_LIMIT`] — a field error at submit time instead of a refusal after the job
+/// is queued. Runs after [`validate_weight_noise`], so the value is already a valid number here.
+fn validate_weight_noise_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let sigma = config
+        .advanced
+        .get(WEIGHT_NOISE_SIGMA_KEY)
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if sigma > 0.0 && !target_supports_weight_noise(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+            message: format!(
+                "{} does not support weight noise ({WEIGHT_NOISE_SIGMA_KEY}) on this platform.",
+                target.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a
+/// finite number in `0..=`[`WEIGHT_NOISE_SIGMA_MAX`], and a non-zero value cannot be combined with
+/// a full base fine-tune — weight noise perturbs adapter factors only (E5). Each failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field.
+fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let Some(value) = config.advanced.get(WEIGHT_NOISE_SIGMA_KEY) else {
+        return Ok(());
+    };
+    let field_error = |message: String| TrainingPlanError::InvalidField {
+        field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+        message,
+    };
+    let sigma = value
+        .as_f64()
+        .filter(|sigma| sigma.is_finite())
+        .ok_or_else(|| field_error(format!("{WEIGHT_NOISE_SIGMA_KEY} must be a number.")))?;
+    if !(0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(&sigma) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} ({sigma}) must be between 0 and {WEIGHT_NOISE_SIGMA_MAX}."
+        )));
+    }
+    if sigma > 0.0 && config_is_full_finetune(config) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} perturbs adapter weights only and cannot be combined with \
+             networkType '{NETWORK_TYPE_FULL}'."
+        )));
+    }
     Ok(())
 }
 
