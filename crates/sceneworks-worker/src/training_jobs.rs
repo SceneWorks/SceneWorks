@@ -24,7 +24,11 @@ use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::{
-    TrainingPlan, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    subject_mask_loss_weights, TrainingPlan, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+};
+use sceneworks_core::training_subject_masks::{
+    lookup_subject_mask_for_image, read_subject_mask_index_at, SubjectMaskLookup,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -780,6 +784,7 @@ fn preflight_training_run(
 fn preflight_training_run(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
     validate_training_plan(settings, plan)?;
     validate_training_target_config(plan)?;
+    preflight_subject_mask_paths(settings, plan)?;
     // This build cannot construct a typed engine request, but it still verifies each stored
     // prepared-bundle receipt exactly once before accepting a dry-run plan.
     let mut prepared_inputs = PreparedTrainingInputs::default();
@@ -843,6 +848,21 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 subject-masked loss (sc-24828): malformed weights are refused here exactly as at
+    // submit time (one shared reader), and a trainer whose descriptor does not declare the
+    // technique is refused before any load (E3). Per-image mask coverage is checked by
+    // `preflight_subject_mask_paths`, which needs the dataset on disk.
+    if subject_mask_loss_weights(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .is_some()
+        && !descriptor.techniques.subject_mask_loss
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support subject-masked loss \
+             ({SUBJECT_MASK_LOSS_KEY})."
+        )));
+    }
+
     if descriptor.backend != "candle" {
         return Ok(engine_id);
     }
@@ -904,13 +924,18 @@ fn training_request_from_plan(
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
 ) -> WorkerResult<TrainingRequest> {
+    // Subject-masked loss (sc-24828): one mask path per item when on (refused here, naming the
+    // images, when any lacks a non-empty mask); `None` keeps every item mask-free.
+    let mask_paths = preflight_subject_mask_paths(settings, plan)?;
     let items = plan
         .dataset
         .items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             Ok(TrainingItem {
                 reference_image_paths: Vec::new(),
+                subject_mask_path: mask_paths.as_ref().map(|paths| paths[index].clone()),
                 image_path: resolve_dataset_item_path(
                     settings,
                     &plan.dataset.root_path,
@@ -938,9 +963,18 @@ fn training_request_from_plan(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    let mut config = finalize_training_config(map_training_config(&plan.config), plan);
+    // The weights were validated by `validate_training_target_config` (same reader), so a
+    // malformed value is already refused; this propagates rather than defaulting regardless.
+    config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .map(|(background, subject)| gen_core::SubjectMaskLoss {
+            background_weight: background as f32,
+            subject_weight: subject as f32,
+        });
     Ok(TrainingRequest {
         items,
-        config: finalize_training_config(map_training_config(&plan.config), plan),
+        config,
         output_dir: resolve_training_output_dir(
             settings,
             &plan.output.output_dir,
@@ -1118,6 +1152,72 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
             "Training config field '{key}' must be a non-negative integer."
         ))),
     }
+}
+
+/// Most images a missing-subject-mask refusal names before summarising the rest as "and N more".
+const MISSING_SUBJECT_MASK_NAME_CAP: usize = 10;
+
+/// Subject-masked loss preflight (epic 2123, sc-24828), shared by the dry and real paths: `None`
+/// when the plan does not turn masked loss on (no file is read); otherwise each dataset image's
+/// stored subject mask, in plan order. Every image must carry a **non-empty** mask — an all-black
+/// "no subject found" mask counts as missing, because with a zero background weight it would
+/// silently drop the image from the loss — else the job is refused with a payload error naming the
+/// images (the first [`MISSING_SUBJECT_MASK_NAME_CAP`], then "and N more"). Masks are matched by
+/// the SHA-256 of each image's current bytes (the key the mask job stored them under).
+fn preflight_subject_mask_paths(
+    settings: &Settings,
+    plan: &TrainingPlan,
+) -> WorkerResult<Option<Vec<PathBuf>>> {
+    if subject_mask_loss_weights(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let root = normalize_app_managed_path(settings, &plan.dataset.root_path, "Dataset root")?;
+    let index = read_subject_mask_index_at(&root).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "Could not read the dataset's subject mask index: {error}"
+        ))
+    })?;
+    let mut paths = Vec::with_capacity(plan.dataset.items.len());
+    let mut missing = Vec::new();
+    for item in &plan.dataset.items {
+        let image_path = resolve_dataset_item_path(
+            settings,
+            &plan.dataset.root_path,
+            &item.image_path,
+            "Training dataset imagePath",
+        )?;
+        let name = image_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| image_path.display().to_string());
+        match lookup_subject_mask_for_image(&root, &index, &image_path) {
+            Ok(SubjectMaskLookup::Present(path)) => paths.push(path),
+            Ok(SubjectMaskLookup::Empty) => missing.push(format!("{name} (no subject found)")),
+            Ok(SubjectMaskLookup::Missing) => missing.push(name),
+            Err(error) => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Could not read training image {name} to match its subject mask: {error}"
+                )))
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(Some(paths));
+    }
+    let shown = missing.len().min(MISSING_SUBJECT_MASK_NAME_CAP);
+    let mut names = missing[..shown].join(", ");
+    if missing.len() > shown {
+        names.push_str(&format!(" and {} more", missing.len() - shown));
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "Subject-masked loss needs a subject mask on every dataset image, but {} of {} have none: \
+         {names}. Generate subject masks for the dataset (or replace the empty ones), then retry.",
+        missing.len(),
+        plan.dataset.items.len()
+    )))
 }
 
 /// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
@@ -1556,6 +1656,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // before. A malformed / out-of-range value never reaches here: the shared dry/real
         // preflight (`preflight_weight_noise_sigma`) refuses it first.
         weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
+        // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
+        // whose fallible reader refuses malformed weights instead of defaulting them to off.
+        subject_mask_loss: None,
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -3242,6 +3345,235 @@ mod tests {
 
     fn parse(value: Value) -> TrainingPlan {
         serde_json::from_value(value).expect("plan deserializes")
+    }
+
+    /// A dataset of `count` distinct images `img00.png…` under `<data>/datasets/ds-1/images`, with
+    /// a stored subject mask for each index in `masked` (all-black when also in `empty`) — the
+    /// on-disk state the sc-2126 mask job leaves (content-hash keyed PNG + index record).
+    fn subject_mask_dataset(
+        data_dir: &Path,
+        count: usize,
+        masked: &[usize],
+        empty: &[usize],
+    ) -> Vec<String> {
+        use sceneworks_core::training_subject_masks::{
+            subject_mask_relative_path, DatasetSubjectMasks, SubjectMaskRecord, SubjectMaskSource,
+            SUBJECT_MASK_INDEX_NAME,
+        };
+        let root = data_dir.join("datasets").join("ds-1");
+        std::fs::create_dir_all(root.join("images")).expect("images dir");
+        std::fs::create_dir_all(root.join("masks")).expect("masks dir");
+        let mut index = DatasetSubjectMasks::default();
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let path = root.join("images").join(format!("img{i:02}.png"));
+            image::RgbImage::from_pixel(8, 8, image::Rgb([i as u8, 7, 9]))
+                .save(&path)
+                .expect("write image");
+            if masked.contains(&i) {
+                let hash = sceneworks_core::media_convert::file_content_hash(&path).expect("hash");
+                let is_empty = empty.contains(&i);
+                image::GrayImage::from_pixel(8, 8, image::Luma([if is_empty { 0 } else { 255 }]))
+                    .save(root.join(subject_mask_relative_path(&hash)))
+                    .expect("write mask");
+                index.masks.insert(
+                    hash,
+                    SubjectMaskRecord {
+                        source: SubjectMaskSource::Auto,
+                        empty: is_empty,
+                        width: 8,
+                        height: 8,
+                        updated_at: "2026-10-04T00:00:00Z".to_owned(),
+                        revision: String::new(),
+                    },
+                );
+            }
+            paths.push(path.display().to_string());
+        }
+        std::fs::write(
+            root.join(SUBJECT_MASK_INDEX_NAME),
+            serde_json::to_vec(&index).expect("index json"),
+        )
+        .expect("write index");
+        paths
+    }
+
+    fn masked_plan(data_dir: &Path, images: &[String], on: bool) -> TrainingPlan {
+        let refs: Vec<&str> = images.iter().map(String::as_str).collect();
+        let mut value = plan_json(data_dir, "z_image_lora", "z_image_turbo", "lora", &refs);
+        value["config"]["advanced"]["subjectMaskLoss"] = json!(on);
+        value["config"]["advanced"]["subjectMaskBackgroundWeight"] = json!(0);
+        value["config"]["advanced"]["subjectMaskSubjectWeight"] = json!(1);
+        parse(value)
+    }
+
+    /// sc-24828 AC: a masked-loss job on a dataset missing any mask is refused at worker preflight,
+    /// and the error names the missing images — an all-black ("no subject") mask counts as
+    /// missing, and the list is capped at ten names plus "and N more".
+    #[test]
+    fn subject_mask_preflight_names_the_images_missing_a_mask() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 13, &[0, 1], &[1]);
+        let message =
+            match preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true)) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a payload refusal, got {other:?}"),
+            };
+        assert!(message.contains("12 of 13 have none"), "{message}");
+        assert!(
+            message.contains("img01.png (no subject found), img02.png"),
+            "{message}"
+        );
+        assert!(message.contains("img10.png and 2 more"), "{message}");
+        assert!(
+            !message.contains("img00.png"),
+            "masked image named: {message}"
+        );
+        assert!(!message.contains("img11.png"), "past the cap: {message}");
+
+        // Off ⇒ nothing is read and nothing is refused.
+        assert_eq!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, false))
+                .expect("off"),
+            None
+        );
+    }
+
+    /// sc-24828 (epic 2123 E3): the shared dry/real preflight admits subject-masked loss where the
+    /// active trainer declares it (Z-Image, on either backend) and refuses it where it does not
+    /// (LTX-2.5 trains from prepared latent bundles, which no image mask can align with) — and a
+    /// malformed weight is refused rather than defaulted.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_subject_mask_loss_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, advanced: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, entry) in advanced {
+                value["config"]["advanced"][*key] = entry.clone();
+            }
+            parse(value)
+        };
+        let on = [("subjectMaskLoss", json!(true))];
+        assert!(
+            crate::inference_runtime::trainer_descriptor("z_image_turbo")
+                .expect("z_image_turbo trainer registered")
+                .techniques
+                .subject_mask_loss
+        );
+        validate_training_target_config(&plan("z_image_lora", "z_image_turbo", &on))
+            .expect("Z-Image admits subject-masked loss");
+        match validate_training_target_config(&plan("ltx_mlx_lora", "ltx_2_5", &on)) {
+            Err(WorkerError::InvalidPayload(message)) => assert!(
+                message.contains("does not support subject-masked loss"),
+                "{message}"
+            ),
+            other => panic!("LTX-2.5 must refuse subject-masked loss, got {other:?}"),
+        }
+        match validate_training_target_config(&plan(
+            "z_image_lora",
+            "z_image_turbo",
+            &[
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!(0)),
+            ],
+        )) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("subjectMaskSubjectWeight"), "{message}")
+            }
+            other => panic!("a zero subject weight must be refused, got {other:?}"),
+        }
+    }
+
+    /// sc-24828: full coverage resolves one mask per image, in plan order.
+    #[test]
+    fn subject_mask_preflight_resolves_every_mask_in_plan_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 3, &[0, 1, 2], &[]);
+        let paths = preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true))
+            .expect("full coverage")
+            .expect("on");
+        assert_eq!(paths.len(), 3);
+        for (path, image) in paths.iter().zip(&images) {
+            let hash =
+                sceneworks_core::media_convert::file_content_hash(Path::new(image)).expect("hash");
+            assert_eq!(
+                path,
+                &data_dir
+                    .join("datasets")
+                    .join("ds-1")
+                    .join("masks")
+                    .join(format!("{hash}.png"))
+            );
+        }
+    }
+
+    /// sc-24828: the typed request carries the engine `subject_mask_loss` weights and each item's
+    /// mask path when on — and neither when off, so a legacy plan maps exactly as before.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_subject_mask_loss_and_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 2, &[0, 1], &[]);
+
+        let mut prepared = PreparedTrainingInputs::default();
+        let on = training_request_from_plan(
+            &settings,
+            &masked_plan(&data_dir, &images, true),
+            &mut prepared,
+        )
+        .expect("on");
+        assert_eq!(
+            on.config.subject_mask_loss,
+            Some(gen_core::SubjectMaskLoss {
+                background_weight: 0.0,
+                subject_weight: 1.0
+            })
+        );
+        assert!(on
+            .items
+            .iter()
+            .all(|item| item.subject_mask_path.as_ref().is_some_and(|p| p.is_file())));
+
+        let mut prepared = PreparedTrainingInputs::default();
+        let off = training_request_from_plan(
+            &settings,
+            &masked_plan(&data_dir, &images, false),
+            &mut prepared,
+        )
+        .expect("off");
+        assert_eq!(off.config.subject_mask_loss, None);
+        assert!(off
+            .items
+            .iter()
+            .all(|item| item.subject_mask_path.is_none()));
+
+        // A missing mask refuses the request build (the real and dry paths share it).
+        std::fs::remove_dir_all(data_dir.join("datasets").join("ds-1").join("masks"))
+            .expect("drop masks");
+        let mut prepared = PreparedTrainingInputs::default();
+        assert!(matches!(
+            training_request_from_plan(
+                &settings,
+                &masked_plan(&data_dir, &images, true),
+                &mut prepared
+            ),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("img00.png, img01.png")
+        ));
     }
 
     /// sc-4887: only an explicit bf16 selects bf16; every other value (incl. the
@@ -5027,6 +5359,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5035,6 +5368,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5142,6 +5476,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5150,6 +5485,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5260,6 +5596,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5268,6 +5605,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5416,6 +5754,7 @@ mod tests {
             control_type: None,
             model_options: Default::default(),
             weight_noise_sigma: 0.0,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5424,6 +5763,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5609,6 +5949,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5850,6 +6191,7 @@ mod tests {
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             }],
             config,
             output_dir,

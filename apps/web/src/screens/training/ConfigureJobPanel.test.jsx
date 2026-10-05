@@ -598,3 +598,92 @@ describe("ConfigureJobPanel weight noise", () => {
     expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
   });
 });
+
+// sc-24828 (epic 2123): subject-masked loss is an off-by-default advanced toggle. While on, the two
+// weight inputs and the dataset's mask coverage appear; incomplete coverage is an error on the
+// toggle (it blocks Start) and offers "Generate subject masks".
+describe("ConfigureJobPanel subject-masked loss", () => {
+  const fullReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: false }] };
+  const partialReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Subject-masked loss"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function weightInput(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input");
+  }
+  function generateButton() {
+    return [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Generate subject masks"));
+  }
+  const onDraft = { ...VALID_DRAFT, subjectMaskLoss: true, subjectMaskBackgroundWeight: "0.1", subjectMaskSubjectWeight: "1" };
+  const ctx = (report) => ({ activeDataset: DATASET, selectedTarget: TARGET, subjectMaskReport: report });
+
+  it("is off by default with no weight inputs, and toggles the draft", () => {
+    const calls = [];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, updateConfigDraft: (field, value) => calls.push([field, value]) })}
+      />,
+    );
+    expect(toggle().checked).toBe(false);
+    expect(weightInput("Background weight")).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["subjectMaskLoss", true]]);
+  });
+
+  it("shows the weights and full coverage without blocking", () => {
+    const validity = validityFor(onDraft, ctx(fullReport));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: onDraft, configValidity: validity, subjectMaskReport: fullReport })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(weightInput("Background weight").value).toBe("0.1");
+    expect(weightInput("Background weight").getAttribute("max")).toBe("1");
+    expect(weightInput("Subject weight").value).toBe("1");
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain("2 of 2 images");
+    expect(generateButton()).toBeUndefined();
+    expect(toggle().getAttribute("aria-invalid")).not.toBe("true");
+  });
+
+  it("flags incomplete coverage on the toggle and offers Generate subject masks", () => {
+    let generated = 0;
+    const validity = validityFor(onDraft, ctx(partialReport));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: partialReport,
+          onGenerateSubjectMasks: () => {
+            generated += 1;
+          },
+        })}
+      />,
+    );
+    expect(toggle().getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain(
+      "1 of 3 images (1 found no subject)",
+    );
+    act(() => generateButton().click());
+    expect(generated).toBe(1);
+    expect(generateButton()).toBeUndefined();
+    expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  it("outlines out-of-range weights", () => {
+    const draft = { ...onDraft, subjectMaskBackgroundWeight: "1.5", subjectMaskSubjectWeight: "0" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: draft, configValidity: validityFor(draft, ctx(fullReport)) })}
+      />,
+    );
+    expect(weightInput("Background weight").getAttribute("aria-invalid")).toBe("true");
+    expect(weightInput("Subject weight").getAttribute("aria-invalid")).toBe("true");
+  });
+});

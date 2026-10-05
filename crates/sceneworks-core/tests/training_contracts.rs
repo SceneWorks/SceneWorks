@@ -5,8 +5,9 @@ use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
     TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
     TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
-    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
-    WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
+    TrainingTargetRegistry, SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+    SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT, SUBJECT_MASK_WEIGHT_MAX, TRAINING_CONTRACT_SCHEMA_VERSION,
+    TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -1786,5 +1787,147 @@ fn web_weight_noise_bound_matches_the_api_bound() {
     assert_eq!(
         read("weightNoiseSigmaSuggested"),
         WEIGHT_NOISE_SIGMA_SUGGESTED
+    );
+}
+
+/// Build a Z-Image plan whose `advanced` carries the given subject-masked-loss keys.
+fn build_plan_with_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_sm",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_sm",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_sm"),
+        file_name: "sm.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24828 (epic 2123 E6): subject-masked-loss keys — in-range values survive into the plan
+/// verbatim (and resolve with defaults when absent); a non-boolean toggle, a background weight
+/// outside [0, max], a subject weight outside (0, max] or a non-number are field-level errors
+/// naming the offending key — even while the toggle is off.
+#[test]
+fn build_training_plan_validates_subject_mask_loss_as_field_errors() {
+    use sceneworks_core::training::subject_mask_loss_weights;
+    for extra in [
+        vec![("subjectMaskLoss", json!(true))],
+        vec![
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0)),
+            ("subjectMaskSubjectWeight", json!(SUBJECT_MASK_WEIGHT_MAX)),
+        ],
+        vec![("subjectMaskLoss", json!(false))],
+    ] {
+        let plan = build_plan_with_advanced(&extra)
+            .unwrap_or_else(|error| panic!("{extra:?} must be accepted: {error}"));
+        for (key, value) in &extra {
+            assert_eq!(&plan.config.advanced[*key], value);
+        }
+    }
+    let resolve = |extra: &[(&str, Value)]| {
+        let plan = build_plan_with_advanced(extra).unwrap();
+        subject_mask_loss_weights(&plan.config.advanced).unwrap()
+    };
+    assert_eq!(resolve(&[]), None, "absent toggle = off");
+    assert_eq!(
+        resolve(&[("subjectMaskLoss", json!(true))]),
+        Some((
+            SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+            SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
+        ))
+    );
+    assert_eq!(
+        resolve(&[
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0.25)),
+            ("subjectMaskSubjectWeight", json!(0.5)),
+        ]),
+        Some((0.25, 0.5))
+    );
+
+    for (extra, field) in [
+        (vec![("subjectMaskLoss", json!("yes"))], "subjectMaskLoss"),
+        (
+            vec![("subjectMaskBackgroundWeight", json!(-0.01))],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskBackgroundWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.01),
+            )],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!(0)),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskSubjectWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.5),
+            )],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!("1")),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        match build_plan_with_advanced(&extra) {
+            Err(TrainingPlanError::InvalidField { field: got, .. }) => {
+                assert_eq!(got, field, "{extra:?}")
+            }
+            other => panic!("{extra:?}: expected a {field} field error, got {other:?}"),
+        }
+    }
+}
+
+/// sc-24828 (epic 2123 E6): the web form's subject-mask weight bound and defaults are the API's.
+#[test]
+fn web_subject_mask_bounds_match_the_api_bounds() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("subjectMaskWeightMax"), SUBJECT_MASK_WEIGHT_MAX);
+    assert_eq!(
+        read("subjectMaskBackgroundWeightDefault"),
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT
+    );
+    assert_eq!(
+        read("subjectMaskSubjectWeightDefault"),
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
     );
 }

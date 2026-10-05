@@ -13,6 +13,8 @@ import {
   optimizerLabel,
   optionLabel,
   qualityPresetLabel,
+  subjectMaskCoverage,
+  subjectMaskWeightMax,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
   trainingAdapterVersionLabels,
@@ -96,6 +98,10 @@ export function ConfigureJobPanel({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  // Subject-masked loss (sc-24828): the active dataset's /subject-masks report (null = unknown)
+  // and the screen's "Generate subject masks" action (saves the dataset, queues the SAM3 job).
+  subjectMaskReport = null,
+  onGenerateSubjectMasks,
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -111,6 +117,11 @@ export function ConfigureJobPanel({
   // Weight noising is on whenever the draft carries a value (empty = off); the toggle seeds the
   // suggested strength and the sigma input appears beside the other optimizer knobs.
   const weightNoiseEnabled = String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  const subjectMaskLossEnabled = Boolean(configDraft.subjectMaskLoss);
+  const maskCoverage = subjectMaskCoverage(subjectMaskReport);
+  const [maskJobRequested, setMaskJobRequested] = React.useState(false);
+  // A queued-generation note belongs to the dataset it was queued for.
+  React.useEffect(() => setMaskJobRequested(false), [activeDataset?.id]);
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -689,7 +700,72 @@ export function ConfigureJobPanel({
                 />
                 Weight noise
               </label>
+              <label
+                className="training-checkbox-field"
+                title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image (Data Sets → Generate subject masks). Off by default."
+              >
+                <input
+                  checked={subjectMaskLossEnabled}
+                  onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
+                  type="checkbox"
+                  {...invalidProps(configValidity, "subjectMaskLoss")}
+                />
+                Subject-masked loss
+              </label>
             </div>
+            {subjectMaskLossEnabled ? (
+              <div className="training-subject-mask-loss">
+                <label title="Loss weight of background pixels (outside the subject mask). 0 ignores the background entirely.">
+                  Background weight
+                  <input
+                    max={subjectMaskWeightMax}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("subjectMaskBackgroundWeight", event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={configDraft.subjectMaskBackgroundWeight ?? ""}
+                    {...invalidProps(configValidity, "subjectMaskBackgroundWeight")}
+                  />
+                </label>
+                <label title="Loss weight of subject pixels (inside the subject mask). Must be greater than 0.">
+                  Subject weight
+                  <input
+                    max={subjectMaskWeightMax}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("subjectMaskSubjectWeight", event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={configDraft.subjectMaskSubjectWeight ?? ""}
+                    {...invalidProps(configValidity, "subjectMaskSubjectWeight")}
+                  />
+                </label>
+                <p className="training-field-hint" data-testid="subject-mask-coverage">
+                  {maskCoverage
+                    ? `Subject masks: ${maskCoverage.usable} of ${maskCoverage.total} images${
+                        maskCoverage.empty ? ` (${maskCoverage.empty} found no subject)` : ""
+                      }.`
+                    : "Subject mask coverage is unknown until the dataset is saved."}
+                </p>
+                {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
+                  maskJobRequested ? (
+                    <p className="training-field-hint">
+                      Subject mask generation queued — coverage updates when the job finishes.
+                    </p>
+                  ) : (
+                    <button
+                      className="secondary-action"
+                      onClick={() => {
+                        setMaskJobRequested(true);
+                        onGenerateSubjectMasks();
+                      }}
+                      type="button"
+                    >
+                      Generate subject masks
+                    </button>
+                  )
+                ) : null}
+              </div>
+            ) : null}
           </AdvancedSection>
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it

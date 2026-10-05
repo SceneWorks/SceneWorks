@@ -56,6 +56,28 @@ pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
 /// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
 pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
 
+/// `advanced` key that turns on **subject-masked loss weighting** (epic 2123, sc-24828): each
+/// image's subject mask (`<dataset>/masks/<content hash>.png`, see
+/// [`crate::training_subject_masks`]) weights the native trainer's per-element loss. A boolean;
+/// absent or `false` is off.
+pub const SUBJECT_MASK_LOSS_KEY: &str = "subjectMaskLoss";
+/// `advanced` key of the loss weight of a pure-background latent cell, in
+/// `SUBJECT_MASK_BACKGROUND_WEIGHT_RANGE` (absent ⇒ [`SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_KEY: &str = "subjectMaskBackgroundWeight";
+/// `advanced` key of the loss weight of a pure-subject latent cell, `> 0` and at most
+/// [`SUBJECT_MASK_WEIGHT_MAX`] (absent ⇒ [`SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_KEY: &str = "subjectMaskSubjectWeight";
+/// Upper bound of both mask weights — the engine's `SubjectMaskLoss` bounds. The web form uses the
+/// identical bound (`subjectMaskWeightMax` in `apps/web/src/training/trainingConfig.js`; a parity
+/// test pins the two together, epic 2123 E6). The background weight may be `0` (drop the
+/// background); the subject weight must be `> 0`.
+pub const SUBJECT_MASK_WEIGHT_MAX: f64 = 1.0;
+/// Default background weight when masked loss is on: keep a little background signal so the
+/// adapter does not learn arbitrary backgrounds, while the subject dominates.
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT: f64 = 0.1;
+/// Default subject weight when masked loss is on.
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT: f64 = 1.0;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -3271,7 +3293,76 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     }
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
+    validate_subject_mask_loss(config)?;
     Ok(())
+}
+
+/// The resolved subject-masked-loss weights `(background, subject)` of `config`'s `advanced` bag
+/// (epic 2123, sc-24828): `Ok(None)` when [`SUBJECT_MASK_LOSS_KEY`] is absent or `false`; else
+/// each weight (defaulted when absent) range-checked. Every failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field. Shared by submit-time validation and the
+/// worker, so the two cannot disagree on defaults or bounds.
+pub fn subject_mask_loss_weights(
+    advanced: &JsonObject,
+) -> Result<Option<(f64, f64)>, TrainingPlanError> {
+    let field_error = |field: &str, message: String| TrainingPlanError::InvalidField {
+        field: field.to_owned(),
+        message,
+    };
+    let enabled = match advanced.get(SUBJECT_MASK_LOSS_KEY) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => {
+            return Err(field_error(
+                SUBJECT_MASK_LOSS_KEY,
+                format!("{SUBJECT_MASK_LOSS_KEY} must be true or false."),
+            ))
+        }
+    };
+    let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
+        let Some(value) = advanced.get(key).filter(|value| !value.is_null()) else {
+            return Ok(default);
+        };
+        let weight = value
+            .as_f64()
+            .filter(|weight| weight.is_finite())
+            .ok_or_else(|| field_error(key, format!("{key} must be a number.")))?;
+        let in_range = if zero_ok {
+            (0.0..=SUBJECT_MASK_WEIGHT_MAX).contains(&weight)
+        } else {
+            weight > 0.0 && weight <= SUBJECT_MASK_WEIGHT_MAX
+        };
+        if !in_range {
+            let range = if zero_ok {
+                format!("between 0 and {SUBJECT_MASK_WEIGHT_MAX}")
+            } else {
+                format!("greater than 0 and at most {SUBJECT_MASK_WEIGHT_MAX}")
+            };
+            return Err(field_error(
+                key,
+                format!("{key} ({weight}) must be {range}."),
+            ));
+        }
+        Ok(weight)
+    };
+    // The weights are range-checked even while the toggle is off, so a stored out-of-range value
+    // never lies dormant until someone flips the switch.
+    let background = weight(
+        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+        true,
+    )?;
+    let subject = weight(
+        SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
+        false,
+    )?;
+    Ok(enabled.then_some((background, subject)))
+}
+
+/// Validates the subject-masked-loss keys (epic 2123 E6) — see [`subject_mask_loss_weights`].
+fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    subject_mask_loss_weights(&config.advanced).map(|_| ())
 }
 
 /// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a

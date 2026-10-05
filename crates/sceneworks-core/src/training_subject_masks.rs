@@ -166,6 +166,55 @@ pub fn resolve_subject_mask_path(
     path.is_file().then_some(path)
 }
 
+/// What a masked-loss run finds for one training image (sc-24828): see
+/// [`lookup_subject_mask_for_image`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubjectMaskLookup {
+    /// A non-empty mask is stored for the image; the absolute path of its PNG.
+    Present(PathBuf),
+    /// A mask is stored but it is all black (no subject was found). Masked loss treats this as
+    /// missing: with a zero background weight it would silently drop the image from the loss.
+    Empty,
+    /// No mask is stored for the image's current bytes.
+    Missing,
+}
+
+/// Read a dataset's mask index from its root (absent ⇒ empty index).
+pub fn read_subject_mask_index_at(dataset_root: &Path) -> std::io::Result<DatasetSubjectMasks> {
+    match fs::read(dataset_root.join(SUBJECT_MASK_INDEX_NAME)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(DatasetSubjectMasks::default())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Find the stored subject mask of the training image at `image_path` under `dataset_root`
+/// (sc-24828, the masked-loss consumer of this module's storage convention). The image is keyed by
+/// the SHA-256 of its **current bytes** — the same [`TrainingDatasetItem::content_hash`] the mask
+/// was written under — so a mask whose image was since replaced never matches. Like the coverage
+/// report, a mask counts only when both its index record and its file exist.
+pub fn lookup_subject_mask_for_image(
+    dataset_root: &Path,
+    index: &DatasetSubjectMasks,
+    image_path: &Path,
+) -> std::io::Result<SubjectMaskLookup> {
+    let hash = crate::media_convert::file_content_hash(image_path)?;
+    let Some(record) = index.masks.get(&hash) else {
+        return Ok(SubjectMaskLookup::Missing);
+    };
+    let path = dataset_root.join(subject_mask_relative_path(&hash));
+    Ok(if !path.is_file() {
+        SubjectMaskLookup::Missing
+    } else if record.empty {
+        SubjectMaskLookup::Empty
+    } else {
+        SubjectMaskLookup::Present(path)
+    })
+}
+
 fn is_content_hash(value: &str) -> bool {
     value.len() == 64
         && value

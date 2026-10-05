@@ -29,6 +29,27 @@ export const lrSchedulerOptions = ["constant", "linear", "cosine"];
 // crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
 export const weightNoiseSigmaMax = 0.1;
 export const weightNoiseSigmaSuggested = 0.0125;
+// Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
+// trainer's per-element loss — background cells by the background weight, subject cells by the
+// subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
+// SUBJECT_MASK_*_WEIGHT_DEFAULT in crates/sceneworks-core/src/training.rs) — a Rust parity test
+// reads these lines, keep them equal. Background may be 0 (drop it); subject must be > 0.
+export const subjectMaskWeightMax = 1;
+export const subjectMaskBackgroundWeightDefault = 0.1;
+export const subjectMaskSubjectWeightDefault = 1;
+
+// Mask coverage of a dataset for masked loss, from its /subject-masks report: `usable` images carry
+// a non-empty mask (an all-black "no subject" mask counts as missing — the worker refuses it too).
+// `null` when no report is loaded (unknown coverage).
+export function subjectMaskCoverage(report) {
+  if (!report || !Array.isArray(report.items)) {
+    return null;
+  }
+  const total = report.items.length;
+  const usable = report.items.filter((item) => item?.hasMask && !item?.empty).length;
+  const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
+  return { total, usable, empty, missing: total - usable, complete: total > 0 && usable === total };
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -341,6 +362,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
     // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
     weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
+    // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
+    subjectMaskLoss: advanced.subjectMaskLoss === true,
+    subjectMaskBackgroundWeight: numericDraft(
+      advanced.subjectMaskBackgroundWeight ?? subjectMaskBackgroundWeightDefault,
+    ),
+    subjectMaskSubjectWeight: numericDraft(advanced.subjectMaskSubjectWeight ?? subjectMaskSubjectWeightDefault),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -429,7 +456,13 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 // that distinction became the app's vocabulary rather than one screen's helper.
 export function configValidation(
   configDraft,
-  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+  {
+    activeDataset,
+    selectedTarget,
+    datasetNotReady = false,
+    missingControlModels = [],
+    subjectMaskReport = null,
+  } = {},
 ) {
   const issues = [];
   if (!selectedTarget) {
@@ -472,6 +505,35 @@ export function configValidation(
       issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
     } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
       issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    }
+  }
+  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
+  // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
+  // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
+  if (configDraft.subjectMaskLoss) {
+    const background = numberFromDraft(configDraft.subjectMaskBackgroundWeight);
+    if (background === null || background < 0 || background > subjectMaskWeightMax) {
+      issues.push(
+        issue.error("subjectMaskBackgroundWeight", `Background weight must be between 0 and ${subjectMaskWeightMax}`),
+      );
+    }
+    const subject = numberFromDraft(configDraft.subjectMaskSubjectWeight);
+    if (subject === null || subject <= 0 || subject > subjectMaskWeightMax) {
+      issues.push(
+        issue.error(
+          "subjectMaskSubjectWeight",
+          `Subject weight must be greater than 0 and at most ${subjectMaskWeightMax}`,
+        ),
+      );
+    }
+    const coverage = subjectMaskCoverage(subjectMaskReport);
+    if (coverage && !coverage.complete) {
+      issues.push(
+        issue.error(
+          "subjectMaskLoss",
+          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+        ),
+      );
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -609,6 +671,14 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
     // Omitted when off (empty draft), so a default job's snapshot is unchanged.
     weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
+    // Omitted entirely when off, so a default job's snapshot is unchanged.
+    subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
+    subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskBackgroundWeight)
+      : undefined,
+    subjectMaskSubjectWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskSubjectWeight)
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
