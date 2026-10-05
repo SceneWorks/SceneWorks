@@ -1546,8 +1546,9 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "VACE shared helpers must import only their shared Wan contract on the Candle cfg"
     );
     assert!(
-        VACE.contains("generate_video, resolve_wan_model_dir, resolve_wan_quant,")
-            && VACE.contains("VideoGenInput,"),
+        VACE.contains(
+            "generate_video, resolve_wan_model_dir, resolve_wan_vace_adapters, wan_load_quant,"
+        ) && VACE.contains("VideoGenInput,"),
         "VACE macOS implementation must import generation and MLX-only Wan resolvers separately"
     );
     assert!(
@@ -10097,6 +10098,27 @@ fn wan_engine_id_maps_the_three_models() {
     assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
 }
 
+/// sc-20686: the MLX Wan-family load quantization is the provider crate's `product_load` decision
+/// (the single source the Metal campaign loads through): VACE-Fun defaults to Q4, `wan_vace` stays
+/// dense, and a packed Wan tier never requantizes while a flat root takes the pick.
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_load_quant_is_the_product_decision() {
+    let absent = request(json!({ "projectId": "p" }));
+    let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+    let quant = |engine_id, request, packed| wan_load_quant(engine_id, request, packed).unwrap();
+    assert_eq!(
+        quant("wan2_2_vace_fun_14b", &absent, false),
+        Some(Quant::Q4)
+    );
+    assert_eq!(quant("wan2_2_vace_fun_14b", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan_vace", &absent, false), None);
+    assert_eq!(quant("wan_vace", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, true), None);
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, false), Some(Quant::Q8));
+    assert!(wan_load_quant("ltx_2_3", &absent, false).is_err());
+}
+
 /// Per-model sampling (sc-4997 / sc-10047): with the Lightning toggle on (the default) both A14B
 /// MoE models (T2V + I2V) force the 4-step Lightning preset (CFG off); the dense 5B honors an
 /// explicit user `steps`/`guidanceScale` and otherwise applies the interim default with CFG retained.
@@ -10629,6 +10651,47 @@ fn wan_vace_adapters_are_single_dense() {
         resolve_wan_vace_adapters(&settings, &over),
         Err(WorkerError::InvalidPayload(_))
     ));
+}
+
+/// sc-20686: a TI2V-5B-only install carries just the `wan_2_2` soft co-requisite files from the
+/// T2V-A14B repo — its `q4/` UMT5/VAE/tokenizer, no experts, no config — and the VACE base resolver
+/// must find them there (the assembly needs nothing else from the 14B snapshot).
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_vace_base_resolves_from_a_ti2v_5b_only_install() {
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wan_vace_base_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+    let _env = EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
+    )]);
+    let settings = Settings {
+        data_dir: dir.to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert_eq!(
+        resolve_wan_vace_base_dir(&settings),
+        None,
+        "nothing installed yet"
+    );
+    let q4 = fake_hf_hub_dir(dir)
+        .join("models--SceneWorks--wan2.2-t2v-a14b-mlx")
+        .join("snapshots")
+        .join("991eb255c544bbb2e1f1e07da4355c2f0a5337b7")
+        .join("q4");
+    std::fs::create_dir_all(&q4).unwrap();
+    for name in [
+        "t5_encoder.safetensors",
+        "vae.safetensors",
+        "tokenizer.json",
+    ] {
+        std::fs::write(q4.join(name), name).unwrap();
+    }
+    let base = resolve_wan_vace_base_dir(&settings).expect("the co-requisite tier files resolve");
+    assert_eq!(base.canonicalize().unwrap(), q4.canonicalize().unwrap());
 }
 
 /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the

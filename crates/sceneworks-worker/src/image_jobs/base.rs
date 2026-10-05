@@ -1008,7 +1008,9 @@ impl CandleImageRoute {
             | CandleImageRoute::KreaImportedControl
             | CandleImageRoute::SdxlImported
             | CandleImageRoute::KreaControl => true,
-            CandleImageRoute::CandleTxt2Img => {
+            // The Qwen-Image 2.1 edit lane runs the same generic stream and provider as its
+            // txt2img call, so the same descriptor answer governs whether it consumes the stack.
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::QwenImage21Edit => {
                 mlx_model(&request.model).is_some_and(|model| model.supports_adapters())
             }
             _ => false,
@@ -5384,16 +5386,12 @@ pub(super) fn mlx_load_quant_for_resolved_artifact(
     engine_id: &str,
     quant: Option<Quant>,
 ) -> Option<Quant> {
+    // FLUX.2 Klein's packed-tier rule is the MLX provider crate's product decision (`product_load`).
     if matches!(
         engine_id,
-        "krea_2_raw"
-            | "krea_2_turbo"
-            | "krea_2_edit"
-            | "krea_2_turbo_edit"
-            | "flux2_klein_9b"
-            | "flux2_klein_9b_edit"
-            | "flux2_klein_9b_kv_edit"
-    ) {
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    ) || runtime_macos::providers::flux2::product_load::loads_packed_tier_unquantized(engine_id)
+    {
         None
     } else {
         quant
