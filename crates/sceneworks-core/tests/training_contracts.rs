@@ -2796,18 +2796,14 @@ fn body_loss_aux_models_are_cataloged_at_the_loaded_revision() {
         );
     }
     for loss in BodyLoss::ALL {
-        assert_eq!(
-            loss.weights_cataloged(),
-            loss == BodyLoss::Proportion || loss.own_model().is_some(),
-            "{loss:?}"
-        );
+        assert!(loss.weights_cataloged(), "{loss:?}");
     }
 }
 
-/// sc-24832 (S1 mechanism): the proportion loss is advertised exactly by the targets whose trainer
-/// decodes x0 for depth anchoring (the same builder arms; ViTPose+ is cataloged); shape and normal by
-/// none until their weights are cataloged. An enabled weight on a non-advertising target is a
-/// submit-time `<loss>Weight` field error; off is always admitted. Mutation: drop
+/// sc-24832 (S1 mechanism): every body loss is advertised exactly by the targets whose trainer
+/// decodes x0 for depth anchoring (the same builder arms; ViTPose+, HybrIK and Sapiens are all
+/// cataloged). An enabled weight on a non-advertising target is a submit-time `<loss>Weight` field
+/// error; off is always admitted. Mutation: drop
 /// `body_losses::validate_support` from `validate_training_config_for_target` ⇒ red.
 #[test]
 fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
@@ -2842,26 +2838,20 @@ fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .filter(|target| target_supports(target, loss))
             .map(|target| target.id.as_str())
             .collect();
-        let expected: Vec<&str> = if loss == BodyLoss::Proportion {
-            depth.clone()
-        } else {
-            Vec::new()
-        };
-        assert_eq!(advertising, expected, "{loss:?}");
+        assert_eq!(advertising, depth, "{loss:?}");
     }
     let z_image = by_id("z_image_turbo_lora");
-    with_weight(&z_image, BodyLoss::Proportion, json!(0.1)).expect("Z-Image admits it");
+    for loss in BodyLoss::ALL {
+        with_weight(&z_image, loss, json!(0.1)).expect("Z-Image admits it");
+    }
     let non_advertising = registry
         .targets
         .iter()
         .find(|target| !target_supports(target, BodyLoss::Proportion))
         .expect("a target without an x0 decoder (Krea ControlNet / LTX-2.5)")
         .clone();
-    for (target, loss) in [
-        (non_advertising, BodyLoss::Proportion),
-        (z_image.clone(), BodyLoss::Shape),
-        (z_image.clone(), BodyLoss::Normal),
-    ] {
+    for loss in BodyLoss::ALL {
+        let target = non_advertising.clone();
         with_weight(&target, loss, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
         match with_weight(&target, loss, json!(0.1)) {
             Err(TrainingPlanError::InvalidField { field, .. }) => {

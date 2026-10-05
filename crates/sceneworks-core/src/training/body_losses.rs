@@ -131,14 +131,28 @@ pub const VITPOSE_PLUS_BASE_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "model.safetensors",
 };
 
-/// HybrIK ResNet-34 shape encoder. Upstream ships it only as a Google-Drive `.pth`; it is
-/// cataloged once its safetensors re-host (`scripts/reference/body_losses_reference.py --convert`
-/// in the inference repo) is published, until then `None` and the shape loss is advertised by no
-/// target.
-pub const HYBRIK_MODEL: Option<&AuxTrainingModel> = None;
-/// Sapiens-0.3B normal estimator. Upstream (`facebook/sapiens-normal-0.3b`) ships only a pickled
-/// `.pth`; cataloged once its safetensors re-host is published (as [`HYBRIK_MODEL`]).
-pub const SAPIENS_NORMAL_MODEL: Option<&AuxTrainingModel> = None;
+/// HybrIK ResNet-34 shape encoder — the SceneWorks safetensors re-host of upstream's Google-Drive
+/// `hybrik_resnet34.pth` (keys unchanged; MIT).
+pub const HYBRIK_RESNET34_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "hybrik_resnet34",
+    label: "HybrIK ResNet-34",
+    repo: "SceneWorks/hybrik-resnet34",
+    revision: "534e2815976bfd4bcecde552a2b863f92e0e53e0",
+    file: "model.safetensors",
+};
+/// The shape loss's own model (cataloged).
+pub const HYBRIK_MODEL: Option<&AuxTrainingModel> = Some(&HYBRIK_RESNET34_MODEL);
+/// Sapiens-0.3B normal estimator — the SceneWorks safetensors re-host of
+/// `facebook/sapiens-normal-0.3b`'s `.pth` state dict (keys unchanged; CC-BY-NC-4.0).
+pub const SAPIENS_NORMAL_0_3B_MODEL: AuxTrainingModel = AuxTrainingModel {
+    id: "sapiens_normal_0_3b",
+    label: "Sapiens Normal 0.3B",
+    repo: "SceneWorks/sapiens-normal-0.3b",
+    revision: "4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+    file: "model.safetensors",
+};
+/// The normal loss's own model (cataloged).
+pub const SAPIENS_NORMAL_MODEL: Option<&AuxTrainingModel> = Some(&SAPIENS_NORMAL_0_3B_MODEL);
 
 /// Whether `target` (as projected for the serving platform) advertises `loss`.
 pub fn target_supports(target: &TrainingTarget, loss: BodyLoss) -> bool {

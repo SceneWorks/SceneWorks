@@ -28962,6 +28962,66 @@
         "description": "Human keypoint estimator used by LoRA training's body losses to keep a character's body proportions consistent and to detect whether a training image shows a person - not a generation model. Apache-2.0.",
         "recommendedFor": []
       }
+    },
+    {
+      // HybrIK ResNet-34 (SceneWorks safetensors re-host of upstream's hybrik_resnet34.pth, keys unchanged) — the frozen beta regressor of the native trainer's body-shape loss (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses (parity test).
+      "id": "hybrik_resnet34",
+      "autoDownload": false,
+      "name": "HybrIK ResNet-34",
+      "family": "hybrik",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/hybrik-resnet34",
+          "revision": "534e2815976bfd4bcecde552a2b863f92e0e53e0",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 130617496,
+          "footprint": { "diskSizeBytes": 130617496 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/hybrik-resnet34"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/hybrik-resnet34/tree/534e2815976bfd4bcecde552a2b863f92e0e53e0",
+      "ui": {
+        "label": "HybrIK ResNet-34",
+        "description": "SMPL body-shape regressor used by LoRA training's body shape loss to keep a character's build consistent - not a generation model. MIT.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // Sapiens normal 0.3B (SceneWorks safetensors re-host of facebook/sapiens-normal-0.3b@ada60522, keys unchanged) — the frozen estimator of the native trainer's normal loss (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses (parity test).
+      "id": "sapiens_normal_0_3b",
+      "autoDownload": false,
+      "name": "Sapiens Normal 0.3B",
+      "family": "sapiens",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/sapiens-normal-0.3b",
+          "revision": "4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 1357935996,
+          "footprint": { "diskSizeBytes": 1357935996 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/sapiens-normal-0.3b"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/sapiens-normal-0.3b/tree/4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+      "ui": {
+        "label": "Sapiens Normal 0.3B",
+        "description": "Human surface-normal estimator used by LoRA training's normal loss to keep a character's body surface detail consistent - not a generation model. CC-BY-NC-4.0.",
+        "recommendedFor": []
+      }
     }
   ]
 }

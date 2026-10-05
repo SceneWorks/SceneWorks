@@ -4849,18 +4849,17 @@ mod tests {
         } else {
             assert!(err(z_image).contains("does not support the body proportion loss"));
         }
-        // Shape/normal: refused — undeclared, or (declared) its model is not cataloged yet.
+        // Shape/normal follow the descriptor too (their models are cataloged).
         for (key, declared) in [
             ("bodyShapeWeight", declared.body_shape_loss),
             ("normalWeight", declared.normal_loss),
         ] {
-            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, json!(0.1))]));
-            let expected = if declared {
-                "not in the model catalog"
+            let p = plan("z_image_lora", "z_image_turbo", &[(key, json!(0.1))]);
+            if declared {
+                validate_training_target_config(&p).unwrap_or_else(|e| panic!("{key}: {e:?}"));
             } else {
-                "does not support the"
-            };
-            assert!(message.contains(expected), "{key}: {message}");
+                assert!(err(p).contains("does not support the"), "{key}");
+            }
         }
         for (key, bad) in [
             ("bodyProportionWeight", json!(-0.1)),
@@ -4971,13 +4970,51 @@ mod tests {
         assert_eq!(body.shape_model_dir, None);
         assert_eq!(body.normal_model_dir, None);
 
-        // A loss whose frozen model is not cataloged is refused (never trained without it).
-        let mut shape = plan.clone();
-        shape
-            .config
-            .advanced
-            .insert("bodyShapeWeight".to_owned(), json!(0.1));
-        assert!(refusal(&shape).contains("not in the model catalog"));
+        // Shape + normal resolve their own models at the pinned revisions (missing ⇒ named).
+        use sceneworks_core::training::body_losses::{
+            HYBRIK_RESNET34_MODEL, SAPIENS_NORMAL_0_3B_MODEL,
+        };
+        let mut all = plan.clone();
+        for (key, v) in [
+            ("bodyShapeWeight", json!(0.2)),
+            ("bodyShapeMinCos", json!(0.5)),
+            ("normalWeight", json!(0.3)),
+            ("normalRestrictToSubject", json!(true)),
+        ] {
+            all.config.advanced.insert(key.to_owned(), v);
+        }
+        assert!(refusal(&all).contains(HYBRIK_RESNET34_MODEL.id));
+        let hybrik = fake_snapshot(
+            &hub,
+            HYBRIK_RESNET34_MODEL.repo,
+            HYBRIK_RESNET34_MODEL.revision,
+            HYBRIK_RESNET34_MODEL.file,
+        );
+        assert!(refusal(&all).contains(SAPIENS_NORMAL_0_3B_MODEL.id));
+        let sapiens = fake_snapshot(
+            &hub,
+            SAPIENS_NORMAL_0_3B_MODEL.repo,
+            SAPIENS_NORMAL_0_3B_MODEL.revision,
+            SAPIENS_NORMAL_0_3B_MODEL.file,
+        );
+        let mut config = map_training_config(&all.config);
+        apply_body_losses(&settings, &all, &mut config).unwrap();
+        let body = &config.body_losses;
+        assert_eq!(
+            canon(body.shape_model_dir.as_ref().unwrap()),
+            canon(&hybrik)
+        );
+        assert_eq!(
+            canon(body.normal_model_dir.as_ref().unwrap()),
+            canon(&sapiens)
+        );
+        assert_eq!(
+            (body.shape.weight, body.shape.t_min, body.shape.t_max),
+            (0.2, 0.4, 0.8)
+        );
+        assert_eq!(body.shape_min_cos, 0.5);
+        assert_eq!(body.normal.weight, 0.3);
+        assert!(body.normal_restrict_to_subject);
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training

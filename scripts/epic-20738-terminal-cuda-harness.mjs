@@ -180,10 +180,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 ];
 // Re-pinned by sc-24832: `config/download-pattern-evidence.json` was re-recorded when the catalog
 // gained epic 2123's training-time auxiliary models — TAEF1, the three Depth-Anything-V2 sizes, the
-// sc-24830 tiny decoders and ViTPose+ base (127 repo@revision keys; sc-19383 left 117).
+// sc-24830 tiny decoders, ViTPose+ base and the HybrIK / Sapiens re-hosts (129 repo@revision keys;
+// sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "f8d65ab276e6c1ac7a30bb4a33337a867fcf195ac8a62c54850df7802e4f97e9";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "9b51f756860ad200a7f2547254305aae7864645987b6bf04bad126778976aa7a";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

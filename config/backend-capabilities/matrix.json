@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 118,
+    "modelCount": 120,
     "importedFamilyCount": 4,
-    "cellCount": 1016,
+    "cellCount": 1018,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
@@ -22,14 +22,14 @@
     "descriptorMlxRuntime": "e2298d047fccb330306cd08561543de1e71668f0d885421560c80386b944c870",
     "descriptorPreviewFacts": "960aaacfa29aba99e932d0c44e0a226cc00241890a1aa5c6848e49917269d7a4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "2607db53a667df2d7ed0a0d84eeeca3932f08b7efb6e3afc5c44e1509b75655e",
+    "manifest": "1287e10065411cecad2fe6361f9fbc6f3540fb7811aa624dc90797e87b982b49",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "14749024735790cc33f3d4f3e968241b4bbcf5e0a30546b52038be39f0988a41",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "678145d02f75ba41158b389c94dcb67c8b7ae3a66932b5875fda5b61c821a008",
-    "trainingCatalog": "4877d2e210b5e65619bf701957c0c6b62ca3bf0db34790f3eaceeeb095681606",
+    "trainingCatalog": "d0300e35ed06da7f5110ffb76facfa32517019aa26e80b8f5f91a7e67b24eec4",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "118b50631aeea8426ef4079282c3bc908c911fcca37ee8e48f26dfbfd5e63486",
+    "workerTrainingDispatch": "9599722424e58654b1af42914770b1e2587b8a5b3c0f7932c131464533f271a5",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -1616,6 +1616,23 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "hybrik_resnet34",
+      "family": "hybrik",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {
@@ -4924,6 +4941,23 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "sapiens_normal_0_3b",
+      "family": "sapiens",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {

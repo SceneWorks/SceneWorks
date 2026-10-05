@@ -1660,16 +1660,12 @@ fn mage_flow_lora_target(
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -1753,16 +1749,12 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 depth anchoring (sc-2125, sc-24830): declared on MLX and Candle alike.
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
             "supportsSubjectMaskLoss": true
         })),
@@ -1885,16 +1877,12 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2006,16 +1994,12 @@ fn krea_raw_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
@@ -2213,16 +2197,12 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2316,16 +2296,12 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2447,12 +2423,10 @@ fn ltx_lora_target(
             depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
             json!(true),
         );
-        // Epic 2123 body losses (sc-24832): the same decoder arms; only the proportion loss's
-        // weights are cataloged, so only it is advertised.
-        limits.insert(
-            body_losses::BODY_PROPORTION_SUPPORT_LIMIT.to_owned(),
-            json!(true),
-        );
+        // Epic 2123 body losses (sc-24832): the same decoder arms.
+        for loss in body_losses::BodyLoss::ALL {
+            limits.insert(loss.support_limit().to_owned(), json!(true));
+        }
     }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
@@ -2611,16 +2585,12 @@ fn wan_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2716,16 +2686,12 @@ fn wan_moe_lora_target(
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2848,16 +2814,12 @@ fn sdxl_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -2948,16 +2910,12 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -3038,16 +2996,12 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -3138,16 +3092,12 @@ fn kolors_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
@@ -4153,16 +4103,12 @@ fn anima_base_lora_target() -> TrainingTarget {
             // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
             // Candle alike (pinned per platform by a worker drift test).
             "supportsDepthAnchoring": true,
-
             // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
-
-            // also declares the three body losses (same builder arms). Only the proportion loss's
-
-            // weights (ViTPose+) are cataloged, so only it is advertised; shape (HybrIK) and
-
-            // normal (Sapiens) join once their re-hosts are cataloged.
-
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
             "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
             "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({

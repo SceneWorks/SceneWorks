@@ -174,10 +174,9 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
 }
 
-/// sc-24832: the targets endpoint advertises each body loss identically on both platforms — the
-/// proportion loss on exactly the depth-anchoring targets (the same decoder arms), shape and normal
-/// nowhere until their weights are cataloged. Mutation: drop the proportion flag from one target ⇒
-/// red.
+/// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
+/// exactly the depth-anchoring targets (the same decoder arms). Mutation: drop a body flag from one
+/// target ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_body_loss_support() {
     use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
@@ -195,12 +194,7 @@ fn platform_effective_training_catalog_projects_body_loss_support() {
     for loss in BodyLoss::ALL {
         let mlx = ids(false, &|t| target_supports(t, loss));
         assert_eq!(mlx, ids(true, &|t| target_supports(t, loss)), "{loss:?}");
-        let expected = if loss == BodyLoss::Proportion {
-            depth.clone()
-        } else {
-            Vec::new()
-        };
-        assert_eq!(mlx, expected, "{loss:?}");
+        assert_eq!(mlx, depth, "{loss:?}");
     }
 }
 

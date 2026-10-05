@@ -2256,6 +2256,19 @@
       ]
     },
     {
+      "key": "SceneWorks/hybrik-resnet34@534e2815976bfd4bcecde552a2b863f92e0e53e0",
+      "repo": "SceneWorks/hybrik-resnet34",
+      "revision": "534e2815976bfd4bcecde552a2b863f92e0e53e0",
+      "resolvedSha": "534e2815976bfd4bcecde552a2b863f92e0e53e0",
+      "servedRepo": "SceneWorks/hybrik-resnet34",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "model.safetensors"
+      ]
+    },
+    {
       "key": "SceneWorks/ideogram-4-mlx@a3095855b8819dc0d6b067cb1354aaa7da189ff8",
       "repo": "SceneWorks/ideogram-4-mlx",
       "revision": "a3095855b8819dc0d6b067cb1354aaa7da189ff8",
@@ -3999,6 +4012,19 @@
         "README.md",
         "model.safetensors",
         "tokenizer.json"
+      ]
+    },
+    {
+      "key": "SceneWorks/sapiens-normal-0.3b@4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+      "repo": "SceneWorks/sapiens-normal-0.3b",
+      "revision": "4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+      "resolvedSha": "4cc2d8618fafb8aab1b24907dcf4c765fb70daf0",
+      "servedRepo": "SceneWorks/sapiens-normal-0.3b",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "model.safetensors"
       ]
     },
     {
