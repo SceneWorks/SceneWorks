@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference revision 0d68aa0e (inference feature/sc-2123-perceptual-character-lora, merge of PR #1188; the epic 2123 feature-branch pin): 738 provenance candidates and 103 production-Rust crate prefixes. The advance from the previously pinned eac60a77 takes in the inference merges since then (the YuE2 epic, Qwen Image 2.1 LoRA training, the sc-24163 training preflight and MLX evidence fixes, the sc-24380 Mage fixes, and the fused compressed KV cache epic) plus sc-24826's weight-noise training technique, which is first-party trainer plumbing. The YuE2 production crates crates/audio/candle-audio-yue2 and crates/audio/candle-audio-sheetsage2 remain unclassified as open advisory items for that epic's compliance pass. Generated inventories and digests describe this exact source. Existing compliance classifications and open items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "0d68aa0e125cc175b0f632f6cc9e4c063e953dfe",
-  "auditDigest": "ffa3de41904dd6d04c02c606284bc694ccd67e6969786241c070e37567d069e9",
+  "_comment": "Audit inventory rescanned at inference revision 9fc68523 (inference feature/sc-2123-perceptual-character-lora, merge of PR #1193; the epic 2123 feature-branch pin, barrier B): 739 provenance candidates and 103 production-Rust crate prefixes. The advance from the previously pinned eac60a77 takes in the inference merges since then (the YuE2 epic, Qwen Image 2.1 LoRA training, the sc-24163 training preflight and MLX evidence fixes, the sc-24380 Mage fixes, and the fused compressed KV cache epic) plus epic 2123's training techniques: sc-24826 weight noise, sc-24827 gradient noise on every trainer, sc-2127 resolution buckets, sc-2125 depth anchoring through the shared perceptual path (the new candidate crates/media/mlx-gen/src/train/perceptual.rs, first-party trainer plumbing covered by the existing mlx-gen architecture area), and sc-24828 subject-masked loss. The YuE2 production crates crates/audio/candle-audio-yue2 and crates/audio/candle-audio-sheetsage2 remain unclassified as open advisory items for that epic's compliance pass. Generated inventories and digests describe this exact source. Existing compliance classifications and open items remain advisory under sc-19751. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "9fc6852369736a3c85926bc024718b3344008c42",
+  "auditDigest": "81863247948fedeaf5839528e89a9197d93b69cad26b3db057eb7237f7e6e8ee",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "0d68aa0e125cc175b0f632f6cc9e4c063e953dfe",
+    "revision": "9fc6852369736a3c85926bc024718b3344008c42",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 738,
-    "populationSha256": "62e0096ea7227a2f6967937fff1c1d8c97e27abd37819e82fa532c807366867a"
+    "matchedFiles": 739,
+    "populationSha256": "6ff16e7b0469a3b4de6cb1c3c9049f1d35e0b8bb4ece3e63568a6099224079d3"
   },
   "portedSourceAreas": [
     {
@@ -913,7 +913,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "0d68aa0e125cc175b0f632f6cc9e4c063e953dfe",
+    "revision": "9fc6852369736a3c85926bc024718b3344008c42",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 103,
     "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"
