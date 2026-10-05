@@ -2078,6 +2078,67 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
+    let workflows: Vec<String> =
+        serde_json::from_str(&web_training_const("depthAnchoringNoVideoLtxWorkflows"))
+            .expect("depthAnchoringNoVideoLtxWorkflows is a JSON-compatible string array");
+    assert_eq!(workflows, DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.to_vec());
+}
+
+/// sc-24830 review: submit refuses the depth-anchoring combinations the engine refuses even on an
+/// advertising target — a Mage full base fine-tune and each LTX-2.5 workflow with no generated
+/// video — as a `depthAnchoringWeight` field error; the adapter run and a video LTX-2.5 workflow
+/// are admitted. Mutation: drop the `depth_anchoring_combination_refusal` check from
+/// `validate_support` ⇒ the refused cases are admitted ⇒ red.
+#[test]
+fn depth_anchoring_refuses_full_finetune_and_no_video_ltx_workflows_at_submit() {
+    use sceneworks_core::training::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS;
+    let registry = builtin_training_targets();
+    let target = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .clone()
+    };
+    let with = |target: &sceneworks_core::training::TrainingTarget, extra: &[(&str, Value)]| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("depthAnchoringWeight".to_owned(), json!(0.1));
+        for (k, v) in extra {
+            config.advanced.insert((*k).to_owned(), v.clone());
+        }
+        validate_training_config_for_target(target, &config)
+    };
+    let refused = |r: Result<(), TrainingPlanError>, what: &str| match r {
+        Err(TrainingPlanError::InvalidField { field, .. }) => {
+            assert_eq!(field, "depthAnchoringWeight", "{what}")
+        }
+        other => panic!("{what}: expected a depthAnchoringWeight field error, got {other:?}"),
+    };
+    let mage = registry
+        .targets
+        .iter()
+        .find(|t| t.base_model == "mage_flow_base")
+        .expect("mage target")
+        .clone();
+    with(&mage, &[("networkType", json!("lora"))]).expect("Mage LoRA admits depth");
+    refused(with(&mage, &[("networkType", json!("full"))]), "mage full");
+    let ltx = target("ltx_2_5_video_lora");
+    with(&ltx, &[("ltxWorkflow", json!("t2v_lora"))]).expect("LTX-2.5 t2v admits depth");
+    for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
+        refused(with(&ltx, &[("ltxWorkflow", json!(workflow))]), workflow);
+    }
+    // The same workflow name on LTX-2.3 is not an LTX-2.5 bundle workflow: no extra refusal.
+    let ltx23 = target("ltx_video_lora");
+    assert!(
+        sceneworks_core::training::depth_anchoring::depth_anchoring_combination_refusal(
+            &ltx23,
+            &ltx23.defaults
+        )
+        .is_none()
+    );
 }
 
 /// sc-2125 / sc-24830: every auxiliary model depth anchoring loads — each family's tiny x0 decoder

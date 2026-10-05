@@ -35,7 +35,7 @@ import {
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEnabled,
-  targetSupportsDepthAnchoring,
+  depthAnchoringAvailable,
   depthAnchoringEveryDefault,
   depthAnchoringEveryMax,
   depthAnchoringModelLabels,
@@ -166,7 +166,8 @@ export function ConfigureJobPanel({
     );
   // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
-  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
+  // A full fine-tune or an LTX-2.5 workflow with no generated video hides it too (sc-24830).
+  const depthAnchoringSupported = depthAnchoringAvailable(selectedTarget, configDraft);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
   // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start

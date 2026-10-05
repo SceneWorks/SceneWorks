@@ -56,6 +56,9 @@ export const depthAnchoringWeightSuggested = 0.1;
 export const depthAnchoringEveryMax = 16;
 export const depthAnchoringEveryDefault = 2;
 export const depthAnchoringModelOptions = ["small", "base", "large"];
+// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
+// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
+export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
 export const depthAnchoringModelLabels = {
   small: "Small (fast)",
   base: "Base",
@@ -129,6 +132,25 @@ export function targetSupportsResolutionBuckets(target) {
 // (pinned to the trainer descriptors by a worker test). Absent means unsupported.
 export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Why depth anchoring cannot run for this target + draft even though the target advertises it, or
+// null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
+// trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function depthAnchoringCombinationRefusal(target, configDraft) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune";
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `Depth anchoring needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the depth-anchoring control is offered for this target + draft.
+export function depthAnchoringAvailable(target, configDraft) {
+  return targetSupportsDepthAnchoring(target) && depthAnchoringCombinationRefusal(target, configDraft) === null;
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -949,6 +971,12 @@ export function depthAnchoringIssues(configDraft, selectedTarget) {
     // only arrive from a carried-over draft, and the API would refuse it anyway.
     issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
     return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = depthAnchoringCombinationRefusal(selectedTarget, configDraft);
+    if (refusal) {
+      issues.push(["depthAnchoringWeight", refusal]);
+      return issues;
+    }
   }
   if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
     issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);

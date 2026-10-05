@@ -53,16 +53,59 @@ pub fn target_supports_depth_anchoring(target: &TrainingTarget) -> bool {
         == Some(true)
 }
 
+/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, web: `depthAnchoringNoVideoLtxWorkflows`) that
+/// generate no video stream — audio-only, or video as frozen conditioning — so there is no x0 video
+/// latent to decode; the engine's LTX-2.5 trainers refuse depth anchoring for them (sc-24830).
+pub const DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS: [&str; 6] = [
+    "v2a_lora",
+    "t2a_lora",
+    "audio_extend_lora",
+    "audio_inpainting_lora",
+    "audio_suffix_lora",
+    "a2a_ic_lora",
+];
+
+/// Why depth anchoring cannot run for this target + config combination even though the target
+/// advertises it, or `None`: a full base fine-tune (the engine trains aux losses through the adapter
+/// step only), or an LTX-2.5 workflow that generates no video. Mirrors the engine's typed refusals.
+pub fn depth_anchoring_combination_refusal(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Option<String> {
+    if super::config_is_full_finetune(config) {
+        return Some(
+            "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
+        );
+    }
+    if target.base_model == "ltx_2_5" {
+        let workflow = config
+            .advanced
+            .get("ltxWorkflow")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
+            return Some(format!(
+                "Depth anchoring needs a generated video stream; the LTX-2.5 workflow '{workflow}' \
+                 generates none."
+            ));
+        }
+    }
+    None
+}
+
 /// Refuses an enabled depth-anchoring request on a target that does not advertise
-/// [`DEPTH_ANCHORING_SUPPORT_LIMIT`] — a `depthAnchoringWeight` field error at submit time instead
-/// of a refusal after the job is queued.
+/// [`DEPTH_ANCHORING_SUPPORT_LIMIT`], or on a combination the engine refuses
+/// ([`depth_anchoring_combination_refusal`]) — a `depthAnchoringWeight` field error at submit time
+/// instead of a refusal after the job is queued.
 pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    if depth_anchoring_settings(&config.advanced)?.is_some()
-        && !target_supports_depth_anchoring(target)
-    {
+    if depth_anchoring_settings(&config.advanced)?.is_none() {
+        return Ok(());
+    }
+    if !target_supports_depth_anchoring(target) {
         return Err(field_error(
             DEPTH_ANCHORING_WEIGHT_KEY,
             format!(
@@ -71,6 +114,9 @@ pub(super) fn validate_support(
                 target.name
             ),
         ));
+    }
+    if let Some(reason) = depth_anchoring_combination_refusal(target, config) {
+        return Err(field_error(DEPTH_ANCHORING_WEIGHT_KEY, reason));
     }
     Ok(())
 }
