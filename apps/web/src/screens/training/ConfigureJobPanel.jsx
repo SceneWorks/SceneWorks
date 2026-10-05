@@ -14,12 +14,34 @@ import {
   optimizerLabel,
   optionLabel,
   qualityPresetLabel,
+  rangeOptions,
+  resolutionBucketRepeatsMax,
+  resolutionBucketsMax,
+  resolutionBucketStride,
+  seedResolutionBuckets,
+  targetSupportsResolutionBuckets,
+  subjectMaskCoverage,
+  subjectMaskWeightMax,
+  targetSupportsSubjectMaskLoss,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
   targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
+  gradientNoiseEtaMax,
+  gradientNoiseEtaSuggested,
+  gradientNoiseGammaDefault,
+  gradientNoiseGammaMax,
+  targetSupportsGradientNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
+  depthAnchoringEnabled,
+  targetSupportsDepthAnchoring,
+  depthAnchoringEveryDefault,
+  depthAnchoringEveryMax,
+  depthAnchoringModelLabels,
+  depthAnchoringModelOptions,
+  depthAnchoringWeightMax,
+  depthAnchoringWeightSuggested,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -98,6 +120,10 @@ export function ConfigureJobPanel({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  // Subject-masked loss (sc-24828): the active dataset's /subject-masks report (null = unknown)
+  // and the screen's "Generate subject masks" action (saves the dataset, queues the SAM3 job).
+  subjectMaskReport = null,
+  onGenerateSubjectMasks,
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -110,14 +136,47 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
-  // Weight noising is offered only where the target's trainer on this platform declares it
-  // (`limits.supportsWeightNoise` from the targets endpoint) — elsewhere the run would be refused.
-  // The toggle is checked for a positive sigma (a "0" draft is off); the sigma input stays visible
-  // while the draft holds any value so an out-of-range entry can be corrected in place.
+  // Adapter noise (epic 2123) is offered only where the target's trainer declares it — the targets
+  // endpoint's `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (every LoRA/LoKr target
+  // since sc-24827; never the control-branch target) — elsewhere the run would be refused.
+  // A toggle is checked for a positive value (a "0" draft is off); the input stays visible while the
+  // draft holds any value so an out-of-range entry can be corrected in place (and typing "0.0…"
+  // never unmounts the field mid-edit).
   const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
   const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
   const weightNoiseInputVisible =
     weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Gradient noise: the same on/visible split over eta; gamma is edited alongside it.
+  const gradientNoiseSupported = targetSupportsGradientNoise(selectedTarget);
+  const gradientNoiseEnabled = (numberFromDraft(configDraft.gradientNoiseEta) ?? 0) > 0;
+  const gradientNoiseInputVisible =
+    gradientNoiseSupported && String(configDraft.gradientNoiseEta ?? "").trim() !== "";
+  // Multi-resolution buckets are on whenever the draft carries a row list (null = off).
+  const resolutionBuckets = Array.isArray(configDraft.resolutionBuckets) ? configDraft.resolutionBuckets : null;
+  // Offered only where the target's trainer on this platform declares buckets
+  // (`limits.supportsResolutionBuckets`, withheld for LTX-2.5) — elsewhere the run would be refused.
+  // A list carried onto an unsupported target keeps its toggle so it can be turned off.
+  const resolutionBucketsSupported = targetSupportsResolutionBuckets(selectedTarget);
+  // Bucket rows pick from the resolutions the target advertises (the API's menu, E6).
+  const bucketResolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const updateResolutionBucket = (index, key, value) =>
+    updateConfigDraft(
+      "resolutionBuckets",
+      resolutionBuckets.map((row, rowIndex) => (rowIndex === index ? { ...row, [key]: value } : row)),
+    );
+  // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
+  // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
+  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
+  const depthAnchoringOn = depthAnchoringEnabled(configDraft);
+  // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
+  // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
+  // through configValidation instead of rendering a toggle the run would refuse.
+  const subjectMaskLossSupported = targetSupportsSubjectMaskLoss(selectedTarget);
+  const subjectMaskLossEnabled = subjectMaskLossSupported && Boolean(configDraft.subjectMaskLoss);
+  const maskCoverage = subjectMaskCoverage(subjectMaskReport);
+  const [maskJobRequested, setMaskJobRequested] = React.useState(false);
+  // A queued-generation note belongs to the dataset it was queued for.
+  React.useEffect(() => setMaskJobRequested(false), [activeDataset?.id]);
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -570,6 +629,103 @@ export function ConfigureJobPanel({
                   />
                 </label>
               ) : null}
+              {gradientNoiseInputVisible ? (
+                <>
+                  <label title="Gradient noise initial scale (eta): every optimizer step adds Gaussian noise of standard deviation eta / (1 + step)^gamma to each adapter gradient, after clipping. 0.01 is the suggested scale.">
+                    Gradient noise eta
+                    <input
+                      max={gradientNoiseEtaMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("gradientNoiseEta", event.target.value)}
+                      step="0.001"
+                      type="number"
+                      value={configDraft.gradientNoiseEta ?? ""}
+                      {...invalidProps(configValidity, "gradientNoiseEta")}
+                    />
+                  </label>
+                  <label title="Gradient noise annealing exponent (gamma): larger values fade the noise out faster over the run. 0.55 is the default.">
+                    Gradient noise gamma
+                    <input
+                      max={gradientNoiseGammaMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("gradientNoiseGamma", event.target.value)}
+                      step="0.05"
+                      type="number"
+                      value={configDraft.gradientNoiseGamma ?? ""}
+                      {...invalidProps(configValidity, "gradientNoiseGamma")}
+                    />
+                  </label>
+                </>
+              ) : null}
+              {depthAnchoringSupported && depthAnchoringOn ? (
+                <>
+                  <label title="Depth anchoring loss weight. 0.1 is the suggested weight for the Small depth model; use a much smaller weight (around 0.001) with Large.">
+                    Depth anchoring weight
+                    <input
+                      max={depthAnchoringWeightMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringWeight", event.target.value)}
+                      step="0.01"
+                      type="number"
+                      value={configDraft.depthAnchoringWeight ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringWeight")}
+                    />
+                  </label>
+                  <label title="Which Depth Anything V2 model judges the depth. Install it from the Models screen first (along with the TAEF1 tiny decoder).">
+                    Depth model
+                    <select
+                      onChange={(event) => updateConfigDraft("depthAnchoringModel", event.target.value)}
+                      value={configDraft.depthAnchoringModel ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringModel")}
+                    >
+                      {depthAnchoringModelOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {depthAnchoringModelLabels[option] ?? option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label title="Lowest noise level (0 = clean image, 1 = pure noise) at which the depth loss applies. Empty = 0.">
+                    Depth window min
+                    <input
+                      max="1"
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringMinT", event.target.value)}
+                      placeholder="0"
+                      step="0.05"
+                      type="number"
+                      value={configDraft.depthAnchoringMinT ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringMinT")}
+                    />
+                  </label>
+                  <label title="Highest noise level at which the depth loss applies. Empty = 1.">
+                    Depth window max
+                    <input
+                      max="1"
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringMaxT", event.target.value)}
+                      placeholder="1"
+                      step="0.05"
+                      type="number"
+                      value={configDraft.depthAnchoringMaxT ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringMaxT")}
+                    />
+                  </label>
+                  <label title="Every Nth step trains the depth loss alone; the steps between train the normal loss. 1 adds the depth loss to every step instead.">
+                    Depth every N steps
+                    <input
+                      max={depthAnchoringEveryMax}
+                      min="1"
+                      onChange={(event) => updateConfigDraft("depthAnchoringEvery", event.target.value)}
+                      placeholder={String(depthAnchoringEveryDefault)}
+                      step="1"
+                      type="number"
+                      value={configDraft.depthAnchoringEvery ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringEvery")}
+                    />
+                  </label>
+                </>
+              ) : null}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -698,7 +854,206 @@ export function ConfigureJobPanel({
                   Weight noise
                 </label>
               ) : null}
+              {gradientNoiseSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Add seeded Gaussian noise to the adapter gradients that fades out over the run (eta / (1 + step)^gamma) — helps escape poor early minima. Off by default."
+                >
+                  <input
+                    checked={gradientNoiseEnabled}
+                    onChange={(event) => {
+                      updateConfigDraft("gradientNoiseEta", event.target.checked ? String(gradientNoiseEtaSuggested) : "");
+                      updateConfigDraft("gradientNoiseGamma", event.target.checked ? String(gradientNoiseGammaDefault) : "");
+                    }}
+                    type="checkbox"
+                  />
+                  Gradient noise
+                </label>
+              ) : null}
+              {resolutionBucketsSupported || resolutionBuckets ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                >
+                  <input
+                    checked={Boolean(resolutionBuckets)}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "resolutionBuckets",
+                        event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Multi-resolution buckets
+                </label>
+              ) : null}
+              {depthAnchoringSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. Needs the TAEF1 and Depth Anything V2 models installed. Off by default."
+                >
+                  <input
+                    checked={depthAnchoringOn}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "depthAnchoringWeight",
+                        event.target.checked ? String(depthAnchoringWeightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Depth anchoring
+                </label>
+              ) : null}
+              {subjectMaskLossSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image (Data Sets → Generate subject masks). Off by default."
+                >
+                  <input
+                    checked={subjectMaskLossEnabled}
+                    onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
+                    type="checkbox"
+                    {...invalidProps(configValidity, "subjectMaskLoss")}
+                  />
+                  Subject-masked loss
+                </label>
+              ) : null}
             </div>
+
+            {resolutionBuckets ? (
+              <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
+                <legend>Resolution buckets</legend>
+                <span className="training-field-hint">
+                  Each image trains at every resolution below, repeated that many times per epoch. These replace the
+                  single Resolution setting.
+                </span>
+                {resolutionBuckets.map((row, index) => (
+                  <div className="training-resolution-bucket-row" key={index}>
+                    <label>
+                      Resolution
+                      {bucketResolutionOptions.length ? (
+                        <select
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          value={row.resolution ?? ""}
+                        >
+                          {bucketResolutionOptions.map(String).includes(String(row.resolution)) ? null : (
+                            <option value={row.resolution ?? ""}>{row.resolution ?? ""}</option>
+                          )}
+                          {bucketResolutionOptions.map((resolution) => (
+                            <option key={resolution} value={resolution}>
+                              {resolution}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          min={resolutionBucketStride}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          step={resolutionBucketStride}
+                          type="number"
+                          value={row.resolution ?? ""}
+                        />
+                      )}
+                    </label>
+                    <label>
+                      Repeats
+                      <input
+                        aria-label={`Bucket ${index + 1} repeats`}
+                        max={resolutionBucketRepeatsMax}
+                        min="1"
+                        onChange={(event) => updateResolutionBucket(index, "repeats", event.target.value)}
+                        step="1"
+                        type="number"
+                        value={row.repeats ?? ""}
+                      />
+                    </label>
+                    <button
+                      aria-label={`Remove bucket ${index + 1}`}
+                      className="secondary-action"
+                      onClick={() =>
+                        updateConfigDraft(
+                          "resolutionBuckets",
+                          resolutionBuckets.filter((_, rowIndex) => rowIndex !== index),
+                        )
+                      }
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="secondary-action"
+                  disabled={resolutionBuckets.length >= resolutionBucketsMax}
+                  onClick={() =>
+                    updateConfigDraft("resolutionBuckets", [
+                      ...resolutionBuckets,
+                      { resolution: String(configDraft.resolution ?? ""), repeats: "1" },
+                    ])
+                  }
+                  type="button"
+                >
+                  Add bucket
+                </button>
+              </fieldset>
+            ) : null}
+            {subjectMaskLossEnabled ? (
+              <div className="training-subject-mask-loss">
+                <label title="Loss weight of background pixels (outside the subject mask). 0 ignores the background entirely. The loss is still averaged over the whole image, so with a low background weight and a small subject the effective learning rate drops roughly in proportion to the subject's share of the frame.">
+                  Background weight
+                  <input
+                    max={subjectMaskWeightMax}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("subjectMaskBackgroundWeight", event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={configDraft.subjectMaskBackgroundWeight ?? ""}
+                    {...invalidProps(configValidity, "subjectMaskBackgroundWeight")}
+                  />
+                </label>
+                <label title="Loss weight of subject pixels (inside the subject mask). Must be greater than 0.">
+                  Subject weight
+                  <input
+                    max={subjectMaskWeightMax}
+                    min="0"
+                    onChange={(event) => updateConfigDraft("subjectMaskSubjectWeight", event.target.value)}
+                    step="0.05"
+                    type="number"
+                    value={configDraft.subjectMaskSubjectWeight ?? ""}
+                    {...invalidProps(configValidity, "subjectMaskSubjectWeight")}
+                  />
+                </label>
+                <p className="training-field-hint" data-testid="subject-mask-coverage">
+                  {maskCoverage
+                    ? `Subject masks: ${maskCoverage.usable} of ${maskCoverage.total} images${
+                        maskCoverage.empty ? ` (${maskCoverage.empty} found no subject)` : ""
+                      }.`
+                    : "Subject mask coverage is unknown until the dataset is saved."}
+                </p>
+                {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
+                  maskJobRequested ? (
+                    <p className="training-field-hint">
+                      Subject mask generation queued — coverage updates when the job finishes.
+                    </p>
+                  ) : (
+                    <button
+                      className="secondary-action"
+                      onClick={() => {
+                        setMaskJobRequested(true);
+                        onGenerateSubjectMasks();
+                      }}
+                      type="button"
+                    >
+                      Generate subject masks
+                    </button>
+                  )
+                ) : null}
+              </div>
+            ) : null}
           </AdvancedSection>
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it

@@ -7,8 +7,28 @@ import {
   configValidation,
   ltx25WorkflowPlan,
   mergeCustomizedConfigDraft,
+  subjectMaskBackgroundWeightDefault,
+  subjectMaskCoverage,
+  subjectMaskSubjectWeightDefault,
+  subjectMaskWeightMax,
+  targetSupportsSubjectMaskLoss,
   timestepTypeOptionsForTarget,
+  gradientNoiseEtaMax,
+  gradientNoiseEtaSuggested,
+  gradientNoiseGammaDefault,
+  gradientNoiseGammaMax,
+  targetSupportsGradientNoise,
   trainingConfigSnapshot,
+  targetSupportsDepthAnchoring,
+  depthAnchoringEveryMax,
+  depthAnchoringModelOptions,
+  depthAnchoringWeightMax,
+  depthAnchoringWeightSuggested,
+  resolutionBucketRepeatsMax,
+  resolutionBucketsMax,
+  resolutionBucketStride,
+  seedResolutionBuckets,
+  targetSupportsResolutionBuckets,
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
@@ -652,6 +672,289 @@ describe("weight noise (sc-24826)", () => {
   });
 });
 
+// sc-2125 (epic 2123): depth anchoring is off by default, round-trips from the form draft into the
+// job's training snapshot only while on, and every knob is bounded by the API's limits (E6).
+describe("depth anchoring (sc-2125)", () => {
+  // Depth anchoring is offered only where the target advertises it (MLX Z-Image today).
+  const depthTarget = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: depthTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+  const ctx = { activeDataset: dataset, selectedTarget: depthTarget };
+  const issuesOn = (draft, field) =>
+    configValidation({ ...whole, ...draft }, ctx).filter((entry) => entry.field === field);
+
+  it("seeds off and leaves a default snapshot without any depth key", () => {
+    const draft = configDraftFromTarget(depthTarget, dataset, ["auto"]);
+    expect(draft.depthAnchoringWeight).toBe("");
+    expect(draft.depthAnchoringModel).toBe("small");
+    const advanced = snap(draft).config.advanced;
+    for (const key of Object.keys(advanced)) {
+      expect(key.startsWith("depthAnchoring")).toBe(false);
+    }
+  });
+
+  it("round-trips an enabled configuration into the snapshot as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(depthTarget, dataset, ["auto"]),
+      depthAnchoringWeight: String(depthAnchoringWeightSuggested),
+      depthAnchoringModel: "large",
+      depthAnchoringMinT: "0.2",
+      depthAnchoringMaxT: "0.8",
+      depthAnchoringEvery: "3",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.depthAnchoringWeight).toBe(0.1);
+    expect(advanced.depthAnchoringModel).toBe("large");
+    expect(advanced.depthAnchoringMinT).toBe(0.2);
+    expect(advanced.depthAnchoringMaxT).toBe(0.8);
+    expect(advanced.depthAnchoringEvery).toBe(3);
+    // A preset/target carrying the keys seeds the draft back.
+    const seeded = configDraftFromTarget(
+      {
+        ...target,
+        defaults: { ...target.defaults, advanced: { networkType: "lora", depthAnchoringWeight: 0.05, depthAnchoringModel: "base" } },
+      },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.depthAnchoringWeight).toBe("0.05");
+    expect(seeded.depthAnchoringModel).toBe("base");
+  });
+
+  it("uses the API's bounds", () => {
+    expect(depthAnchoringWeightMax).toBe(1);
+    expect(depthAnchoringEveryMax).toBe(16);
+    expect(depthAnchoringModelOptions).toEqual(["small", "base", "large"]);
+  });
+
+  it("flags out-of-range knobs on their own fields, only while enabled", () => {
+    // Off: stray knob values are not judged.
+    expect(issuesOn({ depthAnchoringEvery: "0" }, "depthAnchoringEvery")).toEqual([]);
+    const on = { depthAnchoringWeight: "0.1" };
+    expect(issuesOn(on, "depthAnchoringWeight")).toEqual([]);
+    for (const bad of ["-0.1", String(depthAnchoringWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ depthAnchoringWeight: bad }, "depthAnchoringWeight")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, depthAnchoringModel: "giant" }, "depthAnchoringModel")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "-0.1" }, "depthAnchoringMinT")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMaxT: "1.5" }, "depthAnchoringMaxT")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "0.7", depthAnchoringMaxT: "0.3" }, "depthAnchoringMaxT")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(depthAnchoringEveryMax + 1)]) {
+      expect(issuesOn({ ...on, depthAnchoringEvery: bad }, "depthAnchoringEvery")).toHaveLength(1);
+    }
+    for (const ok of ["1", "2", String(depthAnchoringEveryMax)]) {
+      expect(issuesOn({ ...on, depthAnchoringEvery: ok }, "depthAnchoringEvery")).toEqual([]);
+    }
+  });
+});
+
+// sc-24827 (epic 2123): annealed gradient noise is off by default, round-trips eta (+ gamma, which
+// only travels with an eta) from the draft into the job snapshot, and is bounded by the API's max.
+describe("gradient noise (sc-24827)", () => {
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: target,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+
+  it("seeds off and leaves a default snapshot without either key", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(draft.gradientNoiseEta).toBe("");
+    expect(draft.gradientNoiseGamma).toBe("");
+    expect(snap(draft).config.advanced).not.toHaveProperty("gradientNoiseEta");
+    expect(snap(draft).config.advanced).not.toHaveProperty("gradientNoiseGamma");
+  });
+
+  it("round-trips eta and gamma into the snapshot as numbers; gamma never travels alone", () => {
+    const base = configDraftFromTarget(target, dataset, ["auto"]);
+    const on = { ...base, gradientNoiseEta: String(gradientNoiseEtaSuggested), gradientNoiseGamma: "0.7" };
+    expect(snap(on).config.advanced.gradientNoiseEta).toBe(0.01);
+    expect(snap(on).config.advanced.gradientNoiseGamma).toBe(0.7);
+    const gammaOnly = { ...base, gradientNoiseGamma: "0.7" };
+    expect(snap(gammaOnly).config.advanced).not.toHaveProperty("gradientNoiseGamma");
+    const seeded = configDraftFromTarget(
+      { ...target, defaults: { ...target.defaults, advanced: { networkType: "lora", gradientNoiseEta: 0.02, gradientNoiseGamma: 0.6 } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.gradientNoiseEta).toBe("0.02");
+    expect(seeded.gradientNoiseGamma).toBe("0.6");
+  });
+
+  it("uses the API's bounds and the upstream defaults", () => {
+    expect(gradientNoiseEtaMax).toBe(0.1);
+    expect(gradientNoiseEtaSuggested).toBe(0.01);
+    expect(gradientNoiseGammaMax).toBe(1);
+    expect(gradientNoiseGammaDefault).toBe(0.55);
+  });
+
+  it("flags out-of-range eta/gamma and eta with a full fine-tune on their own fields", () => {
+    const ctx = { activeDataset: dataset, selectedTarget: target };
+    const fieldIssues = (draft, field) => configValidation(draft, ctx).filter((entry) => entry.field === field);
+    for (const ok of ["", "0", "0.01", String(gradientNoiseEtaMax)]) {
+      expect(fieldIssues({ ...whole, gradientNoiseEta: ok }, "gradientNoiseEta")).toEqual([]);
+    }
+    for (const bad of ["-0.01", String(gradientNoiseEtaMax + 0.001), "abc"]) {
+      expect(fieldIssues({ ...whole, gradientNoiseEta: bad }, "gradientNoiseEta").map((e) => e.kind)).toEqual(["error"]);
+    }
+    expect(fieldIssues({ ...whole, networkType: "full", gradientNoiseEta: "0.01" }, "gradientNoiseEta")).toHaveLength(1);
+    for (const ok of ["", "0", "0.55", String(gradientNoiseGammaMax)]) {
+      expect(fieldIssues({ ...whole, gradientNoiseGamma: ok }, "gradientNoiseGamma")).toEqual([]);
+    }
+    for (const bad of ["-0.1", String(gradientNoiseGammaMax + 0.001), "x"]) {
+      expect(fieldIssues({ ...whole, gradientNoiseGamma: bad }, "gradientNoiseGamma").map((e) => e.kind)).toEqual(["error"]);
+    }
+  });
+
+  it("reads only explicit true flags as support and blocks a carried-over eta without it", () => {
+    expect(targetSupportsGradientNoise({ limits: { supportsGradientNoise: true } })).toBe(true);
+    expect(targetSupportsGradientNoise({ limits: { supportsGradientNoise: "true" } })).toBe(false);
+    expect(targetSupportsGradientNoise({ limits: { supportsWeightNoise: true } })).toBe(false);
+    expect(targetSupportsGradientNoise(null)).toBe(false);
+    const message = "This target does not support gradient noise — clear it or pick a supporting target";
+    const unsupported = { ...target, limits: { ...target.limits, supportsGradientNoise: undefined } };
+    const issues = configValidation({ ...whole, gradientNoiseEta: "0.01" }, { activeDataset: dataset, selectedTarget: unsupported });
+    expect(issues.map((entry) => entry.message)).toContain(message);
+    const supported = { ...target, limits: { ...target.limits, supportsGradientNoise: true } };
+    expect(configValidation({ ...whole, gradientNoiseEta: "0.01" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, gradientNoiseEta: "0" }, { activeDataset: dataset, selectedTarget: unsupported })).toEqual([]);
+  });
+});
+
+// sc-2127 (epic 2123): multi-resolution buckets are off by default, round-trip from the form draft
+// into the job's training snapshot as typed rows, and are held to the same limits as the API.
+describe("resolution buckets (sc-2127)", () => {
+  const bucketTarget = {
+    ...target,
+    limits: { ...target.limits, resolutions: [512, 768, 1024], supportsResolutionBuckets: true },
+  };
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: bucketTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+  const rows = (...pairs) => pairs.map(([resolution, repeats]) => ({ resolution: String(resolution), repeats: String(repeats) }));
+  const fieldIssues = (resolutionBuckets) =>
+    configValidation({ ...whole, resolutionBuckets }, { activeDataset: dataset, selectedTarget: bucketTarget }).filter(
+      (entry) => entry.field === "resolutionBuckets",
+    );
+
+  it("seeds off and leaves a default snapshot without the key", () => {
+    const draft = configDraftFromTarget(bucketTarget, dataset, ["auto"]);
+    expect(draft.resolutionBuckets).toBeNull();
+    expect(snap(draft).config.advanced).not.toHaveProperty("resolutionBuckets");
+  });
+
+  it("round-trips a 16:4:1 bucket list into the training snapshot as numbers", () => {
+    const draft = { ...configDraftFromTarget(bucketTarget, dataset, ["auto"]), resolutionBuckets: rows([512, 16], [768, 4], [1024, 1]) };
+    expect(snap(draft).config.advanced.resolutionBuckets).toEqual([
+      { resolution: 512, repeats: 16 },
+      { resolution: 768, repeats: 4 },
+      { resolution: 1024, repeats: 1 },
+    ]);
+    // ...and a preset/target that carries buckets seeds the draft back.
+    const seeded = configDraftFromTarget(
+      { ...bucketTarget, defaults: { ...bucketTarget.defaults, advanced: { resolutionBuckets: [{ resolution: 768, repeats: 2 }] } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.resolutionBuckets).toEqual(rows([768, 2]));
+  });
+
+  it("seeds the toggle with the target's resolutions up to the current one", () => {
+    expect(seedResolutionBuckets(bucketTarget, "768")).toEqual(rows([512, 1], [768, 1]));
+    expect(seedResolutionBuckets({ limits: {} }, "640")).toEqual(rows([640, 1]));
+  });
+
+  it("reads only an explicit true flag as support, and blocks a list on an unsupported target", () => {
+    expect(targetSupportsResolutionBuckets(bucketTarget)).toBe(true);
+    expect(targetSupportsResolutionBuckets({ limits: { supportsResolutionBuckets: "true" } })).toBe(false);
+    expect(targetSupportsResolutionBuckets({ limits: {} })).toBe(false);
+    expect(targetSupportsResolutionBuckets(null)).toBe(false);
+    // LTX-2.5 withholds the flag: a carried-over list is an error there, off is fine.
+    const ltx25 = { ...bucketTarget, id: "ltx_2_5_video_lora", limits: { resolutions: [512, 768, 1024] } };
+    const issuesOn = (resolutionBuckets) =>
+      configValidation({ ...whole, resolutionBuckets }, { activeDataset: dataset, selectedTarget: ltx25 }).filter(
+        (entry) => entry.field === "resolutionBuckets",
+      );
+    expect(issuesOn(rows([512, 2])).map((entry) => entry.message)).toEqual([
+      "This target does not support multi-resolution buckets — turn them off or pick a supporting target",
+    ]);
+    expect(issuesOn(null)).toEqual([]);
+  });
+
+  it("uses the API's limits", () => {
+    expect(resolutionBucketsMax).toBe(8);
+    expect(resolutionBucketRepeatsMax).toBe(100);
+    expect(resolutionBucketStride).toBe(32);
+  });
+
+  it("accepts a well-formed list and flags every malformed one on the resolutionBuckets field", () => {
+    expect(fieldIssues(null)).toEqual([]);
+    expect(fieldIssues(rows([512, 16], [768, 4], [1024, resolutionBucketRepeatsMax]))).toEqual([]);
+    const tooMany = Array.from({ length: resolutionBucketsMax + 1 }, (_, i) => [512, i + 1]);
+    for (const bad of [
+      [],
+      rows([512, 0]),
+      rows([512, -1]),
+      rows([512, 1.5]),
+      rows([512, resolutionBucketRepeatsMax + 1]),
+      rows([512, ""]),
+      rows([500, 1]),
+      rows([1536, 1]),
+      rows([512, 1], [512, 2]),
+      rows(...tooMany),
+    ]) {
+      const issues = fieldIssues(bad);
+      expect(issues.length, JSON.stringify(bad)).toBeGreaterThan(0);
+      expect(issues.every((entry) => entry.kind === "error")).toBe(true);
+    }
+  });
+});
+
 describe("weight noise target support (sc-24826)", () => {
   const whole = {
     outputName: "Kelsie LoRA",
@@ -681,5 +984,148 @@ describe("weight noise target support (sc-24826)", () => {
     const supported = { ...target, limits: { ...target.limits, supportsWeightNoise: true } };
     expect(configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, weightNoiseSigma: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
+  });
+});
+
+// sc-2125: depth anchoring follows the S1 target-support mechanism (`limits.supportsDepthAnchoring`).
+describe("depth anchoring target support (sc-2125)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+
+  it("reads only an explicit true flag as support", () => {
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: true } })).toBe(true);
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: "true" } })).toBe(false);
+    expect(targetSupportsDepthAnchoring({ limits: {} })).toBe(false);
+    expect(targetSupportsDepthAnchoring(null)).toBe(false);
+  });
+
+  it("blocks a carried-over depth weight on a target without support", () => {
+    const issues = configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: target });
+    expect(issues.map((entry) => entry.message)).toContain(
+      "This target does not support depth anchoring — clear it or pick a supporting target",
+    );
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
+  });
+});
+
+// sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
+// when on, is bounded by the API's bounds, and incomplete mask coverage blocks the run.
+describe("subject-masked loss (sc-24828)", () => {
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: target,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    subjectMaskLoss: true,
+    subjectMaskBackgroundWeight: "0.1",
+    subjectMaskSubjectWeight: "1",
+  };
+  const report = (masks) => ({ items: masks.map(([hasMask, empty]) => ({ hasMask, empty })) });
+  const maskTarget = { ...target, limits: { ...target.limits, supportsSubjectMaskLoss: true } };
+  const issuesFor = (draft, subjectMaskReport = null) =>
+    configValidation(draft, { activeDataset: dataset, selectedTarget: maskTarget, subjectMaskReport }).filter((entry) =>
+      String(entry.field ?? "").startsWith("subjectMask"),
+    );
+
+  it("is offered only where the target advertises it; a carried-over true elsewhere blocks the run", () => {
+    expect(targetSupportsSubjectMaskLoss(maskTarget)).toBe(true);
+    expect(targetSupportsSubjectMaskLoss(target)).toBe(false);
+    expect(targetSupportsSubjectMaskLoss({ limits: { supportsSubjectMaskLoss: "yes" } })).toBe(false);
+    const unsupported = configValidation(whole, { activeDataset: dataset, selectedTarget: target }).filter((entry) =>
+      String(entry.message).includes("subject-masked loss"),
+    );
+    expect(unsupported.map((entry) => [entry.field, entry.kind])).toEqual([[null, "error"]]);
+    expect(
+      configValidation({ ...whole, subjectMaskLoss: false }, { activeDataset: dataset, selectedTarget: target }).filter(
+        (entry) => String(entry.message).includes("subject-masked loss"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("seeds off with default weights and leaves a default snapshot without the keys", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(draft.subjectMaskLoss).toBe(false);
+    expect(draft.subjectMaskBackgroundWeight).toBe(String(subjectMaskBackgroundWeightDefault));
+    expect(draft.subjectMaskSubjectWeight).toBe(String(subjectMaskSubjectWeightDefault));
+    const advanced = snap(draft).config.advanced;
+    for (const key of ["subjectMaskLoss", "subjectMaskBackgroundWeight", "subjectMaskSubjectWeight"]) {
+      expect(advanced).not.toHaveProperty(key);
+    }
+  });
+
+  it("round-trips an enabled run's weights into the snapshot as numbers", () => {
+    const draft = {
+      ...configDraftFromTarget(target, dataset, ["auto"]),
+      subjectMaskLoss: true,
+      subjectMaskBackgroundWeight: "0",
+      subjectMaskSubjectWeight: "0.8",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.subjectMaskLoss).toBe(true);
+    expect(advanced.subjectMaskBackgroundWeight).toBe(0);
+    expect(advanced.subjectMaskSubjectWeight).toBe(0.8);
+  });
+
+  it("uses the API's bounds and defaults", () => {
+    expect(subjectMaskWeightMax).toBe(1);
+    expect(subjectMaskBackgroundWeightDefault).toBe(0.1);
+    expect(subjectMaskSubjectWeightDefault).toBe(1);
+  });
+
+  it("flags out-of-range weights on their fields", () => {
+    expect(issuesFor(whole)).toEqual([]);
+    expect(issuesFor({ ...whole, subjectMaskBackgroundWeight: "0" })).toEqual([]);
+    for (const bad of ["-0.1", "1.01", "abc", ""]) {
+      expect(issuesFor({ ...whole, subjectMaskBackgroundWeight: bad }).map((entry) => entry.field)).toEqual([
+        "subjectMaskBackgroundWeight",
+      ]);
+    }
+    for (const bad of ["0", "1.5", "x"]) {
+      expect(issuesFor({ ...whole, subjectMaskSubjectWeight: bad }).map((entry) => entry.field)).toEqual([
+        "subjectMaskSubjectWeight",
+      ]);
+    }
+    // Off ⇒ the weights are not this run's concern.
+    expect(issuesFor({ ...whole, subjectMaskLoss: false, subjectMaskSubjectWeight: "0" })).toEqual([]);
+  });
+
+  it("blocks on incomplete mask coverage (an empty mask counts as missing), not on unknown coverage", () => {
+    expect(issuesFor(whole, report([[true, false], [true, false]]))).toEqual([]);
+    expect(issuesFor(whole, null)).toEqual([]);
+    const partial = issuesFor(whole, report([[true, false], [true, true], [false, false]]));
+    expect(partial.map((entry) => [entry.field, entry.kind])).toEqual([["subjectMaskLoss", "error"]]);
+    expect(partial[0].message).toContain("missing for 2 of 3 images");
+    expect(subjectMaskCoverage(report([[true, false], [true, true], [false, false]]))).toEqual({
+      total: 3,
+      usable: 1,
+      empty: 1,
+      missing: 2,
+      complete: false,
+    });
   });
 });

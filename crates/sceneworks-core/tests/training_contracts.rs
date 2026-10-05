@@ -2,16 +2,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sceneworks_core::training::{
-    build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
-    TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
-    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
-    WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
+    build_training_plan, builtin_training_targets, validate_training_config_for_target,
+    BuildTrainingPlan, LoraTrainingRequest, TrainingConfig, TrainingDataset, TrainingModality,
+    TrainingOutputKind, TrainingPlan, TrainingPlanError, TrainingPresetRegistry,
+    TrainingProvenance, TrainingTargetLimitError, TrainingTargetRegistry, GRADIENT_NOISE_ETA_KEY,
+    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_ETA_SUGGESTED, GRADIENT_NOISE_GAMMA_DEFAULT,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_MAX,
+    RESOLUTION_BUCKET_REPEATS_MAX, RESOLUTION_BUCKET_STRIDE,
+    SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT, SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
+    SUBJECT_MASK_WEIGHT_MAX, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
 use sceneworks_core::training::{
-    project_candle_training_limits, target_supports_weight_noise,
-    validate_training_config_for_target,
+    project_candle_training_limits, target_supports_resolution_buckets,
 };
+use sceneworks_core::training::{target_supports_gradient_noise, target_supports_weight_noise};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1793,11 +1798,722 @@ fn web_weight_noise_bound_matches_the_api_bound() {
     );
 }
 
-/// sc-24826 review: only targets whose platform trainer declares weight noise advertise it, and a
-/// non-zero sigma on any other target is a submit-time `weightNoiseSigma` field error (not a
-/// refusal after the job is queued). The Candle projection withdraws Z-Image's MLX-only support.
+/// Build a Z-Image plan whose `advanced` carries the given extra keys.
+fn build_plan_with_depth_advanced(
+    extra: &[(&str, Value)],
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_da",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_da",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_da"),
+        file_name: "da.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// Build a Z-Image plan whose `advanced` carries the given subject-masked-loss keys.
+fn build_plan_with_subject_mask_advanced(
+    extra: &[(&str, Value)],
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_sm",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_sm",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_sm"),
+        file_name: "sm.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24828 (epic 2123 E6): subject-masked-loss keys — in-range values survive into the plan
+/// verbatim (and resolve with defaults when absent); a non-boolean toggle, a background weight
+/// outside [0, max], a subject weight outside (0, max] or a non-number are field-level errors
+/// naming the offending key — even while the toggle is off.
 #[test]
-fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+fn build_training_plan_validates_subject_mask_loss_as_field_errors() {
+    use sceneworks_core::training::subject_mask_loss_weights;
+    for extra in [
+        vec![("subjectMaskLoss", json!(true))],
+        vec![
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0)),
+            ("subjectMaskSubjectWeight", json!(SUBJECT_MASK_WEIGHT_MAX)),
+        ],
+        vec![("subjectMaskLoss", json!(false))],
+    ] {
+        let plan = build_plan_with_subject_mask_advanced(&extra)
+            .unwrap_or_else(|error| panic!("{extra:?} must be accepted: {error}"));
+        for (key, value) in &extra {
+            assert_eq!(&plan.config.advanced[*key], value);
+        }
+    }
+    let resolve = |extra: &[(&str, Value)]| {
+        let plan = build_plan_with_subject_mask_advanced(extra).unwrap();
+        subject_mask_loss_weights(&plan.config.advanced).unwrap()
+    };
+    assert_eq!(resolve(&[]), None, "absent toggle = off");
+    assert_eq!(
+        resolve(&[("subjectMaskLoss", json!(true))]),
+        Some((
+            SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+            SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
+        ))
+    );
+    assert_eq!(
+        resolve(&[
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0.25)),
+            ("subjectMaskSubjectWeight", json!(0.5)),
+        ]),
+        Some((0.25, 0.5))
+    );
+
+    for (extra, field) in [
+        (vec![("subjectMaskLoss", json!("yes"))], "subjectMaskLoss"),
+        (
+            vec![("subjectMaskBackgroundWeight", json!(-0.01))],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskBackgroundWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.01),
+            )],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!(0)),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskSubjectWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.5),
+            )],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!("1")),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        match build_plan_with_subject_mask_advanced(&extra) {
+            Err(TrainingPlanError::InvalidField { field: got, .. }) => {
+                assert_eq!(got, field, "{extra:?}")
+            }
+            other => panic!("{extra:?}: expected a {field} field error, got {other:?}"),
+        }
+    }
+}
+
+/// sc-24828 (epic 2123 E6): the web form's subject-mask weight bound and defaults are the API's.
+#[test]
+fn web_subject_mask_bounds_match_the_api_bounds() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("subjectMaskWeightMax"), SUBJECT_MASK_WEIGHT_MAX);
+    assert_eq!(
+        read("subjectMaskBackgroundWeightDefault"),
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT
+    );
+    assert_eq!(
+        read("subjectMaskSubjectWeightDefault"),
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
+    );
+}
+
+/// sc-2125 (epic 2123 E6): in-range depth-anchoring values survive into the plan verbatim; every
+/// out-of-range / wrong-type value is a field-level error naming the offending key.
+#[test]
+fn build_training_plan_validates_depth_anchoring_as_field_errors() {
+    use sceneworks_core::training::depth_anchoring::*;
+    let good = [
+        (
+            DEPTH_ANCHORING_WEIGHT_KEY,
+            json!(DEPTH_ANCHORING_WEIGHT_SUGGESTED),
+        ),
+        (DEPTH_ANCHORING_MODEL_KEY, json!("large")),
+        (DEPTH_ANCHORING_MIN_T_KEY, json!(0.2)),
+        (DEPTH_ANCHORING_MAX_T_KEY, json!(0.9)),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(DEPTH_ANCHORING_EVERY_MAX)),
+    ];
+    let plan = build_plan_with_depth_advanced(&good).expect("in-range depth anchoring is accepted");
+    for (key, value) in &good {
+        assert_eq!(&plan.config.advanced[*key], value, "{key}");
+    }
+    let settings = depth_anchoring_settings(&plan.config.advanced)
+        .unwrap()
+        .expect("weight > 0 is on");
+    assert_eq!(settings.model, "large");
+    assert_eq!(settings.every, DEPTH_ANCHORING_EVERY_MAX as u32);
+    // Weight 0 (or absent) is off.
+    let off = build_plan_with_depth_advanced(&[(DEPTH_ANCHORING_WEIGHT_KEY, json!(0))]).unwrap();
+    assert_eq!(
+        depth_anchoring_settings(&off.config.advanced).unwrap(),
+        None
+    );
+
+    for (key, value, extra) in [
+        (DEPTH_ANCHORING_WEIGHT_KEY, json!(-0.01), None),
+        (
+            DEPTH_ANCHORING_WEIGHT_KEY,
+            json!(DEPTH_ANCHORING_WEIGHT_MAX + 0.001),
+            None,
+        ),
+        (DEPTH_ANCHORING_WEIGHT_KEY, json!("0.1"), None),
+        (DEPTH_ANCHORING_MODEL_KEY, json!("giant"), None),
+        (DEPTH_ANCHORING_MIN_T_KEY, json!(-0.1), None),
+        (DEPTH_ANCHORING_MAX_T_KEY, json!(1.5), None),
+        (
+            DEPTH_ANCHORING_MAX_T_KEY,
+            json!(0.3),
+            Some((DEPTH_ANCHORING_MIN_T_KEY, json!(0.6))),
+        ),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(0), None),
+        (
+            DEPTH_ANCHORING_EVERY_KEY,
+            json!(DEPTH_ANCHORING_EVERY_MAX + 1),
+            None,
+        ),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(2.5), None),
+    ] {
+        let mut advanced = vec![
+            (DEPTH_ANCHORING_WEIGHT_KEY, json!(0.1)),
+            (key, value.clone()),
+        ];
+        if let Some(pair) = extra {
+            advanced.push(pair);
+        }
+        match build_plan_with_depth_advanced(&advanced) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, key, "{key}={value}")
+            }
+            other => panic!("{key}={value}: expected a field error naming {key}, got {other:?}"),
+        }
+    }
+}
+
+/// Read `export const <name> = <literal>;` from the web training config module.
+fn web_training_const(name: &str) -> String {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let prefix = format!("export const {name} = ");
+    let line = source
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+    line[prefix.len()..].trim_end_matches(';').trim().to_owned()
+}
+
+/// sc-2125 (epic 2123 E6): the web form's depth-anchoring bounds are the API's bounds.
+#[test]
+fn web_depth_anchoring_bounds_match_the_api_bounds() {
+    use sceneworks_core::training::depth_anchoring::*;
+    let num = |name: &str| -> f64 {
+        web_training_const(name)
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not numeric ({error})"))
+    };
+    assert_eq!(num("depthAnchoringWeightMax"), DEPTH_ANCHORING_WEIGHT_MAX);
+    assert_eq!(
+        num("depthAnchoringWeightSuggested"),
+        DEPTH_ANCHORING_WEIGHT_SUGGESTED
+    );
+    assert_eq!(
+        num("depthAnchoringEveryMax"),
+        DEPTH_ANCHORING_EVERY_MAX as f64
+    );
+    assert_eq!(
+        num("depthAnchoringEveryDefault"),
+        DEPTH_ANCHORING_EVERY_DEFAULT as f64
+    );
+    let models: Vec<String> =
+        serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
+            .expect("depthAnchoringModelOptions is a JSON-compatible string array");
+    assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
+}
+
+/// sc-2125: every auxiliary model depth anchoring loads is a `componentOnly` utility entry in the
+/// shipped catalog whose repo / revision / file are exactly the worker's resolution constants — so
+/// "install it from the Models screen" installs the bytes the trainer loads.
+#[test]
+fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    for aux in std::iter::once(&TAEF1_MODEL).chain(DEPTH_ANYTHING_V2_MODELS.iter()) {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == aux.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", aux.id));
+        assert_eq!(entry["type"], "utility", "{}", aux.id);
+        assert_eq!(entry["componentOnly"], true, "{}", aux.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], aux.repo, "{}", aux.id);
+        assert_eq!(download["revision"], aux.revision, "{}", aux.id);
+        assert!(
+            download["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == aux.file),
+            "{} does not download {}",
+            aux.id,
+            aux.file
+        );
+    }
+}
+
+/// Build a Z-Image plan (target resolutions 512/768/1024) whose `advanced` carries
+/// `resolutionBuckets`.
+fn build_plan_with_buckets(buckets: Value) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    config
+        .advanced
+        .insert("resolutionBuckets".to_owned(), buckets);
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_rb",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_rb",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_rb"),
+        file_name: "rb.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-2127 (epic 2123 E6): a well-formed bucket list survives into the plan verbatim; an empty
+/// list, a non-positive / non-integer / over-limit repeat, an off-stride / zero / unsupported
+/// resolution, a duplicate, too many rows and a non-list are all field-level errors naming
+/// `resolutionBuckets`.
+#[test]
+fn build_training_plan_validates_resolution_buckets_as_a_field_error() {
+    let good = json!([
+        { "resolution": 512, "repeats": 16 },
+        { "resolution": 768, "repeats": 4 },
+        { "resolution": 1024, "repeats": RESOLUTION_BUCKET_REPEATS_MAX },
+    ]);
+    let plan = build_plan_with_buckets(good.clone()).expect("16:4:N buckets accepted");
+    assert_eq!(plan.config.advanced["resolutionBuckets"], good);
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&plan.config),
+        1024
+    );
+
+    let too_many: Vec<Value> = (1..=RESOLUTION_BUCKETS_MAX as u64 + 1)
+        .map(|i| json!({ "resolution": 32 * i, "repeats": 1 }))
+        .collect();
+    for bad in [
+        json!([]),
+        json!([{ "resolution": 512, "repeats": 0 }]),
+        json!([{ "resolution": 512, "repeats": -2 }]),
+        json!([{ "resolution": 512, "repeats": 1.5 }]),
+        json!([{ "resolution": 512, "repeats": RESOLUTION_BUCKET_REPEATS_MAX + 1 }]),
+        json!([{ "resolution": 512 }]),
+        json!([{ "resolution": 0, "repeats": 1 }]),
+        json!([{ "resolution": RESOLUTION_BUCKET_STRIDE * 16 + 16, "repeats": 1 }]),
+        // On-stride but not a resolution this target trains at.
+        json!([{ "resolution": 1536, "repeats": 1 }]),
+        json!([{ "resolution": 512, "repeats": 1 }, { "resolution": 512, "repeats": 2 }]),
+        json!(too_many),
+        json!({ "resolution": 512, "repeats": 1 }),
+    ] {
+        match build_plan_with_buckets(bad.clone()) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "resolutionBuckets", "{bad}")
+            }
+            other => panic!("{bad}: expected a resolutionBuckets field error, got {other:?}"),
+        }
+    }
+}
+
+/// sc-2127 (epic 2123 E7): memory admission sizes for the largest bucket, not `resolution`.
+#[test]
+fn training_max_resolution_is_the_largest_bucket() {
+    let mut config = builtin_training_targets()
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("target")
+        .defaults
+        .clone();
+    config.resolution = 768;
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&config),
+        768
+    );
+    config.advanced.insert(
+        "resolutionBuckets".to_owned(),
+        json!([{ "resolution": 512, "repeats": 4 }, { "resolution": 1024, "repeats": 1 }]),
+    );
+    assert_eq!(
+        sceneworks_core::training::training_max_resolution(&config),
+        1024
+    );
+}
+
+/// sc-2127 (epic 2123 E6): the web form's bucket limits are the API's. The web constants live in
+/// `apps/web/src/training/trainingConfig.js`; read them so the two cannot drift.
+#[test]
+fn web_resolution_bucket_limits_match_the_api_limits() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> u64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not an integer literal: {line} ({error})"))
+    };
+    assert_eq!(read("resolutionBucketsMax"), RESOLUTION_BUCKETS_MAX as u64);
+    assert_eq!(
+        read("resolutionBucketRepeatsMax"),
+        RESOLUTION_BUCKET_REPEATS_MAX
+    );
+    assert_eq!(read("resolutionBucketStride"), RESOLUTION_BUCKET_STRIDE);
+}
+
+/// Build a Z-Image plan whose `advanced` carries `key = value` (and optionally a network type).
+fn build_plan_with_advanced(
+    key: &str,
+    value: Value,
+    network_type: Option<&str>,
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    config.advanced.insert(key.to_owned(), value);
+    if let Some(network_type) = network_type {
+        config
+            .advanced
+            .insert("networkType".to_owned(), json!(network_type));
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_gn",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_gn",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_gn"),
+        file_name: "gn.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24827 (epic 2123 E6): in-range gradient-noise eta/gamma survive into the plan verbatim;
+/// negative / above-limit / non-numeric values, and eta with a full fine-tune, are field-level
+/// errors naming the offending field.
+#[test]
+fn build_training_plan_validates_gradient_noise_as_field_errors() {
+    for (key, value) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(0)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_MAX)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(0)),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_DEFAULT),
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(GRADIENT_NOISE_GAMMA_MAX)),
+    ] {
+        let plan = build_plan_with_advanced(key, value.clone(), None)
+            .unwrap_or_else(|error| panic!("{key}={value} must be accepted: {error}"));
+        assert_eq!(plan.config.advanced[key], value);
+    }
+    for (key, value, network_type) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(-0.0001), None),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_MAX + 0.0001),
+            None,
+        ),
+        (GRADIENT_NOISE_ETA_KEY, json!("0.01"), None),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+            Some("full"),
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(-0.1), None),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_MAX + 0.0001),
+            None,
+        ),
+        (GRADIENT_NOISE_GAMMA_KEY, json!("0.55"), None),
+    ] {
+        match build_plan_with_advanced(key, value.clone(), network_type) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, key, "{key}={value}/{network_type:?}")
+            }
+            other => panic!(
+                "{key}={value}/{network_type:?}: expected a {key} field error, got {other:?}"
+            ),
+        }
+    }
+}
+
+/// sc-24827 (epic 2123 E3): the control-branch target advertises neither adapter-noise flag (its
+/// native trainer trains a full-weight branch and declares neither), so both knobs are refused at
+/// submit time with a field-level error; a plain control request still validates.
+#[test]
+fn adapter_noise_is_refused_for_a_control_branch_target() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.output_kind == TrainingOutputKind::ControlBranch)
+        .expect("a control-branch target is registered");
+    validate_training_config_for_target(target, &target.defaults)
+        .expect("the control target's defaults validate");
+    for (key, value) in [
+        (WEIGHT_NOISE_SIGMA_KEY, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+    ] {
+        let mut config = target.defaults.clone();
+        config.advanced.insert(key.to_owned(), value);
+        match validate_training_config_for_target(target, &config) {
+            Err(TrainingPlanError::InvalidField { field, message }) => {
+                assert_eq!(field, key);
+                assert!(message.contains("does not support"), "{message}");
+            }
+            other => panic!("{key}: expected a field error, got {other:?}"),
+        }
+        // Explicitly off is fine.
+        let mut off = target.defaults.clone();
+        off.advanced.insert(key.to_owned(), json!(0));
+        validate_training_config_for_target(target, &off).expect("off validates");
+    }
+}
+
+/// sc-24827 (epic 2123 E6): the web form's gradient-noise bounds and defaults are the API's. The
+/// web constants live in `apps/web/src/training/trainingConfig.js`; read them so they cannot drift.
+#[test]
+fn web_gradient_noise_bounds_match_the_api_bounds() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("gradientNoiseEtaMax"), GRADIENT_NOISE_ETA_MAX);
+    assert_eq!(
+        read("gradientNoiseEtaSuggested"),
+        GRADIENT_NOISE_ETA_SUGGESTED
+    );
+    assert_eq!(read("gradientNoiseGammaMax"), GRADIENT_NOISE_GAMMA_MAX);
+    assert_eq!(
+        read("gradientNoiseGammaDefault"),
+        GRADIENT_NOISE_GAMMA_DEFAULT
+    );
+}
+
+/// sc-24826 review, updated for sc-24827: every LoRA/LoKr target advertises both adapter-noise
+/// flags (all their trainers declare both, on both backends) and admits both knobs; a target that
+/// does not advertise a flag gets a submit-time field error for that knob — never a refusal after
+/// the job is queued.
+#[test]
+fn adapter_noise_is_gated_on_the_target_flags() {
+    let registry = builtin_training_targets();
+    let lora_targets: Vec<_> = registry
+        .targets
+        .iter()
+        .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
+        .collect();
+    assert!(!lora_targets.is_empty());
+    for target in &lora_targets {
+        assert!(target_supports_weight_noise(target), "{}", target.id);
+        assert!(target_supports_gradient_noise(target), "{}", target.id);
+        for (key, value) in [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)),
+            (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_SUGGESTED)),
+        ] {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(key.to_owned(), value);
+            validate_training_config_for_target(target, &config)
+                .unwrap_or_else(|e| panic!("{} {key}: {e}", target.id));
+        }
+    }
+
+    // Withdraw one flag at a time: that knob becomes a field error, the other stays admitted.
+    let z_image = lora_targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("Z-Image target");
+    for (flag, key, value, other_key, other_value) in [
+        (
+            "supportsWeightNoise",
+            WEIGHT_NOISE_SIGMA_KEY,
+            json!(WEIGHT_NOISE_SIGMA_SUGGESTED),
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+        ),
+        (
+            "supportsGradientNoise",
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_SUGGESTED),
+            WEIGHT_NOISE_SIGMA_KEY,
+            json!(WEIGHT_NOISE_SIGMA_SUGGESTED),
+        ),
+    ] {
+        let mut target = (*z_image).clone();
+        target.limits.remove(flag);
+        let with = |key: &str, value: &Value| {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(key.to_owned(), value.clone());
+            validate_training_config_for_target(&target, &config)
+        };
+        with(key, &json!(0)).unwrap_or_else(|e| panic!("{flag}: off must pass: {e}"));
+        match with(key, &value) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => assert_eq!(field, key, "{flag}"),
+            other => panic!("{flag}: expected a {key} field error, got {other:?}"),
+        }
+        with(other_key, &other_value)
+            .unwrap_or_else(|e| panic!("{flag}: the other technique must stay admitted: {e}"));
+    }
+}
+
+/// sc-2127 review: every builtin target advertises `supportsResolutionBuckets` except LTX-2.5
+/// (prepared latent packs, no spatial edge) — one catalog serves both platforms since sc-24827 — and a bucket list on a target that
+/// does not advertise it is a submit-time `resolutionBuckets` field error, never a queued job.
+#[test]
+fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
+    let registry = builtin_training_targets();
+    let withheld: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| !target_supports_resolution_buckets(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+
+    let buckets = |target: &sceneworks_core::training::TrainingTarget| {
+        let allowed = target.limits["resolutions"]
+            .as_array()
+            .expect("resolutions")[0]
+            .clone();
+        let mut config = target.defaults.clone();
+        config.advanced.insert(
+            "resolutionBuckets".to_owned(),
+            json!([{ "resolution": allowed, "repeats": 2 }]),
+        );
+        validate_training_config_for_target(target, &config)
+    };
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    buckets(&by_id("z_image_turbo_lora")).expect("Z-Image admits buckets");
+    match buckets(&by_id("ltx_2_5_video_lora")) {
+        Err(TrainingPlanError::InvalidField { field, message }) => {
+            assert_eq!(field, "resolutionBuckets");
+            assert!(
+                message.contains("does not support multi-resolution buckets"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a resolutionBuckets field error, got {other:?}"),
+    }
+}
+
+/// sc-2125 review (S1 mechanism): only targets whose platform trainer declares depth anchoring
+/// advertise it, and an enabled depth weight on any other target is a submit-time
+/// `depthAnchoringWeight` field error. The Candle projection withdraws Z-Image's MLX-only support.
+/// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
+/// the SDXL case is accepted ⇒ red.
+#[test]
+fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
     let registry = builtin_training_targets();
     let by_id = |id: &str| {
         registry
@@ -1807,41 +2523,89 @@ fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
             .unwrap_or_else(|| panic!("{id} target present"))
             .clone()
     };
-    let with_sigma = |target: &sceneworks_core::training::TrainingTarget, sigma: Value| {
+    let with_weight = |target: &sceneworks_core::training::TrainingTarget, weight: Value| {
         let mut config = target.defaults.clone();
-        config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
+        config
+            .advanced
+            .insert("depthAnchoringWeight".to_owned(), weight);
         validate_training_config_for_target(target, &config)
     };
 
     let advertising: Vec<&str> = registry
         .targets
         .iter()
-        .filter(|target| target_supports_weight_noise(target))
+        .filter(|target| target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
     assert_eq!(
         advertising,
         ["z_image_turbo_lora"],
-        "only Z-Image MLX declares weight noise"
+        "only Z-Image MLX declares depth anchoring"
     );
 
     let z_image = by_id("z_image_turbo_lora");
-    with_sigma(&z_image, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)).expect("Z-Image MLX admits it");
+    with_weight(&z_image, json!(0.1)).expect("Z-Image MLX admits it");
 
     let mut z_image_candle = z_image.clone();
     project_candle_training_limits(&mut z_image_candle);
-    assert!(!target_supports_weight_noise(&z_image_candle));
+    assert!(!target_supports_depth_anchoring(&z_image_candle));
 
     for target in [by_id("sdxl_lora"), z_image_candle] {
-        // Off is always fine...
-        with_sigma(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
-        // ...on is a field error.
-        match with_sigma(&target, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)) {
+        with_weight(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match with_weight(&target, json!(0.1)) {
             Err(TrainingPlanError::InvalidField { field, .. }) => {
-                assert_eq!(field, "weightNoiseSigma", "{}", target.id)
+                assert_eq!(field, "depthAnchoringWeight", "{}", target.id)
             }
             other => panic!(
-                "{}: expected a weightNoiseSigma field error, got {other:?}",
+                "{}: expected a depthAnchoringWeight field error, got {other:?}",
+                target.id
+            ),
+        }
+    }
+}
+
+/// sc-24828 review: every LoRA target advertises subject-masked loss except LTX-2.5 (prepared
+/// latent bundles) and the Krea ControlNet branch; mask loss on a non-advertising target is a
+/// submit-time `subjectMaskLoss` field error (never queued), and off is always admitted. The flag
+/// is static (no Candle projection touches it).
+#[test]
+fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::target_supports_subject_mask_loss;
+    let registry = builtin_training_targets();
+    let with_mask = |target: &sceneworks_core::training::TrainingTarget, on: bool| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("subjectMaskLoss".to_owned(), json!(on));
+        validate_training_config_for_target(target, &config)
+    };
+    let unsupported: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| !target_supports_subject_mask_loss(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    for target in &registry.targets {
+        with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
+        let mut candle = target.clone();
+        project_candle_training_limits(&mut candle);
+        assert_eq!(
+            target_supports_subject_mask_loss(&candle),
+            target_supports_subject_mask_loss(target),
+            "{}: the Candle projection must not change subject-mask support",
+            target.id
+        );
+        match (
+            with_mask(target, true),
+            target_supports_subject_mask_loss(target),
+        ) {
+            (Ok(()), true) => {}
+            (Err(TrainingPlanError::InvalidField { field, .. }), false) => {
+                assert_eq!(field, "subjectMaskLoss", "{}", target.id)
+            }
+            (other, supported) => panic!(
+                "{} (advertised {supported}): unexpected mask-loss validation {other:?}",
                 target.id
             ),
         }

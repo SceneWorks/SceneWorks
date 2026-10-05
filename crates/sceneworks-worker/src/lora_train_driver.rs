@@ -274,6 +274,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             })
             .collect();
         assert!(
@@ -392,6 +393,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                subject_mask_path: None,
             })
             .collect();
         assert!(

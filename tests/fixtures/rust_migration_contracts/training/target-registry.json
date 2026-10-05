@@ -82,6 +82,10 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -176,7 +180,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
@@ -271,7 +279,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
@@ -365,7 +377,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
@@ -459,7 +475,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
@@ -557,7 +577,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
@@ -654,7 +678,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",
@@ -741,7 +769,8 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsResolutionBuckets": true
       },
       "ui": {
         "datasetModality": "image",
@@ -843,7 +872,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "backend": "native",
@@ -946,7 +979,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "backend": "native",
@@ -1039,7 +1076,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
@@ -1122,7 +1163,11 @@
         "steps": [
           200,
           4000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",
@@ -1251,7 +1296,9 @@
         "steps": [
           200,
           4000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "video",
@@ -1346,7 +1393,11 @@
         "steps": [
           200,
           4000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",
@@ -1442,7 +1493,11 @@
         "steps": [
           200,
           4000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",
@@ -1537,7 +1592,11 @@
         "steps": [
           200,
           4000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",
@@ -1630,7 +1689,11 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
+        "supportsWeightNoise": true
       },
       "ui": {
         "datasetModality": "image",

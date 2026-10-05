@@ -5648,6 +5648,31 @@ input.dataset-name-input.boxed:focus {
   border-top: 1px solid var(--border);
 }
 
+/* Multi-resolution bucket editor (sc-2127): one row per bucket, resolution + repeats + remove. */
+.training-resolution-buckets {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.training-resolution-buckets[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.training-resolution-bucket-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(100px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.training-resolution-buckets > .secondary-action {
+  justify-self: start;
+}
+
 /* Actions close the work-panel: Reset defaults then one filled primary, divided
    from the config above (sc-10492). Both buttons share the control baseline —
    `.primary-action`'s 44px default would otherwise stand taller than the 36px

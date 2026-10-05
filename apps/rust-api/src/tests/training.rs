@@ -113,15 +113,44 @@ fn ltx_workflow_options(name: &str) -> (Option<Value>, Option<Value>) {
     }
 }
 
-/// sc-24826 review: the targets endpoint advertises weight-noise support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
+/// sc-24826 review, updated for sc-24827: the targets endpoint advertises adapter-noise support
+/// per target. Every LoRA/LoKr trainer declares weight AND gradient noise on both backends, so both
+/// platform catalogs advertise both flags on every target except the Krea control branch (a
+/// full-weight ControlNet branch whose trainer declares neither).
 #[test]
-fn platform_effective_training_catalog_projects_weight_noise_support() {
+fn platform_effective_training_catalog_advertises_adapter_noise_support() {
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for target in &registry.targets {
+            let adapter = target.id != "krea_2_control";
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(target),
+                adapter,
+                "{} weight noise (candle={candle})",
+                target.id
+            );
+            assert_eq!(
+                sceneworks_core::training::target_supports_gradient_noise(target),
+                adapter,
+                "{} gradient noise (candle={candle})",
+                target.id
+            );
+        }
+    }
+}
+
+/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
+/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
+/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     let advertising = |candle: bool| -> Vec<String> {
         crate::training::effective_training_targets_for_candle(candle)
             .targets
             .iter()
-            .filter(|target| sceneworks_core::training::target_supports_weight_noise(target))
+            .filter(|target| {
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(target)
+            })
             .map(|target| target.id.clone())
             .collect()
     };
@@ -2619,15 +2648,13 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
         );
     }
 
-    // In-range values pass validation where the platform's Z-Image trainer declares weight noise
-    // (MLX); the Candle catalog withdraws the flag, so a non-zero sigma is a field error there.
-    let supported = cfg!(target_os = "macos");
+    // In-range values pass validation: since sc-24827 the Z-Image trainer declares weight noise
+    // on both platforms, and the targets endpoint advertises it. (A target without the flag is a
+    // submit-time field error — pinned in the core `adapter_noise_is_gated_on_the_target_flags`.)
     assert_eq!(
-        target["limits"]["supportsWeightNoise"]
-            .as_bool()
-            .unwrap_or(false),
-        supported,
-        "the targets endpoint advertises the platform-effective weight-noise support"
+        target["limits"]["supportsWeightNoise"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises weight-noise support"
     );
     for sigma in [
         json!(0),
@@ -2635,43 +2662,333 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
         json!(sceneworks_core::training::WEIGHT_NOISE_SIGMA_MAX),
     ] {
         let (status, error) = submit(sigma.clone(), "lora").await;
-        if supported || sigma == json!(0) {
-            assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
-            assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
-        } else {
-            assert_eq!(status, StatusCode::BAD_REQUEST, "{sigma}: {error}");
-            assert_eq!(error["context"]["field"], "weightNoiseSigma", "{sigma}");
-        }
+        assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
     }
+}
 
-    // A target whose trainer does not declare weight noise (SDXL) is not advertised, and a
-    // non-zero sigma there is refused at submit with the field error — never queued.
-    let sdxl = registry["targets"]
+/// sc-24827 (epic 2123 E6): `advanced.gradientNoiseEta` / `gradientNoiseGamma` are validated at
+/// the API boundary with field-level errors — negative, above the shared limit, non-numeric, or
+/// (eta) combined with a full fine-tune — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_gradient_noise_with_a_field_error() {
+    use sceneworks_core::training::{
+        GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_KEY,
+        GRADIENT_NOISE_GAMMA_MAX,
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Gradient noise boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
         .as_array()
         .expect("target list")
         .iter()
-        .find(|target| target["id"] == "sdxl_lora")
-        .expect("SDXL target")
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
         .clone();
-    assert!(sdxl["limits"].get("supportsWeightNoise").is_none());
-    let mut config = sdxl["defaults"].clone();
-    config["advanced"]["weightNoiseSigma"] = json!(0.0125);
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |key: &str, value: Value, network_type: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"][key] = value;
+        config["advanced"]["networkType"] = json!(network_type);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Gradient noise",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (key, value, network_type) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(-0.01), "lora"),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_MAX + 0.001),
+            "lora",
+        ),
+        (GRADIENT_NOISE_ETA_KEY, json!("0.01"), "lora"),
+        (GRADIENT_NOISE_ETA_KEY, json!(0.01), "full"),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(-0.5), "lora"),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_MAX + 0.001),
+            "lora",
+        ),
+    ] {
+        let (status, error) = submit(key, value.clone(), network_type).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key}={value}/{network_type}"
+        );
+        assert_eq!(error["code"], "training_field_error", "{key}={value}");
+        assert_eq!(error["context"]["field"], key, "{key}={value}");
+    }
+
+    for (key, value) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(0)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_MAX)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(0.55)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(GRADIENT_NOISE_GAMMA_MAX)),
+    ] {
+        let (status, error) = submit(key, value.clone(), "lora").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key}={value}: {error}");
+        assert_eq!(
+            error["detail"], "Training dataset not found",
+            "{key}={value}"
+        );
+    }
+}
+
+/// sc-2127 (epic 2123 E6): `advanced.resolutionBuckets` is validated at the API boundary with a
+/// field-level error — an empty list, a non-positive repeat, an off-stride or unsupported
+/// resolution, a duplicate — before any dataset lookup. A well-formed 16:4:1 list passes validation
+/// (and then hits the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Resolution bucket boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |buckets: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["resolutionBuckets"] = buckets;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Resolution buckets",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for buckets in [
+        json!([]),
+        json!([{ "resolution": 512, "repeats": 0 }]),
+        json!([{ "resolution": 512, "repeats": -4 }]),
+        json!([{ "resolution": 500, "repeats": 1 }]),
+        json!([{ "resolution": 1536, "repeats": 1 }]),
+        json!([{ "resolution": 512, "repeats": 1 }, { "resolution": 512, "repeats": 2 }]),
+    ] {
+        let (status, error) = submit(buckets.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{buckets}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{buckets}");
+        assert_eq!(error["context"]["field"], "resolutionBuckets", "{buckets}");
+    }
+
+    let (status, error) = submit(json!([
+        { "resolution": 512, "repeats": 16 },
+        { "resolution": 768, "repeats": 4 },
+        { "resolution": 1024, "repeats": 1 },
+    ]))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["detail"], "Training dataset not found");
+    assert_eq!(target["limits"]["supportsResolutionBuckets"], json!(true));
+
+    // sc-2127 review: LTX-2.5's trainer declares no bucket support on either platform, so the
+    // targets endpoint withholds the flag and a bucket list there is refused at submit with the
+    // field error — never queued for the worker preflight to refuse.
+    let ltx25 = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    assert!(ltx25["limits"].get("supportsResolutionBuckets").is_none());
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["resolutionBuckets"] = json!([
+        { "resolution": ltx25["limits"]["resolutions"][0].clone(), "repeats": 2 },
+    ]);
     let (status, error) = request(
         app.clone(),
         "POST",
         &path,
         json!({
-            "targetId": "sdxl_lora",
+            "targetId": "ltx_2_5_video_lora",
             "datasetId": "ds_missing",
             "config": config,
-            "outputName": "Weight noise",
+            "outputName": "Resolution buckets",
             "dryRun": true
         }),
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
     assert_eq!(error["code"], "training_field_error");
-    assert_eq!(error["context"]["field"], "weightNoiseSigma");
+    assert_eq!(error["context"]["field"], "resolutionBuckets");
+}
+
+/// sc-24828 (epic 2123 E6): the subject-masked-loss keys are validated at the API boundary with a
+/// field-level error naming the offending key — a non-boolean toggle, a background weight outside
+/// [0, max], a subject weight outside (0, max] — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_field_error() {
+    use sceneworks_core::training::SUBJECT_MASK_WEIGHT_MAX;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Subject mask boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |toggle: Value, background: Value, subject: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["subjectMaskLoss"] = toggle;
+        config["advanced"]["subjectMaskBackgroundWeight"] = background;
+        config["advanced"]["subjectMaskSubjectWeight"] = subject;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Subject mask",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (toggle, background, subject, field) in [
+        (json!("on"), json!(0.1), json!(1), "subjectMaskLoss"),
+        (
+            json!(true),
+            json!(-0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(0),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!("1"),
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        let (status, error) = submit(toggle.clone(), background.clone(), subject.clone()).await;
+        let case = format!("{toggle}/{background}/{subject}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{case}");
+        assert_eq!(error["context"]["field"], field, "{case}");
+    }
+
+    for (background, subject) in [
+        (json!(0), json!(1)),
+        (json!(SUBJECT_MASK_WEIGHT_MAX), json!(0.5)),
+    ] {
+        let (status, error) = submit(json!(true), background.clone(), subject.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{background}/{subject}: {error}"
+        );
+        assert_eq!(error["detail"], "Training dataset not found");
+    }
+
+    // sc-24828 review: the targets endpoint advertises subject-masked loss per target, and a
+    // target that does not (LTX-2.5 — its trainers train from prepared latent bundles) refuses it at
+    // submit with the `subjectMaskLoss` field error instead of queueing a job the worker refuses.
+    let targets = registry["targets"].as_array().expect("target list");
+    let advertises = |id: &str| {
+        targets
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))["limits"]["supportsSubjectMaskLoss"]
+            == json!(true)
+    };
+    assert!(advertises("z_image_turbo_lora"));
+    assert!(!advertises("ltx_2_5_video_lora"));
+    assert!(!advertises("krea_2_control"));
+    let ltx25 = targets
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["subjectMaskLoss"] = json!(true);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Subject mask",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "subjectMaskLoss");
 }
 
 #[tokio::test]

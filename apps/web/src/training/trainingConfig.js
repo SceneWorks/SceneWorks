@@ -29,12 +29,113 @@ export const lrSchedulerOptions = ["constant", "linear", "cosine"];
 // crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
 export const weightNoiseSigmaMax = 0.1;
 export const weightNoiseSigmaSuggested = 0.0125;
+// Annealed gradient noise (epic 2123, sc-24827): on optimizer update t the trainer adds
+// N(0,1)·eta/(1+t)^gamma to every adapter gradient (after the norm clip). Off (empty/0) by default;
+// enabling it seeds the upstream eta and the paper's gamma. The maxima are the API's bounds
+// (GRADIENT_NOISE_ETA_MAX / GRADIENT_NOISE_GAMMA_MAX in crates/sceneworks-core/src/training.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const gradientNoiseEtaMax = 0.1;
+export const gradientNoiseEtaSuggested = 0.01;
+export const gradientNoiseGammaMax = 1;
+export const gradientNoiseGammaDefault = 0.55;
+// Multi-resolution buckets with per-bucket repeat counts (epic 2123, sc-2127): each dataset image
+// trains at every listed resolution, `repeats` times per epoch per row (so 512/768/1024 at 16/4/1
+// is a 16:4:1 per-image mix). Off (null draft) by default. These are the API's limits
+// (RESOLUTION_BUCKETS_MAX / RESOLUTION_BUCKET_REPEATS_MAX / RESOLUTION_BUCKET_STRIDE in
+// crates/sceneworks-core/src/training.rs) — a Rust parity test reads these lines, keep them equal.
+export const resolutionBucketsMax = 8;
+export const resolutionBucketRepeatsMax = 100;
+export const resolutionBucketStride = 32;
+// Depth anchoring (epic 2123, sc-2125): an auxiliary loss that decodes the model's prediction with
+// a tiny decoder, runs a frozen Depth Anything V2 on it, and pulls its depth toward the training
+// image's. Off (empty weight) by default; enabling seeds the upstream DA2-Small weight. These
+// bounds are the API's (crates/sceneworks-core/src/training/depth_anchoring.rs) — a Rust parity
+// test reads these lines, keep them equal.
+export const depthAnchoringWeightMax = 1;
+export const depthAnchoringWeightSuggested = 0.1;
+export const depthAnchoringEveryMax = 16;
+export const depthAnchoringEveryDefault = 2;
+export const depthAnchoringModelOptions = ["small", "base", "large"];
+export const depthAnchoringModelLabels = {
+  small: "Small (fast)",
+  base: "Base",
+  large: "Large (much smaller weight)",
+};
 
-// Whether the target's trainer on the serving platform honors weight noise — the API projects the
-// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
-// test). Absent means unsupported.
+// Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
+// trainer's per-element loss — background cells by the background weight, subject cells by the
+// subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
+// SUBJECT_MASK_*_WEIGHT_DEFAULT in crates/sceneworks-core/src/training.rs) — a Rust parity test
+// reads these lines, keep them equal. Background may be 0 (drop it); subject must be > 0.
+export const subjectMaskWeightMax = 1;
+export const subjectMaskBackgroundWeightDefault = 0.1;
+export const subjectMaskSubjectWeightDefault = 1;
+
+// Mask coverage of a dataset for masked loss, from its /subject-masks report: `usable` images carry
+// a non-empty mask (an all-black "no subject" mask counts as missing — the worker refuses it too).
+// `null` when no report is loaded (unknown coverage).
+export function subjectMaskCoverage(report) {
+  if (!report || !Array.isArray(report.items)) {
+    return null;
+  }
+  const total = report.items.length;
+  const usable = report.items.filter((item) => item?.hasMask && !item?.empty).length;
+  const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
+  return { total, usable, empty, missing: total - usable, complete: total > 0 && usable === total };
+}
+
+// The target's advertised training resolutions, ascending (empty when it advertises none).
+function targetResolutions(target) {
+  const values = target?.limits?.resolutions;
+  return Array.isArray(values) ? values.map(Number).filter(Number.isFinite).sort((a, b) => a - b) : [];
+}
+
+// Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
+export function resolutionBucketsDraft(value) {
+  return Array.isArray(value)
+    ? value.map((row) => ({ resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }))
+    : null;
+}
+
+// The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
+// the current one (or just the current one when the target advertises none), one repeat each, so a
+// fresh list trains exactly the sizes the target already offers and the user tunes the mix.
+export function seedResolutionBuckets(target, resolution) {
+  const current = numberFromDraft(resolution);
+  const offered = targetResolutions(target).filter((value) => current === null || value <= current);
+  const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
+  return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
+}
+
+// Whether the target's trainer honors weight noise / gradient noise — the targets endpoint's
+// `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (pinned to the trainer descriptors
+// by a worker test). Absent means unsupported.
 export function targetSupportsWeightNoise(target) {
   return target?.limits?.supportsWeightNoise === true;
+}
+export function targetSupportsGradientNoise(target) {
+  return target?.limits?.supportsGradientNoise === true;
+}
+
+// Whether the target's trainer on the serving platform honors multi-resolution buckets — the
+// platform-effective `limits.supportsResolutionBuckets` (pinned to the trainer descriptors by a
+// worker test; withheld for LTX-2.5). Absent means unsupported.
+export function targetSupportsResolutionBuckets(target) {
+  return target?.limits?.supportsResolutionBuckets === true;
+}
+
+// Whether the target's trainer on the serving platform honors depth anchoring — the same
+// mechanism as weight noise: the API projects the platform-effective `limits.supportsDepthAnchoring`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsDepthAnchoring(target) {
+  return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
+// API advertises `limits.supportsSubjectMaskLoss` per target (pinned to the trainer descriptors on
+// both platforms by a worker test). Absent means unsupported.
+export function targetSupportsSubjectMaskLoss(target) {
+  return target?.limits?.supportsSubjectMaskLoss === true;
 }
 export const optimizerLabels = {
   adam: "Adam",
@@ -348,6 +449,24 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
     // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
     weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
+    // Empty = gradient noise off (the default); the toggle seeds eta + gamma together.
+    gradientNoiseEta: numericDraft(advanced.gradientNoiseEta),
+    gradientNoiseGamma: numericDraft(advanced.gradientNoiseGamma),
+    // null = one resolution (the default); see seedResolutionBuckets.
+    resolutionBuckets: resolutionBucketsDraft(advanced.resolutionBuckets),
+    // Empty weight = depth anchoring off (the default); see depthAnchoringWeightSuggested. The
+    // other knobs only matter (and only reach the job) while it is on.
+    depthAnchoringWeight: numericDraft(advanced.depthAnchoringWeight),
+    depthAnchoringModel: asText(advanced.depthAnchoringModel || depthAnchoringModelOptions[0]),
+    depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
+    depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
+    depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
+    // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
+    subjectMaskLoss: advanced.subjectMaskLoss === true,
+    subjectMaskBackgroundWeight: numericDraft(
+      advanced.subjectMaskBackgroundWeight ?? subjectMaskBackgroundWeightDefault,
+    ),
+    subjectMaskSubjectWeight: numericDraft(advanced.subjectMaskSubjectWeight ?? subjectMaskSubjectWeightDefault),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -386,6 +505,55 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
         }
       : {}),
   };
+}
+
+// Resolution buckets: optional (null = off), but when on the list must hold 1..max rows, each an
+// on-stride resolution the target trains at (not repeated) with a whole repeat count in
+// 1..resolutionBucketRepeatsMax — the API's exact rules (E6), so the button never enables a job
+// the API would refuse.
+function validateResolutionBuckets(rows, target, issues) {
+  if (!Array.isArray(rows)) {
+    return;
+  }
+  const field = "resolutionBuckets";
+  // A list carried over from another target (or a preset) on a target that cannot honor it would be
+  // refused by the API — block it here with the same reason.
+  if (!targetSupportsResolutionBuckets(target)) {
+    issues.push(issue.error(field, "This target does not support multi-resolution buckets — turn them off or pick a supporting target"));
+    return;
+  }
+  if (!rows.length) {
+    issues.push(issue.error(field, "Add at least one resolution bucket, or turn multi-resolution buckets off"));
+    return;
+  }
+  if (rows.length > resolutionBucketsMax) {
+    issues.push(issue.error(field, `At most ${resolutionBucketsMax} resolution buckets`));
+  }
+  const offered = targetResolutions(target);
+  const seen = new Set();
+  rows.forEach((row, index) => {
+    const n = index + 1;
+    const resolution = numberFromDraft(row?.resolution);
+    const repeats = numberFromDraft(row?.repeats);
+    if (
+      resolution === null ||
+      !Number.isInteger(resolution) ||
+      resolution <= 0 ||
+      resolution % resolutionBucketStride !== 0
+    ) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution must be a positive multiple of ${resolutionBucketStride}`));
+    } else if (offered.length && !offered.includes(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
+    } else if (seen.has(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution ${resolution} is already listed`));
+    }
+    if (resolution !== null) {
+      seen.add(resolution);
+    }
+    if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
+      issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
+    }
+  });
 }
 
 // Decide how the config-draft basis effect should react to a basis change (sc-11970).
@@ -436,7 +604,13 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 // that distinction became the app's vocabulary rather than one screen's helper.
 export function configValidation(
   configDraft,
-  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+  {
+    activeDataset,
+    selectedTarget,
+    datasetNotReady = false,
+    missingControlModels = [],
+    subjectMaskReport = null,
+  } = {},
 ) {
   const issues = [];
   if (!selectedTarget) {
@@ -483,6 +657,61 @@ export function configValidation(
       // The toggle is hidden for such a target, so this names no input (field null): the value can
       // only arrive from a carried-over draft, and the API would refuse it anyway.
       issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
+    }
+  }
+  // Gradient noise (sc-24827): same bounds as the API (E6); eta is adapter-only (E5).
+  if (String(configDraft.gradientNoiseEta ?? "").trim()) {
+    const eta = numberFromDraft(configDraft.gradientNoiseEta);
+    if (eta === null || eta < 0 || eta > gradientNoiseEtaMax) {
+      issues.push(issue.error("gradientNoiseEta", `Gradient noise eta must be between 0 and ${gradientNoiseEtaMax}`));
+    } else if (eta > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
+      issues.push(issue.error("gradientNoiseEta", "Gradient noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (eta > 0 && selectedTarget && !targetSupportsGradientNoise(selectedTarget)) {
+      // As for weight noise: the controls are hidden for such a target, so this names no input.
+      issues.push(issue.error(null, "This target does not support gradient noise — clear it or pick a supporting target"));
+    }
+  }
+  if (String(configDraft.gradientNoiseGamma ?? "").trim()) {
+    const gamma = numberFromDraft(configDraft.gradientNoiseGamma);
+    if (gamma === null || gamma < 0 || gamma > gradientNoiseGammaMax) {
+      issues.push(issue.error("gradientNoiseGamma", `Gradient noise gamma must be between 0 and ${gradientNoiseGammaMax}`));
+    }
+  }
+  validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
+  for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
+  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
+  // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
+  // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
+  if (configDraft.subjectMaskLoss && selectedTarget && !targetSupportsSubjectMaskLoss(selectedTarget)) {
+    // The toggle is hidden for such a target, so a `true` can only be carried over from another
+    // target's draft; it must block Start (the API refuses it too).
+    issues.push(issue.error(null, "This target does not support subject-masked loss — pick a supporting target"));
+  } else if (configDraft.subjectMaskLoss) {
+    const background = numberFromDraft(configDraft.subjectMaskBackgroundWeight);
+    if (background === null || background < 0 || background > subjectMaskWeightMax) {
+      issues.push(
+        issue.error("subjectMaskBackgroundWeight", `Background weight must be between 0 and ${subjectMaskWeightMax}`),
+      );
+    }
+    const subject = numberFromDraft(configDraft.subjectMaskSubjectWeight);
+    if (subject === null || subject <= 0 || subject > subjectMaskWeightMax) {
+      issues.push(
+        issue.error(
+          "subjectMaskSubjectWeight",
+          `Subject weight must be greater than 0 and at most ${subjectMaskWeightMax}`,
+        ),
+      );
+    }
+    const coverage = subjectMaskCoverage(subjectMaskReport);
+    if (coverage && !coverage.complete) {
+      issues.push(
+        issue.error(
+          "subjectMaskLoss",
+          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+        ),
+      );
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -620,6 +849,27 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
     // Omitted when off (empty draft), so a default job's snapshot is unchanged.
     weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
+    // Gradient noise: omitted when off; gamma only travels with an eta (it means nothing alone).
+    gradientNoiseEta: numberFromDraft(configDraft.gradientNoiseEta),
+    gradientNoiseGamma: String(configDraft.gradientNoiseEta ?? "").trim()
+      ? numberFromDraft(configDraft.gradientNoiseGamma)
+      : undefined,
+    // Omitted when off (null draft); an empty "on" list is sent as [] and refused by both sides.
+    resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
+      ? configDraft.resolutionBuckets.map((row) => ({
+          resolution: numberFromDraft(row?.resolution),
+          repeats: numberFromDraft(row?.repeats),
+        }))
+      : undefined,
+    ...depthAnchoringSnapshot(configDraft),
+    // Omitted entirely when off, so a default job's snapshot is unchanged.
+    subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
+    subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskBackgroundWeight)
+      : undefined,
+    subjectMaskSubjectWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskSubjectWeight)
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
@@ -678,4 +928,64 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       advanced,
     },
   };
+}
+
+// Depth anchoring is on whenever the draft carries a weight (empty = off).
+export function depthAnchoringEnabled(configDraft) {
+  return String(configDraft?.depthAnchoringWeight ?? "").trim() !== "";
+}
+
+// Field issues for the depth-anchoring knobs — the API's bounds (E6): weight in
+// [0, depthAnchoringWeightMax], a known model size, a [0, 1] noise window with min <= max, and a
+// whole alternation period in [1, depthAnchoringEveryMax]. Checked only while enabled.
+export function depthAnchoringIssues(configDraft, selectedTarget) {
+  if (!depthAnchoringEnabled(configDraft)) return [];
+  const issues = [];
+  const weight = numberFromDraft(configDraft.depthAnchoringWeight);
+  if (weight === null || weight < 0 || weight > depthAnchoringWeightMax) {
+    issues.push(["depthAnchoringWeight", `Depth anchoring weight must be between 0 and ${depthAnchoringWeightMax}`]);
+  } else if (weight > 0 && selectedTarget && !targetSupportsDepthAnchoring(selectedTarget)) {
+    // The toggle is hidden for such a target, so this names no input (field null): the value can
+    // only arrive from a carried-over draft, and the API would refuse it anyway.
+    issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
+    return issues;
+  }
+  if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
+    issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);
+  }
+  const window = {};
+  for (const field of ["depthAnchoringMinT", "depthAnchoringMaxT"]) {
+    if (!String(configDraft[field] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[field]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([field, "Noise window bounds must be between 0 and 1"]);
+    } else {
+      window[field] = t;
+    }
+  }
+  const minT = window.depthAnchoringMinT ?? 0;
+  const maxT = window.depthAnchoringMaxT ?? 1;
+  if (minT > maxT) {
+    issues.push(["depthAnchoringMaxT", "Noise window max must be at least its min"]);
+  }
+  if (String(configDraft.depthAnchoringEvery ?? "").trim()) {
+    const every = numberFromDraft(configDraft.depthAnchoringEvery);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > depthAnchoringEveryMax) {
+      issues.push(["depthAnchoringEvery", `Alternation period must be a whole number from 1 to ${depthAnchoringEveryMax}`]);
+    }
+  }
+  return issues;
+}
+
+// The depth-anchoring keys a job snapshot carries: none while off, so a default job's snapshot
+// is unchanged; the weight plus every set knob while on (unset knobs take the API defaults).
+export function depthAnchoringSnapshot(configDraft) {
+  if (!depthAnchoringEnabled(configDraft)) return {};
+  return compactObject({
+    depthAnchoringWeight: numberFromDraft(configDraft.depthAnchoringWeight),
+    depthAnchoringModel: asText(configDraft.depthAnchoringModel).trim(),
+    depthAnchoringMinT: numberFromDraft(configDraft.depthAnchoringMinT),
+    depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
+    depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
+  });
 }
