@@ -2447,6 +2447,12 @@ fn ltx_lora_target(
             depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
             json!(true),
         );
+        // Epic 2123 body losses (sc-24832): the same decoder arms; only the proportion loss's
+        // weights are cataloged, so only it is advertised.
+        limits.insert(
+            body_losses::BODY_PROPORTION_SUPPORT_LIMIT.to_owned(),
+            json!(true),
+        );
     }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));

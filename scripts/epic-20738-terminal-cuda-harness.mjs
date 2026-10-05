@@ -178,12 +178,12 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned by sc-19383: `config/download-pattern-evidence.json` was re-recorded when the catalog
-// gained the YuE lyrics2song entries — six stage-1 re-hosts, the stage-2 re-host and the xcodec
-// re-host (117 repo@revision keys incl. the two frozen importer authorities; sc-24114 left 109).
+// Re-pinned by sc-24832: `config/download-pattern-evidence.json` was re-recorded when the catalog
+// gained epic 2123's training-time auxiliary models — TAEF1, the three Depth-Anything-V2 sizes, the
+// sc-24830 tiny decoders and ViTPose+ base (127 repo@revision keys; sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "e54da3132ca340d054da8ac138d5426963f52572edaf83dafbc64d7f6d31a1f0";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "f8d65ab276e6c1ac7a30bb4a33337a867fcf195ac8a62c54850df7802e4f97e9";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

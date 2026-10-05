@@ -25,7 +25,7 @@ use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::body_losses::{body_loss_settings, BodyLoss};
 use sceneworks_core::training::depth_anchoring::{
-    depth_anchoring_settings, x0_decoder_for_trainer, X0DecoderSource, DEPTH_ANCHORING_WEIGHT_KEY,
+    depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
 };
 use sceneworks_core::training::{
     parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
@@ -1419,9 +1419,10 @@ fn apply_body_losses(
 fn resolve_x0_decoder_dir(
     settings: &Settings,
     plan: &TrainingPlan,
-    decoder: X0DecoderSource,
+    decoder: sceneworks_core::training::depth_anchoring::X0DecoderSource,
     purpose: &str,
 ) -> WorkerResult<PathBuf> {
+    use sceneworks_core::training::depth_anchoring::X0DecoderSource;
     match decoder {
         X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model, purpose),
         // The trainer decodes through its own VAE, resolved from the base model it loads; the

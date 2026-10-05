@@ -1023,17 +1023,23 @@ export function depthAnchoringSnapshot(configDraft) {
 
 // The body-loss draft fields of a target/preset `advanced` bag (empty weight = off).
 function bodyLossesDraft(advanced) {
-  const draft = {
+  return {
+    bodyProportionWeight: numericDraft(advanced.bodyProportionWeight),
+    bodyProportionMinT: numericDraft(advanced.bodyProportionMinT),
+    bodyProportionMaxT: numericDraft(advanced.bodyProportionMaxT),
+    bodyProportionEvery: numericDraft(advanced.bodyProportionEvery),
+    bodyShapeWeight: numericDraft(advanced.bodyShapeWeight),
+    bodyShapeMinT: numericDraft(advanced.bodyShapeMinT),
+    bodyShapeMaxT: numericDraft(advanced.bodyShapeMaxT),
+    bodyShapeEvery: numericDraft(advanced.bodyShapeEvery),
+    normalWeight: numericDraft(advanced.normalWeight),
+    normalMinT: numericDraft(advanced.normalMinT),
+    normalMaxT: numericDraft(advanced.normalMaxT),
+    normalEvery: numericDraft(advanced.normalEvery),
     bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
     bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
     normalRestrictToSubject: advanced.normalRestrictToSubject === true,
   };
-  for (const { prefix } of bodyLosses) {
-    for (const suffix of ["Weight", "MinT", "MaxT", "Every"]) {
-      draft[`${prefix}${suffix}`] = numericDraft(advanced[`${prefix}${suffix}`]);
-    }
-  }
-  return draft;
 }
 
 // A body loss is on whenever the draft carries its weight (empty = off).
