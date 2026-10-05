@@ -9,6 +9,8 @@ import {
   mergeCustomizedConfigDraft,
   timestepTypeOptionsForTarget,
   trainingConfigSnapshot,
+  targetSupportsDepthAnchoring,
+  targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEveryMax,
@@ -658,11 +660,13 @@ describe("weight noise (sc-24826)", () => {
 // sc-2125 (epic 2123): depth anchoring is off by default, round-trips from the form draft into the
 // job's training snapshot only while on, and every knob is bounded by the API's limits (E6).
 describe("depth anchoring (sc-2125)", () => {
+  // Depth anchoring is offered only where the target advertises it (MLX Z-Image today).
+  const depthTarget = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
   const snap = (draft) =>
     trainingConfigSnapshot({
       activeDataset: dataset,
       configDraft: { ...draft, outputName: "Kelsie LoRA" },
-      selectedTarget: target,
+      selectedTarget: depthTarget,
     });
   const whole = {
     outputName: "Kelsie LoRA",
@@ -677,12 +681,12 @@ describe("depth anchoring (sc-2125)", () => {
     saveEvery: 250,
     depthAnchoringModel: "small",
   };
-  const ctx = { activeDataset: dataset, selectedTarget: target };
+  const ctx = { activeDataset: dataset, selectedTarget: depthTarget };
   const issuesOn = (draft, field) =>
     configValidation({ ...whole, ...draft }, ctx).filter((entry) => entry.field === field);
 
   it("seeds off and leaves a default snapshot without any depth key", () => {
-    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    const draft = configDraftFromTarget(depthTarget, dataset, ["auto"]);
     expect(draft.depthAnchoringWeight).toBe("");
     expect(draft.depthAnchoringModel).toBe("small");
     const advanced = snap(draft).config.advanced;
@@ -693,7 +697,7 @@ describe("depth anchoring (sc-2125)", () => {
 
   it("round-trips an enabled configuration into the snapshot as typed values", () => {
     const draft = {
-      ...configDraftFromTarget(target, dataset, ["auto"]),
+      ...configDraftFromTarget(depthTarget, dataset, ["auto"]),
       depthAnchoringWeight: String(depthAnchoringWeightSuggested),
       depthAnchoringModel: "large",
       depthAnchoringMinT: "0.2",
@@ -743,5 +747,71 @@ describe("depth anchoring (sc-2125)", () => {
     for (const ok of ["1", "2", String(depthAnchoringEveryMax)]) {
       expect(issuesOn({ ...on, depthAnchoringEvery: ok }, "depthAnchoringEvery")).toEqual([]);
     }
+  });
+});
+
+describe("weight noise target support (sc-24826)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+
+  it("reads only an explicit true flag as support", () => {
+    expect(targetSupportsWeightNoise({ limits: { supportsWeightNoise: true } })).toBe(true);
+    expect(targetSupportsWeightNoise({ limits: { supportsWeightNoise: "true" } })).toBe(false);
+    expect(targetSupportsWeightNoise({ limits: {} })).toBe(false);
+    expect(targetSupportsWeightNoise(null)).toBe(false);
+  });
+
+  it("blocks a carried-over positive sigma on a target without support", () => {
+    const issues = configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: target });
+    expect(issues.map((entry) => entry.message)).toContain(
+      "This target does not support weight noise — clear it or pick a supporting target",
+    );
+    const supported = { ...target, limits: { ...target.limits, supportsWeightNoise: true } };
+    expect(configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, weightNoiseSigma: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
+  });
+});
+
+// sc-2125: depth anchoring follows the S1 target-support mechanism (`limits.supportsDepthAnchoring`).
+describe("depth anchoring target support (sc-2125)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+
+  it("reads only an explicit true flag as support", () => {
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: true } })).toBe(true);
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: "true" } })).toBe(false);
+    expect(targetSupportsDepthAnchoring({ limits: {} })).toBe(false);
+    expect(targetSupportsDepthAnchoring(null)).toBe(false);
+  });
+
+  it("blocks a carried-over depth weight on a target without support", () => {
+    const issues = configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: target });
+    expect(issues.map((entry) => entry.message)).toContain(
+      "This target does not support depth anchoring — clear it or pick a supporting target",
+    );
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
 });

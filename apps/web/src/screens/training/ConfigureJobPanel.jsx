@@ -6,6 +6,7 @@ import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx"
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
+import { numberFromDraft } from "../../training/drafts.js";
 import {
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -15,10 +16,12 @@ import {
   qualityPresetLabel,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
+  targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEnabled,
+  targetSupportsDepthAnchoring,
   depthAnchoringEveryDefault,
   depthAnchoringEveryMax,
   depthAnchoringModelLabels,
@@ -115,10 +118,17 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
-  // Weight noising is on whenever the draft carries a value (empty = off); the toggle seeds the
-  // suggested strength and the sigma input appears beside the other optimizer knobs.
-  const weightNoiseEnabled = String(configDraft.weightNoiseSigma ?? "").trim() !== "";
-  // Depth anchoring is on whenever the draft carries a weight (empty = off); its knobs appear while on.
+  // Weight noising is offered only where the target's trainer on this platform declares it
+  // (`limits.supportsWeightNoise` from the targets endpoint) — elsewhere the run would be refused.
+  // The toggle is checked for a positive sigma (a "0" draft is off); the sigma input stays visible
+  // while the draft holds any value so an out-of-range entry can be corrected in place.
+  const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
+  const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
+  const weightNoiseInputVisible =
+    weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
+  // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
+  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
@@ -558,7 +568,7 @@ export function ConfigureJobPanel({
                   value={configDraft.lrWarmupSteps ?? ""}
                 />
               </label>
-              {weightNoiseEnabled ? (
+              {weightNoiseInputVisible ? (
                 <label title="Weight noise strength (sigma): after every optimizer step each adapter weight gets Gaussian noise scaled by sigma times that tensor's RMS. 0.0125 is the suggested strength.">
                   Weight noise sigma
                   <input
@@ -572,7 +582,7 @@ export function ConfigureJobPanel({
                   />
                 </label>
               ) : null}
-              {depthAnchoringOn ? (
+              {depthAnchoringSupported && depthAnchoringOn ? (
                 <>
                   <label title="Depth anchoring loss weight. 0.1 is the suggested weight for the Small depth model; use a much smaller weight (around 0.001) with Large.">
                     Depth anchoring weight
@@ -754,35 +764,39 @@ export function ConfigureJobPanel({
                   Gradient checkpointing
                 </label>
               )}
-              <label
-                className="training-checkbox-field"
-                title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
-              >
-                <input
-                  checked={weightNoiseEnabled}
-                  onChange={(event) =>
-                    updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
-                  }
-                  type="checkbox"
-                />
-                Weight noise
-              </label>
-              <label
-                className="training-checkbox-field"
-                title="Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. Needs the TAEF1 and Depth Anything V2 models installed. Off by default."
-              >
-                <input
-                  checked={depthAnchoringOn}
-                  onChange={(event) =>
-                    updateConfigDraft(
-                      "depthAnchoringWeight",
-                      event.target.checked ? String(depthAnchoringWeightSuggested) : "",
-                    )
-                  }
-                  type="checkbox"
-                />
-                Depth anchoring
-              </label>
+              {weightNoiseSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
+                >
+                  <input
+                    checked={weightNoiseEnabled}
+                    onChange={(event) =>
+                      updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
+                    }
+                    type="checkbox"
+                  />
+                  Weight noise
+                </label>
+              ) : null}
+              {depthAnchoringSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. Needs the TAEF1 and Depth Anything V2 models installed. Off by default."
+                >
+                  <input
+                    checked={depthAnchoringOn}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "depthAnchoringWeight",
+                        event.target.checked ? String(depthAnchoringWeightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Depth anchoring
+                </label>
+              ) : null}
             </div>
           </AdvancedSection>
 

@@ -3422,6 +3422,80 @@ mod tests {
         assert!(mapped.gradient_checkpointing);
     }
 
+    /// sc-24826 review: the catalog's `supportsWeightNoise` flag (which gates the web toggle and
+    /// submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.weight_noise` for every target this runtime can train — the builtin (MLX) value
+    /// on macOS, the Candle projection off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_weight_noise_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(&target),
+                descriptor.techniques.weight_noise,
+                "{} ({engine_id}): catalog supportsWeightNoise disagrees with the trainer descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-2125 review (S1 mechanism): the catalog's `supportsDepthAnchoring` flag (which gates the
+    /// web toggle and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.depth_anchoring` for every target this runtime can train — the builtin (MLX)
+    /// value on macOS, the Candle projection off-Mac. Mutation: drop the flag from the Z-Image
+    /// target (or mark SDXL) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_depth_anchoring_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    &target
+                ),
+                descriptor.techniques.depth_anchoring,
+                "{} ({engine_id}): catalog supportsDepthAnchoring disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
     /// sc-24826 (epic 2123): `advanced.weightNoiseSigma` reaches the engine's typed
     /// `weight_noise_sigma`; absent stays 0 (off), so a legacy plan maps exactly as before.
     #[cfg(any(

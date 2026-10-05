@@ -55,6 +55,34 @@ pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
 pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
 /// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
 pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. The
+/// builtin catalog carries the MLX truth (like every other builtin default);
+/// [`project_candle_training_limits`] removes it for targets whose Candle trainer does not declare
+/// it. The web form shows the weight-noise toggle only where this is `true`, and submit-time
+/// validation refuses a non-zero sigma elsewhere. A worker test pins both projections to the linked
+/// trainer descriptors, so the flag cannot drift from what the engine actually implements.
+pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
+
+/// Whether `target` (as projected for the serving platform) advertises weight-noise support.
+pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(WEIGHT_NOISE_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend: no
+/// Candle trainer declares weight noise yet (epic 2123 adds them story by story), so the flag is
+/// removed for every target. Callers that serve the Candle catalog (the API off macOS) apply it.
+pub fn project_candle_training_limits(target: &mut TrainingTarget) {
+    target.limits.remove(WEIGHT_NOISE_SUPPORT_LIMIT);
+    // No Candle trainer declares depth anchoring yet either (sc-2125; S8 adds them).
+    target
+        .limits
+        .remove(depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT);
+}
 
 /// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
 /// catalog models.
@@ -1486,7 +1514,13 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // (LyCORIS Kronecker) is advertised on the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 weight noising (sc-24826): the Z-Image MLX trainer declares it. Removed for
+            // Candle by `project_candle_training_limits`.
+            "supportsWeightNoise": true,
+            // Epic 2123 depth anchoring (sc-2125): the Z-Image MLX trainer declares it. Removed for
+            // Candle by `project_candle_training_limits`.
+            "supportsDepthAnchoring": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -3012,6 +3046,8 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_weight_noise_support(target, config)?;
+    depth_anchoring::validate_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3276,6 +3312,30 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
     depth_anchoring::validate(config)?;
+    Ok(())
+}
+
+/// Refuses a non-zero `advanced.weightNoiseSigma` on a target that does not advertise
+/// [`WEIGHT_NOISE_SUPPORT_LIMIT`] — a field error at submit time instead of a refusal after the job
+/// is queued. Runs after [`validate_weight_noise`], so the value is already a valid number here.
+fn validate_weight_noise_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let sigma = config
+        .advanced
+        .get(WEIGHT_NOISE_SIGMA_KEY)
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if sigma > 0.0 && !target_supports_weight_noise(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+            message: format!(
+                "{} does not support weight noise ({WEIGHT_NOISE_SIGMA_KEY}) on this platform.",
+                target.name
+            ),
+        });
+    }
     Ok(())
 }
 

@@ -44,6 +44,20 @@ export const depthAnchoringModelLabels = {
   base: "Base",
   large: "Large (much smaller weight)",
 };
+
+// Whether the target's trainer on the serving platform honors weight noise — the API projects the
+// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
+// test). Absent means unsupported.
+export function targetSupportsWeightNoise(target) {
+  return target?.limits?.supportsWeightNoise === true;
+}
+
+// Whether the target's trainer on the serving platform honors depth anchoring — the same
+// mechanism as weight noise: the API projects the platform-effective `limits.supportsDepthAnchoring`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsDepthAnchoring(target) {
+  return target?.limits?.supportsDepthAnchoring === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -494,9 +508,13 @@ export function configValidation(
       issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
     } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
       issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (sigma > 0 && selectedTarget && !targetSupportsWeightNoise(selectedTarget)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
     }
   }
-  for (const [field, message] of depthAnchoringIssues(configDraft)) {
+  for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -703,12 +721,17 @@ export function depthAnchoringEnabled(configDraft) {
 // Field issues for the depth-anchoring knobs — the API's bounds (E6): weight in
 // [0, depthAnchoringWeightMax], a known model size, a [0, 1] noise window with min <= max, and a
 // whole alternation period in [1, depthAnchoringEveryMax]. Checked only while enabled.
-export function depthAnchoringIssues(configDraft) {
+export function depthAnchoringIssues(configDraft, selectedTarget) {
   if (!depthAnchoringEnabled(configDraft)) return [];
   const issues = [];
   const weight = numberFromDraft(configDraft.depthAnchoringWeight);
   if (weight === null || weight < 0 || weight > depthAnchoringWeightMax) {
     issues.push(["depthAnchoringWeight", `Depth anchoring weight must be between 0 and ${depthAnchoringWeightMax}`]);
+  } else if (weight > 0 && selectedTarget && !targetSupportsDepthAnchoring(selectedTarget)) {
+    // The toggle is hidden for such a target, so this names no input (field null): the value can
+    // only arrive from a carried-over draft, and the API would refuse it anyway.
+    issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
+    return issues;
   }
   if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
     issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);

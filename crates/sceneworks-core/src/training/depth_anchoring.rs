@@ -4,7 +4,9 @@
 //! (submit-time field errors) and the worker (preflight + engine mapping) share, and the auxiliary
 //! catalog models the technique needs installed.
 
-use super::{TrainingConfig, TrainingPlanError};
+use serde_json::Value;
+
+use super::{TrainingConfig, TrainingPlanError, TrainingTarget};
 use crate::contracts::JsonObject;
 
 /// `advanced` key of the depth-anchoring loss weight. Absent or `0` is off.
@@ -32,6 +34,45 @@ pub const DEPTH_ANCHORING_EVERY_MAX: u64 = 16;
 pub const DEPTH_ANCHORING_EVERY_DEFAULT: u32 = 2;
 /// The accepted [`DEPTH_ANCHORING_MODEL_KEY`] values (web: `depthAnchoringModelOptions`).
 pub const DEPTH_ANCHORING_MODELS: [&str; 3] = ["small", "base", "large"];
+
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// depth anchoring (its `TrainerDescriptor::techniques.depth_anchoring`). Absent = no. The same
+/// mechanism as weight noise ([`super::WEIGHT_NOISE_SUPPORT_LIMIT`]): the builtin catalog carries
+/// the MLX truth, [`super::project_candle_training_limits`] removes it for Candle, the web form
+/// shows the toggle only where it is `true`, submit-time validation refuses a non-zero weight
+/// elsewhere, and a worker test pins the flag to the linked trainer descriptors.
+pub const DEPTH_ANCHORING_SUPPORT_LIMIT: &str = "supportsDepthAnchoring";
+
+/// Whether `target` (as projected for the serving platform) advertises depth-anchoring support.
+pub fn target_supports_depth_anchoring(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(DEPTH_ANCHORING_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// Refuses an enabled depth-anchoring request on a target that does not advertise
+/// [`DEPTH_ANCHORING_SUPPORT_LIMIT`] — a `depthAnchoringWeight` field error at submit time instead
+/// of a refusal after the job is queued.
+pub(super) fn validate_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    if depth_anchoring_settings(&config.advanced)?.is_some()
+        && !target_supports_depth_anchoring(target)
+    {
+        return Err(field_error(
+            DEPTH_ANCHORING_WEIGHT_KEY,
+            format!(
+                "{} does not support depth anchoring ({DEPTH_ANCHORING_WEIGHT_KEY}) on this \
+                 platform.",
+                target.name
+            ),
+        ));
+    }
+    Ok(())
+}
 
 /// An auxiliary training-time model a technique needs installed — a `componentOnly` catalog entry
 /// in `config/manifests/builtin.models.jsonc` (a parity test pins repo / revision / file to it).

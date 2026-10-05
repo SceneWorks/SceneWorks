@@ -8,6 +8,10 @@ use sceneworks_core::training::{
     TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
     WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
+use sceneworks_core::training::{
+    project_candle_training_limits, target_supports_weight_noise,
+    validate_training_config_for_target,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1963,5 +1967,117 @@ fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
             aux.id,
             aux.file
         );
+    }
+}
+/// sc-24826 review: only targets whose platform trainer declares weight noise advertise it, and a
+/// non-zero sigma on any other target is a submit-time `weightNoiseSigma` field error (not a
+/// refusal after the job is queued). The Candle projection withdraws Z-Image's MLX-only support.
+#[test]
+fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_sigma = |target: &sceneworks_core::training::TrainingTarget, sigma: Value| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
+        validate_training_config_for_target(target, &config)
+    };
+
+    let advertising: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| target_supports_weight_noise(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        advertising,
+        ["z_image_turbo_lora"],
+        "only Z-Image MLX declares weight noise"
+    );
+
+    let z_image = by_id("z_image_turbo_lora");
+    with_sigma(&z_image, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)).expect("Z-Image MLX admits it");
+
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    assert!(!target_supports_weight_noise(&z_image_candle));
+
+    for target in [by_id("sdxl_lora"), z_image_candle] {
+        // Off is always fine...
+        with_sigma(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        // ...on is a field error.
+        match with_sigma(&target, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "weightNoiseSigma", "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a weightNoiseSigma field error, got {other:?}",
+                target.id
+            ),
+        }
+    }
+}
+
+/// sc-2125 review (S1 mechanism): only targets whose platform trainer declares depth anchoring
+/// advertise it, and an enabled depth weight on any other target is a submit-time
+/// `depthAnchoringWeight` field error. The Candle projection withdraws Z-Image's MLX-only support.
+/// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
+/// the SDXL case is accepted ⇒ red.
+#[test]
+fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_weight = |target: &sceneworks_core::training::TrainingTarget, weight: Value| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("depthAnchoringWeight".to_owned(), weight);
+        validate_training_config_for_target(target, &config)
+    };
+
+    let advertising: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| target_supports_depth_anchoring(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        advertising,
+        ["z_image_turbo_lora"],
+        "only Z-Image MLX declares depth anchoring"
+    );
+
+    let z_image = by_id("z_image_turbo_lora");
+    with_weight(&z_image, json!(0.1)).expect("Z-Image MLX admits it");
+
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    assert!(!target_supports_depth_anchoring(&z_image_candle));
+
+    for target in [by_id("sdxl_lora"), z_image_candle] {
+        with_weight(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match with_weight(&target, json!(0.1)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "depthAnchoringWeight", "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a depthAnchoringWeight field error, got {other:?}",
+                target.id
+            ),
+        }
     }
 }
