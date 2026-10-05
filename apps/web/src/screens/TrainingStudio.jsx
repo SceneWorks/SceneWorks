@@ -1749,7 +1749,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // `baseOverride` lets a follow-up save (e.g. dedupe's second persist) act on a just-saved dataset
     // whose React state hasn't flushed yet — without it, `activeDataset`/`assetsById` are stale and a
     // re-materialized item key can miss `assetsById`, silently dropping kept images. Rebuild the
-    // asset map from the override so every kept item resolves.
+    // item and reference asset maps from the override so every kept item and ordered reference
+    // resolves under the server-assigned keys returned by the first save.
     const base = baseOverride ?? activeDataset;
     const baseAssetsById = baseOverride
       ? new Map([
@@ -1758,14 +1759,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
             asset.id,
             asset,
           ]),
+          ...datasetReferenceAssets(baseOverride, activeProject?.id, assets).map((asset) => [
+            asset.id,
+            asset,
+          ]),
         ])
       : assetsById;
+    const baseReferenceDraftById = baseOverride
+      ? referenceDraftsFromDataset(baseOverride, assets)
+      : referenceDraftById;
     const payload = datasetPayload({
       activeDataset: base,
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
-      referenceDraftById,
+      referenceDraftById: baseReferenceDraftById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });

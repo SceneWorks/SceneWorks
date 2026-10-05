@@ -830,6 +830,149 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("preserves ordered references when dedupe rekeys a newly uploaded target between its two saves (sc-24163)", async () => {
+    const initialDataset = {
+      id: "dataset-a",
+      name: "Portrait Set",
+      version: 3,
+      items: [
+        {
+          id: "item_keep",
+          assetId: "asset-a",
+          displayName: "Mira.png",
+          caption: { text: "keep", source: "manual", triggerWords: [] },
+        },
+        {
+          id: "item_duplicate",
+          assetId: "asset-b",
+          displayName: "Mira duplicate.png",
+          caption: { text: "duplicate", source: "manual", triggerWords: [] },
+        },
+      ],
+    };
+    const uploadDatasetItem = vi.fn(async (file) => ({
+      id: `upload-${file.name}`,
+      displayName: file.name,
+      file: { path: `training/uploads/${file.name}`, mimeType: "image/png" },
+    }));
+    const updateDataset = vi.fn(async (datasetId, payload) => {
+      const version = updateDataset.mock.calls.length === 1 ? 4 : 5;
+      return {
+        id: datasetId,
+        name: payload.name,
+        version,
+        items: payload.items.map((item) => {
+          if (item.assetId === "asset-a") return { ...item, id: "item_keep" };
+          if (item.assetId === "asset-b") return { ...item, id: "item_duplicate" };
+          if (item.id === "item_target") return item;
+          return {
+            ...item,
+            id: "item_target",
+            path: "images/item_target.png",
+            references: item.references?.map((reference, index) => ({
+              ...reference,
+              path: `references/item_target/${index + 1}.png`,
+            })),
+          };
+        }),
+      };
+    });
+    const loadReadiness = vi.fn(async () => ({
+      gate: "needs_attention",
+      subScores: { technical: 0.8 },
+      counts: { info: 0, warn: 1, fatal: 0 },
+      itemCount: 2,
+      items: [],
+      datasetFlags: [],
+      duplicateRemoval: { groups: [{ keep: "item_keep", remove: ["item_duplicate"] }] },
+    }));
+    const editTarget = {
+      ...zImageTrainingTarget,
+      id: "qwen_image_edit_lora",
+      baseModel: "qwen_image_2_1",
+      limits: { ...zImageTrainingTarget.limits, maxReferenceImages: 10 },
+    };
+
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [
+            { id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } },
+            { id: "asset-b", type: "image", displayName: "Mira duplicate.png", file: { path: "assets/images/Mira-duplicate.png", mimeType: "image/png" } },
+          ],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 2 }],
+          loadDataset: vi.fn(async () => initialDataset),
+          loadReadiness,
+          trainingTargets: [editTarget],
+          updateDataset,
+          uploadDatasetItem,
+        }),
+      );
+    });
+    await openPortraitSet();
+    await settle();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click();
+    });
+    const targetInput = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(targetInput, "files", {
+        configurable: true,
+        value: [new File([new Uint8Array([1])], "target.png", { type: "image/png" })],
+      });
+      targetInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Close").click();
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit pairs").click();
+    });
+
+    await act(async () => {
+      document.body.querySelector('[aria-label="Add reference images to target.png"]').click();
+    });
+    const referenceInput = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(referenceInput, "files", {
+        configurable: true,
+        value: [
+          new File([new Uint8Array([2])], "before.png", { type: "image/png" }),
+          new File([new Uint8Array([3])], "style.png", { type: "image/png" }),
+        ],
+      });
+      referenceInput.dispatchEvent(new window.Event("change", { bubbles: true }));
+    });
+    await settle();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")]
+        .find((button) => button.textContent.includes("Remove 1 duplicate"))
+        .click();
+    });
+    await settle();
+
+    expect(updateDataset).toHaveBeenCalledTimes(2);
+    expect(updateDataset.mock.calls[0][1].items.find((item) => item.path === "training/uploads/target.png")?.references)
+      .toEqual([
+        { path: "training/uploads/before.png", displayName: "before.png" },
+        { path: "training/uploads/style.png", displayName: "style.png" },
+      ]);
+    expect(updateDataset.mock.calls[1][1].items).toEqual([
+      expect.objectContaining({ id: "item_keep", assetId: "asset-a" }),
+      expect.objectContaining({
+        id: "item_target",
+        path: "training/datasets/dataset-a/images/item_target.png",
+        references: [
+          { path: "training/datasets/dataset-a/references/item_target/1.png", displayName: "before.png" },
+          { path: "training/datasets/dataset-a/references/item_target/2.png", displayName: "style.png" },
+        ],
+      }),
+    ]);
+  });
+
   it("queues a caption job for all images via the caption dialog (sc-2025)", async () => {
     const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
     const createCaptionJob = vi.fn(async () => ({ id: "job-caption-1", type: "training_caption" }));
