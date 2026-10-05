@@ -2715,6 +2715,7 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
         ("normalMinT", json!(0.1)),
         ("normalMaxT", json!(0.9)),
         ("normalEvery", json!(BODY_LOSS_EVERY_MAX)),
+        ("normalRestrictToSubject", json!(true)),
     ];
     let plan = build_plan_with_body_advanced(&good).expect("in-range body losses are accepted");
     for (key, value) in &good {
@@ -2729,7 +2730,7 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
         (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
     );
     assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
-    assert!(s.include_head && !s.normal_restrict_to_subject);
+    assert!(s.include_head && s.normal_restrict_to_subject);
     assert_eq!(s.shape_min_cos, 0.5);
     let off = build_plan_with_body_advanced(&[("bodyShapeWeight", json!(0))]).unwrap();
     assert!(!body_loss_settings(&off.config.advanced)
@@ -2930,8 +2931,8 @@ fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
 
 /// sc-24832: the body losses mirror depth anchoring's combination refusals — a full fine-tune and a
 /// video-less LTX-2.5 workflow are `<loss>Weight` field errors even on an advertising target — and
-/// the subject-restricted normal loss is a `normalRestrictToSubject` field error (the engine refuses
-/// it: no trainer feeds masks to the perceptual path yet). Mutation: drop the
+/// the subject-restricted normal loss is accepted, except on LTX-2.5 (no image to align a mask
+/// with), where it is a `normalRestrictToSubject` field error. Mutation: drop the
 /// `body_loss_combination_refusal` check from `validate_support` ⇒ red.
 #[test]
 fn body_losses_refuse_the_combinations_the_engine_refuses() {
@@ -2982,7 +2983,19 @@ fn body_losses_refuse_the_combinations_the_engine_refuses() {
     restricted
         .advanced
         .insert("normalRestrictToSubject".to_owned(), json!(true));
-    match validate_training_config_for_target(z_image, &restricted) {
+    validate_training_config_for_target(z_image, &restricted)
+        .expect("subject-restricted normals are accepted on Z-Image");
+    let mut ltx_restricted = ltx25.defaults.clone();
+    ltx_restricted
+        .advanced
+        .insert("ltxWorkflow".to_owned(), json!("t2v_lora"));
+    ltx_restricted
+        .advanced
+        .insert("normalWeight".to_owned(), json!(0.1));
+    ltx_restricted
+        .advanced
+        .insert("normalRestrictToSubject".to_owned(), json!(true));
+    match validate_training_config_for_target(&ltx25, &ltx_restricted) {
         Err(TrainingPlanError::InvalidField { field, .. }) => {
             assert_eq!(field, "normalRestrictToSubject")
         }

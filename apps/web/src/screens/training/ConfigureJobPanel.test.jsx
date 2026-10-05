@@ -979,8 +979,7 @@ describe("ConfigureJobPanel body losses", () => {
     expect(field("Body shape every N steps").getAttribute("max")).toBe("16");
     expect(field("Body shape cosine gate")).toBeTruthy();
     expect(field("Surface normals weight").value).toBe("0.2");
-    // Subject-restricted normals are not offered (the API refuses them for now).
-    expect(field("Normals on the subject only")).toBeUndefined();
+    expect(field("Normals on the subject only")).toBeTruthy();
     expect(field("Body proportion weight")).toBeUndefined();
     act(() => toggle("Body shape loss").click());
     expect(calls).toEqual([["bodyShapeWeight", ""]]);

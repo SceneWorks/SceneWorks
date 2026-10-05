@@ -1142,6 +1142,10 @@ export function bodyLossIssues(configDraft, selectedTarget) {
         issues.push([everyField, `Alternation period must be a whole number from 1 to ${bodyLossEveryMax}`]);
       }
     }
+    if (prefix === "normal" && configDraft.normalRestrictToSubject && selectedTarget?.baseModel === "ltx_2_5") {
+      // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
+      issues.push(["normalRestrictToSubject", "LTX-2.5 cannot restrict the normal loss to the subject"]);
+    }
     if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
       const c = numberFromDraft(configDraft.bodyShapeMinCos);
       if (c === null || c < -1 || c > 1) {
@@ -1176,8 +1180,6 @@ export function bodyLossSnapshot(configDraft) {
       if (c !== null) out.bodyShapeMinCos = c;
     }
     if (prefix === "normal" && configDraft.normalRestrictToSubject) {
-      // Not offered in the form (the API refuses it until a trainer feeds subject masks to the
-      // perceptual path); a carried-over value still reaches the API and is refused there.
       out.normalRestrictToSubject = true;
     }
   }

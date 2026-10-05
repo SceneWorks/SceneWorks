@@ -804,6 +804,19 @@ export function ConfigureJobPanel({
                         Include head proportions
                       </label>
                     ) : null}
+                    {loss.prefix === "normal" && selectedTarget?.baseModel !== "ltx_2_5" ? (
+                      <label
+                        className="training-checkbox-field"
+                        title="Average the normal loss over each image's subject mask only (needs a subject mask on every image — Data Sets → Generate subject masks)."
+                      >
+                        <input
+                          checked={Boolean(configDraft.normalRestrictToSubject)}
+                          onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
+                          type="checkbox"
+                        />
+                        Normals on the subject only
+                      </label>
+                    ) : null}
                     {loss.prefix === "bodyShape" ? (
                       <label title={`The shape loss only counts while the predicted body shape is already this similar (cosine) to the reference. Empty = ${bodyShapeMinCosDefault}.`}>
                         Body shape cosine gate

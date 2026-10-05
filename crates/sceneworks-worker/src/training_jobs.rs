@@ -1478,10 +1478,14 @@ fn preflight_subject_mask_paths(
     settings: &Settings,
     plan: &TrainingPlan,
 ) -> WorkerResult<Option<Vec<PathBuf>>> {
-    if subject_mask_loss_weights(&plan.config.advanced)
+    let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-        .is_none()
-    {
+        .is_some();
+    // sc-24832: the normal loss restricted to the subject reads the same per-image masks.
+    let body = body_loss_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let restricted_normals = body.normal.is_some() && body.normal_restrict_to_subject;
+    if !masked_loss && !restricted_normals {
         return Ok(None);
     }
     let root = normalize_app_managed_path(settings, &plan.dataset.root_path, "Dataset root")?;
@@ -1522,8 +1526,13 @@ fn preflight_subject_mask_paths(
     if missing.len() > shown {
         names.push_str(&format!(" and {} more", missing.len() - shown));
     }
+    let technique = if masked_loss {
+        "Subject-masked loss"
+    } else {
+        "The subject-restricted normal loss"
+    };
     Err(WorkerError::InvalidPayload(format!(
-        "Subject-masked loss needs a subject mask on every dataset image, but {} of {} have none: \
+        "{technique} needs a subject mask on every dataset image, but {} of {} have none: \
          {names}. Generate subject masks for the dataset (or replace the empty ones), then retry.",
         missing.len(),
         plan.dataset.items.len()
@@ -3785,6 +3794,52 @@ mod tests {
         value["config"]["advanced"]["subjectMaskBackgroundWeight"] = json!(0);
         value["config"]["advanced"]["subjectMaskSubjectWeight"] = json!(1);
         parse(value)
+    }
+
+    /// sc-24832: the subject-restricted normal loss reads the same per-image masks, so worker
+    /// preflight resolves them (and refuses a dataset missing any, naming it) even with masked loss
+    /// off; unrestricted normals read none. Mutation: drop `restricted_normals` from the preflight's
+    /// gate ⇒ no masks resolved, no refusal ⇒ red.
+    #[test]
+    fn subject_mask_preflight_covers_the_restricted_normal_loss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let plan_for = |images: &[String], restrict: bool| {
+            let mut plan = masked_plan(&data_dir, images, false);
+            plan.config
+                .advanced
+                .insert("normalWeight".to_owned(), json!(0.1));
+            plan.config
+                .advanced
+                .insert("normalRestrictToSubject".to_owned(), json!(restrict));
+            plan
+        };
+        let partial = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        match preflight_subject_mask_paths(&settings, &plan_for(&partial, true)) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("subject-restricted normal loss"), "{message}");
+                assert!(message.contains("img01.png"), "{message}");
+            }
+            other => panic!("expected a payload refusal, got {other:?}"),
+        }
+        assert!(preflight_subject_mask_paths(&settings, &plan_for(&partial, false))
+            .unwrap()
+            .is_none());
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let data_dir2 = dir2.path().canonicalize().expect("canonical data root");
+        let settings2 = test_settings(&data_dir2);
+        let full = subject_mask_dataset(&data_dir2, 2, &[0, 1], &[]);
+        let mut full_plan = masked_plan(&data_dir2, &full, false);
+        full_plan.config.advanced.insert("normalWeight".to_owned(), json!(0.1));
+        full_plan
+            .config
+            .advanced
+            .insert("normalRestrictToSubject".to_owned(), json!(true));
+        let paths = preflight_subject_mask_paths(&settings2, &full_plan)
+            .unwrap()
+            .expect("masks resolved for restricted normals");
+        assert_eq!(paths.len(), 2);
     }
 
     /// sc-24828 AC: a masked-loss job on a dataset missing any mask is refused at worker preflight,

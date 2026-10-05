@@ -1266,6 +1266,15 @@ describe("body losses (sc-24832)", () => {
     expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: true } }, bodyLosses[1])).toBe(true);
   });
 
+  // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject. Mutation: drop the
+  // LTX-2.5 check in bodyLossIssues ⇒ red.
+  it("flags subject-restricted normals on LTX-2.5 only", () => {
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const draft = { normalWeight: "0.1", normalRestrictToSubject: true, ltxWorkflow: "t2v_lora" };
+    expect(issuesOn(draft, "normalRestrictToSubject", ltx25)).toHaveLength(1);
+    expect(issuesOn(draft, "normalRestrictToSubject")).toEqual([]);
+  });
+
   // Mirrors the API's combination refusals. Mutation: drop the LTX-2.5 workflow check ⇒ red.
   it("refuses a full fine-tune and a video-less LTX-2.5 workflow", () => {
     expect(bodyLossCombinationRefusal(bodyTarget, { networkType: "full" })).toMatch(/full fine-tune/);

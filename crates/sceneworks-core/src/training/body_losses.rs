@@ -335,8 +335,8 @@ pub fn body_loss_combination_refusal(
 /// Refuses, as a field error at submit time instead of after the job is queued: an enabled body
 /// loss on a target that does not advertise it or on a combination the engine refuses
 /// ([`body_loss_combination_refusal`]) — on the loss's `<loss>Weight` key — and the
-/// subject-restricted normal loss ([`NORMAL_RESTRICT_TO_SUBJECT_KEY`]), which the engine refuses
-/// because no trainer feeds subject masks to the perceptual path yet.
+/// subject-restricted normal loss ([`NORMAL_RESTRICT_TO_SUBJECT_KEY`]) on LTX-2.5, whose prepared
+/// latent bundles carry no image a subject mask could be aligned with (the engine refuses it).
 pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
@@ -361,10 +361,15 @@ pub(super) fn validate_support(
             return Err(field_error(&key, reason));
         }
     }
-    if settings.normal.is_some() && settings.normal_restrict_to_subject {
+    if settings.normal.is_some()
+        && settings.normal_restrict_to_subject
+        && target.base_model == "ltx_2_5"
+    {
         return Err(field_error(
             NORMAL_RESTRICT_TO_SUBJECT_KEY,
-            "Restricting the normal loss to the subject mask is not supported yet.".to_owned(),
+            "LTX-2.5 trains on prepared latent bundles with no image a subject mask can be aligned \
+             with, so the normal loss cannot be restricted to the subject."
+                .to_owned(),
         ));
     }
     Ok(())
