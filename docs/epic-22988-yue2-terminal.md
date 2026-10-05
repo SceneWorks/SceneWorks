@@ -27,8 +27,11 @@ Each acceptance case writes one record to `<out>/evidence/records/<case>.json`, 
   worker through `SCENEWORKS_FFMPEG` for recording transcription;
 - the pass/fail reason.
 
-Audio is CC BY-NC 4.0: it stays in the app data dir on the host for the listening review and is
-never copied into the evidence or uploaded.
+These experimental runs use CC BY-NC 4.0 model weights and retain their model/license provenance.
+The ordinary acceptance/profile campaign retains audio on its host and uploads evidence without
+audio. Separately owner-authorized bounded precision runs retain WAVs in internal noncommercial
+listening artifacts with 30-day retention; their source identities and digests are recorded below.
+This does not determine rights in user lyrics, source recordings or generated outputs.
 
 ## Shipped configuration
 
@@ -50,7 +53,7 @@ The worker keeps the shipped 10 s heartbeat. Cancellation rides that heartbeat, 
 make their target stage longer than it: 3 000 forced semantic tokens for AR, 400 ODE steps for NAR,
 and the smallest decode tile for decode.
 
-## Weight tier and compute precision (pending terminal proof)
+## Weight tier and compute precision
 
 The Song Lab has separate **Weight tier** and **Compute precision** controls. `bf16` is the released
 weight tier; `q8` and `q4` are locally derived compressed matmul weights. A Q8/Q4 tier does not
@@ -91,11 +94,12 @@ choice before another submission. A previously explicit `fp32` setting maps to n
 both model stages already ran FP32. Existing API clients must send `computePolicy` on fresh
 generation/decode requests; they cannot rely on the historical default.
 
-The ten baseline Native profile records below are historical measurements, not strict-BF16 VAE
-proof. New bounded off-plan CUDA or Metal precision cases can use `capture --case-file <outside-repo.json>`
-through the same guarded native capture helper, with the case's explicit `computePolicy`; they do
-not change the checked-in plan or ingest into its corpus. Their actual GPU results and final
-precision-policy acceptance remain pending.
+The ten baseline native profile records below remain historical default/Legacy measurements,
+not strict-BF16 VAE proof. The bounded explicit-policy receipts below identify their own app,
+controller and unchanged M6 runtime revisions. Off-plan cases use
+`capture --case-file <outside-repo.json>` through the same guarded native capture helper; they do
+not change the checked-in plan or ingest into its corpus. Their hardware checks passed for the
+recorded requests; the owner accepted all 15 new renders after listening on 2026-10-05.
 
 For a fresh CUDA or Metal profile host, `yue2-acceptance.mjs --platform <cuda|metal>
 --profile-install-only` runs only the existing cold app install flow (BF16 plus both decoders and
@@ -249,7 +253,8 @@ The `yue2-terminal-cuda` job does the following:
   `E:\huggingface\hub` is never used);
 - runs the full CUDA profile campaign by default, skips it for `yue2_acceptance_only`, or captures
   only the FP8 case for `yue2_fp8_profile_only`;
-- uploads the evidence and receipts (never audio) before it enforces the verdict.
+- uploads evidence and receipts without audio before enforcing this ordinary terminal workflow's
+  verdict; separately authorized bounded precision listening artifacts are described below.
 
 The ordinary `candle-worker` lane stands down for this dispatch, because every `cuda` listener
 shares the measured GPU. After the listening review, remove the run's `E:` state directory.
@@ -308,3 +313,48 @@ these records, not evidence of strict BF16 or all-integer quantized arithmetic. 
 acceptance does not resolve them. Weight rehosting remains gated. Preserve the Metal safety skip,
 the earlier red runs and separate run identities in final evidence; this table alone does not
 claim sc-23002 Done or feature-to-main delivery.
+
+## Bounded explicit precision receipts (2026-10-05)
+
+Production runtime M6 is `25bd55cdb6a56c78b07584a12150c9f5d46be439`. The bounded evidence
+combines independently retained CUDA8, Metal BF16 two-case and Metal five-case captures. Their
+app and controller revisions differ; each receipt retains its actual source and admission
+estimate. This is not one common app head or one seven-case Metal workflow.
+
+| Capture | App / controller (runtime M6 throughout) | Hardware result and scope |
+|---|---|---|
+| [CUDA8 37334669358](https://github.com/SceneWorks/inference/actions/runs/37334669358) | `f63d173089f81a8cc591d9e905ec952eaa5cda83` / `2c820231926094566d1ed719c085ba7a7a2284a5` | Eight bounded cases passed: BF16 standard/legacy, FP32 standard, Q8/Q4 BF16/FP32 standard and FP8-auto. Case-bound owned stage samples, actual dtypes and WAV identities were independently checked. Known owned release was verified. |
+| [Metal3 37345072908](https://github.com/SceneWorks/inference/actions/runs/37345072908) | `f63d173089f81a8cc591d9e905ec952eaa5cda83` / `708462b0db6dde4acace41804100aacb88986b4c` | Workflow remains failed. BF16 standard and legacy completed with stage coverage; these two passes are retained. FP32 standard rendered but failed load/semantic/acoustic pricing and remains excluded from the retained candidate set; decode was covered. Awaited native/guard release is retained, without an independent postcase census claim. |
+| [Metal five continuation 37358074867](https://github.com/SceneWorks/inference/actions/runs/37358074867) | `7a8aac63efe1610c33cce02250ed50ee433c4339` / `e5bdedda9a7602689716fff90fb664298be05392` | Five cases passed: FP32 standard; Q8 BF16 standard; Q4 BF16 standard; Q8 FP32 standard; Q4 FP32 standard. Independent audit verified source/closure, raw stage coverage, actual model/VAE/latent dtypes, five WAVs and known owned release through guard chains and after-case known PID absence. Scope is `metal-five-continuation`, with `full_backend_profile:false`. |
+
+Original authenticated artifacts (IDs and original ZIP SHA-256):
+
+- CUDA8 metrics `11358745707`: `40491a1eed3a35f289f85b770e990b721d1e0e7e1da7cbc63d7379339a658429`;
+  listening `11358745714`: `82151bb9cfc6758cd206042d98a42fda90fd2e1c33457af77818b82418b3cd66`.
+- Metal3 metrics `11360986164`: `44e9ff1d1f61c8cb50b31c2df4bd9e8535e1674b58729ba90f650e943cb8d215`;
+  listening `11360409172`: `3c80fb46da20e5b4bb324967cb8e724ef72dc664691c3843c27b32c6ca8bc622`.
+- Metal five metrics `11366117888`: `3b4e37b00ad3637191fd06c804f1ca7842be78e4c253caa3c641ad468464169b`
+  (122 files); listening `11366187638`: `2b6faa1e02676881f7c1dec52b2770d87c902eb19cd661f470c128ab68ca4228`
+  (five WAVs).
+
+App `7a8aac63` adds a 3 GiB empirical allowance to explicit FP32 Metal MoT accounting, based on
+the saved undercoverage. The pinned Metal allocator rounds FP32 conversion buffers beyond logical
+tensor bytes, but the complete physical-footprint residual was not isolated. The new five-case
+samples are covered by their actual `7a8aac63` estimates; the failed `f63d1730` measurements remain
+unchanged. CUDA, BF16, decoder formulas and the recorded ample-budget production controls are
+unchanged. Sample coverage does not establish a universal memory bound.
+
+**Human listening accepted, 2026-10-05:** the owner reported “All 15 sound good” after reviewing
+the source-qualified final playlist. It binds CUDA8,
+Metal BF16 two-case and Metal five-case WAVs to their actual records and hashes. The failed original
+Metal FP32 WAV is explicitly excluded. The historical 22-render listening acceptance does not
+extend to these new outputs; this is a separate verdict for the 15 retained renders.
+
+The original ten profile records, red attempts, Metal watchdog exit 97 and owner-directed
+worker-kill safety skip remain disclosed above. Successful historical M2 long-context receipts
+retain their original identities; any budget-exceeded attempt remains a distinct historical
+failure with its exact command. These short precision captures do not repeat or replace that
+campaign. Known captured-process release does not prove absence of unknown or escaped services,
+or admit later workloads; Metal native PID birth times and outer watchdog PIDs were not retained.
+These bounded receipts do not by themselves close sc-23002 or the epic, prove common-head HTTP
+acceptance or establish current long-context evidence.
