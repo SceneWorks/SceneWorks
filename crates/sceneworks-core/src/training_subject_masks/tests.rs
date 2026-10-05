@@ -47,6 +47,7 @@ impl Fixture {
                         text: String::new(),
                         source: CaptionSource::Manual,
                         trigger_words: Vec::new(),
+                        mode: None,
                         updated_at: None,
                         extra: Default::default(),
                     },

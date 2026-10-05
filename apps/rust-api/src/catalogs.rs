@@ -826,6 +826,7 @@ pub(crate) async fn materialize_catalog_results(
                         text: caption,
                         source: Some(CaptionSource::Imported),
                         trigger_words: Vec::new(),
+                        mode: None,
                     }),
                     width: Some(acquired.width),
                     height: Some(acquired.height),

@@ -1,4 +1,5 @@
 use super::*;
+use sceneworks_core::training::CaptionMode;
 
 pub(crate) async fn list_training_targets() -> Json<TrainingTargetRegistry> {
     Json(effective_training_targets())
@@ -530,6 +531,11 @@ pub(crate) async fn create_training_dataset_caption_job(
         .item_ids
         .as_ref()
         .map(|ids| ids.iter().map(String::as_str).collect());
+    let request_trigger_words = payload
+        .trigger_words
+        .iter()
+        .map(|word| word.trim().to_owned())
+        .collect::<Vec<_>>();
     let items = dataset
         .items
         .iter()
@@ -538,11 +544,22 @@ pub(crate) async fn create_training_dataset_caption_job(
             None => payload.recaption || item.caption.text.trim().is_empty(),
         })
         .map(|item| {
+            // sc-24829: an item with no trigger words of its own takes the request's.
+            let own_words = item
+                .caption
+                .trigger_words
+                .iter()
+                .any(|word| !word.trim().is_empty());
+            let trigger_words = if own_words {
+                item.caption.trigger_words.clone()
+            } else {
+                request_trigger_words.clone()
+            };
             json!({
                 "itemId": item.id.clone(),
                 "imagePath": dataset_root.join(&item.path).display().to_string(),
                 "existingCaption": item.caption.text.clone(),
-                "triggerWords": item.caption.trigger_words.clone(),
+                "triggerWords": trigger_words,
             })
         })
         .collect::<Vec<_>>();
@@ -550,6 +567,27 @@ pub(crate) async fn create_training_dataset_caption_job(
         return Err(ApiError::bad_request(
             "No dataset items need captions. Enable recaption to overwrite existing captions.",
         ));
+    }
+    // sc-24829: a trigger-only caption IS the trigger words, so an image without any would be
+    // written an empty caption. Refuse up front, naming how many images are missing them.
+    let trigger_only = payload.mode == CaptionMode::TriggerOnly;
+    if trigger_only {
+        let missing = items
+            .iter()
+            .filter(|item| {
+                !item["triggerWords"].as_array().is_some_and(|words| {
+                    words
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .any(|word| !word.trim().is_empty())
+                })
+            })
+            .count();
+        if missing > 0 {
+            return Err(ApiError::bad_request(format!(
+                "Caption mode triggerOnly needs trigger words on every image; {missing} image(s) have none."
+            )));
+        }
     }
     let options = serde_json::to_value(payload.options)
         .map_err(|error| ApiError::internal(format!("caption options serialize: {error}")))?;
@@ -566,18 +604,23 @@ pub(crate) async fn create_training_dataset_caption_job(
         "datasetVersion": dataset.version,
         "datasetRoot": dataset_root.display().to_string(),
         "recaption": payload.recaption,
+        "mode": payload.mode,
         "options": options,
         "items": items,
     }) {
         Value::Object(map) => map,
         _ => return Err(ApiError::internal("caption job payload must be an object")),
     };
-    crate::model_sources::ensure_runtime_model_sources(
-        &state,
-        &JobType::TrainingCaption,
-        &mut job_payload,
-    )
-    .await?;
+    // A trigger-only job loads no captioner (sc-24829), so it carries no model source — the same
+    // model-free exemption the worker's runtime-source guard applies to it.
+    if !trigger_only {
+        crate::model_sources::ensure_runtime_model_sources(
+            &state,
+            &JobType::TrainingCaption,
+            &mut job_payload,
+        )
+        .await?;
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
         store.create_job(CreateJob {
             job_type: JobType::TrainingCaption,
@@ -1573,6 +1616,11 @@ pub(crate) async fn strip_exif_training_dataset_items(
     ))
 }
 
+/// Caption-job trigger-word limits (sc-24829, E6) — mirror `captionTriggerWordLimits` in
+/// `apps/web/src/training/joyCaptionPrompts.js`.
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORDS_MAX: usize = 16;
+pub(crate) const TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS: usize = 64;
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
@@ -1580,6 +1628,40 @@ pub(crate) fn validate_training_caption_job_request(
         return Err(ApiError::bad_request(
             "Unsupported training captioner. Use joy_caption.",
         ));
+    }
+    match &payload.mode {
+        CaptionMode::Default | CaptionMode::TriggerOnly => {}
+        // The subject-only prompt is owned by the worker; a caller prompt would silently replace
+        // it, so the two are refused together rather than one being ignored.
+        CaptionMode::SubjectOnly if !payload.options.caption_prompt.trim().is_empty() => {
+            return Err(ApiError::bad_request(
+                "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty.",
+            ));
+        }
+        CaptionMode::SubjectOnly => {}
+        _ => {
+            return Err(ApiError::bad_request(
+                "Caption mode must be one of default, subjectOnly, or triggerOnly.",
+            ));
+        }
+    }
+    if payload.trigger_words.len() > TRAINING_CAPTION_TRIGGER_WORDS_MAX {
+        return Err(ApiError::bad_request(format!(
+            "triggerWords: use at most {TRAINING_CAPTION_TRIGGER_WORDS_MAX} trigger words."
+        )));
+    }
+    for word in &payload.trigger_words {
+        let word = word.trim();
+        if word.is_empty() {
+            return Err(ApiError::bad_request(
+                "triggerWords: trigger words must not be empty.",
+            ));
+        }
+        if word.chars().count() > TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS {
+            return Err(ApiError::bad_request(format!(
+                "triggerWords: each trigger word must be at most {TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS} characters."
+            )));
+        }
     }
     if payload.model_name_or_path.trim().is_empty() {
         return Err(ApiError::bad_request(

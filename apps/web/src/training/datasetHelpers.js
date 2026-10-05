@@ -40,6 +40,9 @@ export function captionDraftsFromDataset(dataset) {
     map[datasetItemSelectionKey(dataset, item, index)] = {
       text: item.caption?.text ?? "",
       source: item.caption?.source ?? "manual",
+      // The auto-caption mode (sc-24829) rides the draft so a save keeps it; a manual edit
+      // replaces the draft without one.
+      ...(item.caption?.mode ? { mode: item.caption.mode } : {}),
     };
   });
   return map;
@@ -191,12 +194,14 @@ export function datasetPayload({ activeDataset, assetsById, associatedCharacterI
             text: draft.text ?? "",
             source: draft.source ?? "manual",
             triggerWords: previous?.caption?.triggerWords ?? [],
+            ...(draft.mode ? { mode: draft.mode } : {}),
           };
         } else if (previous?.caption) {
           caption = {
             text: previous.caption.text ?? "",
             source: previous.caption.source ?? "manual",
             triggerWords: previous.caption.triggerWords ?? [],
+            ...(previous.caption.mode ? { mode: previous.caption.mode } : {}),
           };
         }
         const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };

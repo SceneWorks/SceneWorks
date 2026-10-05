@@ -24,13 +24,16 @@ import {
   subjectMaskUrl,
 } from "../../training/subjectMasks.js";
 
-// Human label for the detected caption source (sc-2025) — read-only on the card.
-function captionSourceLabel(source) {
+// Human label for the detected caption source (sc-2025) — read-only on the card. An auto caption
+// made in a non-default mode (sc-24829) names that mode.
+const captionModeLabels = { subjectOnly: "subject only", triggerOnly: "trigger words" };
+
+function captionSourceLabel(source, mode) {
   if (source === "imported") {
     return "Imported";
   }
   if (source === "auto") {
-    return "Auto";
+    return captionModeLabels[mode] ? `Auto · ${captionModeLabels[mode]}` : "Auto";
   }
   return "Manual";
 }
@@ -579,7 +582,7 @@ export function DatasetEditorPanel({
                   <div className="training-caption-card-body">
                     <div className="training-caption-card-meta">
                       <strong title={name}>{name}</strong>
-                      <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source)}</span>
+                      <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source, draft.mode)}</span>
                       {disabled ? (
                         <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
                       ) : null}
