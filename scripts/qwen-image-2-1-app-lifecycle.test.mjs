@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { inflateSync } from "node:zlib";
-import { assertCompleted, assertDenseSnapshotLayout, assertPins, assertPlan, assertResume, assertWorker, BASE_REVISION, LICENSE_URL, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { assertCompleted, assertDenseSnapshotLayout, assertHardwareIdentity, assertImmutableRevisions, assertPins, assertPlan, assertResume, assertRunnerIdentity, assertWorker, BASE_REVISION, LICENSE_URL, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), hash = "b".repeat(64), workerId = "owned-qwen-worker";
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -113,23 +113,26 @@ test("public synthetic image pairs have valid PNG payloads and distinct source/t
 function assertWorkflowScope(workflow) {
   const trigger = workflow.slice(workflow.indexOf("on:"), workflow.indexOf("permissions:"));
   assert.match(trigger, /workflow_call:/); assert.doesNotMatch(trigger, /\b(workflow_dispatch|push|pull_request|schedule):/);
-  assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);
-  assert.match(workflow, /test "\$RUNNER_NAME" = nax-macos\s*$/m);
+  assert.match(workflow, /runner_target:[\s\S]*?default: primary/);
+  assert.match(workflow, /inputs\.runner_target == 'secondary'.*\["self-hosted","macOS","ARM64","rw-mage"\].*\["self-hosted","macOS","ARM64","rw-starvector"\]/);
+  assert.match(workflow, /primary:nax-macos\|secondary:nax-macos-2/);
+  assert.match(workflow, /QWEN_APP_RUNNER_TARGET: \$\{\{ inputs.runner_target \}\}/);
   assert.match(workflow, /test "\$GITHUB_SHA" = "\$QWEN_APP_SOURCE_SHA"\s*$/m);
   assert.match(workflow, /ref: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /QWEN_APP_SOURCE_SHA: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /- name: Build and exercise the owned API and MLX worker\n        run: node scripts\/qwen-image-2-1-app-lifecycle\.mjs\n        env:\n          QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/evidence\//);
   assert.doesNotMatch(workflow, /^      QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}/m, "runner.temp is unavailable in job-level env");
+  assert.equal((workflow.match(/^    concurrency:$/gm) ?? []).length, 1); assert.match(workflow, /group: qwen-image-2-1-app-lifecycle-primary-mac/);
   assert.match(workflow, /cancel-in-progress: false/); assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /--build-type Release --github-env/);
   assert.doesNotMatch(workflow, /measure-memory|download-missing|gh pr|git push|bump-inference/);
 }
-test("reusable app workflow preserves exclusive primary-runner and immutable caller scope", () => {
+test("reusable app workflow selects one exact app runner while preserving immutable caller scope", () => {
   const workflow = read(".github/workflows/qwen-image-2-1-app-lifecycle.yml"); assertWorkflowScope(workflow);
   const runnerTempAtJobScope = workflow.replace("      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}", "      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}\n      QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}");
   assert.throws(() => assertWorkflowScope(runnerTempAtJobScope), /runner\.temp is unavailable in job-level env/);
-  for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace("ARM64, rw-starvector", "ARM64, nax"), workflow.replace("= nax-macos", "= nax-macos-2"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace('test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"', 'test -n "$GITHUB_SHA"'), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
+  for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace('"rw-mage"', '"nax"'), workflow.replace('"rw-starvector"', '"nax"'), workflow.replace("secondary:nax-macos-2", "secondary:nax-macos"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace('test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"', 'test -n "$GITHUB_SHA"'), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
   const harness = read("scripts/qwen-image-2-1-app-lifecycle.mjs");
   assert.match(harness, /SCENEWORKS_CREDENTIALS_DIR: path.join\(state, "credentials"\)/);
   assert.match(harness, /HF_HUB_OFFLINE: "1"/); assert.match(harness, /SCENEWORKS_WORKER_ONLY: "1"/);
@@ -143,6 +146,8 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml/);
   assert.match(workflow, /source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
+  assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
   assert.deepEqual(jobs, ["qwen-app-lifecycle", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const runs = (profile, backend) => jobs.filter((job) => {
@@ -163,7 +168,7 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
   const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
-  const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
+  const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
   for (const mutant of mutants) assert.throws(() => assertDispatcherIsolation(mutant));
 });
 
@@ -186,12 +191,23 @@ test("frozen dense snapshot uses processor tokenizer files and rejects the older
   }
 });
 
-test("wrong runtime writes a failed receipt before any native build or service starts", async () => {
+test("runner route admits only the selected exact target/name pair", () => {
+  assertRunnerIdentity("primary", "nax-macos");
+  assertRunnerIdentity("secondary", "nax-macos-2");
+  for (const pair of [["unknown", "nax-macos"], ["primary", "nax-macos-2"], ["secondary", "nax-macos"], ["secondary", "unrelated-runner"]]) assert.throws(() => assertRunnerIdentity(...pair), /target\/name mismatch/);
+  assertImmutableRevisions(sha, "b".repeat(40));
+  assert.throws(() => assertImmutableRevisions("main", "b".repeat(40)), /immutable source/);
+  assertHardwareIdentity([{ chip_type: "Apple M5 Max", physical_memory: "128 GB", machine_model: "Mac" }]);
+  for (const hardware of [[], [{ chip_type: "Apple M4 Max", physical_memory: "128 GB" }], [{ chip_type: "Apple M5 Max", physical_memory: "64 GB" }], [{ chip_type: "Apple M5 Max", physical_memory: "128 GB" }, { chip_type: "Apple M5 Max", physical_memory: "128 GB" }]]) assert.throws(() => assertHardwareIdentity(hardware), /128 GB M5 Max/);
+});
+
+test("wrong runtime writes selected route and immutable identity to a failed receipt before build", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "qwen-app-guard-")), output = path.join(temporary, "attempt");
   try {
-    await assert.rejects(runLifecycle({ RUNNER_NAME: "unrelated-runner", RUNNER_TEMP: temporary, QWEN_APP_OUTPUT: output }), /primary Apple Silicon Mac required/);
+    await assert.rejects(runLifecycle({ QWEN_APP_RUNNER_TARGET: "secondary", RUNNER_NAME: "nax-macos", RUNNER_TEMP: temporary, QWEN_APP_OUTPUT: output, QWEN_APP_SOURCE_SHA: sha, QWEN_APP_INFERENCE_SHA: "b".repeat(40), GITHUB_RUN_ID: "42", GITHUB_RUN_ATTEMPT: "3" }), /target\/name mismatch/);
     const receipt = JSON.parse(await readFile(path.join(output, "evidence", "receipt.json"), "utf8"));
     assert.equal(receipt.status, "failed"); assert.deepEqual(receipt.cases, []); assert.deepEqual(receipt.cleanup, []); assert.ok(receipt.finished_at);
+    assert.deepEqual(receipt.identity, { requested_runner_target: "secondary", runner_name: "nax-macos", sceneworks_revision: sha, inference_revision: "b".repeat(40), run_id: "42", run_attempt: "3", hardware: null });
   } finally {
     // Exact mkdtemp path remains inside the OS temporary directory before recursive cleanup.
     assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir()) + path.sep));

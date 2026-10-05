@@ -18,6 +18,19 @@ const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 const requireFact = (value, message) => assert.ok(value, message);
 
+export function assertRunnerIdentity(target, runnerName) {
+  const expected = { primary: "nax-macos", secondary: "nax-macos-2" }[target];
+  requireFact(expected && runnerName === expected, "selected app runner target/name mismatch");
+}
+
+export function assertHardwareIdentity(hardware) {
+  requireFact(hardware.length === 1 && hardware[0].chip_type?.includes("M5 Max") && hardware[0].physical_memory === "128 GB", "expected 128 GB M5 Max hardware required");
+}
+
+export function assertImmutableRevisions(source, inference) {
+  requireFact(SHA.test(source) && SHA.test(inference), "immutable source and inference revisions required");
+}
+
 export function assertPins(manifests, lock, expected) {
   requireFact(SHA.test(expected), "exact inference SHA required");
   for (const manifest of manifests) {
@@ -144,7 +157,7 @@ export async function runLifecycle(env = process.env) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), output = path.resolve(env.QWEN_APP_OUTPUT ?? "");
   requireFact(env.QWEN_APP_OUTPUT && env.RUNNER_TEMP && output.startsWith(path.resolve(env.RUNNER_TEMP) + path.sep), "output must be a unique directory under RUNNER_TEMP");
   await mkdir(output); const evidence = path.join(output, "evidence"); await mkdir(evidence);
-  const receipt = { schema_version: 1, kind: "qwen_image_2_1_mlx_app_lifecycle", status: "running", started_at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, cases: [] };
+  const receipt = { schema_version: 1, kind: "qwen_image_2_1_mlx_app_lifecycle", status: "running", started_at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, identity: { requested_runner_target: env.QWEN_APP_RUNNER_TARGET, runner_name: env.RUNNER_NAME, sceneworks_revision: env.QWEN_APP_SOURCE_SHA, inference_revision: env.QWEN_APP_INFERENCE_SHA, run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, hardware: null }, cases: [] };
   const save = async () => { const temporary = path.join(evidence, "receipt.tmp"); await writeFile(temporary, JSON.stringify(receipt, null, 2) + "\n"); await rename(temporary, path.join(evidence, "receipt.json")); };
   await save();
   const children = [], handles = [], controller = new AbortController();
@@ -170,8 +183,9 @@ export async function runLifecycle(env = process.env) {
     try { alive(); const result = await Promise.race([child.done, interruption]); alive(); requireFact(result.code === 0, `${name} failed; see owned log`); } finally { controller.signal.removeEventListener("abort", interrupted); }
   };
   try {
-    requireFact(process.platform === "darwin" && process.arch === "arm64" && env.RUNNER_NAME === "nax-macos", "primary Apple Silicon Mac required");
-    requireFact(SHA.test(env.QWEN_APP_SOURCE_SHA) && SHA.test(env.QWEN_APP_INFERENCE_SHA), "immutable source and inference revisions required");
+    assertRunnerIdentity(env.QWEN_APP_RUNNER_TARGET, env.RUNNER_NAME);
+    assertImmutableRevisions(env.QWEN_APP_SOURCE_SHA, env.QWEN_APP_INFERENCE_SHA);
+    requireFact(process.platform === "darwin" && process.arch === "arm64", "Darwin arm64 runner required");
     const git = async (...args) => (await execFile("git", args, { cwd: root })).stdout.trim();
     requireFact(await git("rev-parse", "HEAD") === env.QWEN_APP_SOURCE_SHA && await git("status", "--porcelain") === "", "exact clean feature checkout required");
     const manifests = await Promise.all(["Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"].map((file) => readFile(path.join(root, file), "utf8")));
@@ -189,8 +203,8 @@ export async function runLifecycle(env = process.env) {
     for (const key of Object.keys(childEnv)) if (key.startsWith("SCENEWORKS_") || /TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key) || ["HF_ENDPOINT", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "CARGO_TARGET_DIR"].includes(key)) delete childEnv[key];
     Object.assign(childEnv, { SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "17921", SCENEWORKS_API_URL: url, SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_POLL_SECONDS: "1", SCENEWORKS_HEARTBEAT_SECONDS: "2", SCENEWORKS_BACKEND_MLX_ENABLED: "true", SCENEWORKS_BACKEND_CANDLE_ENABLED: "false", SCENEWORKS_MLX_REQUIRED: "1", SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce", HF_HOME: weights, HF_HUB_CACHE: hub, HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" });
     const hardware = JSON.parse((await execFile("system_profiler", ["SPHardwareDataType", "-json"])).stdout).SPHardwareDataType.map(({ chip_type, physical_memory, machine_model }) => ({ chip_type, physical_memory, machine_model }));
-    requireFact(hardware.length === 1 && hardware[0].chip_type?.includes("M5 Max") && hardware[0].physical_memory === "128 GB", "expected 128 GB M5 Max hardware required");
-    receipt.identity = { sceneworks_revision: env.QWEN_APP_SOURCE_SHA, inference_revision: env.QWEN_APP_INFERENCE_SHA, base_revision: BASE_REVISION, base_snapshot: base, runner_name: env.RUNNER_NAME, worker_id: workerId, hardware };
+    assertHardwareIdentity(hardware);
+    Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId, hardware });
     await save();
     await checkedCommand("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api"], { ...env, CARGO_TARGET_DIR: path.join(root, "target") }, "build");
     requireFact(await git("status", "--porcelain") === "", "build changed the pinned checkout");

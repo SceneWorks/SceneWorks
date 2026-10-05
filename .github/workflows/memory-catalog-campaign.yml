@@ -78,6 +78,14 @@ on:
         required: false
         type: string
         default: ""
+      qwen_app_runner_target:
+        description: "App lifecycle only: primary selects rw-starvector/nax-macos; secondary selects rw-mage/nax-macos-2."
+        required: false
+        type: choice
+        options:
+          - primary
+          - secondary
+        default: primary
       backend:
         description: "Which lane to walk. mlx runs on a Mac, candle on the Windows CUDA box."
         required: true
@@ -232,6 +240,7 @@ jobs:
     with:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
+      runner_target: ${{ inputs.qwen_app_runner_target }}
   mlx:
     if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
