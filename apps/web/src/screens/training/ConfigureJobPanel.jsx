@@ -6,6 +6,7 @@ import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx"
 import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
+import { numberFromDraft } from "../../training/drafts.js";
 import {
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -15,8 +16,10 @@ import {
   qualityPresetLabel,
   subjectMaskCoverage,
   subjectMaskWeightMax,
+  targetSupportsSubjectMaskLoss,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
+  targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
@@ -114,10 +117,19 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
-  // Weight noising is on whenever the draft carries a value (empty = off); the toggle seeds the
-  // suggested strength and the sigma input appears beside the other optimizer knobs.
-  const weightNoiseEnabled = String(configDraft.weightNoiseSigma ?? "").trim() !== "";
-  const subjectMaskLossEnabled = Boolean(configDraft.subjectMaskLoss);
+  // Weight noising is offered only where the target's trainer on this platform declares it
+  // (`limits.supportsWeightNoise` from the targets endpoint) — elsewhere the run would be refused.
+  // The toggle is checked for a positive sigma (a "0" draft is off); the sigma input stays visible
+  // while the draft holds any value so an out-of-range entry can be corrected in place.
+  const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
+  const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
+  const weightNoiseInputVisible =
+    weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
+  // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
+  // through configValidation instead of rendering a toggle the run would refuse.
+  const subjectMaskLossSupported = targetSupportsSubjectMaskLoss(selectedTarget);
+  const subjectMaskLossEnabled = subjectMaskLossSupported && Boolean(configDraft.subjectMaskLoss);
   const maskCoverage = subjectMaskCoverage(subjectMaskReport);
   const [maskJobRequested, setMaskJobRequested] = React.useState(false);
   // A queued-generation note belongs to the dataset it was queued for.
@@ -560,7 +572,7 @@ export function ConfigureJobPanel({
                   value={configDraft.lrWarmupSteps ?? ""}
                 />
               </label>
-              {weightNoiseEnabled ? (
+              {weightNoiseInputVisible ? (
                 <label title="Weight noise strength (sigma): after every optimizer step each adapter weight gets Gaussian noise scaled by sigma times that tensor's RMS. 0.0125 is the suggested strength.">
                   Weight noise sigma
                   <input
@@ -687,35 +699,39 @@ export function ConfigureJobPanel({
                   Gradient checkpointing
                 </label>
               )}
-              <label
-                className="training-checkbox-field"
-                title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
-              >
-                <input
-                  checked={weightNoiseEnabled}
-                  onChange={(event) =>
-                    updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
-                  }
-                  type="checkbox"
-                />
-                Weight noise
-              </label>
-              <label
-                className="training-checkbox-field"
-                title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image (Data Sets → Generate subject masks). Off by default."
-              >
-                <input
-                  checked={subjectMaskLossEnabled}
-                  onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
-                  type="checkbox"
-                  {...invalidProps(configValidity, "subjectMaskLoss")}
-                />
-                Subject-masked loss
-              </label>
+              {weightNoiseSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
+                >
+                  <input
+                    checked={weightNoiseEnabled}
+                    onChange={(event) =>
+                      updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
+                    }
+                    type="checkbox"
+                  />
+                  Weight noise
+                </label>
+              ) : null}
+              {subjectMaskLossSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image (Data Sets → Generate subject masks). Off by default."
+                >
+                  <input
+                    checked={subjectMaskLossEnabled}
+                    onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
+                    type="checkbox"
+                    {...invalidProps(configValidity, "subjectMaskLoss")}
+                  />
+                  Subject-masked loss
+                </label>
+              ) : null}
             </div>
             {subjectMaskLossEnabled ? (
               <div className="training-subject-mask-loss">
-                <label title="Loss weight of background pixels (outside the subject mask). 0 ignores the background entirely.">
+                <label title="Loss weight of background pixels (outside the subject mask). 0 ignores the background entirely. The loss is still averaged over the whole image, so with a low background weight and a small subject the effective learning rate drops roughly in proportion to the subject's share of the frame.">
                   Background weight
                   <input
                     max={subjectMaskWeightMax}

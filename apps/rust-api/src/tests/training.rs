@@ -113,6 +113,22 @@ fn ltx_workflow_options(name: &str) -> (Option<Value>, Option<Value>) {
     }
 }
 
+/// sc-24826 review: the targets endpoint advertises weight-noise support per platform — Z-Image
+/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
+#[test]
+fn platform_effective_training_catalog_projects_weight_noise_support() {
+    let advertising = |candle: bool| -> Vec<String> {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| sceneworks_core::training::target_supports_weight_noise(target))
+            .map(|target| target.id.clone())
+            .collect()
+    };
+    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
+    assert!(advertising(true).is_empty());
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);
@@ -2247,15 +2263,59 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
         );
     }
 
+    // In-range values pass validation where the platform's Z-Image trainer declares weight noise
+    // (MLX); the Candle catalog withdraws the flag, so a non-zero sigma is a field error there.
+    let supported = cfg!(target_os = "macos");
+    assert_eq!(
+        target["limits"]["supportsWeightNoise"]
+            .as_bool()
+            .unwrap_or(false),
+        supported,
+        "the targets endpoint advertises the platform-effective weight-noise support"
+    );
     for sigma in [
         json!(0),
         json!(0.0125),
         json!(sceneworks_core::training::WEIGHT_NOISE_SIGMA_MAX),
     ] {
         let (status, error) = submit(sigma.clone(), "lora").await;
-        assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
-        assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
+        if supported || sigma == json!(0) {
+            assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
+            assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
+        } else {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{sigma}: {error}");
+            assert_eq!(error["context"]["field"], "weightNoiseSigma", "{sigma}");
+        }
     }
+
+    // A target whose trainer does not declare weight noise (SDXL) is not advertised, and a
+    // non-zero sigma there is refused at submit with the field error — never queued.
+    let sdxl = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "sdxl_lora")
+        .expect("SDXL target")
+        .clone();
+    assert!(sdxl["limits"].get("supportsWeightNoise").is_none());
+    let mut config = sdxl["defaults"].clone();
+    config["advanced"]["weightNoiseSigma"] = json!(0.0125);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "sdxl_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Weight noise",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "weightNoiseSigma");
 }
 
 /// sc-24828 (epic 2123 E6): the subject-masked-loss keys are validated at the API boundary with a
@@ -2355,6 +2415,44 @@ async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_fi
         );
         assert_eq!(error["detail"], "Training dataset not found");
     }
+
+    // sc-24828 review: the targets endpoint advertises subject-masked loss per target, and a
+    // target that does not (LTX-2.5 — its trainers train from prepared latent bundles) refuses it at
+    // submit with the `subjectMaskLoss` field error instead of queueing a job the worker refuses.
+    let targets = registry["targets"].as_array().expect("target list");
+    let advertises = |id: &str| {
+        targets
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))["limits"]["supportsSubjectMaskLoss"]
+            == json!(true)
+    };
+    assert!(advertises("z_image_turbo_lora"));
+    assert!(!advertises("ltx_2_5_video_lora"));
+    assert!(!advertises("krea_2_control"));
+    let ltx25 = targets
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["subjectMaskLoss"] = json!(true);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Subject mask",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "subjectMaskLoss");
 }
 
 #[tokio::test]

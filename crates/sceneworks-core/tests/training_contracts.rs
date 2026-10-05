@@ -9,6 +9,10 @@ use sceneworks_core::training::{
     SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT, SUBJECT_MASK_WEIGHT_MAX, TRAINING_CONTRACT_SCHEMA_VERSION,
     TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
+use sceneworks_core::training::{
+    project_candle_training_limits, target_supports_weight_noise,
+    validate_training_config_for_target,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -1930,4 +1934,107 @@ fn web_subject_mask_bounds_match_the_api_bounds() {
         read("subjectMaskSubjectWeightDefault"),
         SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
     );
+}
+
+/// sc-24826 review: only targets whose platform trainer declares weight noise advertise it, and a
+/// non-zero sigma on any other target is a submit-time `weightNoiseSigma` field error (not a
+/// refusal after the job is queued). The Candle projection withdraws Z-Image's MLX-only support.
+#[test]
+fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_sigma = |target: &sceneworks_core::training::TrainingTarget, sigma: Value| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert("weightNoiseSigma".to_owned(), sigma);
+        validate_training_config_for_target(target, &config)
+    };
+
+    let advertising: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| target_supports_weight_noise(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        advertising,
+        ["z_image_turbo_lora"],
+        "only Z-Image MLX declares weight noise"
+    );
+
+    let z_image = by_id("z_image_turbo_lora");
+    with_sigma(&z_image, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)).expect("Z-Image MLX admits it");
+
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    assert!(!target_supports_weight_noise(&z_image_candle));
+
+    for target in [by_id("sdxl_lora"), z_image_candle] {
+        // Off is always fine...
+        with_sigma(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        // ...on is a field error.
+        match with_sigma(&target, json!(WEIGHT_NOISE_SIGMA_SUGGESTED)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "weightNoiseSigma", "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a weightNoiseSigma field error, got {other:?}",
+                target.id
+            ),
+        }
+    }
+}
+
+/// sc-24828 review: every LoRA target advertises subject-masked loss except LTX-2.5 (prepared
+/// latent bundles) and the Krea ControlNet branch; mask loss on a non-advertising target is a
+/// submit-time `subjectMaskLoss` field error (never queued), and off is always admitted. The flag
+/// is static (no Candle projection touches it).
+#[test]
+fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::target_supports_subject_mask_loss;
+    let registry = builtin_training_targets();
+    let with_mask = |target: &sceneworks_core::training::TrainingTarget, on: bool| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("subjectMaskLoss".to_owned(), json!(on));
+        validate_training_config_for_target(target, &config)
+    };
+    let unsupported: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| !target_supports_subject_mask_loss(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    for target in &registry.targets {
+        with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
+        let mut candle = target.clone();
+        project_candle_training_limits(&mut candle);
+        assert_eq!(
+            target_supports_subject_mask_loss(&candle),
+            target_supports_subject_mask_loss(target),
+            "{}: the Candle projection must not change subject-mask support",
+            target.id
+        );
+        match (
+            with_mask(target, true),
+            target_supports_subject_mask_loss(target),
+        ) {
+            (Ok(()), true) => {}
+            (Err(TrainingPlanError::InvalidField { field, .. }), false) => {
+                assert_eq!(field, "subjectMaskLoss", "{}", target.id)
+            }
+            (other, supported) => panic!(
+                "{} (advertised {supported}): unexpected mask-loss validation {other:?}",
+                target.id
+            ),
+        }
+    }
 }

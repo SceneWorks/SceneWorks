@@ -50,6 +50,20 @@ export function subjectMaskCoverage(report) {
   const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
   return { total, usable, empty, missing: total - usable, complete: total > 0 && usable === total };
 }
+
+// Whether the target's trainer on the serving platform honors weight noise — the API projects the
+// platform-effective `limits.supportsWeightNoise` (pinned to the trainer descriptors by a worker
+// test). Absent means unsupported.
+export function targetSupportsWeightNoise(target) {
+  return target?.limits?.supportsWeightNoise === true;
+}
+
+// Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
+// API advertises `limits.supportsSubjectMaskLoss` per target (pinned to the trainer descriptors on
+// both platforms by a worker test). Absent means unsupported.
+export function targetSupportsSubjectMaskLoss(target) {
+  return target?.limits?.supportsSubjectMaskLoss === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -505,12 +519,20 @@ export function configValidation(
       issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
     } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
       issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (sigma > 0 && selectedTarget && !targetSupportsWeightNoise(selectedTarget)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
     }
   }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
   // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
   // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
-  if (configDraft.subjectMaskLoss) {
+  if (configDraft.subjectMaskLoss && selectedTarget && !targetSupportsSubjectMaskLoss(selectedTarget)) {
+    // The toggle is hidden for such a target, so a `true` can only be carried over from another
+    // target's draft; it must block Start (the API refuses it too).
+    issues.push(issue.error(null, "This target does not support subject-masked loss — pick a supporting target"));
+  } else if (configDraft.subjectMaskLoss) {
     const background = numberFromDraft(configDraft.subjectMaskBackgroundWeight);
     if (background === null || background < 0 || background > subjectMaskWeightMax) {
       issues.push(

@@ -55,6 +55,48 @@ pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
 pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
 /// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
 pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. The
+/// builtin catalog carries the MLX truth (like every other builtin default);
+/// [`project_candle_training_limits`] removes it for targets whose Candle trainer does not declare
+/// it. The web form shows the weight-noise toggle only where this is `true`, and submit-time
+/// validation refuses a non-zero sigma elsewhere. A worker test pins both projections to the linked
+/// trainer descriptors, so the flag cannot drift from what the engine actually implements.
+pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
+
+/// Whether `target` (as projected for the serving platform) advertises weight-noise support.
+pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(WEIGHT_NOISE_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend: no
+/// Candle trainer declares weight noise yet (epic 2123 adds them story by story), so the flag is
+/// removed for every target. Callers that serve the Candle catalog (the API off macOS) apply it.
+/// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
+/// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
+/// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
+/// and the Krea ControlNet branch, so the flag is static per target and needs no Candle
+/// projection; a worker test pins it to the linked trainer descriptors on each platform. The web
+/// form shows the toggle only where this is `true`, and submit-time validation refuses mask loss
+/// elsewhere with a `subjectMaskLoss` field error.
+pub const SUBJECT_MASK_LOSS_SUPPORT_LIMIT: &str = "supportsSubjectMaskLoss";
+
+/// Whether `target` advertises subject-masked-loss support.
+pub fn target_supports_subject_mask_loss(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(SUBJECT_MASK_LOSS_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
+pub fn project_candle_training_limits(target: &mut TrainingTarget) {
+    target.limits.remove(WEIGHT_NOISE_SUPPORT_LIMIT);
+}
 
 /// `advanced` key that turns on **subject-masked loss weighting** (epic 2123, sc-24828): each
 /// image's subject mask (`<dataset>/masks/<content hash>.png`, see
@@ -1427,7 +1469,10 @@ fn mage_flow_lora_target(
             // Order is adapter kinds first, then the non-adapter path.
             "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -1504,7 +1549,12 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // (LyCORIS Kronecker) is advertised on the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 weight noising (sc-24826): the Z-Image MLX trainer declares it. Removed for
+            // Candle by `project_candle_training_limits`.
+            "supportsWeightNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -1616,7 +1666,10 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // target modules above.
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -1718,7 +1771,10 @@ fn krea_raw_lora_target() -> TrainingTarget {
             // inference (the `mlx-gen-krea` trainer builds both; the apply path handles both).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
@@ -1906,7 +1962,10 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -1990,7 +2049,10 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2097,6 +2159,12 @@ fn ltx_lora_target(
         "lrSchedulers": ["constant", "linear", "cosine"],
         "outputScopes": ["project", "global"]
     }));
+    // Epic 2123 subject-masked loss (sc-24828): the LTX-2.3 trainer declares it on both backends;
+    // LTX-2.5 trains from prepared latent bundles, which no image mask can be aligned with, so its
+    // trainers refuse it and it is not advertised.
+    if !is_ltx_2_5 {
+        limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
+    }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(
@@ -2245,7 +2313,10 @@ fn wan_lora_target() -> TrainingTarget {
             // by both single-DiT providers rather than filtered at install.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -2331,7 +2402,10 @@ fn wan_moe_lora_target(
                 json!(["lora"])
             },
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -2444,7 +2518,10 @@ fn sdxl_lora_target() -> TrainingTarget {
             // the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -2525,7 +2602,10 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -2596,7 +2676,10 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -2677,7 +2760,10 @@ fn kolors_lora_target() -> TrainingTarget {
             // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -3030,6 +3116,8 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_weight_noise_support(target, config)?;
+    validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3360,9 +3448,55 @@ pub fn subject_mask_loss_weights(
     Ok(enabled.then_some((background, subject)))
 }
 
+/// Refuses subject-masked loss on a target that does not advertise
+/// [`SUBJECT_MASK_LOSS_SUPPORT_LIMIT`] — a `subjectMaskLoss` field error at submit time instead of a
+/// refusal after the job is queued (for a control target, after its condition render). Runs after
+/// [`validate_subject_mask_loss`], so the keys are already well-formed here.
+fn validate_subject_mask_loss_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    if subject_mask_loss_weights(&config.advanced)?.is_some()
+        && !target_supports_subject_mask_loss(target)
+    {
+        return Err(TrainingPlanError::InvalidField {
+            field: SUBJECT_MASK_LOSS_KEY.to_owned(),
+            message: format!(
+                "{} does not support subject-masked loss ({SUBJECT_MASK_LOSS_KEY}).",
+                target.name
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Validates the subject-masked-loss keys (epic 2123 E6) — see [`subject_mask_loss_weights`].
 fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
     subject_mask_loss_weights(&config.advanced).map(|_| ())
+}
+
+/// Refuses a non-zero `advanced.weightNoiseSigma` on a target that does not advertise
+/// [`WEIGHT_NOISE_SUPPORT_LIMIT`] — a field error at submit time instead of a refusal after the job
+/// is queued. Runs after [`validate_weight_noise`], so the value is already a valid number here.
+fn validate_weight_noise_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let sigma = config
+        .advanced
+        .get(WEIGHT_NOISE_SIGMA_KEY)
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if sigma > 0.0 && !target_supports_weight_noise(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+            message: format!(
+                "{} does not support weight noise ({WEIGHT_NOISE_SIGMA_KEY}) on this platform.",
+                target.name
+            ),
+        });
+    }
+    Ok(())
 }
 
 /// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a
@@ -3506,7 +3640,10 @@ fn anima_base_lora_target() -> TrainingTarget {
             // LoKr through the shared `apply_anima_adapters` seam (sc-10521).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",

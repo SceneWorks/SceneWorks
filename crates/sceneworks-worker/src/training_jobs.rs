@@ -3633,6 +3633,86 @@ mod tests {
         assert!(mapped.gradient_checkpointing);
     }
 
+    /// sc-24828 review: the catalog's static `supportsSubjectMaskLoss` flag (which gates the web
+    /// toggle and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.subject_mask_loss` for every target this runtime can train — MLX on macOS,
+    /// Candle off-Mac, with no projection on either. The targets that do not support it are pinned
+    /// exactly, so a trainer gaining or losing the technique without the catalog following fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_subject_mask_loss_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        let mut unsupported = Vec::new();
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            let advertised = sceneworks_core::training::target_supports_subject_mask_loss(&target);
+            assert_eq!(
+                advertised, descriptor.techniques.subject_mask_loss,
+                "{} ({engine_id}): catalog supportsSubjectMaskLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            if !advertised {
+                unsupported.push(target.id.clone());
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 10,
+            "only {checked} builtin targets resolved to a linked trainer"
+        );
+        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle.
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &["ltx_2_5_video_lora"]
+        } else {
+            &["krea_2_control", "ltx_2_5_video_lora"]
+        };
+        assert_eq!(unsupported, expected);
+    }
+
+    /// sc-24826 review: the catalog's `supportsWeightNoise` flag (which gates the web toggle and
+    /// submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.weight_noise` for every target this runtime can train — the builtin (MLX) value
+    /// on macOS, the Candle projection off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_weight_noise_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(&target),
+                descriptor.techniques.weight_noise,
+                "{} ({engine_id}): catalog supportsWeightNoise disagrees with the trainer descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
     /// sc-24826 (epic 2123): `advanced.weightNoiseSigma` reaches the engine's typed
     /// `weight_noise_sigma`; absent stays 0 (off), so a legacy plan maps exactly as before.
     #[cfg(any(
