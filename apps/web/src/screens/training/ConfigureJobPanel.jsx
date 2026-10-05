@@ -35,7 +35,7 @@ import {
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEnabled,
-  targetSupportsDepthAnchoring,
+  depthAnchoringAvailable,
   depthAnchoringEveryDefault,
   depthAnchoringEveryMax,
   depthAnchoringModelLabels,
@@ -44,7 +44,7 @@ import {
   depthAnchoringWeightSuggested,
   latentLossEnabled,
   latentPerceptualLosses,
-  targetSupportsLatentLoss,
+  latentLossAvailable,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -169,11 +169,12 @@ export function ConfigureJobPanel({
     );
   // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
-  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
+  // A full fine-tune or an LTX-2.5 workflow with no generated video hides it too (sc-24830).
+  const depthAnchoringSupported = depthAnchoringAvailable(selectedTarget, configDraft);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   // The latent-space perceptual losses (sc-24833) follow the same mechanism, one per entry of
   // `latentPerceptualLosses` (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`).
-  const latentLosses = latentPerceptualLosses.filter((loss) => targetSupportsLatentLoss(selectedTarget, loss));
+  const latentLosses = latentPerceptualLosses.filter((loss) => latentLossAvailable(selectedTarget, configDraft, loss));
   const latentLossHelp = {
     vaeAnchor:
       "Match the training image at several scales: the model's prediction is decoded and a frozen FLUX.2 VAE encoder compares its features with the training image's. Needs the tiny decoder and the FLUX.2 VAE installed. Off by default.",

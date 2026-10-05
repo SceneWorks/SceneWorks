@@ -79,10 +79,11 @@ pub const LATENT_LPIPS: LatentLossSpec = LatentLossSpec {
 /// Both techniques, in a stable order.
 pub const LATENT_LOSSES: [LatentLossSpec; 2] = [VAE_ANCHOR, LATENT_LPIPS];
 
-/// Builtin targets whose **MLX** trainer declares the VAE anchor (`techniques.vae_anchor_loss`):
-/// every trainer wired through the shared aux-loss builder with an x0 decoder — Z-Image, SDXL /
-/// Illustrious, Kolors, SD3.5, Lens and Mage-Flow. A worker test pins this to the descriptors.
-pub const VAE_ANCHOR_TARGETS: [&str; 9] = [
+/// Builtin targets whose trainer declares the VAE anchor (`techniques.vae_anchor_loss`) — on both
+/// platforms (technique flags are static per target, sc-24830): every target whose trainer has an x0
+/// decoder ([`super::depth_anchoring::x0_decoder_for_trainer`]) and drives the shared aux-loss
+/// builder, i.e. exactly the depth-anchoring targets. A worker test pins this to the descriptors.
+pub const VAE_ANCHOR_TARGETS: [&str; 16] = [
     "z_image_turbo_lora",
     "sdxl_lora",
     "illustrious_xl_v1_lora",
@@ -91,11 +92,19 @@ pub const VAE_ANCHOR_TARGETS: [&str; 9] = [
     "sd3_5_large_lora",
     "sd3_5_medium_lora",
     "lens_turbo_lora",
+    "krea_2_raw_lora",
+    "anima_base_lora",
+    "wan_lora",
+    "wan_t2v_14b_lora",
+    "wan_i2v_14b_lora",
+    "ltx_video_lora",
+    "ltx_2_5_video_lora",
     "mage_flow_base_lora",
 ];
 
-/// Builtin targets whose **MLX** trainer declares E-LatentLPIPS (`techniques.latent_lpips_loss`):
-/// the trainers whose latent family has published weights ([`latent_lpips_model_for_trainer`]).
+/// Builtin targets whose trainer declares E-LatentLPIPS (`techniques.latent_lpips_loss`) on both
+/// platforms: the trainers whose latent family has published weights
+/// ([`latent_lpips_model_for_trainer`]). No decoder is involved.
 pub const LATENT_LPIPS_TARGETS: [&str; 7] = [
     "z_image_turbo_lora",
     "sdxl_lora",
@@ -106,12 +115,8 @@ pub const LATENT_LPIPS_TARGETS: [&str; 7] = [
     "sd3_5_medium_lora",
 ];
 
-/// Builtin targets whose **Candle** trainer declares the VAE anchor (Mage-Flow, through the shared
-/// builder with its full Mage-VAE decoder). No Candle trainer declares E-LatentLPIPS yet.
-pub const CANDLE_VAE_ANCHOR_TARGETS: [&str; 1] = ["mage_flow_base_lora"];
-
-/// Insert the MLX-truth latent-perceptual support flags into a builtin target's `limits`.
-pub(super) fn insert_mlx_limits(target: &mut TrainingTarget) {
+/// Insert the latent-perceptual support flags into a builtin target's `limits`.
+pub(super) fn insert_limits(target: &mut TrainingTarget) {
     for (spec, targets) in [
         (&VAE_ANCHOR, &VAE_ANCHOR_TARGETS[..]),
         (&LATENT_LPIPS, &LATENT_LPIPS_TARGETS[..]),
@@ -124,12 +129,45 @@ pub(super) fn insert_mlx_limits(target: &mut TrainingTarget) {
     }
 }
 
-/// Project the latent-perceptual flags of a builtin (MLX-truth) target onto the Candle backend.
-pub(super) fn project_candle_limits(target: &mut TrainingTarget) {
-    if !CANDLE_VAE_ANCHOR_TARGETS.contains(&target.id.as_str()) {
-        target.limits.remove(VAE_ANCHOR.support_limit);
+/// Why `spec` cannot run for this target + config combination even though the target advertises
+/// it, or `None` — mirroring the engine's typed refusals: a full base fine-tune (aux losses train
+/// through the adapter step only), and — for the decoded-x0 VAE anchor — an LTX-2.5 workflow that
+/// generates no video (no x0 video latent to decode;
+/// [`super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS`]).
+pub fn latent_loss_combination_refusal(
+    spec: &LatentLossSpec,
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Option<String> {
+    let label = capitalized(spec.label);
+    if super::config_is_full_finetune(config) {
+        return Some(format!(
+            "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
+        ));
     }
-    target.limits.remove(LATENT_LPIPS.support_limit);
+    if spec.weight_key == VAE_ANCHOR.weight_key && target.base_model == "ltx_2_5" {
+        let workflow = config
+            .advanced
+            .get("ltxWorkflow")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
+            return Some(format!(
+                "{label} decodes the generated video stream; the LTX-2.5 workflow '{workflow}' \
+                 generates none."
+            ));
+        }
+    }
+    None
+}
+
+fn capitalized(label: &str) -> String {
+    let mut c = label.chars();
+    match c.next() {
+        Some(first) => first.to_uppercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 /// The FLUX.2 VAE whose encoder the VAE anchor runs — the VAE inside the existing
@@ -289,8 +327,9 @@ pub(super) fn validate(config: &TrainingConfig) -> Result<(), TrainingPlanError>
     Ok(())
 }
 
-/// Refuses an enabled technique on a target that does not advertise it — a field error on the
-/// weight key at submit time instead of a refusal after the job is queued.
+/// Refuses an enabled technique on a target that does not advertise it, or on a combination the
+/// engine refuses ([`latent_loss_combination_refusal`]) — a field error on the weight key at submit
+/// time instead of a refusal after the job is queued.
 pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
@@ -305,6 +344,11 @@ pub(super) fn validate_support(
                     target.name, spec.label, spec.weight_key
                 ),
             ));
+        }
+        if latent_loss_settings(spec, &config.advanced)?.is_some() {
+            if let Some(reason) = latent_loss_combination_refusal(spec, target, config) {
+                return Err(field_error(spec.weight_key, reason));
+            }
         }
     }
     Ok(())

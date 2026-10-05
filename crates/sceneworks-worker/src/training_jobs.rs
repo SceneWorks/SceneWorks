@@ -902,7 +902,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
         if x0_decoder_for_trainer(engine_id).is_none() {
             return Err(WorkerError::InvalidPayload(format!(
-                "Native trainer '{engine_id}' has no tiny x0 decoder for depth anchoring \
+                "Native trainer '{engine_id}' has no x0 decoder for depth anchoring \
                  ({DEPTH_ANCHORING_WEIGHT_KEY})."
             )));
         }
@@ -1243,10 +1243,12 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
 
 /// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
 /// the engine's typed [`gen_core::DepthAnchoringConfig`] and resolve the two auxiliary checkpoints
-/// it loads — the trainer family's tiny x0 decoder (TAEF1 for Z-Image) and the selected
-/// Depth-Anything-V2 — from the installed model library. A missing checkpoint is refused, naming
-/// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the config
-/// untouched, so a legacy plan maps exactly as before.
+/// it loads — the trainer family's x0 decoder (its cataloged tiny decoder, e.g. TAEF1 for Z-Image,
+/// TAESDXL for SDXL, TAEW2.1 for Wan/Krea/Anima — or, for a family with none, the base model the
+/// trainer already loads, whose own VAE decodes; sc-24830) and the selected Depth-Anything-V2 —
+/// from the installed model library. A missing checkpoint is refused, naming the catalog model to
+/// install; nothing is downloaded mid-job. Off (the default) leaves the config untouched, so a
+/// legacy plan maps exactly as before.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1256,7 +1258,7 @@ fn apply_depth_anchoring(
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
 ) -> WorkerResult<()> {
-    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
+    use sceneworks_core::training::depth_anchoring::{depth_anything_v2_model, X0DecoderSource};
 
     let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
@@ -1272,13 +1274,22 @@ fn apply_depth_anchoring(
         })?;
     let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
-            "Native trainer '{engine_id}' has no tiny x0 decoder for depth anchoring."
+            "Native trainer '{engine_id}' has no x0 decoder for depth anchoring."
         ))
     })?;
     let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
     })?;
-    config.perceptual_decoder_dir = Some(installed_aux_model_dir(settings, decoder)?);
+    config.perceptual_decoder_dir = Some(match decoder {
+        X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model)?,
+        // The trainer decodes through its own VAE, resolved from the base model it loads; the
+        // shared engine floor still wants the decoder location named, so name the base snapshot.
+        X0DecoderSource::BaseModelVae => resolve_app_managed_model_dir(
+            settings,
+            &plan.target.base_model_path,
+            "Training baseModelPath",
+        )?,
+    });
     config.depth_anchoring = gen_core::DepthAnchoringConfig {
         schedule: gen_core::AuxLossSchedule {
             weight: depth.weight as f32,
@@ -1319,7 +1330,7 @@ fn preflight_latent_perceptual(
         }
         if x0_decoder_for_trainer(engine_id).is_none() {
             return Err(WorkerError::InvalidPayload(format!(
-                "Native trainer '{engine_id}' has no tiny x0 decoder for the VAE anchor loss ({}).",
+                "Native trainer '{engine_id}' has no x0 decoder for the VAE anchor loss ({}).",
                 VAE_ANCHOR.weight_key
             )));
         }
@@ -1358,6 +1369,7 @@ fn apply_latent_perceptual(
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
 ) -> WorkerResult<()> {
+    use sceneworks_core::training::depth_anchoring::X0DecoderSource;
     use sceneworks_core::training::latent_perceptual::{
         LatentLossSettings, FLUX2_VAE_MODEL, FLUX2_VAE_TIER_DIRS,
     };
@@ -1386,10 +1398,19 @@ fn apply_latent_perceptual(
     if let Some(va) = &vae_anchor {
         let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
-                "Native trainer '{engine_id}' has no tiny x0 decoder for the VAE anchor loss."
+                "Native trainer '{engine_id}' has no x0 decoder for the VAE anchor loss."
             ))
         })?;
-        config.perceptual_decoder_dir = Some(installed_aux_model_dir(settings, decoder)?);
+        // The same decoder resolution as depth anchoring (a shared field): a cataloged tiny decoder,
+        // or the trainer's own VAE from the base model it loads.
+        config.perceptual_decoder_dir = Some(match decoder {
+            X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model)?,
+            X0DecoderSource::BaseModelVae => resolve_app_managed_model_dir(
+                settings,
+                &plan.target.base_model_path,
+                "Training baseModelPath",
+            )?,
+        });
         let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             FLUX2_VAE_MODEL.repo,
@@ -4099,11 +4120,12 @@ mod tests {
         );
     }
 
-    /// sc-2125 review (S1 mechanism): the catalog's `supportsDepthAnchoring` flag (which gates the
-    /// web toggle and submit-time validation) must equal the linked trainer descriptor's
-    /// `techniques.depth_anchoring` for every target this runtime can train — the builtin (MLX)
-    /// value on macOS, the Candle projection off-Mac. Mutation: drop the flag from the Z-Image
-    /// target (or mark SDXL) ⇒ red.
+    /// sc-2125 / sc-24830: the catalog's `supportsDepthAnchoring` flag (which gates the web toggle
+    /// and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.depth_anchoring` for every target this runtime can train — the builtin catalog
+    /// (served identically on both platforms) against the MLX descriptors on macOS and the Candle
+    /// descriptors off-Mac — and every declaring trainer must have an x0 decoder source. Mutation:
+    /// drop the flag from one target (or mark the Krea ControlNet target) ⇒ red.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -4111,16 +4133,20 @@ mod tests {
     #[test]
     fn catalog_depth_anchoring_flag_matches_the_linked_trainer_descriptors() {
         let mut checked = 0;
-        for mut target in sceneworks_core::training::builtin_training_targets().targets {
-            if !cfg!(target_os = "macos") {
-                sceneworks_core::training::project_candle_training_limits(&mut target);
-            }
+        for target in sceneworks_core::training::builtin_training_targets().targets {
             let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
                 continue;
             };
             let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
                 continue;
             };
+            if descriptor.techniques.depth_anchoring {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) declares depth anchoring but has no x0 decoder source",
+                    target.id
+                );
+            }
             assert_eq!(
                 sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
                     &target
@@ -4470,10 +4496,11 @@ mod tests {
         }
     }
 
-    /// sc-2125 (epic 2123 E3): the shared dry/real preflight refuses depth anchoring on a trainer
-    /// whose descriptor does not declare it, refuses malformed values naming the key, and admits it
-    /// where the active runtime's trainer declares it (Z-Image on MLX). Mutation: drop the
-    /// `descriptor.techniques.depth_anchoring` check ⇒ the SDXL case is admitted ⇒ red.
+    /// sc-2125 / sc-24830 (epic 2123 E3): the shared dry/real preflight refuses depth anchoring on a
+    /// trainer whose descriptor does not declare it (the Krea ControlNet branch), refuses malformed
+    /// values naming the key, and admits it where the active runtime's trainer declares it — SDXL,
+    /// Z-Image and Mage on both backends. Mutation: drop the `descriptor.techniques.depth_anchoring`
+    /// check ⇒ the Krea ControlNet refusal no longer names unsupported depth anchoring ⇒ red.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -4505,24 +4532,37 @@ mod tests {
         ))
         .is_ok());
 
-        // SDXL declares no depth anchoring on either backend.
-        assert!(err(plan("sdxl_lora", "sdxl", &on)).contains("does not support depth anchoring"));
-
-        // Z-Image follows its active descriptor: admitted on MLX, refused on Candle (until S8).
-        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
-            .expect("z_image_turbo trainer registered")
-            .techniques
-            .depth_anchoring;
-        assert_eq!(
-            declared,
-            cfg!(target_os = "macos"),
-            "only Z-Image MLX declares depth anchoring today"
-        );
-        let z_image = plan("z_image_lora", "z_image_turbo", &on);
-        if declared {
-            validate_training_target_config(&z_image).expect("Z-Image MLX admits depth anchoring");
+        // The Krea ControlNet branch trains no x0-decodable LoRA. It is a Candle-only trainer (not
+        // registered in the MLX runtime); where it is registered its control request is refused.
+        let control_on = [
+            ("depthAnchoringWeight", json!(0.1)),
+            ("networkType", json!("control")),
+        ];
+        let control = err(plan("krea_control", "krea_2_raw", &control_on));
+        if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+            assert!(
+                control.contains("does not support depth anchoring"),
+                "{control}"
+            );
+            assert!(validate_training_target_config(&plan(
+                "krea_control",
+                "krea_2_raw",
+                &[("networkType", json!("control"))]
+            ))
+            .is_ok());
         } else {
-            assert!(err(z_image).contains("does not support depth anchoring"));
+            assert!(control.contains("not registered"), "{control}");
+        }
+
+        // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
+        // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.
+        for (kernel, base) in [
+            ("sdxl_lora", "sdxl"),
+            ("z_image_lora", "z_image_turbo"),
+            ("mage_flow_lora", "mage_flow_base"),
+        ] {
+            validate_training_target_config(&plan(kernel, base, &on))
+                .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
         }
 
         // Malformed values never silently map to off — each is refused naming its key.
@@ -4549,10 +4589,80 @@ mod tests {
             .join(format!("models--{}", repo.replace('/', "--")))
             .join("snapshots")
             .join(revision);
-        // A nested file (`q4/vae/…`, `elatentlpips_ckpt/…`) gets its sub-directories too.
         std::fs::create_dir_all(snapshot.join(file).parent().unwrap()).unwrap();
         std::fs::write(snapshot.join(file), b"weights").unwrap();
         snapshot
+    }
+
+    /// sc-24830: each family's depth-anchoring plan hands the trainer ITS x0 decoder — the
+    /// installed snapshot of the family's tiny decoder at the pinned revision (a decoder file in a
+    /// repo subdirectory included), or, for Mage-Flow (no tiny decoder), the base model snapshot
+    /// whose own VAE the trainer decodes through. A missing decoder is refused naming it.
+    /// Mutation: map every trainer to TAEF1 in `x0_decoder_for_trainer` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn depth_anchoring_resolves_each_familys_x0_decoder() {
+        use sceneworks_core::training::depth_anchoring::{
+            DEPTH_ANYTHING_V2_MODELS, TAELTX2_3_MODEL, TAESD3_MODEL, TAESDXL_MODEL, TAEW2_1_MODEL,
+            TAEW2_2_MODEL,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let small = &DEPTH_ANYTHING_V2_MODELS[0];
+        fake_snapshot(&hub, small.repo, small.revision, small.file);
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            value["config"]["advanced"]["depthAnchoringWeight"] = json!(0.1);
+            parse(value)
+        };
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        for (kernel, base, model) in [
+            ("sdxl_lora", "sdxl", &TAESDXL_MODEL),
+            ("sd3_lora", "sd3_5_large", &TAESD3_MODEL),
+            ("wan_moe_lora", "wan_2_2_t2v_14b", &TAEW2_1_MODEL),
+            ("wan_lora", "wan_2_2", &TAEW2_2_MODEL),
+            ("ltx_mlx_lora", "ltx_2_3", &TAELTX2_3_MODEL),
+        ] {
+            let plan = plan(kernel, base);
+            let mut config = map_training_config(&plan.config);
+            match apply_depth_anchoring(&settings, &plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => {
+                    assert!(message.contains(model.id), "{kernel}: {message}")
+                }
+                other => panic!("{kernel}: expected a not-installed refusal, got {other:?}"),
+            }
+            let snapshot = fake_snapshot(&hub, model.repo, model.revision, model.file);
+            let mut config = map_training_config(&plan.config);
+            apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
+            assert_eq!(
+                canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+                canon(&snapshot),
+                "{kernel}"
+            );
+        }
+        // Mage-Flow decodes through its own VAE: the decoder location is the base snapshot.
+        std::fs::create_dir_all(dir.path().join("models").join("base-missing")).unwrap();
+        let mage = plan("mage_flow_lora", "mage_flow_base");
+        let mut config = map_training_config(&mage.config);
+        apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(
+                &resolve_app_managed_model_dir(
+                    &settings,
+                    &mage.target.base_model_path,
+                    "Training baseModelPath"
+                )
+                .unwrap()
+            )
+        );
     }
 
     /// sc-2125: an enabled depth-anchoring plan maps onto the engine's typed config — schedule,
@@ -4676,9 +4786,10 @@ mod tests {
 
     /// sc-24833 (S1 mechanism): the catalog's `supportsVaeAnchorLoss` / `supportsLatentLpipsLoss`
     /// flags must equal the linked trainer descriptor's `techniques.vae_anchor_loss` /
-    /// `techniques.latent_lpips_loss` for every target this runtime can train — the builtin (MLX)
-    /// value on macOS, the Candle projection off-Mac. Mutation: drop a target from
-    /// `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS` (or add Krea-2) ⇒ red.
+    /// `techniques.latent_lpips_loss` for every target this runtime can train (static per-target
+    /// flags, identical on both platforms, compared with the active platform's descriptors); and a
+    /// target advertising the decoded-x0 VAE anchor must have an x0 decoder. Mutation: drop a target
+    /// from `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS` (or add `krea_2_control`) ⇒ red.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -4687,16 +4798,20 @@ mod tests {
     fn catalog_latent_perceptual_flags_match_the_linked_trainer_descriptors() {
         use sceneworks_core::training::latent_perceptual::target_supports;
         let mut checked = 0;
-        for mut target in sceneworks_core::training::builtin_training_targets().targets {
-            if !cfg!(target_os = "macos") {
-                sceneworks_core::training::project_candle_training_limits(&mut target);
-            }
+        for target in sceneworks_core::training::builtin_training_targets().targets {
             let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
                 continue;
             };
             let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
                 continue;
             };
+            if target_supports(&VAE_ANCHOR, &target) {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) advertises the VAE anchor without an x0 decoder",
+                    target.id
+                );
+            }
             for (spec, declared) in [
                 (&VAE_ANCHOR, descriptor.techniques.vae_anchor_loss),
                 (&LATENT_LPIPS, descriptor.techniques.latent_lpips_loss),
@@ -4719,9 +4834,9 @@ mod tests {
 
     /// sc-24833 (epic 2123 E3): the shared dry/real preflight refuses each latent-perceptual loss on
     /// a trainer whose descriptor does not declare it, refuses malformed values naming the key, and
-    /// admits it where the active runtime's trainer declares it (Z-Image on MLX); Krea-2 declares
-    /// neither. Mutation: drop the `techniques.latent_lpips_loss` check ⇒ the Krea case is admitted
-    /// ⇒ red.
+    /// admits it where the trainer declares it (Z-Image both; Krea-2 the VAE anchor only, having no
+    /// E-LatentLPIPS weights). Mutation: drop the `techniques.latent_lpips_loss` check ⇒ the Krea
+    /// E-LatentLPIPS case is admitted ⇒ red.
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
@@ -4756,23 +4871,23 @@ mod tests {
                 &[(spec.weight_key, json!(0))]
             ))
             .is_ok());
-            assert!(
-                err(plan("krea_lora", "krea_2_raw", &on))
-                    .contains(&format!("does not support the {label} loss")),
-                "{label}"
-            );
-            assert_eq!(
-                declared,
-                cfg!(target_os = "macos"),
-                "only Z-Image MLX declares the {label} loss today"
-            );
-            let z_image = plan("z_image_lora", "z_image_turbo", &on);
-            if declared {
-                validate_training_target_config(&z_image)
-                    .unwrap_or_else(|e| panic!("Z-Image MLX admits the {label} loss: {e:?}"));
+            // Krea-2 (TAEW2.1 decoder) declares the VAE anchor but has no E-LatentLPIPS weights.
+            let krea = plan("krea_lora", "krea_2_raw", &on);
+            if spec.weight_key == VAE_ANCHOR.weight_key {
+                validate_training_target_config(&krea)
+                    .unwrap_or_else(|e| panic!("Krea-2 admits the VAE anchor: {e:?}"));
             } else {
-                assert!(err(z_image).contains("does not support"), "{label}");
+                assert!(
+                    err(krea).contains(&format!("does not support the {label} loss")),
+                    "{label}"
+                );
             }
+            assert!(
+                declared,
+                "Z-Image declares the {label} loss on both platforms"
+            );
+            validate_training_target_config(&plan("z_image_lora", "z_image_turbo", &on))
+                .unwrap_or_else(|e| panic!("Z-Image admits the {label} loss: {e:?}"));
             for (key, bad) in [
                 (spec.weight_key, json!(-0.1)),
                 (spec.weight_key, json!("0.5")),

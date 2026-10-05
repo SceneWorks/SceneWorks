@@ -23,6 +23,10 @@ import {
   targetSupportsVaeAnchorLoss,
   targetSupportsLatentLpipsLoss,
   latentPerceptualLosses,
+  latentLossAvailable,
+  latentLossCombinationRefusal,
+  depthAnchoringAvailable,
+  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
@@ -1022,6 +1026,32 @@ describe("depth anchoring target support (sc-2125)", () => {
     expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
+
+  // sc-24830 review: an advertising target still refuses the combinations the engine refuses — a
+  // full base fine-tune and an LTX-2.5 workflow with no generated video — as a weight issue, and
+  // the control is not offered for them. Mutation: return null from
+  // depthAnchoringCombinationRefusal ⇒ red.
+  it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const messages = (draft, selectedTarget) =>
+      configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
+        .filter((entry) => entry.field === "depthAnchoringWeight")
+        .map((entry) => entry.message);
+    expect(messages({ networkType: "full" }, supported)).toEqual([
+      "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
+    ]);
+    expect(depthAnchoringAvailable(supported, { networkType: "full" })).toBe(false);
+    expect(depthAnchoringAvailable(supported, { networkType: "lora" })).toBe(true);
+    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
+    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+      expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
+      expect(depthAnchoringAvailable(ltx, { ltxWorkflow: workflow })).toBe(false);
+      // The same name on a non-LTX-2.5 target is no refusal.
+      expect(depthAnchoringAvailable(supported, { ltxWorkflow: workflow })).toBe(true);
+    }
+    expect(depthAnchoringAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+  });
 });
 
 // sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
@@ -1198,6 +1228,22 @@ describe("latent-space perceptual losses (sc-24833)", () => {
       expect(validate({ [`${loss.prefix}Weight`]: "1" })).toEqual([]);
       expect(validate({ [`${loss.prefix}Weight`]: "0" }, target)).toEqual([]);
     }
+  });
+
+  // Mirrors the API's latent_loss_combination_refusal. Mutation: drop the refusal check from
+  // latentPerceptualIssues ⇒ red.
+  it("refuses a full fine-tune and the VAE anchor on a no-video LTX-2.5 workflow", () => {
+    for (const loss of latentPerceptualLosses) {
+      const issues = validate({ [`${loss.prefix}Weight`]: "1", networkType: "full" });
+      expect(issues.map((entry) => entry.field)).toContain(`${loss.prefix}Weight`);
+      expect(latentLossAvailable(supported, { networkType: "full" }, loss)).toBe(false);
+      expect(latentLossAvailable(supported, { networkType: "lora" }, loss)).toBe(true);
+    }
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const [vaeAnchor, lpips] = latentPerceptualLosses;
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, vaeAnchor)).toContain("t2a_lora");
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2v_lora" }, vaeAnchor)).toBeNull();
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, lpips)).toBeNull();
   });
 
   // Mutation: drop latentPerceptualIssues from configValidation ⇒ red.

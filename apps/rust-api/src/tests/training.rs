@@ -139,9 +139,10 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     }
 }
 
-/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
-/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+/// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
+/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
+/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     let advertising = |candle: bool| -> Vec<String> {
@@ -154,34 +155,40 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
             .map(|target| target.id.clone())
             .collect()
     };
-    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
-    assert!(advertising(true).is_empty());
+    let mlx = advertising(false);
+    assert_eq!(
+        mlx,
+        advertising(true),
+        "MLX and Candle advertise the same targets"
+    );
+    let all: Vec<String> = crate::training::effective_training_targets_for_candle(false)
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .filter(|id| id != "krea_2_control")
+        .collect();
+    assert_eq!(mlx, all);
+    assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
+    assert!(mlx
+        .iter()
+        .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
 }
 
-/// sc-24833: the targets endpoint advertises the latent-perceptual losses per platform — the MLX
-/// tables on the MLX catalog; on the Candle catalog only Mage-Flow's VAE anchor (no Candle trainer
-/// declares E-LatentLPIPS). Mutation: drop `project_candle_training_limits` from the Candle path ⇒
-/// red.
+/// sc-24833: the targets endpoint advertises the latent-perceptual losses identically on both
+/// platforms (static per-target flags, sc-24830) — exactly `VAE_ANCHOR_TARGETS` /
+/// `LATENT_LPIPS_TARGETS`. Mutation: drop a target from either table ⇒ red.
 #[test]
-fn platform_effective_training_catalog_projects_latent_perceptual_support() {
+fn platform_effective_training_catalog_advertises_latent_perceptual_support() {
     use sceneworks_core::training::latent_perceptual::{
-        target_supports, CANDLE_VAE_ANCHOR_TARGETS, LATENT_LOSSES, LATENT_LPIPS_TARGETS,
-        VAE_ANCHOR_TARGETS,
+        target_supports, LATENT_LOSSES, LATENT_LPIPS_TARGETS, VAE_ANCHOR_TARGETS,
     };
-    let sorted = |ids: &[&str]| {
-        let mut v: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
-        v.sort();
-        v
-    };
-    for (spec, mlx, candle) in [
-        (
-            LATENT_LOSSES[0],
-            &VAE_ANCHOR_TARGETS[..],
-            &CANDLE_VAE_ANCHOR_TARGETS[..],
-        ),
-        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..], &[][..]),
+    for (spec, table) in [
+        (LATENT_LOSSES[0], &VAE_ANCHOR_TARGETS[..]),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..]),
     ] {
-        let advertising = |candle: bool| -> Vec<String> {
+        let mut expected: Vec<String> = table.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        for candle in [false, true] {
             let mut ids: Vec<String> =
                 crate::training::effective_training_targets_for_candle(candle)
                     .targets
@@ -190,10 +197,8 @@ fn platform_effective_training_catalog_projects_latent_perceptual_support() {
                     .map(|target| target.id.clone())
                     .collect();
             ids.sort();
-            ids
-        };
-        assert_eq!(advertising(false), sorted(mlx), "{}", spec.support_limit);
-        assert_eq!(advertising(true), sorted(candle), "{}", spec.support_limit);
+            assert_eq!(ids, expected, "{} (candle {candle})", spec.support_limit);
+        }
     }
 }
 

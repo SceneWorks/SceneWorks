@@ -867,6 +867,19 @@ describe("ConfigureJobPanel depth anchoring", () => {
     return calls;
   }
 
+  // sc-24830 review: the toggle is hidden for a full fine-tune and a no-video LTX-2.5 workflow.
+  // Mutation: gate the toggle on targetSupportsDepthAnchoring alone ⇒ red.
+  it("hides the toggle for a full fine-tune and a no-video LTX-2.5 workflow", () => {
+    mountWith({ draft: { ...VALID_DRAFT, networkType: "full" } });
+    expect(toggle()).toBeFalsy();
+
+    mountWith({
+      target: { ...Z_IMAGE, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5" },
+      draft: { ...VALID_DRAFT, ltxWorkflow: "t2a_lora" },
+    });
+    expect(toggle()).toBeFalsy();
+  });
+
   it("is off by default and seeds 0.1 when enabled", () => {
     const calls = mountWith();
     expect(toggle()).toBeTruthy();

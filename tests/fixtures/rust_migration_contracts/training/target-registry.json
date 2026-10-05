@@ -183,6 +183,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -284,6 +285,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -384,6 +386,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -484,6 +487,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -588,6 +592,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
@@ -690,9 +695,11 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -884,6 +891,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -993,6 +1001,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
@@ -1092,9 +1101,11 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1179,9 +1190,11 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1312,7 +1325,9 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1409,9 +1424,11 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1509,9 +1526,11 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1608,9 +1627,11 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1705,6 +1726,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
