@@ -28535,7 +28535,7 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "48061f1192167fa8ce09a27d8faaba4c5d449ce63a34f924204d3987c95b208d",
+              "sha256": "bf28a1e2077767bc1de851a5805a271d5171d1a4b29c8858af4fa7709bcea7c4",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
@@ -28554,13 +28554,13 @@
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 252080,
-                  "sha256": "0da52cf1890e029fe2b1a19b8a3324cb45c9ccca5fbc8ca9351f0d108bd4633d"
+                  "byteSize": 252286,
+                  "sha256": "3a1bbb5ef98bb70cdc8abff7481bf22b864e8de90b7865df7d0348a6527c7e94"
                 },
                 {
                   "path": "Cargo.toml",
-                  "byteSize": 10005,
-                  "sha256": "0f9b023451f574a130a4de5bdd197256f219a43899176fccbf82a474f5b30610"
+                  "byteSize": 10213,
+                  "sha256": "40a6166399ec89c1bfc64f9c9aae82a67511905e87a04dcad8ea53b40a31f8f2"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
@@ -28585,7 +28585,7 @@
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
                   "byteSize": 9288,
-                  "sha256": "b92993aa1a6f57c39a9533e383ffb128f454e6f0e7d50df2e663a6fe10aa6602"
+                  "sha256": "3c58ab9ffeda740bec5842d6472c7dad4c5dde7e029d7f3ed5c3f083b7b66fea"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
@@ -28649,8 +28649,8 @@
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7959,
-                  "sha256": "d9e0e577f8ca85dfd748c738129c8c44ae47b6214b206e7a7813b224561abfa3"
+                  "byteSize": 8003,
+                  "sha256": "c814bf496d72ca669541705470a08e88ef62d39a37bff66661ca2a781c9d37b7"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

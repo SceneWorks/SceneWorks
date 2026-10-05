@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision 190e20e7: 734 provenance candidates and 103 production-Rust crate prefixes. Relative to 825341ff, five surviving candidate source blobs changed while retaining their paths, normalized markers, and classifications. One YuE2 VAE candidate was removed because its former Native FP32 port header was corrected for the fixed-order BF16 CUDA convolution route; the file and its crate remain present and mapped by the existing YuE2 architecture/source notices. No production-Rust crate prefix was added or removed. Existing YuE2 Apache-2.0 plus named MIT source notices and the owner-recorded noncommercial CC BY-NC 4.0 basis for SheetSage2 port code remain mapped to their recorded About source/port entries. This mapping grants no weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "190e20e7c6b5bac006194c729baabd22c0c44a5d",
-  "auditDigest": "e0d16cab94d19b501a578a430edfb5c46fa405f2077ebe6e80224b1f119571ec",
+  "_comment": "Audit inventory rescanned at inference main revision 25bd55cd: 745 provenance candidates and 104 production-Rust crate prefixes. The new vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The new speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference main source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
+  "inferenceRevision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+  "auditDigest": "3e4090fb200d833b9661535d745ea10b541b9a53cf5f8f3541a9a4ade4bfe95e",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "190e20e7c6b5bac006194c729baabd22c0c44a5d",
+    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 734,
-    "populationSha256": "20f4c4f654d7afd770d7574b1622b8f26beb5bf49580efec574f0ab398e9fd68"
+    "matchedFiles": 745,
+    "populationSha256": "d37d590c3b64b27157fec35bedb9144dd13e54aa56992d529b6be92a75c37143"
   },
   "portedSourceAreas": [
     {
@@ -149,9 +149,18 @@
       "paths": [
         "crates/contracts/core-llm/core-llm-testkit/src/comparison.rs"
       ],
-      "provenance": "The scanner matches first-party prose in this diagnostic comparison suite: \"not a reproduction of a vendor's aggregate benchmark\" (the model vendor's published scores, which it deliberately does not reproduce) and the identifier `follow_up` for its tool round-trip case.",
+      "provenance": "The scanner matches first-party prose in this diagnostic comparison suite: \"not a reproduction of a vendor's aggregate benchmark\" and the identifier `follow_up` for its tool round-trip case.",
       "disposition": "first-party-source",
       "evidence": "SceneWorks-authored text-LLM comparison cases driven through the public core-llm TextLlm trait; no upstream source, prompt set or benchmark is copied. The crate remains explicitly classified as first-party-original in crateDispositions."
+    },
+    {
+      "id": "architecture:crates/contracts/core-llm/core-llm-testkit/baseline",
+      "paths": [
+        "crates/contracts/core-llm/core-llm-testkit/baseline/speculative_bench_baseline.rs"
+      ],
+      "provenance": "Pre-epic speculative benchmark baseline driver, copied from this repository's own current core-llm testkit because the older revision cannot import its newer API.",
+      "disposition": "first-party-source",
+      "evidence": "The driver copies SceneWorks-authored prompt sets, budgets and statistics within the same repository, not upstream benchmark source. The crate remains first-party-original in crateDispositions."
     },
     {
       "id": "architecture:crates/contracts/gen-core",
@@ -428,6 +437,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-core",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-core/",
+      "provenance": "Vendored Hugging Face Candle core 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d, including upstream CUDA graph parameter-cache commits cabbc30191b352814d8bb94e821e82faa883c7b5 and f53ed3bfbd2e3291c70e4db81eaf0faeccbb8e83 plus the local zeroed quantized-padding change, as documented in VENDORED.md.",
+      "disposition": "about-license",
+      "component": "candle-transformers-source"
     },
     {
       "id": "architecture:crates/media/candle-gen/vendor/candle-kernels",
@@ -927,10 +943,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "190e20e7c6b5bac006194c729baabd22c0c44a5d",
+    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 103,
-    "cratePopulationSha256": "c418b9e4370c3ba09d9107f068c92d29192a147b3088dcdd0c7263c92548b0b0"
+    "cratePrefixes": 104,
+    "cratePopulationSha256": "5e4ba59e61486beb49342068681d613d19d3d47eb3332360d0f2503540230f21"
   },
   "crateDispositions": [
     {
