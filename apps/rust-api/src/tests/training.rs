@@ -139,9 +139,10 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     }
 }
 
-/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
-/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+/// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
+/// platforms — every LoRA target except the Krea ControlNet branch and LTX-2.5 (their trainers
+/// cannot decode x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     let advertising = |candle: bool| -> Vec<String> {
@@ -154,32 +155,52 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
             .map(|target| target.id.clone())
             .collect()
     };
-    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
-    assert!(advertising(true).is_empty());
+    let mlx = advertising(false);
+    assert_eq!(
+        mlx,
+        advertising(true),
+        "MLX and Candle advertise the same targets"
+    );
+    let all: Vec<String> = crate::training::effective_training_targets_for_candle(false)
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .filter(|id| id != "krea_2_control" && id != "ltx_2_5_video_lora")
+        .collect();
+    assert_eq!(mlx, all);
+    assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
+    assert!(mlx
+        .iter()
+        .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
 }
 
-/// sc-24832: the targets endpoint advertises each body loss per platform — the proportion loss on
-/// Z-Image in the MLX catalog (shape/normal await their cataloged weights), nothing on the Candle
-/// catalog. Mutation: drop the body-loss removal from `project_candle_training_limits` ⇒ red.
+/// sc-24832: the targets endpoint advertises each body loss identically on both platforms — the
+/// proportion loss on exactly the depth-anchoring targets (the same decoder arms), shape and normal
+/// nowhere until their weights are cataloged. Mutation: drop the proportion flag from one target ⇒
+/// red.
 #[test]
 fn platform_effective_training_catalog_projects_body_loss_support() {
     use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+    let ids = |candle: bool, keep: &dyn Fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| keep(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = ids(false, &|t| {
+        sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(t)
+    });
     for loss in BodyLoss::ALL {
-        let advertising = |candle: bool| -> Vec<String> {
-            crate::training::effective_training_targets_for_candle(candle)
-                .targets
-                .iter()
-                .filter(|target| target_supports(target, loss))
-                .map(|target| target.id.clone())
-                .collect()
-        };
-        let mlx: Vec<String> = if loss == BodyLoss::Proportion {
-            vec!["z_image_turbo_lora".to_owned()]
+        let mlx = ids(false, &|t| target_supports(t, loss));
+        assert_eq!(mlx, ids(true, &|t| target_supports(t, loss)), "{loss:?}");
+        let expected = if loss == BodyLoss::Proportion {
+            depth.clone()
         } else {
             Vec::new()
         };
-        assert_eq!(advertising(false), mlx, "{loss:?}");
-        assert!(advertising(true).is_empty(), "{loss:?}");
+        assert_eq!(mlx, expected, "{loss:?}");
     }
 }
 
