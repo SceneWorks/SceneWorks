@@ -1276,13 +1276,39 @@ describe("body losses (sc-24832)", () => {
     expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: true } }, bodyLosses[1])).toBe(true);
   });
 
-  // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject. Mutation: drop the
-  // LTX-2.5 check in bodyLossIssues ⇒ red.
+  // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject — a field-less issue,
+  // since the toggle is hidden there. Mutation: drop the LTX-2.5 check in bodyLossIssues ⇒ red.
   it("flags subject-restricted normals on LTX-2.5 only", () => {
     const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
     const draft = { normalWeight: "0.1", normalRestrictToSubject: true, ltxWorkflow: "t2v_lora" };
-    expect(issuesOn(draft, "normalRestrictToSubject", ltx25)).toHaveLength(1);
+    const ltx = configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget: ltx25 });
+    expect(ltx.filter((entry) => entry.field === null && /LTX-2.5 cannot restrict/.test(entry.message))).toHaveLength(1);
+    expect(issuesOn(draft, "normalRestrictToSubject", ltx25)).toEqual([]);
     expect(issuesOn(draft, "normalRestrictToSubject")).toEqual([]);
+  });
+
+  // Like subject-masked loss, restricted normals need a non-empty subject mask on every image:
+  // incomplete coverage is an error on the toggle; full or unknown coverage is not. Mutation: drop
+  // the coverage check in bodyLossIssues ⇒ red.
+  it("blocks subject-restricted normals on incomplete subject-mask coverage", () => {
+    const draft = { ...whole, normalWeight: "0.1", normalRestrictToSubject: true };
+    const on = (subjectMaskReport) =>
+      configValidation(draft, { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport }).filter(
+        (entry) => entry.field === "normalRestrictToSubject",
+      );
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
+    expect(on(partial).map((entry) => entry.message)).toEqual([
+      "Subject masks are missing for 2 of 3 images — generate subject masks first",
+    ]);
+    expect(on({ items: [{ hasMask: true, empty: false }] })).toEqual([]);
+    expect(on(null)).toEqual([]);
+    // Unrestricted normals never read the masks.
+    expect(
+      configValidation(
+        { ...draft, normalRestrictToSubject: false },
+        { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport: partial },
+      ).filter((entry) => /Subject masks are missing/.test(entry.message)),
+    ).toEqual([]);
   });
 
   // Mirrors the API's combination refusals. Mutation: drop the LTX-2.5 workflow check ⇒ red.

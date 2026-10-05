@@ -944,20 +944,61 @@ describe("ConfigureJobPanel body losses", () => {
       .find((node) => node.textContent.trim().startsWith(label))
       ?.querySelector("input, select");
   }
-  function mountWith({ target = PROPORTION_ONLY, draft = VALID_DRAFT, calls = [] } = {}) {
+  function mountWith({ target = PROPORTION_ONLY, draft = VALID_DRAFT, calls = [], report = null, onGenerate } = {}) {
     mount(
       <ConfigureJobPanel
         {...baseProps({
           showAdvancedConfig: true,
           selectedTarget: target,
           configDraft: draft,
-          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target, subjectMaskReport: report }),
           updateConfigDraft: (name, value) => calls.push([name, value]),
+          subjectMaskReport: report,
+          onGenerateSubjectMasks: onGenerate,
         })}
       />,
     );
     return calls;
   }
+
+  // Restricted normals read the subject masks like subject-masked loss: the same coverage readout,
+  // an error on the checkbox while coverage is incomplete, and "Generate subject masks" (shown once
+  // when subject-masked loss is on too). Mutation: drop the restricted-normal affordance ⇒ red.
+  it("offers subject-mask coverage and generation for restricted normals", () => {
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: false }] };
+    const draft = { ...VALID_DRAFT, normalWeight: "0.1", normalRestrictToSubject: true };
+    let generated = 0;
+    mountWith({ target: ALL, draft, report: partial, onGenerate: () => (generated += 1) });
+    expect(field("Normals on the subject only").getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeTruthy();
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain("1 of 2 images");
+    const generate = [...container.querySelectorAll("button")].find((node) =>
+      node.textContent.includes("Generate subject masks"),
+    );
+    act(() => generate.click());
+    expect(generated).toBe(1);
+    expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  it("shows no mask readout for unrestricted normals, and one readout alongside subject-masked loss", () => {
+    const partial = { items: [{ hasMask: false }] };
+    mountWith({ target: ALL, draft: { ...VALID_DRAFT, normalWeight: "0.1" }, report: partial });
+    expect(container.querySelector("[data-testid=subject-mask-coverage]")).toBeNull();
+    mountWith({
+      target: { ...ALL, limits: { ...ALL.limits, supportsSubjectMaskLoss: true } },
+      draft: {
+        ...VALID_DRAFT,
+        normalWeight: "0.1",
+        normalRestrictToSubject: true,
+        subjectMaskLoss: true,
+        subjectMaskBackgroundWeight: "0.1",
+        subjectMaskSubjectWeight: "1",
+      },
+      report: partial,
+    });
+    expect(container.querySelectorAll("[data-testid=subject-mask-coverage]")).toHaveLength(1);
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeNull();
+  });
 
   // Mutation: render every body toggle regardless of the target flag ⇒ the shape toggle appears ⇒ red.
   it("offers only the advertised losses, off by default, seeding 0.1 when enabled", () => {

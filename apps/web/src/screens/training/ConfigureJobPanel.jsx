@@ -269,6 +269,42 @@ export function ConfigureJobPanel({
   const [maskJobRequested, setMaskJobRequested] = React.useState(false);
   // A queued-generation note belongs to the dataset it was queued for.
   React.useEffect(() => setMaskJobRequested(false), [activeDataset?.id]);
+  // The subject-restricted normal loss (sc-24832) reads the same per-image masks, so it gets the
+  // same coverage readout and "Generate subject masks" action (once — under subject-masked loss
+  // when that is on too).
+  const restrictedNormalsOn =
+    selectedTarget?.baseModel !== "ltx_2_5" &&
+    Boolean(configDraft.normalRestrictToSubject) &&
+    bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft, loss));
+  const subjectMaskCoverageAffordance = (
+    <>
+      <p className="training-field-hint" data-testid="subject-mask-coverage">
+        {maskCoverage
+          ? `Subject masks: ${maskCoverage.usable} of ${maskCoverage.total} images${
+              maskCoverage.empty ? ` (${maskCoverage.empty} found no subject)` : ""
+            }.`
+          : "Subject mask coverage is unknown until the dataset is saved."}
+      </p>
+      {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
+        maskJobRequested ? (
+          <p className="training-field-hint">
+            Subject mask generation queued — coverage updates when the job finishes.
+          </p>
+        ) : (
+          <button
+            className="secondary-action"
+            onClick={() => {
+              setMaskJobRequested(true);
+              onGenerateSubjectMasks();
+            }}
+            type="button"
+          >
+            Generate subject masks
+          </button>
+        )
+      ) : null}
+    </>
+  );
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -892,9 +928,15 @@ export function ConfigureJobPanel({
                           checked={Boolean(configDraft.normalRestrictToSubject)}
                           onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
                           type="checkbox"
+                          {...invalidProps(configValidity, "normalRestrictToSubject")}
                         />
                         Normals on the subject only
                       </label>
+                    ) : null}
+                    {loss.prefix === "normal" && restrictedNormalsOn && !subjectMaskLossEnabled ? (
+                      <div className="training-subject-mask-loss" data-testid="restricted-normal-masks">
+                        {subjectMaskCoverageAffordance}
+                      </div>
                     ) : null}
                     {loss.prefix === "bodyShape" ? (
                       <label title={`The shape loss only counts while the predicted body shape is already this similar (cosine) to the reference. Empty = ${bodyShapeMinCosDefault}.`}>
@@ -1313,31 +1355,7 @@ export function ConfigureJobPanel({
                     {...invalidProps(configValidity, "subjectMaskSubjectWeight")}
                   />
                 </label>
-                <p className="training-field-hint" data-testid="subject-mask-coverage">
-                  {maskCoverage
-                    ? `Subject masks: ${maskCoverage.usable} of ${maskCoverage.total} images${
-                        maskCoverage.empty ? ` (${maskCoverage.empty} found no subject)` : ""
-                      }.`
-                    : "Subject mask coverage is unknown until the dataset is saved."}
-                </p>
-                {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
-                  maskJobRequested ? (
-                    <p className="training-field-hint">
-                      Subject mask generation queued — coverage updates when the job finishes.
-                    </p>
-                  ) : (
-                    <button
-                      className="secondary-action"
-                      onClick={() => {
-                        setMaskJobRequested(true);
-                        onGenerateSubjectMasks();
-                      }}
-                      type="button"
-                    >
-                      Generate subject masks
-                    </button>
-                  )
-                ) : null}
+                {subjectMaskCoverageAffordance}
               </div>
             ) : null}
           </AdvancedSection>

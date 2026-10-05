@@ -809,7 +809,7 @@ export function configValidation(
   for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
-  for (const [field, message] of bodyLossIssues(configDraft, selectedTarget)) {
+  for (const [field, message] of bodyLossIssues(configDraft, selectedTarget, subjectMaskReport)) {
     issues.push(issue.error(field, message));
   }
   for (const [field, message] of faceLossIssues(configDraft, selectedTarget)) {
@@ -1267,7 +1267,7 @@ export function bodyLossEnabled(configDraft, loss) {
 // Field issues for the body-loss knobs — the API's bounds (E6), per loss while it is on: weight in
 // [0, bodyLossWeightMax], a [0, 1] noise window with min <= max, a whole alternation period in
 // [1, bodyLossEveryMax]; plus the shape loss's cosine gate in [-1, 1].
-export function bodyLossIssues(configDraft, selectedTarget) {
+export function bodyLossIssues(configDraft, selectedTarget, subjectMaskReport = null) {
   const issues = [];
   for (const loss of bodyLosses) {
     if (!bodyLossEnabled(configDraft, loss)) continue;
@@ -1312,9 +1312,22 @@ export function bodyLossIssues(configDraft, selectedTarget) {
         issues.push([everyField, `Alternation period must be a whole number from 1 to ${bodyLossEveryMax}`]);
       }
     }
-    if (prefix === "normal" && configDraft.normalRestrictToSubject && selectedTarget?.baseModel === "ltx_2_5") {
-      // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
-      issues.push(["normalRestrictToSubject", "LTX-2.5 cannot restrict the normal loss to the subject"]);
+    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+      if (selectedTarget?.baseModel === "ltx_2_5") {
+        // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
+        // The toggle is hidden there, so a carried-over `true` names no input.
+        issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
+      } else {
+        // Like subject-masked loss: every image needs a non-empty subject mask (the worker refuses
+        // the job otherwise), so incomplete coverage blocks Start (unknown coverage is left to it).
+        const coverage = subjectMaskCoverage(subjectMaskReport);
+        if (coverage && !coverage.complete) {
+          issues.push([
+            "normalRestrictToSubject",
+            `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+          ]);
+        }
+      }
     }
     if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
       const c = numberFromDraft(configDraft.bodyShapeMinCos);
