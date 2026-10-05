@@ -201,6 +201,13 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
   );
 });
 
+test("Windows runner prep reads the toolchain pin from its selected checkout", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  assert.match(action, /inputs:\s+workspace-directory:\s+description:[^\n]+\s+required: false\s+default: \./);
+  assert.match(action, /- name: Select & verify the real Rust toolchain bin[^\n]*\n\s+shell: powershell\n\s+working-directory: \$\{\{ inputs\.workspace-directory \}\}/);
+  assert.match(action, /Select-String -Path 'rust-toolchain\.toml'/);
+});
+
 test("Windows runner prep resolves rustup outside the job's CARGO_HOME", async () => {
   const action = await source(".github/actions/prepare-rust-runner/action.yml");
   // rustup lives in the profile that installed it. The runner services pin CARGO_HOME
