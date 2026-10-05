@@ -3270,3 +3270,310 @@ fn face_losses_refuse_full_finetune_and_no_video_ltx_workflows_at_submit() {
         }
     }
 }
+
+/// sc-24833 (epic 2123 E6): in-range VAE-anchor / E-LatentLPIPS values survive into the plan
+/// verbatim and parse with upstream's defaults (window `[0, 0.5]`, additive `every = 1`); every
+/// out-of-range / wrong-type value is a field-level error naming the offending key. Mutation: widen
+/// the weight bound in `latent_loss_settings` to `0.0..=f64::MAX` ⇒ the over-max weight is accepted
+/// ⇒ red.
+#[test]
+fn build_training_plan_validates_latent_perceptual_losses_as_field_errors() {
+    use sceneworks_core::training::latent_perceptual::*;
+    for spec in LATENT_LOSSES {
+        let plan = build_plan_with_depth_advanced(&[(spec.weight_key, json!(0.5))])
+            .unwrap_or_else(|e| panic!("{}: {e}", spec.weight_key));
+        assert_eq!(
+            latent_loss_settings(&spec, &plan.config.advanced).unwrap(),
+            Some(LatentLossSettings {
+                weight: 0.5,
+                min_t: 0.0,
+                max_t: LATENT_LOSS_MAX_T_DEFAULT,
+                every: LATENT_LOSS_EVERY_DEFAULT,
+            }),
+            "{} defaults",
+            spec.weight_key
+        );
+        let good = [
+            (spec.weight_key, json!(LATENT_LOSS_WEIGHT_MAX)),
+            (spec.min_t_key, json!(0.1)),
+            (spec.max_t_key, json!(0.9)),
+            (spec.every_key, json!(LATENT_LOSS_EVERY_MAX)),
+        ];
+        let plan = build_plan_with_depth_advanced(&good).expect("in-range values are accepted");
+        for (key, value) in &good {
+            assert_eq!(&plan.config.advanced[*key], value, "{key}");
+        }
+        let off = build_plan_with_depth_advanced(&[(spec.weight_key, json!(0))]).unwrap();
+        assert_eq!(
+            latent_loss_settings(&spec, &off.config.advanced).unwrap(),
+            None
+        );
+
+        for (key, value, extra) in [
+            (spec.weight_key, json!(-0.01), None),
+            (spec.weight_key, json!(LATENT_LOSS_WEIGHT_MAX + 0.001), None),
+            (spec.weight_key, json!("0.5"), None),
+            (spec.min_t_key, json!(-0.1), None),
+            (spec.max_t_key, json!(1.5), None),
+            (
+                spec.max_t_key,
+                json!(0.3),
+                Some((spec.min_t_key, json!(0.6))),
+            ),
+            (spec.every_key, json!(0), None),
+            (spec.every_key, json!(LATENT_LOSS_EVERY_MAX + 1), None),
+            (spec.every_key, json!(1.5), None),
+        ] {
+            let mut advanced = vec![(spec.weight_key, json!(0.5)), (key, value.clone())];
+            if let Some(pair) = extra {
+                advanced.push(pair);
+            }
+            match build_plan_with_depth_advanced(&advanced) {
+                Err(TrainingPlanError::InvalidField { field, .. }) => {
+                    assert_eq!(field, key, "{key}={value}")
+                }
+                other => {
+                    panic!("{key}={value}: expected a field error naming {key}, got {other:?}")
+                }
+            }
+        }
+    }
+}
+
+/// sc-24833 (epic 2123 E6): the web form's latent-perceptual bounds are the API's bounds.
+#[test]
+fn web_latent_perceptual_bounds_match_the_api_bounds() {
+    use sceneworks_core::training::latent_perceptual::*;
+    let num = |name: &str| -> f64 {
+        web_training_const(name)
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not numeric ({error})"))
+    };
+    for prefix in ["vaeAnchor", "latentLpips"] {
+        assert_eq!(
+            num(&format!("{prefix}WeightMax")),
+            LATENT_LOSS_WEIGHT_MAX,
+            "{prefix}"
+        );
+        assert_eq!(
+            num(&format!("{prefix}WeightSuggested")),
+            LATENT_LOSS_WEIGHT_SUGGESTED,
+            "{prefix}"
+        );
+        assert_eq!(
+            num(&format!("{prefix}MaxTDefault")),
+            LATENT_LOSS_MAX_T_DEFAULT,
+            "{prefix}"
+        );
+        assert_eq!(
+            num(&format!("{prefix}EveryDefault")),
+            LATENT_LOSS_EVERY_DEFAULT as f64,
+            "{prefix}"
+        );
+        assert_eq!(
+            num(&format!("{prefix}EveryMax")),
+            LATENT_LOSS_EVERY_MAX as f64,
+            "{prefix}"
+        );
+    }
+}
+
+/// sc-24833: every auxiliary model the latent-perceptual losses load is a `componentOnly` utility
+/// entry in the shipped catalog whose repo / revision / file are exactly the worker's resolution
+/// constants; the FLUX.2 VAE component is the VAE inside the FLUX.2 [dev] entry's own repo at its
+/// pinned revision, so an installed FLUX.2 [dev] tier satisfies it too.
+#[test]
+fn latent_perceptual_aux_models_are_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::latent_perceptual::{
+        ELATENTLPIPS_MODELS, FLUX2_VAE_MODEL, FLUX2_VAE_TIER_DIRS,
+    };
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    for aux in std::iter::once(&FLUX2_VAE_MODEL).chain(ELATENTLPIPS_MODELS.iter()) {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == aux.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", aux.id));
+        assert_eq!(entry["type"], "utility", "{}", aux.id);
+        assert_eq!(entry["componentOnly"], true, "{}", aux.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], aux.repo, "{}", aux.id);
+        assert_eq!(download["revision"], aux.revision, "{}", aux.id);
+        assert!(
+            download["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == aux.file),
+            "{} does not download {}",
+            aux.id,
+            aux.file
+        );
+    }
+    assert!(FLUX2_VAE_MODEL.file.starts_with(FLUX2_VAE_TIER_DIRS[0]));
+    // Every FLUX.2 [dev] tier download is the same repo + revision, and each tier directory is one
+    // the worker accepts the VAE from.
+    let dev = models
+        .iter()
+        .find(|m| m["id"] == "flux2_dev")
+        .expect("flux2_dev entry");
+    for download in dev["downloads"].as_array().unwrap() {
+        assert_eq!(download["repo"], FLUX2_VAE_MODEL.repo);
+        assert_eq!(download["revision"], FLUX2_VAE_MODEL.revision);
+        let tier = download["variant"].as_str().unwrap();
+        assert!(
+            FLUX2_VAE_TIER_DIRS.contains(&format!("{tier}/vae").as_str()),
+            "{tier}"
+        );
+    }
+}
+
+/// sc-24833 (S1 mechanism): exactly the targets in `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS`
+/// advertise each loss (static per target, identical on both platforms); the VAE-anchor set is the
+/// depth-anchoring set (same x0-decoder seam); an enabled weight on any other target is a
+/// submit-time field error on that weight key. Mutation: drop `latent_perceptual::validate_support`
+/// from `validate_training_config_for_target` ⇒ the Krea control case is accepted ⇒ red.
+#[test]
+fn latent_perceptual_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    use sceneworks_core::training::latent_perceptual::{
+        target_supports, LATENT_LOSSES, LATENT_LPIPS_TARGETS, VAE_ANCHOR_TARGETS,
+    };
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    let depth: Vec<String> = sorted(
+        registry
+            .targets
+            .iter()
+            .filter(|target| target_supports_depth_anchoring(target))
+            .map(|target| target.id.clone())
+            .collect(),
+    );
+    for (spec, table) in [
+        (LATENT_LOSSES[0], &VAE_ANCHOR_TARGETS[..]),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..]),
+    ] {
+        let advertising = sorted(
+            registry
+                .targets
+                .iter()
+                .filter(|target| target_supports(&spec, target))
+                .map(|target| target.id.clone())
+                .collect(),
+        );
+        assert_eq!(
+            advertising,
+            sorted(table.iter().map(|s| s.to_string()).collect()),
+            "{}",
+            spec.support_limit
+        );
+        if spec.weight_key == LATENT_LOSSES[0].weight_key {
+            assert_eq!(
+                advertising, depth,
+                "the VAE anchor rides the depth-anchoring decoders"
+            );
+        }
+        let with_weight = |target: &sceneworks_core::training::TrainingTarget, weight: Value| {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(spec.weight_key.to_owned(), weight);
+            validate_training_config_for_target(target, &config)
+        };
+        with_weight(&by_id("z_image_turbo_lora"), json!(0.5)).expect("Z-Image admits it");
+        let unsupported = if spec.weight_key == LATENT_LOSSES[0].weight_key {
+            "krea_2_control"
+        } else {
+            "krea_2_raw_lora"
+        };
+        let target = by_id(unsupported);
+        with_weight(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match with_weight(&target, json!(0.5)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, spec.weight_key, "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a {} field error, got {other:?}",
+                target.id, spec.weight_key
+            ),
+        }
+    }
+}
+
+/// sc-24833: the submit-time combination refusals mirror the engine's — neither latent loss on a
+/// full fine-tune (Mage-Flow advertises both `full` and the VAE anchor), and the decoded-x0 VAE
+/// anchor not on an LTX-2.5 workflow that generates no video; a video-generating workflow is
+/// admitted. Mutation: drop the `latent_loss_combination_refusal` check from `validate_support` ⇒
+/// the full-fine-tune case is accepted ⇒ red.
+#[test]
+fn latent_perceptual_losses_refuse_the_combinations_the_engine_refuses() {
+    use sceneworks_core::training::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS;
+    use sceneworks_core::training::latent_perceptual::{
+        latent_loss_combination_refusal, VAE_ANCHOR,
+    };
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let field_error = |target: &sceneworks_core::training::TrainingTarget,
+                       extra: &[(&str, Value)]| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert(VAE_ANCHOR.weight_key.to_owned(), json!(0.5));
+        for (k, v) in extra {
+            config.advanced.insert((*k).to_owned(), v.clone());
+        }
+        validate_training_config_for_target(target, &config)
+    };
+    let mage = by_id("mage_flow_base_lora");
+    field_error(&mage, &[]).expect("Mage-Flow LoRA admits the VAE anchor");
+    match field_error(&mage, &[("networkType", json!("full"))]) {
+        Err(TrainingPlanError::InvalidField { field, message }) => {
+            assert_eq!(field, VAE_ANCHOR.weight_key);
+            assert!(message.contains("full fine-tune"), "{message}");
+        }
+        other => panic!("expected a full-fine-tune refusal, got {other:?}"),
+    }
+    let ltx = by_id("ltx_2_5_video_lora");
+    for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
+        let mut config = ltx.defaults.clone();
+        config
+            .advanced
+            .insert("ltxWorkflow".to_owned(), json!(workflow));
+        assert!(
+            latent_loss_combination_refusal(&VAE_ANCHOR, &ltx, &config).is_some(),
+            "{workflow}"
+        );
+    }
+    let mut config = ltx.defaults.clone();
+    config
+        .advanced
+        .insert("ltxWorkflow".to_owned(), json!("t2v_lora"));
+    assert_eq!(
+        latent_loss_combination_refusal(&VAE_ANCHOR, &ltx, &config),
+        None
+    );
+}

@@ -31,6 +31,9 @@ use sceneworks_core::training::face_losses::{
     face_landmark_loss_settings, identity_loss_settings, FACE_LANDMARK_LOSS_WEIGHT_KEY,
     IDENTITY_LOSS_WEIGHT_KEY,
 };
+use sceneworks_core::training::latent_perceptual::{
+    latent_loss_settings, latent_lpips_model_for_trainer, LATENT_LPIPS, VAE_ANCHOR,
+};
 use sceneworks_core::training::{
     parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
     GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
@@ -982,6 +985,11 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
             )));
         }
     }
+    // Epic 2123 latent-space perceptual losses (sc-24833): strictly parsed (the API's parser),
+    // refused for a trainer whose descriptor does not declare the technique (E3), and — VAE anchor
+    // — for a family with no cataloged tiny x0 decoder / — E-LatentLPIPS — for a family with no
+    // published weights. Installed weights are checked in `apply_latent_perceptual`.
+    preflight_latent_perceptual(advanced, engine_id, &descriptor.techniques)?;
 
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
@@ -1115,6 +1123,7 @@ fn training_request_from_plan(
     apply_depth_anchoring(settings, plan, &mut config)?;
     apply_body_losses(settings, plan, &mut config)?;
     apply_face_losses(settings, plan, &mut config)?;
+    apply_latent_perceptual(settings, plan, &mut config)?;
     // The weights were validated by `validate_training_target_config` (same reader), so a
     // malformed value is already refused; this propagates rather than defaulting regardless.
     config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
@@ -1474,6 +1483,136 @@ fn perceptual_decoder_dir(
     }
 }
 
+/// Epic 2123 latent-space perceptual losses (sc-24833), the shared dry/real preflight half: each
+/// technique strictly parsed, refused unless the trainer's descriptor declares it, and refused when
+/// its catalog dependency cannot exist for the trainer's family (the VAE anchor's tiny x0 decoder,
+/// E-LatentLPIPS's family weights).
+fn preflight_latent_perceptual(
+    advanced: &JsonObject,
+    engine_id: &str,
+    techniques: &gen_core::TrainingTechniques,
+) -> WorkerResult<()> {
+    let parse = |spec| {
+        latent_loss_settings(spec, advanced)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    };
+    if parse(&VAE_ANCHOR)?.is_some() {
+        if !techniques.vae_anchor_loss {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the VAE anchor loss ({}).",
+                VAE_ANCHOR.weight_key
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no x0 decoder for the VAE anchor loss ({}).",
+                VAE_ANCHOR.weight_key
+            )));
+        }
+    }
+    if parse(&LATENT_LPIPS)?.is_some() {
+        if !techniques.latent_lpips_loss {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the E-LatentLPIPS loss ({}).",
+                LATENT_LPIPS.weight_key
+            )));
+        }
+        if latent_lpips_model_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no E-LatentLPIPS weights for its latent family \
+                 ({}).",
+                LATENT_LPIPS.weight_key
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Epic 2123 latent-space perceptual losses (sc-24833): map the strictly parsed `advanced.vaeAnchor*`
+/// / `advanced.latentLpips*` keys onto the engine's typed configs and resolve the checkpoints they
+/// load from the installed model library — the VAE anchor's tiny x0 decoder (shared with depth
+/// anchoring) and FLUX.2 VAE (the `flux2_vae` component, or any installed FLUX.2 [dev] tier at the
+/// same pinned revision), E-LatentLPIPS's family weights. A missing checkpoint is refused naming
+/// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the
+/// config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_latent_perceptual(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::latent_perceptual::{
+        LatentLossSettings, FLUX2_VAE_MODEL, FLUX2_VAE_TIER_DIRS,
+    };
+    let advanced = &plan.config.advanced;
+    let parse = |spec| {
+        latent_loss_settings(spec, advanced)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    };
+    let (vae_anchor, latent_lpips) = (parse(&VAE_ANCHOR)?, parse(&LATENT_LPIPS)?);
+    if vae_anchor.is_none() && latent_lpips.is_none() {
+        return Ok(());
+    }
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let schedule = |s: &LatentLossSettings| gen_core::AuxLossSchedule {
+        weight: s.weight as f32,
+        t_min: s.min_t as f32,
+        t_max: s.max_t as f32,
+        every_n: s.every,
+    };
+    if let Some(va) = &vae_anchor {
+        // The same decoder resolution as every decoded-x0 loss (a shared field): a cataloged tiny
+        // decoder, or the trainer's own VAE from the base model it loads.
+        config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
+            settings,
+            plan,
+            engine_id,
+            "The VAE anchor loss",
+        )?);
+        let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            FLUX2_VAE_MODEL.repo,
+            FLUX2_VAE_MODEL.revision,
+        )
+        .and_then(|snapshot| {
+            FLUX2_VAE_TIER_DIRS
+                .iter()
+                .map(|tier| snapshot.join(tier))
+                .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
+        })
+        .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?;
+        config.vae_anchor = gen_core::VaeAnchorConfig {
+            schedule: schedule(va),
+            model_dir: Some(vae_dir),
+        };
+    }
+    if let Some(lp) = &latent_lpips {
+        let weights = latent_lpips_model_for_trainer(engine_id).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no E-LatentLPIPS weights for its latent family."
+            ))
+        })?;
+        config.latent_lpips = gen_core::LatentLpipsConfig {
+            schedule: schedule(lp),
+            model_dir: Some(installed_aux_model_dir(
+                settings,
+                weights,
+                "The E-LatentLPIPS loss",
+            )?),
+        };
+    }
+    Ok(())
+}
+
 /// The installed snapshot directory of an auxiliary training model (its pinned revision with the
 /// weight file present), installed through the Model Manager into the app-managed Hugging Face
 /// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
@@ -1496,11 +1635,24 @@ fn installed_aux_model_dir(
             return Ok(dir);
         }
     }
-    Err(WorkerError::InvalidPayload(format!(
+    Err(not_installed(model, technique))
+}
+
+/// The typed refusal for an auxiliary training model that is not installed, naming the catalog
+/// entry to install and the `technique` that needs it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn not_installed(
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+    technique: &str,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
         "{technique} needs the '{}' model ({}), which is not installed. Install it from the \
          Models screen.",
         model.label, model.id
-    )))
+    ))
 }
 
 /// Epic 2123 face losses (sc-24831): map the strictly parsed `advanced.identityLoss*` /
@@ -2138,6 +2290,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
         // whose fallible reader refuses malformed weights instead of defaulting them to off.
         subject_mask_loss: None,
+        // Epic 2123 latent-space perceptual losses (sc-24833) start off here;
+        // `apply_latent_perceptual` fills them in when the plan enables them.
+        vae_anchor: Default::default(),
+        latent_lpips: Default::default(),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -5121,6 +5277,53 @@ mod tests {
             "no builtin target resolved to a linked trainer"
         );
     }
+    /// sc-24833 (S1 mechanism): the catalog's `supportsVaeAnchorLoss` / `supportsLatentLpipsLoss`
+    /// flags must equal the linked trainer descriptor's `techniques.vae_anchor_loss` /
+    /// `techniques.latent_lpips_loss` for every target this runtime can train (static per-target
+    /// flags, identical on both platforms, compared with the active platform's descriptors); and a
+    /// target advertising the decoded-x0 VAE anchor must have an x0 decoder. Mutation: drop a target
+    /// from `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS` (or add `krea_2_control`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_latent_perceptual_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::latent_perceptual::target_supports;
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            if target_supports(&VAE_ANCHOR, &target) {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) advertises the VAE anchor without an x0 decoder",
+                    target.id
+                );
+            }
+            for (spec, declared) in [
+                (&VAE_ANCHOR, descriptor.techniques.vae_anchor_loss),
+                (&LATENT_LPIPS, descriptor.techniques.latent_lpips_loss),
+            ] {
+                assert_eq!(
+                    target_supports(spec, &target),
+                    declared,
+                    "{} ({engine_id}): catalog {} disagrees with the trainer descriptor",
+                    target.id,
+                    spec.support_limit
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
 
     /// sc-24831 (E3): the shared dry/real preflight refuses a face loss on a trainer whose
     /// descriptor does not declare it (the Krea ControlNet branch, where registered), refuses
@@ -5472,6 +5675,206 @@ mod tests {
         assert_eq!(
             canon(config.face_analysis_dir.as_ref().unwrap()),
             canon(&stack)
+        );
+    }
+    /// sc-24833 (epic 2123 E3): the shared dry/real preflight refuses each latent-perceptual loss on
+    /// a trainer whose descriptor does not declare it, refuses malformed values naming the key, and
+    /// admits it where the trainer declares it (Z-Image both; Krea-2 the VAE anchor only, having no
+    /// E-LatentLPIPS weights). Mutation: drop the `techniques.latent_lpips_loss` check ⇒ the Krea
+    /// E-LatentLPIPS case is admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_latent_perceptual_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let z = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques;
+        for (spec, label, declared) in [
+            (&VAE_ANCHOR, "VAE anchor", z.vae_anchor_loss),
+            (&LATENT_LPIPS, "E-LatentLPIPS", z.latent_lpips_loss),
+        ] {
+            let on = [(spec.weight_key, json!(0.5))];
+            assert!(validate_training_target_config(&plan(
+                "krea_lora",
+                "krea_2_raw",
+                &[(spec.weight_key, json!(0))]
+            ))
+            .is_ok());
+            // Krea-2 (TAEW2.1 decoder) declares the VAE anchor but has no E-LatentLPIPS weights.
+            let krea = plan("krea_lora", "krea_2_raw", &on);
+            if spec.weight_key == VAE_ANCHOR.weight_key {
+                validate_training_target_config(&krea)
+                    .unwrap_or_else(|e| panic!("Krea-2 admits the VAE anchor: {e:?}"));
+            } else {
+                assert!(
+                    err(krea).contains(&format!("does not support the {label} loss")),
+                    "{label}"
+                );
+            }
+            assert!(
+                declared,
+                "Z-Image declares the {label} loss on both platforms"
+            );
+            validate_training_target_config(&plan("z_image_lora", "z_image_turbo", &on))
+                .unwrap_or_else(|e| panic!("Z-Image admits the {label} loss: {e:?}"));
+            for (key, bad) in [
+                (spec.weight_key, json!(-0.1)),
+                (spec.weight_key, json!("0.5")),
+                (spec.max_t_key, json!(1.5)),
+                (spec.every_key, json!(0)),
+            ] {
+                let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+                assert!(message.contains(key), "{key}={bad}: {message}");
+            }
+        }
+    }
+
+    /// sc-24833: enabled latent-perceptual losses map onto the engine's typed configs — schedules
+    /// with upstream's defaults — and resolve their checkpoints from the installed library at the
+    /// pinned revisions: the VAE anchor takes the TAEF1 decoder plus the FLUX.2 VAE from whichever
+    /// FLUX.2 [dev] tier is installed (the `flux2_vae` component installs `bf16/vae`, a q4 install
+    /// serves too); E-LatentLPIPS takes the Z-Image (FLUX.1) family weights. Missing / wrong-revision
+    /// checkpoints are refused naming the model; off leaves the config untouched. Mutations: resolve
+    /// the VAE with the unpinned revision ⇒ the wrong-revision case resolves ⇒ red; map Z-Image to
+    /// the SDXL weights ⇒ the resolution names the wrong model ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn latent_perceptual_losses_map_schedules_and_resolve_installed_aux_models() {
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        use sceneworks_core::training::latent_perceptual::{ELATENTLPIPS_MODELS, FLUX2_VAE_MODEL};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("vaeAnchorWeight", json!(0.5)),
+            ("vaeAnchorEvery", json!(2)),
+            ("latentLpipsWeight", json!(2.0)),
+            ("latentLpipsMinT", json!(0.1)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_latent_perceptual(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a not-installed refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_latent_perceptual(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.vae_anchor.schedule.is_enabled());
+        assert!(!config.latent_lpips.schedule.is_enabled());
+        assert_eq!(config.perceptual_decoder_dir, None);
+        assert_eq!(config.vae_anchor.model_dir, None);
+        assert_eq!(config.latent_lpips.model_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(FLUX2_VAE_MODEL.id));
+        fake_snapshot(
+            &hub,
+            FLUX2_VAE_MODEL.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            "q4/vae/diffusion_pytorch_model.safetensors",
+        );
+        assert!(
+            refusal(&plan).contains(FLUX2_VAE_MODEL.id),
+            "wrong revision"
+        );
+        let flux2 = fake_snapshot(
+            &hub,
+            FLUX2_VAE_MODEL.repo,
+            FLUX2_VAE_MODEL.revision,
+            "q4/vae/diffusion_pytorch_model.safetensors",
+        );
+        let flux = &ELATENTLPIPS_MODELS[2];
+        assert!(refusal(&plan).contains(flux.id));
+        let sdxl = &ELATENTLPIPS_MODELS[0];
+        fake_snapshot(&hub, sdxl.repo, sdxl.revision, sdxl.file);
+        assert!(
+            refusal(&plan).contains(flux.id),
+            "SDXL weights do not serve Z-Image"
+        );
+        let lpips = fake_snapshot(&hub, flux.repo, flux.revision, flux.file);
+
+        let mut config = map_training_config(&plan.config);
+        apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        assert_eq!(
+            canon(config.vae_anchor.model_dir.as_ref().unwrap()),
+            canon(&flux2.join("q4").join("vae"))
+        );
+        assert_eq!(
+            canon(config.latent_lpips.model_dir.as_ref().unwrap()),
+            canon(&lpips)
+        );
+        assert_eq!(
+            config.vae_anchor.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.5,
+                t_min: 0.0,
+                t_max: 0.5,
+                every_n: 2,
+            }
+        );
+        assert_eq!(
+            config.latent_lpips.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 2.0,
+                t_min: 0.1,
+                t_max: 0.5,
+                every_n: 1,
+            }
+        );
+        // The bf16 component install is preferred when present.
+        std::fs::create_dir_all(flux2.join("bf16").join("vae")).unwrap();
+        std::fs::write(flux2.join(FLUX2_VAE_MODEL.file), b"weights").unwrap();
+        let mut config = map_training_config(&plan.config);
+        apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
+        assert_eq!(
+            canon(config.vae_anchor.model_dir.as_ref().unwrap()),
+            canon(&flux2.join("bf16").join("vae"))
         );
     }
 
@@ -7127,6 +7530,8 @@ mod tests {
             identity_loss: Default::default(),
             face_landmark_loss: Default::default(),
             face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -7253,6 +7658,8 @@ mod tests {
             identity_loss: Default::default(),
             face_landmark_loss: Default::default(),
             face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -7382,6 +7789,8 @@ mod tests {
             identity_loss: Default::default(),
             face_landmark_loss: Default::default(),
             face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -7549,6 +7958,8 @@ mod tests {
             identity_loss: Default::default(),
             face_landmark_loss: Default::default(),
             face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
             subject_mask_loss: None,
         };
         let request = TrainingRequest {

@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 121,
+    "modelCount": 125,
     "importedFamilyCount": 4,
-    "cellCount": 1019,
+    "cellCount": 1023,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 78,
     "exceptionCount": 10
@@ -22,14 +22,14 @@
     "descriptorMlxRuntime": "5e54aa9fcfe488a8017431fc0062026c15ced6c6d84023750d320c1b215aff41",
     "descriptorPreviewFacts": "11f955becfe549eaed754e25627640609c02578bc8ebcc6ae4c79673b581e02e",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "3eb49b3b92dc2ce85576b26ab186821be2aad80e5ec69ca199b370b613aca430",
+    "manifest": "e15ff7cd89d31b670dc1aaecb271faf48901bef71316f0786afe38be2071b5e4",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "14749024735790cc33f3d4f3e968241b4bbcf5e0a30546b52038be39f0988a41",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "678145d02f75ba41158b389c94dcb67c8b7ae3a66932b5875fda5b61c821a008",
-    "trainingCatalog": "4ff95ce3664824edff85a68e1d48b941cf73f1b565634ce68e00bf90b9ac0004",
+    "trainingCatalog": "9e18edd65993d97147f92ecd18cb5724899f81e7d8209412fb11a4815f201cd9",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "d23f959309973a791560c0d754bafb25e34c98ae880984344833f301003c36eb",
+    "workerTrainingDispatch": "f08120b7df504377d791c02daa40268defb6bbcd7bd47f3582bdb1a379bd00b3",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -1106,6 +1106,57 @@
       }
     },
     {
+      "id": "elatentlpips_flux",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "elatentlpips_sd3",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "elatentlpips_sdxl",
+      "family": "elatentlpips",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
       "id": "film_planner_qwen3_6_27b",
       "family": "film-planner",
       "modelType": "utility",
@@ -1484,6 +1535,23 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "flux2_vae",
+      "family": "flux2_vae",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     },
     {

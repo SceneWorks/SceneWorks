@@ -242,6 +242,10 @@ pub mod depth_anchoring;
 /// keys, bounds, the shared strict parsers, support flags and auxiliary catalog models.
 pub mod face_losses;
 
+/// The latent-space perceptual losses (epic 2123, sc-24833): VAE anchor + E-LatentLPIPS keys,
+/// bounds, the shared strict parser, support flags and auxiliary catalog models.
+pub mod latent_perceptual;
+
 /// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
 /// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
 /// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
@@ -771,6 +775,11 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         ],
         extra: ExtraFields::new(),
     };
+    // Epic 2123 latent-space perceptual losses (sc-24833): static per-target support flags
+    // (`latent_perceptual::{VAE_ANCHOR_TARGETS, LATENT_LPIPS_TARGETS}`), identical on both platforms.
+    for target in &mut registry.targets {
+        latent_perceptual::insert_limits(target);
+    }
     // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
     // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
     for target in &mut registry.targets {
@@ -3472,6 +3481,7 @@ pub fn validate_training_config_for_target(
     depth_anchoring::validate_support(target, config)?;
     body_losses::validate_support(target, config)?;
     face_losses::validate_support(target, config)?;
+    latent_perceptual::validate_support(target, config)?;
     validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -3746,6 +3756,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     depth_anchoring::validate(config)?;
     body_losses::validate(config)?;
     face_losses::validate(config)?;
+    latent_perceptual::validate(config)?;
     validate_subject_mask_loss(config)?;
     Ok(())
 }

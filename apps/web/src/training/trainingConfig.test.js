@@ -20,6 +20,11 @@ import {
   targetSupportsGradientNoise,
   trainingConfigSnapshot,
   targetSupportsDepthAnchoring,
+  targetSupportsVaeAnchorLoss,
+  targetSupportsLatentLpipsLoss,
+  latentPerceptualLosses,
+  latentLossAvailable,
+  latentLossCombinationRefusal,
   depthAnchoringAvailable,
   depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
@@ -1474,5 +1479,102 @@ describe("face loss combination refusals (sc-24831)", () => {
     expect(faceLandmarkLossAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
     expect(identityLossAvailable(full, { networkType: "full" })).toBe(false);
     expect(faceLossCombinationRefusal({ baseModel: "ltx_2_3" }, { ltxWorkflow: "t2a_lora" }, "Identity loss")).toBeNull();
+  });
+});
+
+// sc-24833: the latent-space perceptual losses follow the S1 target-support mechanism
+// (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`), are off by default, reach
+// the snapshot only when on, and are bounded by the API's bounds (E6).
+describe("latent-space perceptual losses (sc-24833)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+  const supported = {
+    ...target,
+    limits: { ...target.limits, supportsVaeAnchorLoss: true, supportsLatentLpipsLoss: true },
+  };
+  const validate = (draft, selectedTarget = supported) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget });
+  const snap = (draft) =>
+    trainingConfigSnapshot({ activeDataset: dataset, configDraft: { ...whole, ...draft }, selectedTarget: supported });
+
+  it("reads only an explicit true flag as support, per loss", () => {
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsVaeAnchorLoss: true } })).toBe(true);
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsVaeAnchorLoss: "true" } })).toBe(false);
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsLatentLpipsLoss: true } })).toBe(false);
+    expect(targetSupportsLatentLpipsLoss({ limits: { supportsLatentLpipsLoss: true } })).toBe(true);
+    expect(targetSupportsLatentLpipsLoss({ limits: {} })).toBe(false);
+    expect(targetSupportsLatentLpipsLoss(null)).toBe(false);
+  });
+
+  it("is off by default: the draft carries empty weights and the snapshot no keys", () => {
+    const draft = configDraftFromTarget(supported, dataset, [], "kelsie");
+    for (const loss of latentPerceptualLosses) {
+      expect(draft[`${loss.prefix}Weight`]).toBe("");
+    }
+    const advanced = snap({}).config.advanced;
+    expect(advanced).toBeTruthy();
+    expect(Object.keys(advanced).filter((k) => /^(vaeAnchor|latentLpips)/.test(k))).toEqual([]);
+  });
+
+  // Mutation: drop latentPerceptualSnapshot from trainingConfigSnapshot ⇒ red.
+  it("carries the weight and every set knob while on", () => {
+    const config = snap({ vaeAnchorWeight: "0.5", vaeAnchorEvery: "2", latentLpipsWeight: "1", latentLpipsMaxT: "0.4" });
+    const advanced = config.config.advanced;
+    expect(advanced.vaeAnchorWeight).toBe(0.5);
+    expect(advanced.vaeAnchorEvery).toBe(2);
+    expect(advanced.vaeAnchorMinT).toBeUndefined();
+    expect(advanced.latentLpipsWeight).toBe(1);
+    expect(advanced.latentLpipsMaxT).toBe(0.4);
+  });
+
+  it("blocks a carried-over weight on a target without support", () => {
+    for (const loss of latentPerceptualLosses) {
+      const issues = validate({ [`${loss.prefix}Weight`]: "1" }, target);
+      expect(issues.map((entry) => entry.message)).toContain(
+        `This target does not support the ${loss.label} loss — clear it or pick a supporting target`,
+      );
+      expect(validate({ [`${loss.prefix}Weight`]: "1" })).toEqual([]);
+      expect(validate({ [`${loss.prefix}Weight`]: "0" }, target)).toEqual([]);
+    }
+  });
+
+  // Mirrors the API's latent_loss_combination_refusal. Mutation: drop the refusal check from
+  // latentPerceptualIssues ⇒ red.
+  it("refuses a full fine-tune and the VAE anchor on a no-video LTX-2.5 workflow", () => {
+    for (const loss of latentPerceptualLosses) {
+      const issues = validate({ [`${loss.prefix}Weight`]: "1", networkType: "full" });
+      expect(issues.map((entry) => entry.field)).toContain(`${loss.prefix}Weight`);
+      expect(latentLossAvailable(supported, { networkType: "full" }, loss)).toBe(false);
+      expect(latentLossAvailable(supported, { networkType: "lora" }, loss)).toBe(true);
+    }
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const [vaeAnchor, lpips] = latentPerceptualLosses;
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, vaeAnchor)).toContain("t2a_lora");
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2v_lora" }, vaeAnchor)).toBeNull();
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, lpips)).toBeNull();
+  });
+
+  // Mutation: drop latentPerceptualIssues from configValidation ⇒ red.
+  it("enforces the API bounds as field issues", () => {
+    for (const loss of latentPerceptualLosses) {
+      const fields = (draft) => validate({ [`${loss.prefix}Weight`]: "1", ...draft }).map((entry) => entry.field);
+      expect(fields({ [`${loss.prefix}Weight`]: String(loss.weightMax + 1) })).toContain(`${loss.prefix}Weight`);
+      expect(fields({ [`${loss.prefix}MinT`]: "1.5" })).toContain(`${loss.prefix}MinT`);
+      expect(fields({ [`${loss.prefix}MinT`]: "0.6" })).toContain(`${loss.prefix}MaxT`);
+      expect(fields({ [`${loss.prefix}MinT`]: "0.6", [`${loss.prefix}MaxT`]: "0.9" })).toEqual([]);
+      expect(fields({ [`${loss.prefix}Every`]: String(loss.everyMax + 1) })).toContain(`${loss.prefix}Every`);
+      expect(fields({ [`${loss.prefix}Every`]: "1.5" })).toContain(`${loss.prefix}Every`);
+    }
   });
 });

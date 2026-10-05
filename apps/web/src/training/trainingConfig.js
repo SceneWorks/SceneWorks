@@ -56,6 +56,45 @@ export const depthAnchoringWeightSuggested = 0.1;
 export const depthAnchoringEveryMax = 16;
 export const depthAnchoringEveryDefault = 2;
 export const depthAnchoringModelOptions = ["small", "base", "large"];
+// Latent-space perceptual losses (epic 2123, sc-24833): the VAE anchor (the model's prediction is
+// decoded and re-encoded by a frozen FLUX.2 VAE encoder, matched against the training image's
+// multi-scale features) and E-LatentLPIPS (a learned perceptual metric on the latent itself). Off
+// (empty weight) by default; enabling seeds weight 1 with upstream's window [0, 0.5], added every
+// step. These bounds are the API's (crates/sceneworks-core/src/training/latent_perceptual.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const vaeAnchorWeightMax = 10;
+export const vaeAnchorWeightSuggested = 1;
+export const vaeAnchorMaxTDefault = 0.5;
+export const vaeAnchorEveryDefault = 1;
+export const vaeAnchorEveryMax = 16;
+export const latentLpipsWeightMax = 10;
+export const latentLpipsWeightSuggested = 1;
+export const latentLpipsMaxTDefault = 0.5;
+export const latentLpipsEveryDefault = 1;
+export const latentLpipsEveryMax = 16;
+// One entry per latent-perceptual loss: its `advanced` key prefix, label, support flag and bounds.
+export const latentPerceptualLosses = [
+  {
+    prefix: "vaeAnchor",
+    label: "VAE anchor",
+    supportLimit: "supportsVaeAnchorLoss",
+    weightMax: vaeAnchorWeightMax,
+    weightSuggested: vaeAnchorWeightSuggested,
+    maxTDefault: vaeAnchorMaxTDefault,
+    everyDefault: vaeAnchorEveryDefault,
+    everyMax: vaeAnchorEveryMax,
+  },
+  {
+    prefix: "latentLpips",
+    label: "E-LatentLPIPS",
+    supportLimit: "supportsLatentLpipsLoss",
+    weightMax: latentLpipsWeightMax,
+    weightSuggested: latentLpipsWeightSuggested,
+    maxTDefault: latentLpipsMaxTDefault,
+    everyDefault: latentLpipsEveryDefault,
+    everyMax: latentLpipsEveryMax,
+  },
+];
 // The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
 // anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
 export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
@@ -589,6 +628,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     faceLandmarkLossMinT: numericDraft(advanced.faceLandmarkLossMinT),
     faceLandmarkLossMaxT: numericDraft(advanced.faceLandmarkLossMaxT),
     faceLandmarkLossEvery: numericDraft(advanced.faceLandmarkLossEvery),
+    // Empty weight = off (the default) for each latent-perceptual loss (sc-24833).
+    ...latentPerceptualDraft(advanced),
     // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
     subjectMaskLoss: advanced.subjectMaskLoss === true,
     subjectMaskBackgroundWeight: numericDraft(
@@ -815,6 +856,9 @@ export function configValidation(
   for (const [field, message] of faceLossIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
+  for (const [field, message] of latentPerceptualIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
   // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
   // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
@@ -998,6 +1042,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     ...depthAnchoringSnapshot(configDraft),
     ...bodyLossSnapshot(configDraft),
     ...faceLossSnapshot(configDraft),
+    ...latentPerceptualSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
     subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
     subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
@@ -1130,6 +1175,127 @@ export function depthAnchoringSnapshot(configDraft) {
     depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
     depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
   });
+}
+
+// Whether the target's trainer on the serving platform honors a latent-perceptual loss — the same
+// mechanism as depth anchoring: the API projects the platform-effective `limits.<supportLimit>`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsLatentLoss(target, loss) {
+  return target?.limits?.[loss.supportLimit] === true;
+}
+
+export function targetSupportsVaeAnchorLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[0]);
+}
+
+export function targetSupportsLatentLpipsLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[1]);
+}
+
+// Why a latent-perceptual loss cannot run for this target + draft even though the target advertises
+// it (the API's latent_loss_combination_refusal), or null: no aux loss on a full fine-tune, and the
+// decoded-x0 VAE anchor not on an LTX-2.5 workflow that generates no video.
+export function latentLossCombinationRefusal(target, configDraft, loss) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `The ${loss.label} loss trains a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (loss.prefix === "vaeAnchor" && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `The ${loss.label} loss decodes the generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether a latent-perceptual loss's control is offered for this target + draft.
+export function latentLossAvailable(target, configDraft, loss) {
+  return targetSupportsLatentLoss(target, loss) && latentLossCombinationRefusal(target, configDraft, loss) === null;
+}
+
+// A latent-perceptual loss is on whenever the draft carries its weight (empty = off).
+export function latentLossEnabled(configDraft, loss) {
+  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
+}
+
+// The draft fields of every latent-perceptual loss, read from a target's `advanced` defaults.
+function latentPerceptualDraft(advanced) {
+  const draft = {};
+  for (const loss of latentPerceptualLosses) {
+    for (const knob of ["Weight", "MinT", "MaxT", "Every"]) {
+      draft[`${loss.prefix}${knob}`] = numericDraft(advanced?.[`${loss.prefix}${knob}`]);
+    }
+  }
+  return draft;
+}
+
+// Field issues for the latent-perceptual knobs — the API's bounds (E6): weight in
+// [0, weightMax], a [0, 1] noise window with min <= max, and a whole alternation period in
+// [1, everyMax]. Checked only while a loss is enabled.
+export function latentPerceptualIssues(configDraft, selectedTarget) {
+  const issues = [];
+  for (const loss of latentPerceptualLosses) {
+    if (!latentLossEnabled(configDraft, loss)) continue;
+    const key = (knob) => `${loss.prefix}${knob}`;
+    const weight = numberFromDraft(configDraft[key("Weight")]);
+    if (weight === null || weight < 0 || weight > loss.weightMax) {
+      issues.push([key("Weight"), `${loss.label} weight must be between 0 and ${loss.weightMax}`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget && !targetSupportsLatentLoss(selectedTarget, loss)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push([null, `This target does not support the ${loss.label} loss — clear it or pick a supporting target`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget) {
+      const refusal = latentLossCombinationRefusal(selectedTarget, configDraft, loss);
+      if (refusal) {
+        issues.push([key("Weight"), refusal]);
+        continue;
+      }
+    }
+    const window = {};
+    for (const knob of ["MinT", "MaxT"]) {
+      if (!String(configDraft[key(knob)] ?? "").trim()) continue;
+      const t = numberFromDraft(configDraft[key(knob)]);
+      if (t === null || t < 0 || t > 1) {
+        issues.push([key(knob), "Noise window bounds must be between 0 and 1"]);
+      } else {
+        window[knob] = t;
+      }
+    }
+    if ((window.MinT ?? 0) > (window.MaxT ?? loss.maxTDefault)) {
+      issues.push([key("MaxT"), "Noise window max must be at least its min"]);
+    }
+    if (String(configDraft[key("Every")] ?? "").trim()) {
+      const every = numberFromDraft(configDraft[key("Every")]);
+      if (every === null || !Number.isInteger(every) || every < 1 || every > loss.everyMax) {
+        issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${loss.everyMax}`]);
+      }
+    }
+  }
+  return issues;
+}
+
+// The latent-perceptual keys a job snapshot carries: none for a loss that is off (a default job's
+// snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
+// defaults).
+export function latentPerceptualSnapshot(configDraft) {
+  const snapshot = {};
+  for (const loss of latentPerceptualLosses) {
+    if (!latentLossEnabled(configDraft, loss)) continue;
+    Object.assign(
+      snapshot,
+      compactObject(
+        Object.fromEntries(
+          ["Weight", "MinT", "MaxT", "Every"].map((knob) => [
+            `${loss.prefix}${knob}`,
+            numberFromDraft(configDraft[`${loss.prefix}${knob}`]),
+          ]),
+        ),
+      ),
+    );
+  }
+  return snapshot;
 }
 
 // A face loss is on whenever the draft carries its weight (empty = off).

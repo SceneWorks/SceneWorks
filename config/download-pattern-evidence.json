@@ -412,6 +412,28 @@
       ]
     },
     {
+      "key": "Mingguksky/elatentlpips@0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "repo": "Mingguksky/elatentlpips",
+      "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "resolvedSha": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "servedRepo": "Mingguksky/elatentlpips",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "elatentlpips_ckpt/flux_latent_vgg16.pth.tar",
+        "elatentlpips_ckpt/flux_latest_vgg16_tuned.pth",
+        "elatentlpips_ckpt/sd15_latent_vgg16.pth.tar",
+        "elatentlpips_ckpt/sd15_latest_vgg16_tuned.pth",
+        "elatentlpips_ckpt/sd21_latent_vgg16.pth.tar",
+        "elatentlpips_ckpt/sd21_latest_vgg16_tuned.pth",
+        "elatentlpips_ckpt/sd3_latent_vgg16.pth.tar",
+        "elatentlpips_ckpt/sd3_latest_vgg16_tuned.pth",
+        "elatentlpips_ckpt/sdxl_latent_vgg16.pth.tar",
+        "elatentlpips_ckpt/sdxl_latest_vgg16_tuned.pth"
+      ]
+    },
+    {
       "key": "MiniMaxAI/MiniMax-H3@939557dc319dd91227e30195a763f272ba7f8765",
       "repo": "MiniMaxAI/MiniMax-H3",
       "revision": "939557dc319dd91227e30195a763f272ba7f8765",

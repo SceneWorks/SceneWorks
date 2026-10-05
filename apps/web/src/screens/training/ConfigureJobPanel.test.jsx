@@ -1039,6 +1039,91 @@ describe("ConfigureJobPanel body losses", () => {
   });
 });
 
+// sc-24833 (epic 2123): the VAE anchor and E-LatentLPIPS are off-by-default advanced toggles, offered
+// only for a target whose platform trainer declares them (`limits.supportsVaeAnchorLoss` /
+// `limits.supportsLatentLpipsLoss`). Checking one seeds weight 1; its knobs exist only while it is on,
+// and an invalid knob is outlined.
+describe("ConfigureJobPanel latent-space perceptual losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsVaeAnchorLoss: true, supportsLatentLpipsLoss: true },
+  };
+  const LPIPS_ONLY = { ...Z_IMAGE, limits: { supportsLatentLpipsLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(label) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === `${label} loss`)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds weight 1 when enabled", () => {
+    const calls = mountWith();
+    for (const label of ["VAE anchor", "E-LatentLPIPS"]) {
+      expect(toggle(label)).toBeTruthy();
+      expect(toggle(label).checked).toBe(false);
+      expect(field(`${label} weight`)).toBeUndefined();
+    }
+    act(() => toggle("VAE anchor").click());
+    act(() => toggle("E-LatentLPIPS").click());
+    expect(calls).toEqual([
+      ["vaeAnchorWeight", "1"],
+      ["latentLpipsWeight", "1"],
+    ]);
+  });
+
+  // Mutation: render the toggles without the per-target support filter ⇒ red.
+  it("offers each toggle only where the target declares that loss", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, vaeAnchorWeight: "1", latentLpipsWeight: "1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeUndefined();
+    expect(field("VAE anchor weight")).toBeUndefined();
+    mountWith({ target: LPIPS_ONLY });
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeTruthy();
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, vaeAnchorWeight: "1" } });
+    expect(toggle("VAE anchor").checked).toBe(true);
+    expect(field("VAE anchor weight").value).toBe("1");
+    expect(field("VAE anchor weight").getAttribute("max")).toBe("10");
+    expect(field("VAE anchor window max").getAttribute("placeholder")).toBe("0.5");
+    expect(field("VAE anchor every N steps").getAttribute("max")).toBe("16");
+    expect(field("VAE anchor every N steps").getAttribute("placeholder")).toBe("1");
+    expect(field("E-LatentLPIPS weight")).toBeUndefined();
+    act(() => toggle("VAE anchor").click());
+    expect(calls).toEqual([["vaeAnchorWeight", ""]]);
+  });
+
+  it("outlines an out-of-range knob", () => {
+    mountWith({ draft: { ...VALID_DRAFT, latentLpipsWeight: "1", latentLpipsEvery: "40" } });
+    expect(field("E-LatentLPIPS every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
 // sc-24828 (epic 2123): subject-masked loss is an off-by-default advanced toggle. While on, the two
 // weight inputs and the dataset's mask coverage appear; incomplete coverage is an error on the
 // toggle (it blocks Start) and offers "Generate subject masks".

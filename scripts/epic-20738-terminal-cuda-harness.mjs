@@ -181,11 +181,12 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // Re-pinned by sc-24832: `config/download-pattern-evidence.json` was re-recorded
 // (`node scripts/check-download-patterns.mjs --write`) when the catalog gained epic 2123's
 // training-time auxiliary models — TAEF1, the three Depth-Anything-V2 sizes, the sc-24830 tiny
-// decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, ViTPose+ base and the HybrIK / Sapiens
-// re-hosts (130 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
+// decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, the sc-24833 FLUX.2 VAE / E-LatentLPIPS
+// weights, ViTPose+ base and the HybrIK / Sapiens re-hosts (131 repo@revision keys incl. the two
+// frozen importer authorities; sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "5bbd084a9c7a8477d58839cd0b275556a6a4a105a63ccbca66524c83667e3ea3";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "ddcac908172ad790289057ff7f5af81fc7ec5980ff23d3620db7df19c2ff8db9";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

@@ -226,6 +226,34 @@ fn platform_effective_training_catalog_projects_face_loss_support() {
     }
 }
 
+/// sc-24833: the targets endpoint advertises the latent-perceptual losses identically on both
+/// platforms (static per-target flags, sc-24830) — exactly `VAE_ANCHOR_TARGETS` /
+/// `LATENT_LPIPS_TARGETS`. Mutation: drop a target from either table ⇒ red.
+#[test]
+fn platform_effective_training_catalog_advertises_latent_perceptual_support() {
+    use sceneworks_core::training::latent_perceptual::{
+        target_supports, LATENT_LOSSES, LATENT_LPIPS_TARGETS, VAE_ANCHOR_TARGETS,
+    };
+    for (spec, table) in [
+        (LATENT_LOSSES[0], &VAE_ANCHOR_TARGETS[..]),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..]),
+    ] {
+        let mut expected: Vec<String> = table.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        for candle in [false, true] {
+            let mut ids: Vec<String> =
+                crate::training::effective_training_targets_for_candle(candle)
+                    .targets
+                    .iter()
+                    .filter(|target| target_supports(&spec, target))
+                    .map(|target| target.id.clone())
+                    .collect();
+            ids.sort();
+            assert_eq!(ids, expected, "{} (candle {candle})", spec.support_limit);
+        }
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

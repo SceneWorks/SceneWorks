@@ -88,9 +88,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -192,9 +194,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -297,9 +301,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -401,9 +407,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -505,9 +513,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -616,6 +626,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -723,6 +734,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -920,9 +932,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1033,9 +1047,11 @@
         "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1139,6 +1155,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1232,6 +1249,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1369,6 +1387,7 @@
         "supportsGradientNoise": true,
         "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1474,6 +1493,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1580,6 +1600,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1685,6 +1706,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1788,6 +1810,7 @@
         "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
