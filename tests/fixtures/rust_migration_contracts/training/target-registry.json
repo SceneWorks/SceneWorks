@@ -83,6 +83,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -179,6 +180,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -276,6 +278,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -372,6 +375,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -468,6 +472,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -568,6 +573,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -667,6 +673,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -754,7 +761,8 @@
         "steps": [
           200,
           6000
-        ]
+        ],
+        "supportsResolutionBuckets": true
       },
       "ui": {
         "datasetModality": "image",
@@ -858,6 +866,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -963,6 +972,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1058,6 +1068,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1143,6 +1154,7 @@
           4000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1371,6 +1383,7 @@
           4000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1469,6 +1482,7 @@
           4000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1566,6 +1580,7 @@
           4000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1661,6 +1676,7 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsResolutionBuckets": true,
         "supportsWeightNoise": true
       },
       "ui": {

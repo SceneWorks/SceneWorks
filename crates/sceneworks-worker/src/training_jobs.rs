@@ -24,8 +24,9 @@ use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::{
-    TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT,
-    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, TRAINING_PLAN_VERSION,
+    parse_resolution_buckets, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
+    GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
+    RESOLUTION_BUCKETS_KEY, TRAINING_PLAN_VERSION,
     WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sha2::{Digest, Sha256};
@@ -875,6 +876,19 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
+    // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
+    // refuses it (E3) — before any load, on both the dry and the real path.
+    let buckets = parse_resolution_buckets(advanced).map_err(|message| {
+        WorkerError::InvalidPayload(format!("Training config field {message}"))
+    })?;
+    if buckets.is_some() && !descriptor.techniques.resolution_buckets {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support multi-resolution buckets \
+             ({RESOLUTION_BUCKETS_KEY})."
+        )));
+    }
+
     if descriptor.backend != "candle" {
         return Ok(engine_id);
     }
@@ -1616,6 +1630,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
             GRADIENT_NOISE_GAMMA_KEY,
             GRADIENT_NOISE_GAMMA_DEFAULT as f32,
         ),
+        // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
+        // `resolution`, exactly as before).
+        resolution_buckets: map_resolution_buckets(advanced),
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -1646,6 +1663,32 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+    }
+}
+
+/// Map `advanced.resolutionBuckets` onto the engine's typed list (absent ⇒ empty ⇒ off). The shared
+/// dry/real preflight refuses a malformed list before this runs; should one ever reach here anyway
+/// it maps **fail-closed** to a zero bucket, which the engine's technique floor refuses
+/// (`resolution_buckets[0] needs a resolution and a repeat count >= 1`) instead of silently
+/// training at one resolution.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
+    match parse_resolution_buckets(advanced) {
+        Ok(None) => Vec::new(),
+        Ok(Some(buckets)) => buckets
+            .into_iter()
+            .map(|bucket| gen_core::ResolutionBucket {
+                resolution: bucket.resolution,
+                repeats: bucket.repeats,
+            })
+            .collect(),
+        Err(_) => vec![gen_core::ResolutionBucket {
+            resolution: 0,
+            repeats: 0,
+        }],
     }
 }
 
@@ -2743,6 +2786,17 @@ fn training_result(
     result.insert("rank".to_owned(), json!(plan.config.rank));
     result.insert("alpha".to_owned(), json!(plan.config.alpha));
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
+    // sc-2127: a bucketed run trains at every listed resolution (which replace `resolution`), so
+    // record the rows it actually trained on. Absent for a single-resolution run.
+    if let Ok(Some(buckets)) = parse_resolution_buckets(&plan.config.advanced) {
+        result.insert(
+            RESOLUTION_BUCKETS_KEY.to_owned(),
+            json!(buckets
+                .iter()
+                .map(|bucket| json!({ "resolution": bucket.resolution, "repeats": bucket.repeats }))
+                .collect::<Vec<_>>()),
+        );
+    }
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
     // Record the REAL backend that ran the training (mlx on macOS, candle off-Mac, cpu fallback),
@@ -3403,6 +3457,47 @@ mod tests {
         );
     }
 
+    /// sc-2127 review: the catalog's `supportsResolutionBuckets` flag (which gates the web toggle
+    /// and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
+    /// catalog (served unprojected on both platforms since sc-24827) against the MLX descriptors on
+    /// macOS and the Candle descriptors off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_resolution_buckets_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        let mut withheld = Vec::new();
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            let advertised = sceneworks_core::training::target_supports_resolution_buckets(&target);
+            assert_eq!(
+                advertised, descriptor.techniques.resolution_buckets,
+                "{} ({engine_id}): catalog supportsResolutionBuckets disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            if !advertised {
+                withheld.push(target.id.clone());
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+        // The refusal side is exercised, not just the agreeing side.
+        assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+    }
+
+
     /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
     /// `gradientNoiseGamma` reach the engine's typed fields; absent stays off (eta 0, sigma 0, gamma
     /// the upstream 0.55), so a legacy plan maps exactly as before.
@@ -3572,6 +3667,125 @@ mod tests {
                 ))
                 .contains("must be a number between"),
                 "{key}={bad}"
+            );
+        }
+    }
+
+    /// sc-2127 (epic 2123): `advanced.resolutionBuckets` reaches the engine's typed
+    /// `resolution_buckets` row-for-row; absent stays empty (off), so a legacy plan maps exactly as
+    /// before; a malformed list maps fail-closed to a bucket the engine floor refuses.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_wires_resolution_buckets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        assert!(map_training_config(&parse(value.clone()).config)
+            .resolution_buckets
+            .is_empty());
+
+        let mut bucketed = value;
+        bucketed["config"]["advanced"]["resolutionBuckets"] = json!([
+            { "resolution": 512, "repeats": 16 },
+            { "resolution": 768, "repeats": 4 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        let rb = |resolution, repeats| gen_core::ResolutionBucket {
+            resolution,
+            repeats,
+        };
+        assert_eq!(
+            map_training_config(&parse(bucketed.clone()).config).resolution_buckets,
+            vec![rb(512, 16), rb(768, 4), rb(1024, 1)]
+        );
+
+        let mut malformed = bucketed;
+        malformed["config"]["advanced"]["resolutionBuckets"] =
+            json!([{ "resolution": 512, "repeats": 0 }]);
+        assert_eq!(
+            map_training_config(&parse(malformed).config).resolution_buckets,
+            vec![rb(0, 0)]
+        );
+        // The worker cap is the engine cap.
+        assert_eq!(
+            sceneworks_core::training::RESOLUTION_BUCKETS_MAX,
+            gen_core::MAX_RESOLUTION_BUCKETS
+        );
+    }
+
+    /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
+    /// refuses a well-formed one exactly when the active trainer's descriptor does not declare
+    /// `techniques.resolution_buckets` (admitted where it does).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_resolution_buckets_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, buckets: Value| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            value["config"]["advanced"]["resolutionBuckets"] = buckets;
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let good = json!([
+            { "resolution": 512, "repeats": 2 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        // Image LoRA trainers declare buckets on both backends; LTX-2.5 trains on prepared latent
+        // packs with no spatial edge, so it declares none and must refuse.
+        for (kernel, base, expected) in [
+            ("z_image_lora", "z_image_turbo", true),
+            ("sdxl_lora", "sdxl", true),
+            ("ltx_mlx_lora", "ltx_2_5", false),
+        ] {
+            let declared = crate::inference_runtime::trainer_descriptor(
+                engine_trainer_id_for(kernel, base).expect("native trainer"),
+            )
+            .expect("trainer registered")
+            .techniques
+            .resolution_buckets;
+            assert_eq!(declared, expected, "{base} bucket declaration");
+            let bucketed = plan(kernel, base, good.clone());
+            if declared {
+                validate_training_target_config(&bucketed)
+                    .unwrap_or_else(|e| panic!("{base} declares buckets but refused them: {e:?}"));
+            } else {
+                assert!(
+                    err(bucketed).contains("does not support multi-resolution buckets"),
+                    "{base}"
+                );
+            }
+        }
+
+        // Malformed lists never silently map to a single-resolution run.
+        for bad in [
+            json!([]),
+            json!([{ "resolution": 512, "repeats": 0 }]),
+            json!([{ "resolution": 512, "repeats": -1 }]),
+            json!([{ "resolution": 500, "repeats": 1 }]),
+            json!("512"),
+        ] {
+            assert!(
+                err(plan("z_image_lora", "z_image_turbo", bad.clone()))
+                    .contains("resolutionBuckets"),
+                "{bad}"
             );
         }
     }
@@ -4655,6 +4869,21 @@ mod tests {
         assert_eq!(result["networkType"], json!("full"));
         assert_eq!(result["outputId"], json!("finetune_mage"));
         assert_eq!(result["backend"], json!("candle"));
+        // sc-2127: a single-resolution run records no bucket rows...
+        assert!(!result.contains_key("resolutionBuckets"));
+
+        // ...and a bucketed run records the rows it trained on next to `resolution`.
+        let mut bucketed = plan.clone();
+        bucketed.config.advanced.insert(
+            "resolutionBuckets".to_owned(),
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }]),
+        );
+        let result = training_result(&bucketed, &output, &[], &[], &[], 0, 0.0, "candle");
+        assert_eq!(
+            result["resolutionBuckets"],
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }])
+        );
+        assert_eq!(result["resolution"], json!(bucketed.config.resolution));
     }
 
     #[cfg(any(
@@ -5206,6 +5435,7 @@ mod tests {
             weight_noise_sigma: 0.0,
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5323,6 +5553,7 @@ mod tests {
             weight_noise_sigma: 0.0,
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5443,6 +5674,7 @@ mod tests {
             weight_noise_sigma: 0.0,
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5601,6 +5833,7 @@ mod tests {
             weight_noise_sigma: 0.0,
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

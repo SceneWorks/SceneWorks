@@ -724,3 +724,103 @@ describe("ConfigureJobPanel gradient noise", () => {
     expect(input("Gradient noise eta")).toBeUndefined();
   });
 });
+
+// sc-2127 (epic 2123): multi-resolution buckets are an off-by-default advanced toggle. Checking it
+// seeds rows from the target's resolutions; the row editor edits/adds/removes rows through the draft
+// and is outlined when the list is invalid.
+describe("ConfigureJobPanel resolution buckets", () => {
+  const bucketTarget = { ...TARGET, limits: { resolutions: [512, 768, 1024], supportsResolutionBuckets: true } };
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Multi-resolution buckets"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  const editor = () => container.querySelector(".training-resolution-buckets");
+  const rows = (...pairs) => pairs.map(([resolution, repeats]) => ({ resolution: String(resolution), repeats: String(repeats) }));
+
+  it("is off by default and seeds the target's resolutions when enabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, resolution: "768" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(false);
+    expect(editor()).toBeNull();
+    act(() => toggle().click());
+    expect(calls).toEqual([["resolutionBuckets", rows([512, 1], [768, 1])]]);
+  });
+
+  it("edits, adds and removes rows, and clears the list when disabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, resolutionBuckets: rows([512, 16], [1024, 1]) };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: bucketTarget }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(editor().getAttribute("aria-invalid")).toBeNull();
+    const repeats = container.querySelector('[aria-label="Bucket 1 repeats"]');
+    expect(repeats.value).toBe("16");
+    expect(repeats.getAttribute("max")).toBe("100");
+    const resolution = container.querySelector('[aria-label="Bucket 2 resolution"]');
+    expect([...resolution.options].map((option) => option.value)).toEqual(["512", "768", "1024"]);
+    act(() => {
+      resolution.value = "768";
+      resolution.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    act(() => container.querySelector('[aria-label="Remove bucket 1"]').click());
+    act(() => [...editor().querySelectorAll("button")].find((node) => node.textContent === "Add bucket").click());
+    act(() => toggle().click());
+    expect(calls).toEqual([
+      ["resolutionBuckets", rows([512, 16], [768, 1])],
+      ["resolutionBuckets", rows([1024, 1])],
+      ["resolutionBuckets", [...rows([512, 16], [1024, 1]), { resolution: String(VALID_DRAFT.resolution), repeats: "1" }]],
+      ["resolutionBuckets", null],
+    ]);
+  });
+
+  it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {
+    const ltx25 = { ...TARGET, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { resolutions: [512, 768, 1024] } };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: ltx25,
+          configValidity: validityFor(VALID_DRAFT, { activeDataset: DATASET, selectedTarget: ltx25 }),
+        })}
+      />,
+    );
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(editor()).toBeNull();
+  });
+
+  it("outlines a list with a non-positive repeat", () => {
+    const draft = { ...VALID_DRAFT, resolutionBuckets: rows([512, 0]) };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: bucketTarget }),
+        })}
+      />,
+    );
+    expect(editor().getAttribute("aria-invalid")).toBe("true");
+  });
+});

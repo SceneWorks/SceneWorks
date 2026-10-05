@@ -1978,7 +1978,9 @@ pub(crate) async fn create_training_job(
             let base_model_dir = resolve_base_model_path(target, &data_dir);
             if let Some(message) = sceneworks_worker::full_finetune_memory_error(
                 FsPath::new(&base_model_dir),
-                payload.config.resolution,
+                // Epic 2123 E7 (sc-2127): with resolution buckets the run trains at every listed
+                // resolution, so the envelope is the LARGEST one, not `resolution`.
+                sceneworks_core::training::training_max_resolution(&payload.config),
                 // The accumulator buffer is a real term in the envelope, not a detail — see
                 // `FULL_FINETUNE_ACCUM_MULTIPLIER`. Passing the configured window is what keeps a
                 // 64–80 GB Mac out of an uncatchable SIGKILL.

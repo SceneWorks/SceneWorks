@@ -82,6 +82,133 @@ pub fn target_supports_gradient_noise(target: &TrainingTarget) -> bool {
     target_limit_flag(target, GRADIENT_NOISE_SUPPORT_LIMIT)
 }
 
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`RESOLUTION_BUCKETS_KEY`] (its `TrainerDescriptor::techniques.resolution_buckets`, sc-2127).
+/// Absent = no. The same mechanism as [`WEIGHT_NOISE_SUPPORT_LIMIT`]: the web form shows the
+/// buckets toggle only where this is `true`, submit-time validation refuses a bucket list
+/// elsewhere, and a worker test pins the flag to the linked trainer descriptors per platform.
+pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
+
+/// Builtin targets whose trainer does NOT honor resolution buckets on any platform: LTX-2.5 trains
+/// on prepared latent packs whose geometry is fixed by the bundle, so there is no spatial edge to
+/// bucket. Every other builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 1] = ["ltx_2_5_video_lora"];
+
+/// Whether `target` advertises resolution-bucket support.
+pub fn target_supports_resolution_buckets(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, RESOLUTION_BUCKETS_SUPPORT_LIMIT)
+}
+
+/// `advanced` key of the **multi-resolution buckets** list (epic 2123, sc-2127): an array of
+/// `{ "resolution": <px>, "repeats": <n> }` rows. Each dataset image is trained at every listed
+/// resolution, `repeats` times per epoch per row (ai-toolkit's `resolution` + `num_repeats` lists),
+/// so rows 512/768/1024 with repeats 16/4/1 train on a 16:4:1 per-image mix. Absent is off (one
+/// bucket at `resolution`, today's behaviour); present-but-empty is a field error.
+pub const RESOLUTION_BUCKETS_KEY: &str = "resolutionBuckets";
+/// Most bucket rows submit-time validation accepts — the engine's own cap
+/// (`gen_core::MAX_RESOLUTION_BUCKETS`; the worker pins the two together). The web form enforces the
+/// same bound (`resolutionBucketsMax` in `apps/web/src/training/trainingConfig.js`, parity-tested).
+pub const RESOLUTION_BUCKETS_MAX: usize = 8;
+/// Largest per-bucket repeat count submit-time validation accepts (web `resolutionBucketRepeatsMax`).
+/// Repeats are a per-image mix ratio; 100:1 is already far past any useful skew.
+pub const RESOLUTION_BUCKET_REPEATS_MAX: u64 = 100;
+/// Every bucket resolution must be a multiple of this (web `resolutionBucketStride`): the native
+/// trainers floor each training edge to a multiple of 32 so the latent grid tiles cleanly, so any
+/// other value would silently train at a different size than the one requested.
+pub const RESOLUTION_BUCKET_STRIDE: u64 = 32;
+
+/// One validated `advanced.resolutionBuckets` row (see [`RESOLUTION_BUCKETS_KEY`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolutionBucketSpec {
+    pub resolution: u32,
+    pub repeats: u32,
+}
+
+/// Parse and validate `advanced.resolutionBuckets` independent of any target: `Ok(None)` when the
+/// key is absent (off), otherwise a non-empty list of at most [`RESOLUTION_BUCKETS_MAX`] rows, each
+/// with an integer `resolution` (`> 0`, a multiple of [`RESOLUTION_BUCKET_STRIDE`], not repeated)
+/// and an integer `repeats` in `1..=`[`RESOLUTION_BUCKET_REPEATS_MAX`]. The error is a
+/// human-facing message for a field error on [`RESOLUTION_BUCKETS_KEY`]. The API's submit-time
+/// validation and the worker's strict preflight share this one parser.
+pub fn parse_resolution_buckets(
+    advanced: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+    let Some(value) = advanced.get(RESOLUTION_BUCKETS_KEY) else {
+        return Ok(None);
+    };
+    let rows = value.as_array().ok_or_else(|| {
+        format!("{RESOLUTION_BUCKETS_KEY} must be a list of {{resolution, repeats}} rows.")
+    })?;
+    if rows.is_empty() {
+        return Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} must list at least one resolution bucket (omit it to train \
+             at a single resolution)."
+        ));
+    }
+    if rows.len() > RESOLUTION_BUCKETS_MAX {
+        return Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} has {} buckets; at most {RESOLUTION_BUCKETS_MAX} are allowed.",
+            rows.len()
+        ));
+    }
+    let mut buckets: Vec<ResolutionBucketSpec> = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let n = index + 1;
+        let row = row.as_object().ok_or_else(|| {
+            format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats."
+            )
+        })?;
+        let resolution = row
+            .get("resolution")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{RESOLUTION_BUCKETS_KEY} row {n}: resolution must be a positive whole number \
+                     of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
+                )
+            })?;
+        let repeats = row
+            .get("repeats")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 \
+                     and {RESOLUTION_BUCKET_REPEATS_MAX}."
+                )
+            })?;
+        if buckets.iter().any(|bucket| bucket.resolution == resolution) {
+            return Err(format!(
+                "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+            ));
+        }
+        buckets.push(ResolutionBucketSpec {
+            resolution,
+            repeats,
+        });
+    }
+    Ok(Some(buckets))
+}
+
+/// The largest training resolution a config trains at: the largest
+/// [`RESOLUTION_BUCKETS_KEY`] row when buckets are set (they replace `resolution`), else
+/// `resolution`. Memory admission sizes for this (epic 2123 E7). A malformed bucket list falls back
+/// to `resolution` here only because plan validation refuses it before any job is queued.
+pub fn training_max_resolution(config: &TrainingConfig) -> u32 {
+    match parse_resolution_buckets(&config.advanced) {
+        Ok(Some(buckets)) => buckets
+            .iter()
+            .map(|bucket| bucket.resolution)
+            .max()
+            .unwrap_or(config.resolution),
+        _ => config.resolution,
+    }
+}
+
 /// `advanced` key of the annealed **gradient noise** initial scale `eta` (epic 2123, sc-24827):
 /// on every optimizer update `t` the native trainer adds `N(0,1) · eta / (1 + t)^gamma` to each
 /// adapter gradient (after the norm clip, before the step). Absent or `0` is off.
@@ -554,7 +681,7 @@ pub struct TrainingProvenance {
 /// by common LoRA practice (and `ai-toolkit` as reference), not derived from
 /// any external config format.
 pub fn builtin_training_targets() -> TrainingTargetRegistry {
-    TrainingTargetRegistry {
+    let mut registry = TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
             z_image_turbo_lora_target(),
@@ -595,7 +722,18 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             ),
         ],
         extra: ExtraFields::new(),
+    };
+    // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
+    // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
+    for target in &mut registry.targets {
+        if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
+            target.limits.insert(
+                RESOLUTION_BUCKETS_SUPPORT_LIMIT.to_owned(),
+                Value::Bool(true),
+            );
+        }
     }
+    registry
 }
 
 /// The built-in training presets Rust owns out of the box.
@@ -3111,6 +3249,7 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -3376,6 +3515,60 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     validate_lr_scheduler(config)?;
     validate_weight_noise(config)?;
     validate_gradient_noise(config)?;
+    parse_resolution_buckets(&config.advanced).map_err(|message| {
+        TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message,
+        }
+    })?;
+    Ok(())
+}
+
+/// Target half of the `advanced.resolutionBuckets` validation (epic 2123 sc-2127, E6): every bucket
+/// resolution must be one the target advertises in `limits.resolutions` (the same menu `resolution`
+/// is held to), as a field error naming [`RESOLUTION_BUCKETS_KEY`]. The structural checks already
+/// ran in [`validate_training_config`].
+fn validate_resolution_buckets_for_target(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let Ok(Some(buckets)) = parse_resolution_buckets(&config.advanced) else {
+        return Ok(());
+    };
+    // The target's trainer on this platform must declare buckets (sc-2127 review): refuse here, at
+    // submit, instead of queueing a job the worker preflight then refuses (E3/E6).
+    if !target_supports_resolution_buckets(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message: format!(
+                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this \
+                 platform.",
+                target.name
+            ),
+        });
+    }
+    let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let allowed = numeric_limit_values("resolutions", allowed)?;
+    if let Some(bucket) = buckets
+        .iter()
+        .find(|bucket| !allowed.contains(&u64::from(bucket.resolution)))
+    {
+        let allowed = allowed
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message: format!(
+                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: \
+                 {allowed}.",
+                target.name, bucket.resolution
+            ),
+        });
+    }
     Ok(())
 }
 
