@@ -64,31 +64,32 @@ fn resolved_commit(source: &str) -> Option<&str> {
     source.split('#').nth(1)
 }
 
-/// Core check, separated from file I/O so the red paths below are testable: candle-kernels must
+/// Core check, separated from file I/O so the red paths below are testable: each vendored crate must
 /// resolve from the inference repo (the patch is live) at the same resolved commit as
 /// sceneworks-gen-core (the patch rev is in lockstep with the worker's inference pins).
-fn check_lock(lock: &str) -> Result<(), String> {
+fn check_lock_crate(lock: &str, crate_name: &str) -> Result<(), String> {
     let packages = parse_lock_packages(lock);
     let kernels: Vec<&Option<String>> = packages
         .iter()
-        .filter(|(n, _)| n == "candle-kernels")
+        .filter(|(n, _)| n == crate_name)
         .map(|(_, s)| s)
         .collect();
     let [kernels_source] = kernels.as_slice() else {
         return Err(format!(
-            "expected exactly one candle-kernels package in Cargo.lock, found {}",
+            "expected exactly one {crate_name} package in Cargo.lock, found {}",
             kernels.len()
         ));
     };
     let Some(kernels_source) = kernels_source else {
         // A path source would mean a SceneWorks-local vendor copy this guard doesn't know about.
-        return Err("candle-kernels has no source (unexpected path dependency)".to_string());
+        return Err(format!(
+            "{crate_name} has no source (unexpected path dependency)"
+        ));
     };
     if kernels_source.contains(UPSTREAM_CANDLE) {
         return Err(format!(
-            "candle-kernels resolves from upstream candle ({kernels_source}): the root Cargo.toml \
-             [patch] to the inference repo's vendored multi-arch copy is not in effect, so \
-             packaged quantized models silently break on Blackwell (sc-7544 / sc-13510)"
+            "{crate_name} resolves from upstream candle ({kernels_source}): the root Cargo.toml \
+             [patch] to the inference repo's vendored implementation is not in effect"
         ));
     }
     // The repo path must END at the repo name (`?rev=` query or fragment), so a lookalike
@@ -97,7 +98,7 @@ fn check_lock(lock: &str) -> Result<(), String> {
     if !matches!(after_repo, Some(rest) if rest.is_empty() || rest.starts_with('?') || rest.starts_with('#'))
     {
         return Err(format!(
-            "candle-kernels resolves from an unexpected source: {kernels_source}"
+            "{crate_name} resolves from an unexpected source: {kernels_source}"
         ));
     }
     let gen_core = packages
@@ -108,11 +109,15 @@ fn check_lock(lock: &str) -> Result<(), String> {
     match (resolved_commit(kernels_source), resolved_commit(gen_core)) {
         (Some(k), Some(g)) if k == g => Ok(()),
         (k, g) => Err(format!(
-            "candle-kernels [patch] rev skews from the worker's inference pin \
-             (candle-kernels {k:?} vs sceneworks-gen-core {g:?}): the vendored kernels no longer \
-             match the pinned candle-core. Re-run `node scripts/bump-inference.mjs`."
+            "{crate_name} [patch] rev skews from the worker's inference pin \
+             ({crate_name} {k:?} vs sceneworks-gen-core {g:?}). \
+             Re-run `node scripts/bump-inference.mjs`."
         )),
     }
+}
+
+fn check_lock(lock: &str) -> Result<(), String> {
+    check_lock_crate(lock, "candle-kernels")
 }
 
 /// The committed workspace lockfile passes the guard.
@@ -123,6 +128,64 @@ fn candle_kernels_resolves_through_the_inference_patch() {
         .unwrap_or_else(|e| panic!("read {}: {e}", lock_path.display()));
     if let Err(msg) = check_lock(&lock) {
         panic!("{msg}");
+    }
+}
+
+/// CUDA graph calls require the inference vendor's parameter-cache API (sc-24441 / sc-24446).
+/// An upstream or duplicate core is an incompatible consumer graph, even if kernels are patched.
+#[test]
+fn candle_core_resolves_through_the_inference_patch() {
+    let lock_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock");
+    let lock = std::fs::read_to_string(&lock_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", lock_path.display()));
+    if let Err(msg) = check_lock_crate(&lock, "candle-core") {
+        panic!("{msg}");
+    }
+}
+
+#[test]
+fn core_guard_rejects_missing_upstream_skewed_duplicate_lookalike_and_unused_resolutions() {
+    let good = GOOD_LOCK.replace("candle-kernels", "candle-core");
+    assert_eq!(check_lock_crate(&good, "candle-core"), Ok(()));
+    let extra_core = "\n[[package]]\nname = \"candle-core\"\nversion = \"0.10.2\"\n\
+        source = \"git+https://github.com/huggingface/candle#upstream\"\n";
+    for (mutant, expected) in [
+        (
+            good.replacen("name = \"candle-core\"", "name = \"missing\"", 1),
+            "exactly one candle-core",
+        ),
+        (
+            good.replacen(
+                "github.com/SceneWorks/inference",
+                "github.com/huggingface/candle",
+                1,
+            ),
+            "upstream candle",
+        ),
+        (
+            good.replacen(
+                "#d68b8b457d76e0472393f0d7bfe0e79ae68278dd",
+                "#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                1,
+            ),
+            "skews",
+        ),
+        (format!("{good}{extra_core}"), "exactly one candle-core"),
+        (
+            good.replacen(
+                "github.com/SceneWorks/inference?",
+                "github.com/SceneWorks/inference-archive?",
+                1,
+            ),
+            "unexpected source",
+        ),
+        (
+            good.replacen("[[package]]", "[[patch.unused]]", 1),
+            "exactly one candle-core",
+        ),
+    ] {
+        let error = check_lock_crate(&mutant, "candle-core").unwrap_err();
+        assert!(error.contains(expected), "expected {expected}: {error}");
     }
 }
 

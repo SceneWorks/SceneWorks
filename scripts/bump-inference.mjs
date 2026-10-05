@@ -48,7 +48,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
 const MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-memory-adapter/Cargo.toml");
 const LOCKFILE = join(repoRoot, "Cargo.lock");
-// Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
+// Root workspace manifest: holds the vendored Candle [patch] pins (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
@@ -66,7 +66,7 @@ const INFERENCE_CRATES = [
 ];
 // Resolved through the root [patch], not a direct dependency — still pinned to the inference
 // repo, so its lock entry must be refreshed on every bump.
-const PATCHED_CRATES = ["candle-kernels"];
+const PATCHED_CRATES = ["candle-kernels", "candle-core"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
