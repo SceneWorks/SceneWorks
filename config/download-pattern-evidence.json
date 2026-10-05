@@ -5298,6 +5298,51 @@
       ]
     },
     {
+      "key": "depth-anything/Depth-Anything-V2-Base-hf@b1958afc87fb45a9e3746cb387596094de553ed8",
+      "repo": "depth-anything/Depth-Anything-V2-Base-hf",
+      "revision": "b1958afc87fb45a9e3746cb387596094de553ed8",
+      "resolvedSha": "b1958afc87fb45a9e3746cb387596094de553ed8",
+      "servedRepo": "depth-anything/Depth-Anything-V2-Base-hf",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "preprocessor_config.json"
+      ]
+    },
+    {
+      "key": "depth-anything/Depth-Anything-V2-Large-hf@7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+      "repo": "depth-anything/Depth-Anything-V2-Large-hf",
+      "revision": "7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+      "resolvedSha": "7581137eff8d4e94f6e796d3baea0e9fa79b22d2",
+      "servedRepo": "depth-anything/Depth-Anything-V2-Large-hf",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "preprocessor_config.json"
+      ]
+    },
+    {
+      "key": "depth-anything/Depth-Anything-V2-Small-hf@5426e4f0f36572d16453bbda7a8389317b1bef99",
+      "repo": "depth-anything/Depth-Anything-V2-Small-hf",
+      "revision": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+      "resolvedSha": "5426e4f0f36572d16453bbda7a8389317b1bef99",
+      "servedRepo": "depth-anything/Depth-Anything-V2-Small-hf",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "model.safetensors",
+        "preprocessor_config.json"
+      ]
+    },
+    {
       "key": "hexgrad/Kokoro-82M@f3ff3571791e39611d31c381e3a41a3af07b4987",
       "repo": "hexgrad/Kokoro-82M",
       "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
@@ -5688,6 +5733,21 @@
         "images/orig-fp32.png",
         "sdxl.vae.safetensors",
         "sdxl_vae.safetensors"
+      ]
+    },
+    {
+      "key": "madebyollin/taef1@b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+      "repo": "madebyollin/taef1",
+      "revision": "b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+      "resolvedSha": "b1b2d00e9e440cfbf3dedb34266864da86016ceb",
+      "servedRepo": "madebyollin/taef1",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "config.json",
+        "diffusion_pytorch_model.bin",
+        "diffusion_pytorch_model.safetensors"
       ]
     },
     {
