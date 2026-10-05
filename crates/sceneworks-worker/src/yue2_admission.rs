@@ -163,6 +163,17 @@ const FP8_COMPUTE_CAP_FLOOR: f32 = 8.9;
 /// established on every host/request. It is independent of CUDA's device-only 2 GiB reserve.
 const METAL_PROCESS_RESERVE_BYTES: u64 = 9 << 28;
 
+/// Additional explicit-FP32 Metal MoT footprint beyond the tensor formulas and the existing
+/// process reserve. In the owned M6 capture 37345072908 (app f63d1730), load's sampled
+/// 19_392_301_360-byte footprint exceeded its 16_938_656_000-byte estimate by 2.285 GiB;
+/// semantic and acoustic also exceeded their estimates. Round the largest residual up to 3 GiB.
+/// The fixture preserves the original revisions, estimates and samples. The pinned Metal
+/// allocator rounds FP32 conversion buffers beyond logical tensor bytes, but the complete
+/// footprint residual is not isolated. This is not a measured bound for other requests or tiers.
+/// Charge every FP32 MoT phase, including quantized routes; the existing retained high-water
+/// carries it into smaller decode tiles without changing the separately covered decode formula.
+const METAL_FP32_MOT_FOOTPRINT_BYTES: u64 = 3 << 30;
+
 /// Additional device residency during an explicit FP32 CUDA MoT load. In the owned M6 GPU1
 /// capture 37314391667, the 16_848_289_792-byte load peak exceeded the 14_522_736_896-byte
 /// resident-weight estimate plus the separate 2 GiB allocator reserve by 178_069_248 bytes.
@@ -1355,6 +1366,22 @@ pub(crate) fn estimate(
         // not a sum of mutually exclusive caches or repeated process reserves.
         let mut high_water = 0;
         for stage in &mut stages {
+            if shape.precision == Yue2Precision::Fp32
+                && matches!(
+                    stage.stage,
+                    Yue2Stage::Load
+                        | Yue2Stage::Plan
+                        | Yue2Stage::Semantic
+                        | Yue2Stage::AcousticPrefill
+                        | Yue2Stage::AcousticSolve
+                )
+            {
+                stage.terms.push(term(
+                    "FP32 Metal MoT footprint allowance",
+                    METAL_FP32_MOT_FOOTPRINT_BYTES,
+                    0,
+                ));
+            }
             stage.terms.push(term(
                 "Metal process and allocator reserve",
                 METAL_PROCESS_RESERVE_BYTES,

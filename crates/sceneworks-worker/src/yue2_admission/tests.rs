@@ -2244,6 +2244,163 @@ fn fixture_shape(fixture: &Value) -> Yue2Shape {
     )
 }
 
+/// The owned M6 capture completed FP32 synthesis but failed three stage-coverage checks.
+/// Retain its f63 observations as historical samples, not as validation of a new GPU run.
+#[test]
+fn fp32_metal_allowance_covers_saved_stages_without_changing_standard_controls() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/metal-fp32-stage-peaks.json")).unwrap();
+    let mut s = fixture_shape(&fixture);
+    s.precision = Yue2Precision::Fp32;
+    let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    let mut uncovered = 0;
+    for (key, observation) in fixture["measuredStages"].as_object().unwrap() {
+        let peak = observation["peakBytes"].as_u64().unwrap();
+        let original = fixture["originalStages"][key]["totalBytes"]
+            .as_u64()
+            .unwrap();
+        uncovered += usize::from(original < peak);
+        let stage_bytes = est
+            .stages
+            .iter()
+            .filter(|stage| match stage.stage {
+                Yue2Stage::AcousticPrefill | Yue2Stage::AcousticSolve => key == "acoustic",
+                other => key == other.key(),
+            })
+            .map(Yue2StageResidency::total_bytes)
+            .max()
+            .unwrap();
+        assert!(observation["samples"].as_u64().unwrap() > 0);
+        assert!(stage_bytes >= peak, "{key}: {stage_bytes} < saved {peak}");
+        if key == "decode" {
+            assert_eq!(stage_bytes, original, "standard decode was already covered");
+        } else {
+            assert_eq!(stage_bytes, original + METAL_FP32_MOT_FOOTPRINT_BYTES);
+        }
+    }
+    assert_eq!(uncovered, 3);
+    // The captured host had over 109 GB available before this case. At that ample budget the
+    // amended accounting still sends the same production controls to the unchanged M6 provider.
+    let admitted = admitted(decide("yue2", &s, Some(&metal(109_672_284_160)), 0));
+    assert_eq!(admitted.controls, Yue2Controls::production());
+    let memory = s.pins.memory_block(&admitted.controls);
+    assert_eq!(memory, Yue2Controls::production().generation_memory());
+    assert!(!memory.stage_residency);
+    assert_eq!(memory.attention_chunk_size, Some(100_663_296));
+    assert_eq!(memory.decode_tile_edge, Some(224));
+    let small_decode = priced(
+        &s,
+        Yue2Backend::Metal,
+        Yue2Controls {
+            decode_core_frames: 1,
+            ..Yue2Controls::production()
+        },
+    );
+    assert_eq!(
+        small_decode.stage(Yue2Stage::Decode).unwrap().total_bytes(),
+        small_decode
+            .stage(Yue2Stage::AcousticSolve)
+            .unwrap()
+            .total_bytes(),
+        "a smaller decoder retains the preceding FP32 MoT high-water"
+    );
+    // A host below the saved load footprint must now refuse before loading, even though the
+    // earlier estimator's load and semantic stages fit and decode could choose a smaller tile.
+    let message = refused(decide("yue2", &s, Some(&metal(19_392_301_359)), 0));
+    assert!(message.contains("load"), "{message}");
+}
+
+#[test]
+fn fp32_metal_allowance_applies_to_all_mot_phases_and_quantized_routes() {
+    for tier in [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4] {
+        let mut s = shape(tier, &default_request());
+        s.precision = Yue2Precision::Fp32;
+        s.transcription_secs = Some(30);
+        let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        for phase in [
+            Yue2Stage::Load,
+            Yue2Stage::Plan,
+            Yue2Stage::Semantic,
+            Yue2Stage::AcousticPrefill,
+            Yue2Stage::AcousticSolve,
+        ] {
+            assert!(
+                est.stage(phase).is_some(),
+                "{tier:?} must exercise {phase:?}"
+            );
+        }
+        for stage in &est.stages {
+            let allowances: Vec<_> = stage
+                .terms
+                .iter()
+                .filter(|term| term.what == "FP32 Metal MoT footprint allowance")
+                .collect();
+            if matches!(stage.stage, Yue2Stage::Transcription | Yue2Stage::Decode) {
+                assert!(allowances.is_empty(), "{tier:?} {:?}", stage.stage);
+            } else {
+                assert_eq!(allowances.len(), 1, "{tier:?} {:?}", stage.stage);
+                assert_eq!(allowances[0].device_bytes, 3 << 30);
+                assert_eq!(allowances[0].host_bytes, 0);
+            }
+        }
+        // All tiers retain this load floor even when no sampling or decoder is requested.
+        s.transcription_secs = None;
+        s.work = Yue2Work::PlanOnly {
+            planning: Yue2Planning::Off,
+        };
+        let load_only = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        let (_, needed) = load_only.unified_floor();
+        assert_eq!(
+            needed,
+            load_only.weights.restored_device_bytes
+                + METAL_PROCESS_RESERVE_BYTES
+                + METAL_FP32_MOT_FOOTPRINT_BYTES
+        );
+        admitted(decide("yue2", &s, Some(&metal(needed)), 0));
+        refused(decide("yue2", &s, Some(&metal(needed - 1)), 0));
+    }
+}
+
+#[test]
+fn fp32_metal_allowance_preserves_other_backends_and_precision_policies() {
+    for tier in [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4] {
+        for (backend, precision) in [
+            (Yue2Backend::Cpu, Yue2Precision::Default),
+            (Yue2Backend::Cpu, Yue2Precision::Fp32),
+            (Yue2Backend::Cuda, Yue2Precision::Default),
+            (Yue2Backend::Cuda, Yue2Precision::StrictBf16),
+            (Yue2Backend::Cuda, Yue2Precision::Fp32),
+            (Yue2Backend::Metal, Yue2Precision::Default),
+            (Yue2Backend::Metal, Yue2Precision::StrictBf16),
+        ] {
+            let mut s = shape(tier, &default_request());
+            s.precision = precision;
+            let est = priced(&s, backend, Yue2Controls::production());
+            assert!(est
+                .stages
+                .iter()
+                .flat_map(|stage| &stage.terms)
+                .all(|term| { term.what != "FP32 Metal MoT footprint allowance" }));
+            let load = est.stage(Yue2Stage::Load).unwrap();
+            let extra = match (backend, precision) {
+                (Yue2Backend::Metal, _) => METAL_PROCESS_RESERVE_BYTES,
+                (Yue2Backend::Cuda, Yue2Precision::Fp32) => CUDA_FP32_LOAD_TRANSIENT_BYTES,
+                _ => 0,
+            };
+            assert_eq!(
+                load.device_bytes(),
+                est.weights.restored_device_bytes + extra
+            );
+            if backend == Yue2Backend::Cpu {
+                s.precision = Yue2Precision::Default;
+                assert_eq!(est, priced(&s, backend, Yue2Controls::production()));
+            }
+        }
+    }
+    assert_eq!(dedicated_reserve_bytes(), 2 << 30);
+    assert_eq!(METAL_PROCESS_RESERVE_BYTES, 9 << 28);
+}
+
 #[test]
 fn metal_estimates_cover_every_saved_stage_peak() {
     let fixtures = metal_profile_fixtures();
