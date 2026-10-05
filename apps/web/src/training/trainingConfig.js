@@ -46,6 +46,21 @@ export const gradientNoiseGammaDefault = 0.55;
 export const resolutionBucketsMax = 8;
 export const resolutionBucketRepeatsMax = 100;
 export const resolutionBucketStride = 32;
+// Depth anchoring (epic 2123, sc-2125): an auxiliary loss that decodes the model's prediction with
+// a tiny decoder, runs a frozen Depth Anything V2 on it, and pulls its depth toward the training
+// image's. Off (empty weight) by default; enabling seeds the upstream DA2-Small weight. These
+// bounds are the API's (crates/sceneworks-core/src/training/depth_anchoring.rs) — a Rust parity
+// test reads these lines, keep them equal.
+export const depthAnchoringWeightMax = 1;
+export const depthAnchoringWeightSuggested = 0.1;
+export const depthAnchoringEveryMax = 16;
+export const depthAnchoringEveryDefault = 2;
+export const depthAnchoringModelOptions = ["small", "base", "large"];
+export const depthAnchoringModelLabels = {
+  small: "Small (fast)",
+  base: "Base",
+  large: "Large (much smaller weight)",
+};
 
 // The target's advertised training resolutions, ascending (empty when it advertises none).
 function targetResolutions(target) {
@@ -85,6 +100,13 @@ export function targetSupportsGradientNoise(target) {
 // worker test; withheld for LTX-2.5). Absent means unsupported.
 export function targetSupportsResolutionBuckets(target) {
   return target?.limits?.supportsResolutionBuckets === true;
+}
+
+// Whether the target's trainer on the serving platform honors depth anchoring — the same
+// mechanism as weight noise: the API projects the platform-effective `limits.supportsDepthAnchoring`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsDepthAnchoring(target) {
+  return target?.limits?.supportsDepthAnchoring === true;
 }
 export const optimizerLabels = {
   adam: "Adam",
@@ -403,6 +425,13 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     gradientNoiseGamma: numericDraft(advanced.gradientNoiseGamma),
     // null = one resolution (the default); see seedResolutionBuckets.
     resolutionBuckets: resolutionBucketsDraft(advanced.resolutionBuckets),
+    // Empty weight = depth anchoring off (the default); see depthAnchoringWeightSuggested. The
+    // other knobs only matter (and only reach the job) while it is on.
+    depthAnchoringWeight: numericDraft(advanced.depthAnchoringWeight),
+    depthAnchoringModel: asText(advanced.depthAnchoringModel || depthAnchoringModelOptions[0]),
+    depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
+    depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
+    depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -608,6 +637,9 @@ export function configValidation(
     }
   }
   validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
+  for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
   // in the Train button's one validity summary rather than a separate `disabled` term.
   // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
@@ -755,6 +787,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           repeats: numberFromDraft(row?.repeats),
         }))
       : undefined,
+    ...depthAnchoringSnapshot(configDraft),
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
@@ -813,4 +846,64 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       advanced,
     },
   };
+}
+
+// Depth anchoring is on whenever the draft carries a weight (empty = off).
+export function depthAnchoringEnabled(configDraft) {
+  return String(configDraft?.depthAnchoringWeight ?? "").trim() !== "";
+}
+
+// Field issues for the depth-anchoring knobs — the API's bounds (E6): weight in
+// [0, depthAnchoringWeightMax], a known model size, a [0, 1] noise window with min <= max, and a
+// whole alternation period in [1, depthAnchoringEveryMax]. Checked only while enabled.
+export function depthAnchoringIssues(configDraft, selectedTarget) {
+  if (!depthAnchoringEnabled(configDraft)) return [];
+  const issues = [];
+  const weight = numberFromDraft(configDraft.depthAnchoringWeight);
+  if (weight === null || weight < 0 || weight > depthAnchoringWeightMax) {
+    issues.push(["depthAnchoringWeight", `Depth anchoring weight must be between 0 and ${depthAnchoringWeightMax}`]);
+  } else if (weight > 0 && selectedTarget && !targetSupportsDepthAnchoring(selectedTarget)) {
+    // The toggle is hidden for such a target, so this names no input (field null): the value can
+    // only arrive from a carried-over draft, and the API would refuse it anyway.
+    issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
+    return issues;
+  }
+  if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
+    issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);
+  }
+  const window = {};
+  for (const field of ["depthAnchoringMinT", "depthAnchoringMaxT"]) {
+    if (!String(configDraft[field] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[field]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([field, "Noise window bounds must be between 0 and 1"]);
+    } else {
+      window[field] = t;
+    }
+  }
+  const minT = window.depthAnchoringMinT ?? 0;
+  const maxT = window.depthAnchoringMaxT ?? 1;
+  if (minT > maxT) {
+    issues.push(["depthAnchoringMaxT", "Noise window max must be at least its min"]);
+  }
+  if (String(configDraft.depthAnchoringEvery ?? "").trim()) {
+    const every = numberFromDraft(configDraft.depthAnchoringEvery);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > depthAnchoringEveryMax) {
+      issues.push(["depthAnchoringEvery", `Alternation period must be a whole number from 1 to ${depthAnchoringEveryMax}`]);
+    }
+  }
+  return issues;
+}
+
+// The depth-anchoring keys a job snapshot carries: none while off, so a default job's snapshot
+// is unchanged; the weight plus every set knob while on (unset knobs take the API defaults).
+export function depthAnchoringSnapshot(configDraft) {
+  if (!depthAnchoringEnabled(configDraft)) return {};
+  return compactObject({
+    depthAnchoringWeight: numberFromDraft(configDraft.depthAnchoringWeight),
+    depthAnchoringModel: asText(configDraft.depthAnchoringModel).trim(),
+    depthAnchoringMinT: numberFromDraft(configDraft.depthAnchoringMinT),
+    depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
+    depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
+  });
 }

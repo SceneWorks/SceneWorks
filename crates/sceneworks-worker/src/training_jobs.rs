@@ -23,6 +23,9 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
+use sceneworks_core::training::depth_anchoring::{
+    depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
+};
 use sceneworks_core::training::{
     parse_resolution_buckets, TrainingPlan, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX,
     GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX,
@@ -876,6 +879,28 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 depth anchoring (sc-2125): strictly parsed (the same parser the API validates
+    // with), refused for any trainer whose descriptor does not declare it (E3) or whose latent
+    // family has no cataloged tiny x0 decoder — before any load, on both the dry and the real path.
+    // Whether the auxiliary weights are installed is checked where the request is built
+    // (`apply_depth_anchoring`), which has the data dir.
+    let depth = depth_anchoring_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if depth.is_some() {
+        if !descriptor.techniques.depth_anchoring {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support depth anchoring \
+                 ({DEPTH_ANCHORING_WEIGHT_KEY})."
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no tiny x0 decoder for depth anchoring \
+                 ({DEPTH_ANCHORING_WEIGHT_KEY})."
+            )));
+        }
+    }
+
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
     // refuses it (E3) — before any load, on both the dry and the real path.
@@ -984,9 +1009,11 @@ fn training_request_from_plan(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    let mut config = finalize_training_config(map_training_config(&plan.config), plan);
+    apply_depth_anchoring(settings, plan, &mut config)?;
     Ok(TrainingRequest {
         items,
-        config: finalize_training_config(map_training_config(&plan.config), plan),
+        config,
         output_dir: resolve_training_output_dir(
             settings,
             &plan.output.output_dir,
@@ -1018,8 +1045,9 @@ fn validate_weights_free_training_request(
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
-    // Epic 2123: the engine's own technique floor on the MAPPED request (weight / gradient noise),
-    // so the worker refuses exactly what the trainer would — before any model load.
+    // Epic 2123: the engine's own technique floor over the fully mapped request (weight / gradient
+    // noise, schedule shape, declared support, aux model directories present), so the worker
+    // refuses exactly what the trainer would — before any model load.
     gen_core::train::validate_training_techniques(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
@@ -1169,6 +1197,90 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
             "Training config field '{key}' must be a non-negative integer."
         ))),
     }
+}
+
+/// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
+/// the engine's typed [`gen_core::DepthAnchoringConfig`] and resolve the two auxiliary checkpoints
+/// it loads — the trainer family's tiny x0 decoder (TAEF1 for Z-Image) and the selected
+/// Depth-Anything-V2 — from the installed model library. A missing checkpoint is refused, naming
+/// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the config
+/// untouched, so a legacy plan maps exactly as before.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_depth_anchoring(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
+
+    let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' has no tiny x0 decoder for depth anchoring."
+        ))
+    })?;
+    let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
+    })?;
+    config.perceptual_decoder_dir = Some(installed_aux_model_dir(settings, decoder)?);
+    config.depth_anchoring = gen_core::DepthAnchoringConfig {
+        schedule: gen_core::AuxLossSchedule {
+            weight: depth.weight as f32,
+            t_min: depth.min_t as f32,
+            t_max: depth.max_t as f32,
+            every_n: depth.every,
+        },
+        model_size: gen_core::DepthModelSize::parse(depth.model).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Unknown Depth Anything V2 size '{}'.",
+                depth.model
+            ))
+        })?,
+        model_dir: Some(installed_aux_model_dir(settings, da2)?),
+    };
+    Ok(())
+}
+
+/// The installed snapshot directory of an auxiliary training model (its pinned revision with the
+/// weight file present), installed through the Model Manager into the app-managed Hugging Face
+/// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
+/// model.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn installed_aux_model_dir(
+    settings: &Settings,
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+) -> WorkerResult<PathBuf> {
+    if let Some(dir) = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        model.repo,
+        model.revision,
+    ) {
+        if dir.join(model.file).is_file() {
+            return Ok(dir);
+        }
+    }
+    Err(WorkerError::InvalidPayload(format!(
+        "Depth anchoring needs the '{}' model ({}), which is not installed. Install it from the \
+         Models screen.",
+        model.label, model.id
+    )))
 }
 
 /// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
@@ -1633,6 +1745,11 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
         // `resolution`, exactly as before).
         resolution_buckets: map_resolution_buckets(advanced),
+        // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
+        // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
+        // the plan enables it.
+        depth_anchoring: Default::default(),
+        perceptual_decoder_dir: None,
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -3457,6 +3574,46 @@ mod tests {
         );
     }
 
+    /// sc-2125 review (S1 mechanism): the catalog's `supportsDepthAnchoring` flag (which gates the
+    /// web toggle and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.depth_anchoring` for every target this runtime can train — the builtin (MLX)
+    /// value on macOS, the Candle projection off-Mac. Mutation: drop the flag from the Z-Image
+    /// target (or mark SDXL) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_depth_anchoring_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    &target
+                ),
+                descriptor.techniques.depth_anchoring,
+                "{} ({engine_id}): catalog supportsDepthAnchoring disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+
     /// sc-2127 review: the catalog's `supportsResolutionBuckets` flag (which gates the web toggle
     /// and submit-time validation) must equal the linked trainer descriptor's
     /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
@@ -3788,6 +3945,209 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// sc-2125 (epic 2123 E3): the shared dry/real preflight refuses depth anchoring on a trainer
+    /// whose descriptor does not declare it, refuses malformed values naming the key, and admits it
+    /// where the active runtime's trainer declares it (Z-Image on MLX). Mutation: drop the
+    /// `descriptor.techniques.depth_anchoring` check ⇒ the SDXL case is admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_depth_anchoring_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let on = [("depthAnchoringWeight", json!(0.1))];
+
+        // Off is always admitted.
+        assert!(validate_training_target_config(&plan("sdxl_lora", "sdxl", &[])).is_ok());
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("depthAnchoringWeight", json!(0))]
+        ))
+        .is_ok());
+
+        // SDXL declares no depth anchoring on either backend.
+        assert!(err(plan("sdxl_lora", "sdxl", &on)).contains("does not support depth anchoring"));
+
+        // Z-Image follows its active descriptor: admitted on MLX, refused on Candle (until S8).
+        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques
+            .depth_anchoring;
+        assert_eq!(
+            declared,
+            cfg!(target_os = "macos"),
+            "only Z-Image MLX declares depth anchoring today"
+        );
+        let z_image = plan("z_image_lora", "z_image_turbo", &on);
+        if declared {
+            validate_training_target_config(&z_image).expect("Z-Image MLX admits depth anchoring");
+        } else {
+            assert!(err(z_image).contains("does not support depth anchoring"));
+        }
+
+        // Malformed values never silently map to off — each is refused naming its key.
+        for (key, bad) in [
+            ("depthAnchoringWeight", json!(-0.1)),
+            ("depthAnchoringWeight", json!("0.1")),
+            ("depthAnchoringModel", json!("giant")),
+            ("depthAnchoringMaxT", json!(1.5)),
+            ("depthAnchoringEvery", json!(0)),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
+
+    /// Lay down a fake installed HF snapshot file (`models--<org>--<name>/snapshots/<rev>/<file>`)
+    /// under `hub` and return the snapshot directory.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn fake_snapshot(hub: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
+        let snapshot = hub
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join(file), b"weights").unwrap();
+        snapshot
+    }
+
+    /// sc-2125: an enabled depth-anchoring plan maps onto the engine's typed config — schedule,
+    /// model size — and resolves the TAEF1 decoder and the selected Depth-Anything-V2 from the
+    /// installed library at their pinned revisions; a missing (or wrong-revision) checkpoint is
+    /// refused naming the catalog model to install; off leaves the config untouched. Mutation:
+    /// resolve with the unpinned `huggingface_snapshot_dir` ⇒ the wrong-revision case resolves ⇒
+    /// red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn depth_anchoring_maps_the_schedule_and_resolves_installed_aux_models() {
+        use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("depthAnchoringWeight", json!(0.05)),
+            ("depthAnchoringModel", json!("base")),
+            ("depthAnchoringMinT", json!(0.2)),
+            ("depthAnchoringMaxT", json!(0.9)),
+            ("depthAnchoringEvery", json!(3)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_depth_anchoring(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a not-installed refusal, got {other:?}"),
+            }
+        };
+
+        // Off: untouched, and nothing needs to be installed.
+        let mut config = map_training_config(&off_plan.config);
+        apply_depth_anchoring(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.depth_anchoring.schedule.is_enabled());
+        assert_eq!(config.perceptual_decoder_dir, None);
+        assert_eq!(config.depth_anchoring.model_dir, None);
+
+        // Nothing installed ⇒ the decoder is named first.
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        let base = &DEPTH_ANYTHING_V2_MODELS[1];
+        assert!(refusal(&plan).contains(base.id));
+        // The wrong revision of the right repo does not count as installed.
+        fake_snapshot(
+            &hub,
+            base.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            base.file,
+        );
+        assert!(refusal(&plan).contains(base.id));
+        let da2 = fake_snapshot(&hub, base.repo, base.revision, base.file);
+
+        let mut config = map_training_config(&plan.config);
+        apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        assert_eq!(
+            canon(config.depth_anchoring.model_dir.as_ref().unwrap()),
+            canon(&da2)
+        );
+        assert_eq!(
+            config.depth_anchoring.model_size,
+            gen_core::DepthModelSize::Base
+        );
+        assert_eq!(
+            config.depth_anchoring.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.05,
+                t_min: 0.2,
+                t_max: 0.9,
+                every_n: 3,
+            }
+        );
+
+        // DA2 Small resolves through the same pinned catalog install (no job-time side cache).
+        let mut small = plan.clone();
+        small
+            .config
+            .advanced
+            .insert("depthAnchoringModel".to_owned(), json!("small"));
+        let small_model = &DEPTH_ANYTHING_V2_MODELS[0];
+        assert!(refusal(&small).contains(small_model.id));
+        let small_dir = fake_snapshot(
+            &hub,
+            small_model.repo,
+            small_model.revision,
+            small_model.file,
+        );
+        let mut config = map_training_config(&small.config);
+        apply_depth_anchoring(&settings, &small, &mut config).unwrap();
+        assert_eq!(
+            canon(config.depth_anchoring.model_dir.as_ref().unwrap()),
+            canon(&small_dir)
+        );
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
@@ -5436,6 +5796,8 @@ mod tests {
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5554,6 +5916,8 @@ mod tests {
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5675,6 +6039,8 @@ mod tests {
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5834,6 +6200,8 @@ mod tests {
             gradient_noise_eta: 0.0,
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            perceptual_decoder_dir: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

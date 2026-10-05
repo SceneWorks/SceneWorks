@@ -13,7 +13,7 @@ use sceneworks_core::training::{
     RESOLUTION_BUCKETS_MAX, RESOLUTION_BUCKET_REPEATS_MAX, RESOLUTION_BUCKET_STRIDE,
 };
 use sceneworks_core::training::{
-    target_supports_resolution_buckets,
+    project_candle_training_limits, target_supports_resolution_buckets,
 };
 use sceneworks_core::training::{target_supports_gradient_noise, target_supports_weight_noise};
 use serde::de::DeserializeOwned;
@@ -1797,6 +1797,183 @@ fn web_weight_noise_bound_matches_the_api_bound() {
     );
 }
 
+/// Build a Z-Image plan whose `advanced` carries the given extra keys.
+fn build_plan_with_depth_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_da",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_da",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_da"),
+        file_name: "da.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-2125 (epic 2123 E6): in-range depth-anchoring values survive into the plan verbatim; every
+/// out-of-range / wrong-type value is a field-level error naming the offending key.
+#[test]
+fn build_training_plan_validates_depth_anchoring_as_field_errors() {
+    use sceneworks_core::training::depth_anchoring::*;
+    let good = [
+        (
+            DEPTH_ANCHORING_WEIGHT_KEY,
+            json!(DEPTH_ANCHORING_WEIGHT_SUGGESTED),
+        ),
+        (DEPTH_ANCHORING_MODEL_KEY, json!("large")),
+        (DEPTH_ANCHORING_MIN_T_KEY, json!(0.2)),
+        (DEPTH_ANCHORING_MAX_T_KEY, json!(0.9)),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(DEPTH_ANCHORING_EVERY_MAX)),
+    ];
+    let plan = build_plan_with_depth_advanced(&good).expect("in-range depth anchoring is accepted");
+    for (key, value) in &good {
+        assert_eq!(&plan.config.advanced[*key], value, "{key}");
+    }
+    let settings = depth_anchoring_settings(&plan.config.advanced)
+        .unwrap()
+        .expect("weight > 0 is on");
+    assert_eq!(settings.model, "large");
+    assert_eq!(settings.every, DEPTH_ANCHORING_EVERY_MAX as u32);
+    // Weight 0 (or absent) is off.
+    let off = build_plan_with_depth_advanced(&[(DEPTH_ANCHORING_WEIGHT_KEY, json!(0))]).unwrap();
+    assert_eq!(
+        depth_anchoring_settings(&off.config.advanced).unwrap(),
+        None
+    );
+
+    for (key, value, extra) in [
+        (DEPTH_ANCHORING_WEIGHT_KEY, json!(-0.01), None),
+        (
+            DEPTH_ANCHORING_WEIGHT_KEY,
+            json!(DEPTH_ANCHORING_WEIGHT_MAX + 0.001),
+            None,
+        ),
+        (DEPTH_ANCHORING_WEIGHT_KEY, json!("0.1"), None),
+        (DEPTH_ANCHORING_MODEL_KEY, json!("giant"), None),
+        (DEPTH_ANCHORING_MIN_T_KEY, json!(-0.1), None),
+        (DEPTH_ANCHORING_MAX_T_KEY, json!(1.5), None),
+        (
+            DEPTH_ANCHORING_MAX_T_KEY,
+            json!(0.3),
+            Some((DEPTH_ANCHORING_MIN_T_KEY, json!(0.6))),
+        ),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(0), None),
+        (
+            DEPTH_ANCHORING_EVERY_KEY,
+            json!(DEPTH_ANCHORING_EVERY_MAX + 1),
+            None,
+        ),
+        (DEPTH_ANCHORING_EVERY_KEY, json!(2.5), None),
+    ] {
+        let mut advanced = vec![
+            (DEPTH_ANCHORING_WEIGHT_KEY, json!(0.1)),
+            (key, value.clone()),
+        ];
+        if let Some(pair) = extra {
+            advanced.push(pair);
+        }
+        match build_plan_with_depth_advanced(&advanced) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, key, "{key}={value}")
+            }
+            other => panic!("{key}={value}: expected a field error naming {key}, got {other:?}"),
+        }
+    }
+}
+
+/// Read `export const <name> = <literal>;` from the web training config module.
+fn web_training_const(name: &str) -> String {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let prefix = format!("export const {name} = ");
+    let line = source
+        .lines()
+        .find(|line| line.starts_with(&prefix))
+        .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+    line[prefix.len()..].trim_end_matches(';').trim().to_owned()
+}
+
+/// sc-2125 (epic 2123 E6): the web form's depth-anchoring bounds are the API's bounds.
+#[test]
+fn web_depth_anchoring_bounds_match_the_api_bounds() {
+    use sceneworks_core::training::depth_anchoring::*;
+    let num = |name: &str| -> f64 {
+        web_training_const(name)
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not numeric ({error})"))
+    };
+    assert_eq!(num("depthAnchoringWeightMax"), DEPTH_ANCHORING_WEIGHT_MAX);
+    assert_eq!(
+        num("depthAnchoringWeightSuggested"),
+        DEPTH_ANCHORING_WEIGHT_SUGGESTED
+    );
+    assert_eq!(
+        num("depthAnchoringEveryMax"),
+        DEPTH_ANCHORING_EVERY_MAX as f64
+    );
+    assert_eq!(
+        num("depthAnchoringEveryDefault"),
+        DEPTH_ANCHORING_EVERY_DEFAULT as f64
+    );
+    let models: Vec<String> =
+        serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
+            .expect("depthAnchoringModelOptions is a JSON-compatible string array");
+    assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
+}
+
+/// sc-2125: every auxiliary model depth anchoring loads is a `componentOnly` utility entry in the
+/// shipped catalog whose repo / revision / file are exactly the worker's resolution constants — so
+/// "install it from the Models screen" installs the bytes the trainer loads.
+#[test]
+fn depth_anchoring_aux_models_are_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    for aux in std::iter::once(&TAEF1_MODEL).chain(DEPTH_ANYTHING_V2_MODELS.iter()) {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == aux.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", aux.id));
+        assert_eq!(entry["type"], "utility", "{}", aux.id);
+        assert_eq!(entry["componentOnly"], true, "{}", aux.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], aux.repo, "{}", aux.id);
+        assert_eq!(download["revision"], aux.revision, "{}", aux.id);
+        assert!(
+            download["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == aux.file),
+            "{} does not download {}",
+            aux.id,
+            aux.file
+        );
+    }
+}
+
 /// Build a Z-Image plan (target resolutions 512/768/1024) whose `advanced` carries
 /// `resolutionBuckets`.
 fn build_plan_with_buckets(buckets: Value) -> Result<TrainingPlan, TrainingPlanError> {
@@ -2180,5 +2357,63 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
             );
         }
         other => panic!("expected a resolutionBuckets field error, got {other:?}"),
+    }
+}
+
+/// sc-2125 review (S1 mechanism): only targets whose platform trainer declares depth anchoring
+/// advertise it, and an enabled depth weight on any other target is a submit-time
+/// `depthAnchoringWeight` field error. The Candle projection withdraws Z-Image's MLX-only support.
+/// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
+/// the SDXL case is accepted ⇒ red.
+#[test]
+fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_weight = |target: &sceneworks_core::training::TrainingTarget, weight: Value| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("depthAnchoringWeight".to_owned(), weight);
+        validate_training_config_for_target(target, &config)
+    };
+
+    let advertising: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| target_supports_depth_anchoring(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(
+        advertising,
+        ["z_image_turbo_lora"],
+        "only Z-Image MLX declares depth anchoring"
+    );
+
+    let z_image = by_id("z_image_turbo_lora");
+    with_weight(&z_image, json!(0.1)).expect("Z-Image MLX admits it");
+
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    assert!(!target_supports_depth_anchoring(&z_image_candle));
+
+    for target in [by_id("sdxl_lora"), z_image_candle] {
+        with_weight(&target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match with_weight(&target, json!(0.1)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, "depthAnchoringWeight", "{}", target.id)
+            }
+            other => panic!(
+                "{}: expected a depthAnchoringWeight field error, got {other:?}",
+                target.id
+            ),
+        }
     }
 }

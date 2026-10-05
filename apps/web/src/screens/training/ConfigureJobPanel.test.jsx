@@ -824,3 +824,81 @@ describe("ConfigureJobPanel resolution buckets", () => {
     expect(editor().getAttribute("aria-invalid")).toBe("true");
   });
 });
+
+// sc-2125 (epic 2123): depth anchoring is an off-by-default advanced toggle, offered only for a
+// target whose platform trainer declares it (`limits.supportsDepthAnchoring`, the same mechanism as
+// weight noise). Checking it seeds the upstream DA2-Small weight; its knobs only exist while it is
+// on, and an invalid knob is outlined.
+describe("ConfigureJobPanel depth anchoring", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsDepthAnchoring: true },
+  };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Depth anchoring"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds 0.1 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle()).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(field("Depth anchoring weight")).toBeUndefined();
+    expect(field("Depth model")).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", "0.1"]]);
+  });
+
+  // Review minor: a target that does not advertise depth anchoring offers neither the toggle nor
+  // its knobs (even with a carried-over weight). Mutation: render the toggle unconditionally ⇒ red.
+  it("offers no toggle or knobs for a target that does not support depth anchoring (SDXL)", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(field("Depth anchoring weight")).toBeUndefined();
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small" } });
+    expect(toggle().checked).toBe(true);
+    expect(field("Depth anchoring weight").value).toBe("0.1");
+    expect(field("Depth anchoring weight").getAttribute("max")).toBe("1");
+    expect([...field("Depth model").options].map((o) => o.value)).toEqual(["small", "base", "large"]);
+    expect(field("Depth every N steps").getAttribute("max")).toBe("16");
+    expect(field("Depth window min")).toBeTruthy();
+    expect(field("Depth window max")).toBeTruthy();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", ""]]);
+  });
+
+  it("outlines an out-of-range alternation period", () => {
+    mountWith({
+      draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small", depthAnchoringEvery: "40" },
+    });
+    expect(field("Depth every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});

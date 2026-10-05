@@ -82,6 +82,7 @@
           200,
           6000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsWeightNoise": true

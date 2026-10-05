@@ -139,6 +139,25 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     }
 }
 
+/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
+/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
+/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_depth_anchoring_support() {
+    let advertising = |candle: bool| -> Vec<String> {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| {
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(target)
+            })
+            .map(|target| target.id.clone())
+            .collect()
+    };
+    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
+    assert!(advertising(true).is_empty());
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

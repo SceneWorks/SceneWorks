@@ -230,6 +230,21 @@ pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
 /// Default annealing exponent (the paper's and upstream's 0.55).
 pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
 
+/// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend. Since
+/// sc-24827 every adapter-noise and resolution-bucket flag is the same on both backends, so the only
+/// flag left to withdraw is depth anchoring: the Z-Image MLX trainer declares it and no Candle
+/// trainer does yet (sc-2125; S8 adds them). Callers that serve the Candle catalog (the API off
+/// macOS) apply it, and the worker drift test pins the projected flag to the Candle descriptors.
+pub fn project_candle_training_limits(target: &mut TrainingTarget) {
+    target
+        .limits
+        .remove(depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT);
+}
+
+/// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
+/// catalog models.
+pub mod depth_anchoring;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -1690,7 +1705,10 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-2125): the Z-Image MLX trainer declares it. Removed for
+            // Candle by `project_candle_training_limits`.
+            "supportsDepthAnchoring": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -3251,6 +3269,7 @@ pub fn validate_training_config_for_target(
     validate_training_config(config)?;
     validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
+    depth_anchoring::validate_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3521,6 +3540,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
             message,
         }
     })?;
+    depth_anchoring::validate(config)?;
     Ok(())
 }
 

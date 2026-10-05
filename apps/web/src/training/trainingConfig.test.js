@@ -14,6 +14,11 @@ import {
   gradientNoiseGammaMax,
   targetSupportsGradientNoise,
   trainingConfigSnapshot,
+  targetSupportsDepthAnchoring,
+  depthAnchoringEveryMax,
+  depthAnchoringModelOptions,
+  depthAnchoringWeightMax,
+  depthAnchoringWeightSuggested,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -662,6 +667,99 @@ describe("weight noise (sc-24826)", () => {
   });
 });
 
+// sc-2125 (epic 2123): depth anchoring is off by default, round-trips from the form draft into the
+// job's training snapshot only while on, and every knob is bounded by the API's limits (E6).
+describe("depth anchoring (sc-2125)", () => {
+  // Depth anchoring is offered only where the target advertises it (MLX Z-Image today).
+  const depthTarget = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: depthTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+  const ctx = { activeDataset: dataset, selectedTarget: depthTarget };
+  const issuesOn = (draft, field) =>
+    configValidation({ ...whole, ...draft }, ctx).filter((entry) => entry.field === field);
+
+  it("seeds off and leaves a default snapshot without any depth key", () => {
+    const draft = configDraftFromTarget(depthTarget, dataset, ["auto"]);
+    expect(draft.depthAnchoringWeight).toBe("");
+    expect(draft.depthAnchoringModel).toBe("small");
+    const advanced = snap(draft).config.advanced;
+    for (const key of Object.keys(advanced)) {
+      expect(key.startsWith("depthAnchoring")).toBe(false);
+    }
+  });
+
+  it("round-trips an enabled configuration into the snapshot as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(depthTarget, dataset, ["auto"]),
+      depthAnchoringWeight: String(depthAnchoringWeightSuggested),
+      depthAnchoringModel: "large",
+      depthAnchoringMinT: "0.2",
+      depthAnchoringMaxT: "0.8",
+      depthAnchoringEvery: "3",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.depthAnchoringWeight).toBe(0.1);
+    expect(advanced.depthAnchoringModel).toBe("large");
+    expect(advanced.depthAnchoringMinT).toBe(0.2);
+    expect(advanced.depthAnchoringMaxT).toBe(0.8);
+    expect(advanced.depthAnchoringEvery).toBe(3);
+    // A preset/target carrying the keys seeds the draft back.
+    const seeded = configDraftFromTarget(
+      {
+        ...target,
+        defaults: { ...target.defaults, advanced: { networkType: "lora", depthAnchoringWeight: 0.05, depthAnchoringModel: "base" } },
+      },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.depthAnchoringWeight).toBe("0.05");
+    expect(seeded.depthAnchoringModel).toBe("base");
+  });
+
+  it("uses the API's bounds", () => {
+    expect(depthAnchoringWeightMax).toBe(1);
+    expect(depthAnchoringEveryMax).toBe(16);
+    expect(depthAnchoringModelOptions).toEqual(["small", "base", "large"]);
+  });
+
+  it("flags out-of-range knobs on their own fields, only while enabled", () => {
+    // Off: stray knob values are not judged.
+    expect(issuesOn({ depthAnchoringEvery: "0" }, "depthAnchoringEvery")).toEqual([]);
+    const on = { depthAnchoringWeight: "0.1" };
+    expect(issuesOn(on, "depthAnchoringWeight")).toEqual([]);
+    for (const bad of ["-0.1", String(depthAnchoringWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ depthAnchoringWeight: bad }, "depthAnchoringWeight")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, depthAnchoringModel: "giant" }, "depthAnchoringModel")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "-0.1" }, "depthAnchoringMinT")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMaxT: "1.5" }, "depthAnchoringMaxT")).toHaveLength(1);
+    expect(issuesOn({ ...on, depthAnchoringMinT: "0.7", depthAnchoringMaxT: "0.3" }, "depthAnchoringMaxT")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(depthAnchoringEveryMax + 1)]) {
+      expect(issuesOn({ ...on, depthAnchoringEvery: bad }, "depthAnchoringEvery")).toHaveLength(1);
+    }
+    for (const ok of ["1", "2", String(depthAnchoringEveryMax)]) {
+      expect(issuesOn({ ...on, depthAnchoringEvery: ok }, "depthAnchoringEvery")).toEqual([]);
+    }
+  });
+});
+
 // sc-24827 (epic 2123): annealed gradient noise is off by default, round-trips eta (+ gamma, which
 // only travels with an eta) from the draft into the job snapshot, and is bounded by the API's max.
 describe("gradient noise (sc-24827)", () => {
@@ -881,5 +979,39 @@ describe("weight noise target support (sc-24826)", () => {
     const supported = { ...target, limits: { ...target.limits, supportsWeightNoise: true } };
     expect(configValidation({ ...whole, weightNoiseSigma: "0.0125" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, weightNoiseSigma: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
+  });
+});
+
+// sc-2125: depth anchoring follows the S1 target-support mechanism (`limits.supportsDepthAnchoring`).
+describe("depth anchoring target support (sc-2125)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+
+  it("reads only an explicit true flag as support", () => {
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: true } })).toBe(true);
+    expect(targetSupportsDepthAnchoring({ limits: { supportsDepthAnchoring: "true" } })).toBe(false);
+    expect(targetSupportsDepthAnchoring({ limits: {} })).toBe(false);
+    expect(targetSupportsDepthAnchoring(null)).toBe(false);
+  });
+
+  it("blocks a carried-over depth weight on a target without support", () => {
+    const issues = configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: target });
+    expect(issues.map((entry) => entry.message)).toContain(
+      "This target does not support depth anchoring — clear it or pick a supporting target",
+    );
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
+    expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
 });

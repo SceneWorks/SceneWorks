@@ -31,6 +31,14 @@ import {
   targetSupportsGradientNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
+  depthAnchoringEnabled,
+  targetSupportsDepthAnchoring,
+  depthAnchoringEveryDefault,
+  depthAnchoringEveryMax,
+  depthAnchoringModelLabels,
+  depthAnchoringModelOptions,
+  depthAnchoringWeightMax,
+  depthAnchoringWeightSuggested,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -149,6 +157,10 @@ export function ConfigureJobPanel({
       "resolutionBuckets",
       resolutionBuckets.map((row, rowIndex) => (rowIndex === index ? { ...row, [key]: value } : row)),
     );
+  // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
+  // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
+  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
+  const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -629,6 +641,75 @@ export function ConfigureJobPanel({
                   </label>
                 </>
               ) : null}
+              {depthAnchoringSupported && depthAnchoringOn ? (
+                <>
+                  <label title="Depth anchoring loss weight. 0.1 is the suggested weight for the Small depth model; use a much smaller weight (around 0.001) with Large.">
+                    Depth anchoring weight
+                    <input
+                      max={depthAnchoringWeightMax}
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringWeight", event.target.value)}
+                      step="0.01"
+                      type="number"
+                      value={configDraft.depthAnchoringWeight ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringWeight")}
+                    />
+                  </label>
+                  <label title="Which Depth Anything V2 model judges the depth. Install it from the Models screen first (along with the TAEF1 tiny decoder).">
+                    Depth model
+                    <select
+                      onChange={(event) => updateConfigDraft("depthAnchoringModel", event.target.value)}
+                      value={configDraft.depthAnchoringModel ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringModel")}
+                    >
+                      {depthAnchoringModelOptions.map((option) => (
+                        <option key={option} value={option}>
+                          {depthAnchoringModelLabels[option] ?? option}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label title="Lowest noise level (0 = clean image, 1 = pure noise) at which the depth loss applies. Empty = 0.">
+                    Depth window min
+                    <input
+                      max="1"
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringMinT", event.target.value)}
+                      placeholder="0"
+                      step="0.05"
+                      type="number"
+                      value={configDraft.depthAnchoringMinT ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringMinT")}
+                    />
+                  </label>
+                  <label title="Highest noise level at which the depth loss applies. Empty = 1.">
+                    Depth window max
+                    <input
+                      max="1"
+                      min="0"
+                      onChange={(event) => updateConfigDraft("depthAnchoringMaxT", event.target.value)}
+                      placeholder="1"
+                      step="0.05"
+                      type="number"
+                      value={configDraft.depthAnchoringMaxT ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringMaxT")}
+                    />
+                  </label>
+                  <label title="Every Nth step trains the depth loss alone; the steps between train the normal loss. 1 adds the depth loss to every step instead.">
+                    Depth every N steps
+                    <input
+                      max={depthAnchoringEveryMax}
+                      min="1"
+                      onChange={(event) => updateConfigDraft("depthAnchoringEvery", event.target.value)}
+                      placeholder={String(depthAnchoringEveryDefault)}
+                      step="1"
+                      type="number"
+                      value={configDraft.depthAnchoringEvery ?? ""}
+                      {...invalidProps(configValidity, "depthAnchoringEvery")}
+                    />
+                  </label>
+                </>
+              ) : null}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -789,6 +870,24 @@ export function ConfigureJobPanel({
                     type="checkbox"
                   />
                   Multi-resolution buckets
+                </label>
+              ) : null}
+              {depthAnchoringSupported ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. Needs the TAEF1 and Depth Anything V2 models installed. Off by default."
+                >
+                  <input
+                    checked={depthAnchoringOn}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "depthAnchoringWeight",
+                        event.target.checked ? String(depthAnchoringWeightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Depth anchoring
                 </label>
               ) : null}
             </div>
