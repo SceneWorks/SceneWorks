@@ -351,10 +351,10 @@ jobs:
     # job simply queues for a box that has the weights.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
-      # Ordinary Candle tests and capability facts use physical GPU 0. The manual Krea anchor
-      # below retains its intentional step-local GPU 1 override.
+      # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
+      # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "0"
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
       CUDA_COMPUTE_CAP: "120"
@@ -1419,6 +1419,8 @@ jobs:
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 120
     env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
       CUDA_COMPUTE_CAP: "120"
       CARGO_NET_OFFLINE: "true"
       HF_HUB_CACHE: 'E:\huggingface\hub'
