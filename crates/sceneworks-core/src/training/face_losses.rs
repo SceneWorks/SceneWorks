@@ -63,10 +63,11 @@ pub const IDENTITY_LOSS_REFERENCES: [&str; 2] = ["dataset_average", "per_image"]
 
 /// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
 /// the identity loss (`TrainerDescriptor::techniques.identity_loss`). Same mechanism as
-/// [`super::depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT`]: the builtin catalog carries the MLX
-/// truth, [`super::project_candle_training_limits`] removes it for Candle, the web form shows the
-/// control only where it is `true`, submit-time validation refuses a non-zero weight elsewhere, and
-/// a worker test pins it to the linked trainer descriptors.
+/// [`super::depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT`]: static per target and identical on
+/// both platforms — set wherever the target's trainer resolves an x0 decoder and its descriptor
+/// declares the technique (a worker test pins it to the active platform's descriptors); the web form
+/// shows the control only where it is `true` and submit-time validation refuses a non-zero weight
+/// elsewhere.
 pub const IDENTITY_LOSS_SUPPORT_LIMIT: &str = "supportsIdentityLoss";
 /// Target `limits` flag for the face-landmark loss — the same mechanism as
 /// [`IDENTITY_LOSS_SUPPORT_LIMIT`] (`TrainerDescriptor::techniques.face_landmark_loss`).
@@ -267,28 +268,69 @@ pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    if identity_loss_settings(&config.advanced)?.is_some() && !target_supports_identity_loss(target)
-    {
-        return Err(field_error(
-            IDENTITY_LOSS_WEIGHT_KEY,
-            format!(
-                "{} does not support the identity loss ({IDENTITY_LOSS_WEIGHT_KEY}) on this \
-                 platform.",
-                target.name
-            ),
-        ));
+    if identity_loss_settings(&config.advanced)?.is_some() {
+        if !target_supports_identity_loss(target) {
+            return Err(field_error(
+                IDENTITY_LOSS_WEIGHT_KEY,
+                format!(
+                    "{} does not support the identity loss ({IDENTITY_LOSS_WEIGHT_KEY}) on this \
+                     platform.",
+                    target.name
+                ),
+            ));
+        }
+        if let Some(reason) = face_loss_combination_refusal(target, config, "The identity loss") {
+            return Err(field_error(IDENTITY_LOSS_WEIGHT_KEY, reason));
+        }
     }
-    if face_landmark_loss_settings(&config.advanced)?.is_some()
-        && !target_supports_face_landmark_loss(target)
-    {
-        return Err(field_error(
-            FACE_LANDMARK_LOSS_WEIGHT_KEY,
-            format!(
-                "{} does not support the face-landmark loss ({FACE_LANDMARK_LOSS_WEIGHT_KEY}) on \
-                 this platform.",
-                target.name
-            ),
-        ));
+    if face_landmark_loss_settings(&config.advanced)?.is_some() {
+        if !target_supports_face_landmark_loss(target) {
+            return Err(field_error(
+                FACE_LANDMARK_LOSS_WEIGHT_KEY,
+                format!(
+                    "{} does not support the face-landmark loss ({FACE_LANDMARK_LOSS_WEIGHT_KEY}) \
+                     on this platform.",
+                    target.name
+                ),
+            ));
+        }
+        if let Some(reason) =
+            face_loss_combination_refusal(target, config, "The face-landmark loss")
+        {
+            return Err(field_error(FACE_LANDMARK_LOSS_WEIGHT_KEY, reason));
+        }
     }
     Ok(())
+}
+
+/// Why a face loss (`label`) cannot run for this target + config combination even though the target
+/// advertises it, or `None` — the same refusals the engine raises for every decoded-x0 loss and
+/// [`super::depth_anchoring::depth_anchoring_combination_refusal`] mirrors for depth: a full base
+/// fine-tune (aux losses train through the adapter step only), or an LTX-2.5 workflow that generates
+/// no video ([`super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS`]).
+pub fn face_loss_combination_refusal(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+    label: &str,
+) -> Option<String> {
+    if super::config_is_full_finetune(config) {
+        return Some(format!(
+            "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
+        ));
+    }
+    if target.base_model == "ltx_2_5" {
+        let workflow = config
+            .advanced
+            .get("ltxWorkflow")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
+            return Some(format!(
+                "{label} needs a generated video stream; the LTX-2.5 workflow '{workflow}' \
+                 generates none."
+            ));
+        }
+    }
+    None
 }

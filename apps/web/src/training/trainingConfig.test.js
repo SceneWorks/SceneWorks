@@ -20,6 +20,8 @@ import {
   targetSupportsGradientNoise,
   trainingConfigSnapshot,
   targetSupportsDepthAnchoring,
+  depthAnchoringAvailable,
+  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
@@ -30,6 +32,10 @@ import {
   identityLossReferenceOptions,
   targetSupportsFaceLandmarkLoss,
   targetSupportsIdentityLoss,
+  faceLossCombinationRefusal,
+  faceLossIssues,
+  faceLandmarkLossAvailable,
+  identityLossAvailable,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -1025,6 +1031,32 @@ describe("depth anchoring target support (sc-2125)", () => {
     expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
+
+  // sc-24830 review: an advertising target still refuses the combinations the engine refuses — a
+  // full base fine-tune and an LTX-2.5 workflow with no generated video — as a weight issue, and
+  // the control is not offered for them. Mutation: return null from
+  // depthAnchoringCombinationRefusal ⇒ red.
+  it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const messages = (draft, selectedTarget) =>
+      configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
+        .filter((entry) => entry.field === "depthAnchoringWeight")
+        .map((entry) => entry.message);
+    expect(messages({ networkType: "full" }, supported)).toEqual([
+      "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
+    ]);
+    expect(depthAnchoringAvailable(supported, { networkType: "full" })).toBe(false);
+    expect(depthAnchoringAvailable(supported, { networkType: "lora" })).toBe(true);
+    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
+    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+      expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
+      expect(depthAnchoringAvailable(ltx, { ltxWorkflow: workflow })).toBe(false);
+      // The same name on a non-LTX-2.5 target is no refusal.
+      expect(depthAnchoringAvailable(supported, { ltxWorkflow: workflow })).toBe(true);
+    }
+    expect(depthAnchoringAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+  });
 });
 
 // sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
@@ -1253,5 +1285,27 @@ describe("face losses (sc-24831)", () => {
       "This target does not support the identity loss — clear it or pick a supporting target",
       "This target does not support the face landmark loss — clear it or pick a supporting target",
     ]);
+  });
+});
+
+// sc-24831: the face losses are refused for the same combinations as depth anchoring (sc-24830) —
+// a full base fine-tune and an LTX-2.5 workflow with no generated video — on the weight field, and
+// their controls are not offered there. Mutation: drop `faceLossCombinationRefusal` from
+// `faceLossScheduleIssues` ⇒ no issue ⇒ red.
+describe("face loss combination refusals (sc-24831)", () => {
+  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const full = { ...target, limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  it("refuses a full fine-tune and a no-video LTX-2.5 workflow, and hides the controls", () => {
+    for (const [key, label] of [["identityLossWeight", "Identity loss"], ["faceLandmarkLossWeight", "Face landmark loss"]]) {
+      const ft = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", networkType: "full" }, full);
+      expect(ft).toEqual([[key, `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]]);
+      const audio = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2a_lora" }, ltx);
+      expect(audio).toEqual([[key, `${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]]);
+      expect(faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
+    }
+    expect(identityLossAvailable(ltx, { ltxWorkflow: "t2a_lora" })).toBe(false);
+    expect(faceLandmarkLossAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+    expect(identityLossAvailable(full, { networkType: "full" })).toBe(false);
+    expect(faceLossCombinationRefusal({ baseModel: "ltx_2_3" }, { ltxWorkflow: "t2a_lora" }, "Identity loss")).toBeNull();
   });
 });

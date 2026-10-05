@@ -56,6 +56,9 @@ export const depthAnchoringWeightSuggested = 0.1;
 export const depthAnchoringEveryMax = 16;
 export const depthAnchoringEveryDefault = 2;
 export const depthAnchoringModelOptions = ["small", "base", "large"];
+// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
+// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
+export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
 export const depthAnchoringModelLabels = {
   small: "Small (fast)",
   base: "Base",
@@ -86,6 +89,29 @@ export function targetSupportsIdentityLoss(target) {
 }
 export function targetSupportsFaceLandmarkLoss(target) {
   return target?.limits?.supportsFaceLandmarkLoss === true;
+}
+
+// Why a face loss (`label`) cannot run for this target + draft even though the target advertises
+// it, or null — mirrors the API's `face_loss_combination_refusal` (sc-24831), the same rules as
+// depth anchoring's: a full base fine-tune trains no adapter step, and an LTX-2.5 workflow with no
+// generated video has nothing to decode.
+export function faceLossCombinationRefusal(target, configDraft, label) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `${label} needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the identity / face-landmark control is offered for this target + draft.
+export function identityLossAvailable(target, configDraft) {
+  return targetSupportsIdentityLoss(target) && faceLossCombinationRefusal(target, configDraft, "Identity loss") === null;
+}
+export function faceLandmarkLossAvailable(target, configDraft) {
+  return targetSupportsFaceLandmarkLoss(target) && faceLossCombinationRefusal(target, configDraft, "Face landmark loss") === null;
 }
 
 // Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
@@ -155,6 +181,25 @@ export function targetSupportsResolutionBuckets(target) {
 // (pinned to the trainer descriptors by a worker test). Absent means unsupported.
 export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Why depth anchoring cannot run for this target + draft even though the target advertises it, or
+// null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
+// trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function depthAnchoringCombinationRefusal(target, configDraft) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune";
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `Depth anchoring needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the depth-anchoring control is offered for this target + draft.
+export function depthAnchoringAvailable(target, configDraft) {
+  return targetSupportsDepthAnchoring(target) && depthAnchoringCombinationRefusal(target, configDraft) === null;
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -990,6 +1035,12 @@ export function depthAnchoringIssues(configDraft, selectedTarget) {
     // only arrive from a carried-over draft, and the API would refuse it anyway.
     issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
     return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = depthAnchoringCombinationRefusal(selectedTarget, configDraft);
+    if (refusal) {
+      issues.push(["depthAnchoringWeight", refusal]);
+      return issues;
+    }
   }
   if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
     issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);
@@ -1040,8 +1091,10 @@ export function faceLandmarkLossEnabled(configDraft) {
 }
 
 // Shared schedule checks for one face loss (weight / noise window / alternation period), the API's
-// bounds (E6). `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss").
-function faceLossScheduleIssues(configDraft, prefix, label, supported) {
+// bounds (E6). `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss"). Marks the
+// returned issues `blocked` when the loss cannot run here at all (unsupported target or refused
+// combination), so the caller skips its loss-specific knobs.
+function faceLossScheduleIssues(configDraft, prefix, label, supported, selectedTarget) {
   const issues = [];
   const weightKey = `${prefix}Weight`;
   const weight = numberFromDraft(configDraft[weightKey]);
@@ -1051,7 +1104,15 @@ function faceLossScheduleIssues(configDraft, prefix, label, supported) {
     // The control is hidden for such a target, so this names no input (field null): the value can
     // only arrive from a carried-over draft, and the API would refuse it anyway.
     issues.push([null, `This target does not support the ${label.toLowerCase()} — clear it or pick a supporting target`]);
+    issues.blocked = true;
     return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = faceLossCombinationRefusal(selectedTarget, configDraft, label);
+    if (refusal) {
+      issues.push([weightKey, refusal]);
+      issues.blocked = true;
+      return issues;
+    }
   }
   const window = {};
   for (const field of [`${prefix}MinT`, `${prefix}MaxT`]) {
@@ -1081,9 +1142,9 @@ export function faceLossIssues(configDraft, selectedTarget) {
   const issues = [];
   if (identityLossEnabled(configDraft)) {
     const supported = !selectedTarget || targetSupportsIdentityLoss(selectedTarget);
-    const scheduleIssues = faceLossScheduleIssues(configDraft, "identityLoss", "Identity loss", supported);
+    const scheduleIssues = faceLossScheduleIssues(configDraft, "identityLoss", "Identity loss", supported, selectedTarget);
     issues.push(...scheduleIssues);
-    if (!scheduleIssues.some(([field]) => field === null)) {
+    if (!scheduleIssues.blocked) {
       if (String(configDraft.identityLossMinCos ?? "").trim()) {
         const minCos = numberFromDraft(configDraft.identityLossMinCos);
         if (minCos === null || minCos < -1 || minCos > 1) {
@@ -1097,7 +1158,7 @@ export function faceLossIssues(configDraft, selectedTarget) {
   }
   if (faceLandmarkLossEnabled(configDraft)) {
     const supported = !selectedTarget || targetSupportsFaceLandmarkLoss(selectedTarget);
-    issues.push(...faceLossScheduleIssues(configDraft, "faceLandmarkLoss", "Face landmark loss", supported));
+    issues.push(...faceLossScheduleIssues(configDraft, "faceLandmarkLoss", "Face landmark loss", supported, selectedTarget));
   }
   return issues;
 }
