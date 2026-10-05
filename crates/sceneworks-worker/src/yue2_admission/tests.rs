@@ -233,6 +233,103 @@ fn explicit_compute_policy_prices_mot_and_names_selected_vae() {
         .any(|term| term.what.contains("FP32 VAE")));
 }
 
+/// The M6 GPU1 FP32 standard load exceeded resident weights plus the independent CUDA reserve.
+/// Every advertised CUDA case uses this one estimator: only explicit FP32 loads acquire the
+/// additional term, including Q-tier loads. A near-budget card must refuse before loading.
+#[test]
+fn fp32_cuda_load_allowance_covers_the_observation_and_only_fp32_loads() {
+    let controls = Yue2Controls::production();
+    let mut cases = Vec::new();
+    for (tier, precision) in [
+        (Yue2Tier::Bf16, Yue2Precision::StrictBf16),
+        (Yue2Tier::Bf16, Yue2Precision::Fp32),
+        (Yue2Tier::Q8, Yue2Precision::StrictBf16),
+        (Yue2Tier::Q8, Yue2Precision::Fp32),
+        (Yue2Tier::Q4, Yue2Precision::StrictBf16),
+        (Yue2Tier::Q4, Yue2Precision::Fp32),
+    ] {
+        let mut shape = shape(tier, &default_request());
+        shape.precision = precision;
+        cases.push(shape);
+    }
+    let legacy_request = with_song(SongParams {
+        decoder: Some(SongDecoder::Legacy),
+        ..Default::default()
+    });
+    let mut legacy = shape(Yue2Tier::Bf16, &legacy_request);
+    legacy.precision = Yue2Precision::StrictBf16;
+    cases.push(legacy);
+    let mut fp8 = shape(Yue2Tier::Bf16, &default_request());
+    fp8.ar = Yue2ArMode::Fp8;
+    cases.push(fp8);
+    assert_eq!(cases.len(), 8);
+
+    for shape in cases {
+        let cuda = priced(&shape, Yue2Backend::Cuda, controls);
+        let load = cuda.stage(Yue2Stage::Load).unwrap();
+        let transient = load
+            .terms
+            .iter()
+            .filter(|term| term.what == "FP32 CUDA load transient")
+            .collect::<Vec<_>>();
+        if shape.precision == Yue2Precision::Fp32 {
+            assert_eq!(transient.len(), 1, "{shape:?}");
+            assert_eq!(transient[0].device_bytes, CUDA_FP32_LOAD_TRANSIENT_BYTES);
+            assert_eq!(transient[0].host_bytes, 0);
+            assert_eq!(
+                load.device_bytes(),
+                cuda.weights.restored_device_bytes + CUDA_FP32_LOAD_TRANSIENT_BYTES
+            );
+            assert!(
+                cuda.stages
+                    .iter()
+                    .filter(|stage| stage.stage != Yue2Stage::Load)
+                    .flat_map(|stage| &stage.terms)
+                    .all(|term| term.what != "FP32 CUDA load transient"),
+                "later stages retain their own formulas"
+            );
+        } else {
+            assert!(transient.is_empty(), "{shape:?}");
+            assert_eq!(load.device_bytes(), cuda.weights.restored_device_bytes);
+        }
+    }
+
+    let mut fp32_shape = shape(Yue2Tier::Bf16, &default_request());
+    fp32_shape.precision = Yue2Precision::Fp32;
+    let full = priced(&fp32_shape, Yue2Backend::Cuda, controls);
+    let load = full.stage(Yue2Stage::Load).unwrap().clone();
+    assert_eq!(full.weights.restored_device_bytes, 14_522_736_896);
+    assert!(
+        load.device_bytes() + dedicated_reserve_bytes() >= 16_848_289_792,
+        "the original 17-sample M6 owned load peak must fit the new estimate"
+    );
+    let load_only = Yue2Estimate {
+        stages: vec![load.clone()],
+        ..full
+    };
+    let needed = load.device_bytes() + dedicated_reserve_bytes();
+    assert_eq!(fit(&load_only, &cuda(needed, needed), 0), Fit::Fits);
+    assert!(matches!(
+        fit(&load_only, &cuda(needed - 1, needed), 0),
+        Fit::Short {
+            stage: Yue2Stage::Load,
+            pool: Pool::Device,
+            needed: shortfall,
+            available,
+        } if shortfall == needed && available == needed - 1
+    ));
+    // The extra term is not a global reserve or a precision change on another backend.
+    for backend in [Yue2Backend::Cpu, Yue2Backend::Metal] {
+        let est = priced(&fp32_shape, backend, controls);
+        assert!(est
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.terms)
+            .all(|term| term.what != "FP32 CUDA load transient"));
+    }
+    assert_eq!(dedicated_reserve_bytes(), 2 << 30);
+}
+
 #[test]
 fn quantized_stages_reserve_their_f32_matmul_operands() {
     let request = default_request();

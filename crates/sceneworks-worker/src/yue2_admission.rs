@@ -163,6 +163,14 @@ const FP8_COMPUTE_CAP_FLOOR: f32 = 8.9;
 /// established on every host/request. It is independent of CUDA's device-only 2 GiB reserve.
 const METAL_PROCESS_RESERVE_BYTES: u64 = 9 << 28;
 
+/// Additional device residency during an explicit FP32 CUDA MoT load. In the owned M6 GPU1
+/// capture 37314391667, the 16_848_289_792-byte load peak exceeded the 14_522_736_896-byte
+/// resident-weight estimate plus the separate 2 GiB allocator reserve by 178_069_248 bytes.
+/// Round that observed residual up to 1 GiB rather than claiming its source or an upper bound
+/// for every GPU. Only the load stage uses this allowance; later stages retain their own
+/// estimates, and the allocator reserve remains independent.
+const CUDA_FP32_LOAD_TRANSIENT_BYTES: u64 = 1 << 30;
+
 // ---- Transcription (SheetSage2 + MERT-v2-FullSong, `candle-audio-sheetsage2`) -----------------------
 
 /// MERT-v2's encoder rate: frames per second of source audio (ConvNeXt subsampler to 25 Hz).
@@ -1133,14 +1141,24 @@ pub(crate) fn estimate(
     }
     stages.push(Yue2StageResidency {
         stage: Yue2Stage::Load,
-        terms: vec![
-            term("resident weights", weights.restored_device_bytes, 0),
-            term(
-                "the mapped weights file",
-                0,
-                mapped_file_bytes(backend, weights.stored_bytes),
-            ),
-        ],
+        terms: {
+            let mut terms = vec![
+                term("resident weights", weights.restored_device_bytes, 0),
+                term(
+                    "the mapped weights file",
+                    0,
+                    mapped_file_bytes(backend, weights.stored_bytes),
+                ),
+            ];
+            if backend == Yue2Backend::Cuda && shape.precision == Yue2Precision::Fp32 {
+                terms.push(term(
+                    "FP32 CUDA load transient",
+                    CUDA_FP32_LOAD_TRANSIENT_BYTES,
+                    0,
+                ));
+            }
+            terms
+        },
     });
     // Resident weights while the AR stages run (FP8: FP8 on the device, originals on the host).
     let ar_weights = || {
