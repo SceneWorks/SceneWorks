@@ -10,26 +10,26 @@
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "0b1ccb76f08a0c2dfd1ceed94c2c1b87e4996deb3e12e995743929aeaa52f1cf",
+    "apiContractEntry": "a443b88144a7b7bb903046b55bf8585fb5be5f9bc03f183e1282213810906203",
     "apiDto": "a1cd6ac05c39f4f8c35e345d7384b883a659eebe8e80f582c3e39502d33aacec",
     "apiGeneration": "8bddc33f95432e5f663426f7b8d796d27e502d6a2f454b2ad6452337ed3cfcb4",
     "apiValidation": "60a46aa0b42f00caf0cdb7a6f720f5627589f93e54ba31da4d2917ac8e44d9a7",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "c7c7b72a067e59bfaeca3699c88bd73475d82b77231fc7a09e5ce293f467efb9",
-    "descriptorCandleFacts": "0a595c7420af68c029bfd60888838224e5c9e4e367706e35878fdef3be3bd3d0",
-    "descriptorCandleRuntime": "c34ae0e2c52d6302c0a7f5d04c20e49475439c8ac8594c03fa4d7ed53d72488a",
-    "descriptorMlxFacts": "b2a0033f7427c6e89b697410d623f4a53b137703fdbeee896431139382ad2deb",
-    "descriptorMlxRuntime": "197f7346873849461bd9fdb5875e998b229df95a2a8baa632cd673015ed18f91",
-    "descriptorPreviewFacts": "d7195a5005fef9ff583da7db55ddb6da497bac8d5b96de93d04df2eb837977b1",
+    "descriptorAudioFacts": "23d40c57d4f60b324d5cdb482e917a7411657c7665e53c151d5831bdccb91198",
+    "descriptorCandleFacts": "af6cf40a7f44dcda09b6054305910411ca9e444adbe44ef9315a1b994da449cf",
+    "descriptorCandleRuntime": "a8b3ff3097b84e1cf8dc2ce7dcc291d64060b4af188244da46d6bfb66875cac0",
+    "descriptorMlxFacts": "8f9bbf076155b60190f8337705e73c1160f4574581137b297d44962069a90044",
+    "descriptorMlxRuntime": "e2298d047fccb330306cd08561543de1e71668f0d885421560c80386b944c870",
+    "descriptorPreviewFacts": "960aaacfa29aba99e932d0c44e0a226cc00241890a1aa5c6848e49917269d7a4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "c9367b3a18b838c08b55b09647dec3889d67d6e928ec33d8139191b22abf98ec",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
-    "routerCatalog": "59bcb18121f0555a42be22cae11b8d64b43b6bb97d39fc609c47f16732264895",
+    "routerCatalog": "14749024735790cc33f3d4f3e968241b4bbcf5e0a30546b52038be39f0988a41",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "678145d02f75ba41158b389c94dcb67c8b7ae3a66932b5875fda5b61c821a008",
-    "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
+    "trainingCatalog": "ec411410a97f1f8c190c29b036d5b068cc97e498adb8224a140950400cb9059a",
     "webAudioStudio": "604a77664e11e55b5b334262dba386f966cb4ea967258e6b1e373a91752e7b26",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -46,7 +46,7 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "2947298a3d2d63327ba981f180500c4cbce64a3077640813b28df33cbc4d54db",
     "workerDispatch": "6a92dcfec93983047db2ad68205561366e0348b6659615001143abb186697d2a",
-    "workerEngineTable": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd",
+    "workerEngineTable": "684f426196987ec977de150868f564b9e24ba17f95e38ab4a47f94e0de299250",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
     "workerImageDispatch": "4c6abf0e436ec63c44040575b2ec2d41ece2fcae52fa0e6e260e95bec60935d8",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "b8fc3d6b70910e042a52af1c2527bc01b8c95e1c1a83e8b2ec02c4fca3adef79",
+    "workerTrainingDispatch": "f93232d68ca90080fcc2758405a3c8b9b96927e412793cfdd1c19d4cdd171010",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -4240,13 +4240,13 @@
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
