@@ -368,6 +368,60 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     [token, activeProject, setJobs, setError],
   );
 
+  // sc-2126: enqueue SAM3 subject-mask generation over the dataset (one mask per image, consumed by
+  // the masked-loss trainer). Async (GPU); the mask report refreshes when the job completes.
+  const createTrainingDatasetSubjectMaskJob = useCallback(
+    async (datasetId, payload = {}, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId) {
+        throw new Error("Select a training dataset first.");
+      }
+      const job = await apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/subject-mask-jobs`,
+        token,
+        {
+          method: "POST",
+          body: JSON.stringify(payload),
+        },
+      );
+      setJobs((items) => upsertJobNewest(items, job));
+      setError("");
+      return job;
+    },
+    [token, activeProject, setJobs, setError],
+  );
+
+  // sc-2126: the dataset's subject-mask coverage + per-image mask status (path, empty, source).
+  const loadTrainingDatasetSubjectMasks = useCallback(
+    async (datasetId, projectId = activeProject?.id, { signal } = {}) => {
+      if (!projectId || !datasetId) {
+        return null;
+      }
+      return apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/subject-masks`,
+        token,
+        { signal },
+      );
+    },
+    [token, activeProject],
+  );
+
+  // sc-2126: replace one image's subject mask with an uploaded file. Returns the updated report.
+  const uploadTrainingDatasetSubjectMask = useCallback(
+    async (datasetId, itemId, file, projectId = activeProject?.id) => {
+      if (!projectId || !datasetId || !itemId) {
+        throw new Error("Save the dataset before uploading a subject mask.");
+      }
+      const form = new FormData();
+      form.append("file", file);
+      return apiFetch(
+        `/api/v1/projects/${projectId}/training/datasets/${encodeURIComponent(datasetId)}/items/${encodeURIComponent(itemId)}/subject-mask`,
+        token,
+        { method: "POST", body: form },
+      );
+    },
+    [token, activeProject],
+  );
+
   // sc-6539 synchronous one-tap fixes: POST returns { dataset, applied } for immediate refresh.
   const smartCropTrainingDataset = useCallback(
     async (datasetId, itemIds, projectId = activeProject?.id) => {
@@ -449,6 +503,9 @@ export function useTraining({ token, activeProject, activeProjectRef, setError, 
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
