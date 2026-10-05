@@ -145,11 +145,11 @@ all = "warn"
 # (scripts/bump-inference.mjs rewrites both; crates/sceneworks-worker/tests/
 # candle_kernels_patch_guard.rs fails the build if they skew or the patch is dropped).
 [patch."https://github.com/huggingface/candle"]
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "4af01e0a6eebb6bc502e1ab4800d39a8d86b1cf1" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "df4606c23ee6b5cf980158799bfb01327e9e19df" }
 # The pinned inference decode graph uses its vendored candle-core CUDA-graph parameter cache.
 # Dependency-workspace patches do not propagate here; keep this consumer patch on the same pin.
 # See inference's crates/media/candle-gen/vendor/candle-core/VENDORED.md (sc-24441 / sc-24446).
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "4af01e0a6eebb6bc502e1ab4800d39a8d86b1cf1" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "df4606c23ee6b5cf980158799bfb01327e9e19df" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #
