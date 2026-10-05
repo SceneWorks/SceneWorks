@@ -24,7 +24,7 @@ use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
 use sceneworks_core::training::depth_anchoring::{
-    depth_anchoring_settings, x0_decoder_for_trainer, X0DecoderSource, DEPTH_ANCHORING_WEIGHT_KEY,
+    depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
 };
 use sceneworks_core::training::{
     parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
@@ -1248,7 +1248,7 @@ fn apply_depth_anchoring(
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
 ) -> WorkerResult<()> {
-    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
+    use sceneworks_core::training::depth_anchoring::{depth_anything_v2_model, X0DecoderSource};
 
     let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
@@ -4372,9 +4372,27 @@ mod tests {
         ))
         .is_ok());
 
-        // The Krea ControlNet branch trains no x0-decodable LoRA: refused on either backend.
-        assert!(err(plan("krea_control", "krea_2_raw", &on))
-            .contains("does not support depth anchoring"));
+        // The Krea ControlNet branch trains no x0-decodable LoRA. It is a Candle-only trainer (not
+        // registered in the MLX runtime); where it is registered its control request is refused.
+        let control_on = [
+            ("depthAnchoringWeight", json!(0.1)),
+            ("networkType", json!("control")),
+        ];
+        let control = err(plan("krea_control", "krea_2_raw", &control_on));
+        if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+            assert!(
+                control.contains("does not support depth anchoring"),
+                "{control}"
+            );
+            assert!(validate_training_target_config(&plan(
+                "krea_control",
+                "krea_2_raw",
+                &[("networkType", json!("control"))]
+            ))
+            .is_ok());
+        } else {
+            assert!(control.contains("not registered"), "{control}");
+        }
 
         // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
         // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.
