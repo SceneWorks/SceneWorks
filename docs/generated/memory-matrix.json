@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:f7584ca56eea385aa021cc671ab91e7e80f561708a84652cec9ad709e8a966a8",
+    "sceneWorksRevision": "source-tree:7ea5fca968e523ac1664c8f4c93fdbf768a575bc00c98373090f5105ffe2c202",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "0ec1a8680645e88f72e9fc1119656007e23e39f464fbbeffacb001124d2ac610"
+        "sha256": "accecf82332aa050084591b8321e50aa59ef8ec9b607884b65c359518785761a"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -25,11 +25,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "4d149fb70937b23f2d4cd3b28686bc89b1947c5f60f9724158cd8b87b4048c7b"
+        "sha256": "f6b837b449a3de1c6cc76c924fc6bebe736fdc97021b4cd3e7c569c8c2bfbd8c"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "26b393f3fb584e85e9875c1045cc50dd10d6a3542e81edc3d3faf2d4507401a3"
+        "sha256": "366f8a17f30527e3e196ca4800b60087739041a2bc4e2b5203c0cfc076f7192a"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "b37fe7c3eae89e22371813fdbc3b91faee6a7905bba93cf1f34b14496f5209d2"
+        "sha256": "29efa6ad777919dc9521fd584102413925f4332461004a3ad520c70d2cf62ca5"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,7 +81,7 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "a89e01ffc265b9ae765e4a31a5bcb98b990709fdcb5b40d989561dee1fa182c5"
+        "sha256": "674254f50808bc0a2da33ca86ef9512bf083a2935065b9070a62f8ddfe418e88"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",

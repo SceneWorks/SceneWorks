@@ -199,6 +199,25 @@ pub(crate) async fn create_prompt_refine_job(
         }
     }
 
+    // sc-20682: the compressed-KV opt-in rides every prompt-refine task; the worker validates it
+    // again, but a typo is refused here rather than as a failed job.
+    if let Some(kv_compression) = payload
+        .kv_compression
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if !matches!(kv_compression, "off" | "qualified") {
+            return Err(ApiError::bad_request(
+                "kvCompression must be off or qualified",
+            ));
+        }
+        job_payload.insert(
+            "kvCompression".to_owned(),
+            Value::String(kv_compression.to_owned()),
+        );
+    }
+
     let workflow = payload
         .workflow
         .as_deref()

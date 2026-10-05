@@ -207,11 +207,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
   // Re-pinned by sc-19383 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
-  // re-recorded when the catalog gained the eight YuE re-host keys. The Illustrious file
+  // re-recorded when the catalog gained the eight YuE re-host keys (sc-19383) and
+  // Wan2.1-VACE-1.3B-diffusers (sc-20686). The Illustrious file
   // censuses below are the real subject of this test and did NOT move — which is the point of
   // asserting them beside the digest.
   assert.equal(current.downloadEvidenceSha256,
-    "e54da3132ca340d054da8ac138d5426963f52572edaf83dafbc64d7f6d31a1f0");
+    "469950e0de974e46972a323ab995805d549b19676737302a6b4e1b395a1e11fc");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
@@ -3290,7 +3291,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
           missingStore: path.join(scratch, "persistent-missing-file"),
           expectedNonModelPaths: [
-            { kind: "cargoTarget", path: path.resolve(sceneworks, "target") },
+            { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworks, "target")) },
             { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
             { kind: "campaignOutput", path: output },
             { kind: "pythonVenv", path: path.dirname(path.dirname(path.resolve("python"))) },

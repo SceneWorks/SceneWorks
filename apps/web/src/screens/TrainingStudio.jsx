@@ -64,7 +64,6 @@ import {
 import { readLicenseAck, writeLicenseAck } from "../licenseAcknowledgment.js";
 import {
   mergeTrainedLoraOfferDecisions,
-  readTrainedLoraOfferDecisions,
   rememberTrainedLoraOfferDecision,
   trainedLoraDecisionsKey,
   trainedLoraOfferCandidate,
@@ -438,7 +437,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const attachingTrainedLoraRef = useRef(false);
   const [trainedLoraOffer, setTrainedLoraOffer] = useState(null);
   const [attachingTrainedLora, setAttachingTrainedLora] = useState(false);
-  const [trainedLoraOfferError, setTrainedLoraOfferError] = useState("");
+  // Keyed by the job it failed for, so a failure can never caption a different offer —
+  // one that replaced it after another window answered, or one in the project the user
+  // switched to while the attach was in flight.
+  const [trainedLoraOfferError, setTrainedLoraOfferError] = useState(null);
+  // Bumped whenever an answer is recorded (here or in another window). Answers live in a
+  // ref and in storage, neither of which re-runs the offer effect, so without this a
+  // decline would leave the next undecided run hidden until unrelated state changed.
+  const [trainedLoraDecisionRevision, setTrainedLoraDecisionRevision] = useState(0);
   const [selectedAssetIds, setSelectedAssetIds] = useState([]);
   // Dataset Doctor readiness report (sc-6534), fetched server-side over the saved
   // dataset. `null` until the first fetch resolves; the loading flag keeps badges in
@@ -1295,7 +1301,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // project, so a carried-over question could name a character the new project does
     // not have. Nothing is cached here — the offer effect re-reads decisions per project.
     setTrainedLoraOffer(null);
-    setTrainedLoraOfferError("");
+    setTrainedLoraOfferError(null);
   }, [activeProject?.id]);
 
   useEffect(() => {
@@ -1324,10 +1330,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
       return current ?? candidate;
     });
-  }, [activeProject?.id, attachCharacterLora, characters, datasetLibraryMode, datasets, jobs, loras]);
+  }, [
+    activeProject?.id,
+    attachCharacterLora,
+    characters,
+    datasetLibraryMode,
+    datasets,
+    jobs,
+    loras,
+    trainedLoraDecisionRevision,
+  ]);
 
   // A second window answering the same run must retire the offer in this one too, or
-  // each accept prepends its own link row.
+  // each accept prepends its own link row. Re-running the offer effect does the
+  // retiring (it re-reads storage and replaces an answered offer with the next
+  // candidate) — nulling the offer here would leave that next run unoffered.
   useEffect(() => {
     const projectId = activeProject?.id;
     if (datasetLibraryMode || !projectId || typeof window === "undefined") {
@@ -1338,10 +1355,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       if (event?.key && event.key !== key) {
         return;
       }
-      const answered = readTrainedLoraOfferDecisions(projectId);
-      setTrainedLoraOffer((current) =>
-        current && current.projectId === projectId && answered.includes(current.jobId) ? null : current,
-      );
+      setTrainedLoraDecisionRevision((revision) => revision + 1);
     }
     window.addEventListener("storage", retireIfAnswered);
     return () => window.removeEventListener("storage", retireIfAnswered);
@@ -1359,7 +1373,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     trainedLoraDecisionsRef.current.set(projectId, session);
     rememberTrainedLoraOfferDecision(projectId, jobId);
     setTrainedLoraOffer((current) => (current?.jobId === jobId ? null : current));
-    setTrainedLoraOfferError("");
+    setTrainedLoraOfferError(null);
+    setTrainedLoraDecisionRevision((revision) => revision + 1);
   }
 
   async function acceptTrainedLoraOffer() {
@@ -1371,7 +1386,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     const offer = trainedLoraOffer;
     attachingTrainedLoraRef.current = true;
     setAttachingTrainedLora(true);
-    setTrainedLoraOfferError("");
+    setTrainedLoraOfferError(null);
     // `attachCharacterLora` reports failure through the shared error channel and
     // resolves to null instead of throwing (useCharacters' withCharacterApi), so the
     // returned character is the only success signal. Anything else keeps the offer up
@@ -1381,9 +1396,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     attachingTrainedLoraRef.current = false;
     setAttachingTrainedLora(false);
     if (!updated) {
-      setTrainedLoraOfferError(
-        `Could not attach ${offer.loraName}. Try again, or attach it later from Character Studio.`,
-      );
+      setTrainedLoraOfferError({
+        jobId: offer.jobId,
+        message: `Could not attach ${offer.loraName}. Try again, or attach it later from Character Studio.`,
+      });
       return;
     }
     setConfigMessage(`Attached ${offer.loraName} to ${offer.characterName} — see its LoRAs panel in Character Studio.`);
@@ -2206,7 +2222,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 {trainedLoraOffer ? (
                   <TrainedLoraOfferCard
                     attaching={attachingTrainedLora}
-                    error={trainedLoraOfferError}
+                    error={
+                      trainedLoraOfferError?.jobId === trainedLoraOffer.jobId ? trainedLoraOfferError.message : ""
+                    }
                     offer={trainedLoraOffer}
                     onAccept={acceptTrainedLoraOffer}
                     onDecline={declineTrainedLoraOffer}
