@@ -195,6 +195,55 @@ fn an_all_black_mask_is_recorded_and_reported_empty() {
     assert!(report.items[1].empty && report.items[1].has_mask);
 }
 
+/// sc-24828: the masked-loss lookup keys an image by its current bytes and reports a stored mask
+/// as Present, an all-black one as Empty, and an unmasked / replaced / file-less one as Missing.
+#[test]
+fn lookup_by_image_bytes_reports_present_empty_and_missing() {
+    let fx = Fixture::new(4, 4, 4);
+    let image = |index: usize| fx.root().join(format!("images/item_{index}.png"));
+    let writes = vec![
+        SubjectMaskWrite {
+            content_hash: fx.hash(0),
+            png: png(&subject_mask(4, 4)),
+        },
+        SubjectMaskWrite {
+            content_hash: fx.hash(1),
+            png: png(&GrayImage::new(4, 4)),
+        },
+        SubjectMaskWrite {
+            content_hash: fx.hash(3),
+            png: png(&subject_mask(4, 4)),
+        },
+    ];
+    fx.store
+        .write_subject_masks(PROJECT, DATASET, writes, SubjectMaskSource::Auto)
+        .unwrap();
+    let index = read_subject_mask_index_at(&fx.root()).unwrap();
+    let lookup = |index_ref: &DatasetSubjectMasks, i: usize| {
+        lookup_subject_mask_for_image(&fx.root(), index_ref, &image(i)).unwrap()
+    };
+    assert_eq!(
+        lookup(&index, 0),
+        SubjectMaskLookup::Present(fx.root().join(subject_mask_relative_path(&fx.hash(0))))
+    );
+    assert_eq!(lookup(&index, 1), SubjectMaskLookup::Empty);
+    assert_eq!(lookup(&index, 2), SubjectMaskLookup::Missing);
+    // Item 3's image is repainted after its mask was written: the stale mask must not match.
+    RgbImage::from_pixel(4, 4, image::Rgb([1, 2, 3]))
+        .save(image(3))
+        .unwrap();
+    assert_eq!(lookup(&index, 3), SubjectMaskLookup::Missing);
+    // A record whose file is gone is Missing, like the coverage report.
+    fs::remove_file(fx.root().join(subject_mask_relative_path(&fx.hash(0)))).unwrap();
+    assert_eq!(lookup(&index, 0), SubjectMaskLookup::Missing);
+    // No index at all ⇒ an empty index, not an error.
+    let bare = tempfile::tempdir().unwrap();
+    assert!(read_subject_mask_index_at(bare.path())
+        .unwrap()
+        .masks
+        .is_empty());
+}
+
 #[test]
 fn a_record_whose_mask_file_is_gone_does_not_count_as_coverage() {
     let fx = Fixture::new(1, 4, 4);

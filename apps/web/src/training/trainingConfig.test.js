@@ -7,6 +7,11 @@ import {
   configValidation,
   ltx25WorkflowPlan,
   mergeCustomizedConfigDraft,
+  subjectMaskBackgroundWeightDefault,
+  subjectMaskCoverage,
+  subjectMaskSubjectWeightDefault,
+  subjectMaskWeightMax,
+  targetSupportsSubjectMaskLoss,
   timestepTypeOptionsForTarget,
   gradientNoiseEtaMax,
   gradientNoiseEtaSuggested,
@@ -1013,5 +1018,114 @@ describe("depth anchoring target support (sc-2125)", () => {
     const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
     expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
+  });
+});
+
+// sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
+// when on, is bounded by the API's bounds, and incomplete mask coverage blocks the run.
+describe("subject-masked loss (sc-24828)", () => {
+  const snap = (draft) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: target,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    subjectMaskLoss: true,
+    subjectMaskBackgroundWeight: "0.1",
+    subjectMaskSubjectWeight: "1",
+  };
+  const report = (masks) => ({ items: masks.map(([hasMask, empty]) => ({ hasMask, empty })) });
+  const maskTarget = { ...target, limits: { ...target.limits, supportsSubjectMaskLoss: true } };
+  const issuesFor = (draft, subjectMaskReport = null) =>
+    configValidation(draft, { activeDataset: dataset, selectedTarget: maskTarget, subjectMaskReport }).filter((entry) =>
+      String(entry.field ?? "").startsWith("subjectMask"),
+    );
+
+  it("is offered only where the target advertises it; a carried-over true elsewhere blocks the run", () => {
+    expect(targetSupportsSubjectMaskLoss(maskTarget)).toBe(true);
+    expect(targetSupportsSubjectMaskLoss(target)).toBe(false);
+    expect(targetSupportsSubjectMaskLoss({ limits: { supportsSubjectMaskLoss: "yes" } })).toBe(false);
+    const unsupported = configValidation(whole, { activeDataset: dataset, selectedTarget: target }).filter((entry) =>
+      String(entry.message).includes("subject-masked loss"),
+    );
+    expect(unsupported.map((entry) => [entry.field, entry.kind])).toEqual([[null, "error"]]);
+    expect(
+      configValidation({ ...whole, subjectMaskLoss: false }, { activeDataset: dataset, selectedTarget: target }).filter(
+        (entry) => String(entry.message).includes("subject-masked loss"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("seeds off with default weights and leaves a default snapshot without the keys", () => {
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(draft.subjectMaskLoss).toBe(false);
+    expect(draft.subjectMaskBackgroundWeight).toBe(String(subjectMaskBackgroundWeightDefault));
+    expect(draft.subjectMaskSubjectWeight).toBe(String(subjectMaskSubjectWeightDefault));
+    const advanced = snap(draft).config.advanced;
+    for (const key of ["subjectMaskLoss", "subjectMaskBackgroundWeight", "subjectMaskSubjectWeight"]) {
+      expect(advanced).not.toHaveProperty(key);
+    }
+  });
+
+  it("round-trips an enabled run's weights into the snapshot as numbers", () => {
+    const draft = {
+      ...configDraftFromTarget(target, dataset, ["auto"]),
+      subjectMaskLoss: true,
+      subjectMaskBackgroundWeight: "0",
+      subjectMaskSubjectWeight: "0.8",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.subjectMaskLoss).toBe(true);
+    expect(advanced.subjectMaskBackgroundWeight).toBe(0);
+    expect(advanced.subjectMaskSubjectWeight).toBe(0.8);
+  });
+
+  it("uses the API's bounds and defaults", () => {
+    expect(subjectMaskWeightMax).toBe(1);
+    expect(subjectMaskBackgroundWeightDefault).toBe(0.1);
+    expect(subjectMaskSubjectWeightDefault).toBe(1);
+  });
+
+  it("flags out-of-range weights on their fields", () => {
+    expect(issuesFor(whole)).toEqual([]);
+    expect(issuesFor({ ...whole, subjectMaskBackgroundWeight: "0" })).toEqual([]);
+    for (const bad of ["-0.1", "1.01", "abc", ""]) {
+      expect(issuesFor({ ...whole, subjectMaskBackgroundWeight: bad }).map((entry) => entry.field)).toEqual([
+        "subjectMaskBackgroundWeight",
+      ]);
+    }
+    for (const bad of ["0", "1.5", "x"]) {
+      expect(issuesFor({ ...whole, subjectMaskSubjectWeight: bad }).map((entry) => entry.field)).toEqual([
+        "subjectMaskSubjectWeight",
+      ]);
+    }
+    // Off ⇒ the weights are not this run's concern.
+    expect(issuesFor({ ...whole, subjectMaskLoss: false, subjectMaskSubjectWeight: "0" })).toEqual([]);
+  });
+
+  it("blocks on incomplete mask coverage (an empty mask counts as missing), not on unknown coverage", () => {
+    expect(issuesFor(whole, report([[true, false], [true, false]]))).toEqual([]);
+    expect(issuesFor(whole, null)).toEqual([]);
+    const partial = issuesFor(whole, report([[true, false], [true, true], [false, false]]));
+    expect(partial.map((entry) => [entry.field, entry.kind])).toEqual([["subjectMaskLoss", "error"]]);
+    expect(partial[0].message).toContain("missing for 2 of 3 images");
+    expect(subjectMaskCoverage(report([[true, false], [true, true], [false, false]]))).toEqual({
+      total: 3,
+      usable: 1,
+      empty: 1,
+      missing: 2,
+      complete: false,
+    });
   });
 });

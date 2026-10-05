@@ -85,6 +85,7 @@
         "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -182,6 +183,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -280,6 +282,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -377,6 +380,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -474,6 +478,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -575,6 +580,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -675,6 +681,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -868,6 +875,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -974,6 +982,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1070,6 +1079,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1156,6 +1166,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1385,6 +1396,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1484,6 +1496,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1582,6 +1595,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1678,6 +1692,7 @@
         ],
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
+        "supportsSubjectMaskLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {

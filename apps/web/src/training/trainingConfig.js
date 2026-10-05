@@ -62,6 +62,28 @@ export const depthAnchoringModelLabels = {
   large: "Large (much smaller weight)",
 };
 
+// Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
+// trainer's per-element loss — background cells by the background weight, subject cells by the
+// subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
+// SUBJECT_MASK_*_WEIGHT_DEFAULT in crates/sceneworks-core/src/training.rs) — a Rust parity test
+// reads these lines, keep them equal. Background may be 0 (drop it); subject must be > 0.
+export const subjectMaskWeightMax = 1;
+export const subjectMaskBackgroundWeightDefault = 0.1;
+export const subjectMaskSubjectWeightDefault = 1;
+
+// Mask coverage of a dataset for masked loss, from its /subject-masks report: `usable` images carry
+// a non-empty mask (an all-black "no subject" mask counts as missing — the worker refuses it too).
+// `null` when no report is loaded (unknown coverage).
+export function subjectMaskCoverage(report) {
+  if (!report || !Array.isArray(report.items)) {
+    return null;
+  }
+  const total = report.items.length;
+  const usable = report.items.filter((item) => item?.hasMask && !item?.empty).length;
+  const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
+  return { total, usable, empty, missing: total - usable, complete: total > 0 && usable === total };
+}
+
 // The target's advertised training resolutions, ascending (empty when it advertises none).
 function targetResolutions(target) {
   const values = target?.limits?.resolutions;
@@ -107,6 +129,13 @@ export function targetSupportsResolutionBuckets(target) {
 // (pinned to the trainer descriptors by a worker test). Absent means unsupported.
 export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
+// API advertises `limits.supportsSubjectMaskLoss` per target (pinned to the trainer descriptors on
+// both platforms by a worker test). Absent means unsupported.
+export function targetSupportsSubjectMaskLoss(target) {
+  return target?.limits?.supportsSubjectMaskLoss === true;
 }
 export const optimizerLabels = {
   adam: "Adam",
@@ -432,6 +461,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
     depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
     depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
+    // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
+    subjectMaskLoss: advanced.subjectMaskLoss === true,
+    subjectMaskBackgroundWeight: numericDraft(
+      advanced.subjectMaskBackgroundWeight ?? subjectMaskBackgroundWeightDefault,
+    ),
+    subjectMaskSubjectWeight: numericDraft(advanced.subjectMaskSubjectWeight ?? subjectMaskSubjectWeightDefault),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -569,7 +604,13 @@ export function mergeCustomizedConfigDraft(seeded, current = {}, customizedField
 // that distinction became the app's vocabulary rather than one screen's helper.
 export function configValidation(
   configDraft,
-  { activeDataset, selectedTarget, datasetNotReady = false, missingControlModels = [] } = {},
+  {
+    activeDataset,
+    selectedTarget,
+    datasetNotReady = false,
+    missingControlModels = [],
+    subjectMaskReport = null,
+  } = {},
 ) {
   const issues = [];
   if (!selectedTarget) {
@@ -639,6 +680,39 @@ export function configValidation(
   validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
   for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
+  }
+  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
+  // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
+  // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
+  if (configDraft.subjectMaskLoss && selectedTarget && !targetSupportsSubjectMaskLoss(selectedTarget)) {
+    // The toggle is hidden for such a target, so a `true` can only be carried over from another
+    // target's draft; it must block Start (the API refuses it too).
+    issues.push(issue.error(null, "This target does not support subject-masked loss — pick a supporting target"));
+  } else if (configDraft.subjectMaskLoss) {
+    const background = numberFromDraft(configDraft.subjectMaskBackgroundWeight);
+    if (background === null || background < 0 || background > subjectMaskWeightMax) {
+      issues.push(
+        issue.error("subjectMaskBackgroundWeight", `Background weight must be between 0 and ${subjectMaskWeightMax}`),
+      );
+    }
+    const subject = numberFromDraft(configDraft.subjectMaskSubjectWeight);
+    if (subject === null || subject <= 0 || subject > subjectMaskWeightMax) {
+      issues.push(
+        issue.error(
+          "subjectMaskSubjectWeight",
+          `Subject weight must be greater than 0 and at most ${subjectMaskWeightMax}`,
+        ),
+      );
+    }
+    const coverage = subjectMaskCoverage(subjectMaskReport);
+    if (coverage && !coverage.complete) {
+      issues.push(
+        issue.error(
+          "subjectMaskLoss",
+          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+        ),
+      );
+    }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
   // in the Train button's one validity summary rather than a separate `disabled` term.
@@ -788,6 +862,14 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
         }))
       : undefined,
     ...depthAnchoringSnapshot(configDraft),
+    // Omitted entirely when off, so a default job's snapshot is unchanged.
+    subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
+    subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskBackgroundWeight)
+      : undefined,
+    subjectMaskSubjectWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskSubjectWeight)
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),

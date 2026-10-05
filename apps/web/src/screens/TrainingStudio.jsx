@@ -723,8 +723,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      // Subject-masked loss (sc-24828) needs a mask on every image; incomplete coverage gates Start.
+      subjectMaskReport: subjectMasks,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
+    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, subjectMasks],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -2050,6 +2052,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
+                  subjectMaskReport={subjectMasks}
+                  onGenerateSubjectMasks={generateSubjectMasks}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}

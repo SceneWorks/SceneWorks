@@ -2854,6 +2854,143 @@ async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_e
     assert_eq!(error["context"]["field"], "resolutionBuckets");
 }
 
+/// sc-24828 (epic 2123 E6): the subject-masked-loss keys are validated at the API boundary with a
+/// field-level error naming the offending key — a non-boolean toggle, a background weight outside
+/// [0, max], a subject weight outside (0, max] — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_field_error() {
+    use sceneworks_core::training::SUBJECT_MASK_WEIGHT_MAX;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Subject mask boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |toggle: Value, background: Value, subject: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["subjectMaskLoss"] = toggle;
+        config["advanced"]["subjectMaskBackgroundWeight"] = background;
+        config["advanced"]["subjectMaskSubjectWeight"] = subject;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Subject mask",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (toggle, background, subject, field) in [
+        (json!("on"), json!(0.1), json!(1), "subjectMaskLoss"),
+        (
+            json!(true),
+            json!(-0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(0),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!("1"),
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        let (status, error) = submit(toggle.clone(), background.clone(), subject.clone()).await;
+        let case = format!("{toggle}/{background}/{subject}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{case}");
+        assert_eq!(error["context"]["field"], field, "{case}");
+    }
+
+    for (background, subject) in [
+        (json!(0), json!(1)),
+        (json!(SUBJECT_MASK_WEIGHT_MAX), json!(0.5)),
+    ] {
+        let (status, error) = submit(json!(true), background.clone(), subject.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{background}/{subject}: {error}"
+        );
+        assert_eq!(error["detail"], "Training dataset not found");
+    }
+
+    // sc-24828 review: the targets endpoint advertises subject-masked loss per target, and a
+    // target that does not (LTX-2.5 — its trainers train from prepared latent bundles) refuses it at
+    // submit with the `subjectMaskLoss` field error instead of queueing a job the worker refuses.
+    let targets = registry["targets"].as_array().expect("target list");
+    let advertises = |id: &str| {
+        targets
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))["limits"]["supportsSubjectMaskLoss"]
+            == json!(true)
+    };
+    assert!(advertises("z_image_turbo_lora"));
+    assert!(!advertises("ltx_2_5_video_lora"));
+    assert!(!advertises("krea_2_control"));
+    let ltx25 = targets
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["subjectMaskLoss"] = json!(true);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Subject mask",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "subjectMaskLoss");
+}
+
 #[tokio::test]
 async fn create_training_job_queues_real_run_when_not_dry_run() {
     let _env = isolate_hf_cache(); // hermetic: resolve the seeded base under the tempdir, never a dev's real HF cache (sc-13834/sc-13860)

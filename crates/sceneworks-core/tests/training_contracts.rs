@@ -11,6 +11,7 @@ use sceneworks_core::training::{
     TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
     WEIGHT_NOISE_SIGMA_SUGGESTED,
     RESOLUTION_BUCKETS_MAX, RESOLUTION_BUCKET_REPEATS_MAX, RESOLUTION_BUCKET_STRIDE,
+    SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT, SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT, SUBJECT_MASK_WEIGHT_MAX,
 };
 use sceneworks_core::training::{
     project_candle_training_limits, target_supports_resolution_buckets,
@@ -1825,6 +1826,151 @@ fn build_plan_with_depth_advanced(extra: &[(&str, Value)]) -> Result<TrainingPla
     })
 }
 
+/// Build a Z-Image plan whose `advanced` carries the given subject-masked-loss keys.
+fn build_plan_with_subject_mask_advanced(
+    extra: &[(&str, Value)],
+) -> Result<TrainingPlan, TrainingPlanError> {
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present");
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_sm",
+        target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_sm",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_sm"),
+        file_name: "sm.safetensors".to_owned(),
+        created_at: "2026-10-04T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24828 (epic 2123 E6): subject-masked-loss keys — in-range values survive into the plan
+/// verbatim (and resolve with defaults when absent); a non-boolean toggle, a background weight
+/// outside [0, max], a subject weight outside (0, max] or a non-number are field-level errors
+/// naming the offending key — even while the toggle is off.
+#[test]
+fn build_training_plan_validates_subject_mask_loss_as_field_errors() {
+    use sceneworks_core::training::subject_mask_loss_weights;
+    for extra in [
+        vec![("subjectMaskLoss", json!(true))],
+        vec![
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0)),
+            ("subjectMaskSubjectWeight", json!(SUBJECT_MASK_WEIGHT_MAX)),
+        ],
+        vec![("subjectMaskLoss", json!(false))],
+    ] {
+        let plan = build_plan_with_subject_mask_advanced(&extra)
+            .unwrap_or_else(|error| panic!("{extra:?} must be accepted: {error}"));
+        for (key, value) in &extra {
+            assert_eq!(&plan.config.advanced[*key], value);
+        }
+    }
+    let resolve = |extra: &[(&str, Value)]| {
+        let plan = build_plan_with_subject_mask_advanced(extra).unwrap();
+        subject_mask_loss_weights(&plan.config.advanced).unwrap()
+    };
+    assert_eq!(resolve(&[]), None, "absent toggle = off");
+    assert_eq!(
+        resolve(&[("subjectMaskLoss", json!(true))]),
+        Some((
+            SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+            SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
+        ))
+    );
+    assert_eq!(
+        resolve(&[
+            ("subjectMaskLoss", json!(true)),
+            ("subjectMaskBackgroundWeight", json!(0.25)),
+            ("subjectMaskSubjectWeight", json!(0.5)),
+        ]),
+        Some((0.25, 0.5))
+    );
+
+    for (extra, field) in [
+        (vec![("subjectMaskLoss", json!("yes"))], "subjectMaskLoss"),
+        (
+            vec![("subjectMaskBackgroundWeight", json!(-0.01))],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskBackgroundWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.01),
+            )],
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!(0)),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![(
+                "subjectMaskSubjectWeight",
+                json!(SUBJECT_MASK_WEIGHT_MAX + 0.5),
+            )],
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            vec![
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!("1")),
+            ],
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        match build_plan_with_subject_mask_advanced(&extra) {
+            Err(TrainingPlanError::InvalidField { field: got, .. }) => {
+                assert_eq!(got, field, "{extra:?}")
+            }
+            other => panic!("{extra:?}: expected a {field} field error, got {other:?}"),
+        }
+    }
+}
+
+/// sc-24828 (epic 2123 E6): the web form's subject-mask weight bound and defaults are the API's.
+#[test]
+fn web_subject_mask_bounds_match_the_api_bounds() {
+    let source = include_str!("../../../apps/web/src/training/trainingConfig.js");
+    let read = |name: &str| -> f64 {
+        let prefix = format!("export const {name} = ");
+        let line = source
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("{name} is not exported by trainingConfig.js"));
+        line[prefix.len()..]
+            .trim_end_matches(';')
+            .trim()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(read("subjectMaskWeightMax"), SUBJECT_MASK_WEIGHT_MAX);
+    assert_eq!(
+        read("subjectMaskBackgroundWeightDefault"),
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT
+    );
+    assert_eq!(
+        read("subjectMaskSubjectWeightDefault"),
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT
+    );
+}
+
+
 /// sc-2125 (epic 2123 E6): in-range depth-anchoring values survive into the plan verbatim; every
 /// out-of-range / wrong-type value is a field-level error naming the offending key.
 #[test]
@@ -2412,6 +2558,54 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
             }
             other => panic!(
                 "{}: expected a depthAnchoringWeight field error, got {other:?}",
+                target.id
+            ),
+        }
+    }
+}
+
+/// sc-24828 review: every LoRA target advertises subject-masked loss except LTX-2.5 (prepared
+/// latent bundles) and the Krea ControlNet branch; mask loss on a non-advertising target is a
+/// submit-time `subjectMaskLoss` field error (never queued), and off is always admitted. The flag
+/// is static (no Candle projection touches it).
+#[test]
+fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
+    use sceneworks_core::training::target_supports_subject_mask_loss;
+    let registry = builtin_training_targets();
+    let with_mask = |target: &sceneworks_core::training::TrainingTarget, on: bool| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("subjectMaskLoss".to_owned(), json!(on));
+        validate_training_config_for_target(target, &config)
+    };
+    let unsupported: Vec<&str> = registry
+        .targets
+        .iter()
+        .filter(|target| !target_supports_subject_mask_loss(target))
+        .map(|target| target.id.as_str())
+        .collect();
+    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    for target in &registry.targets {
+        with_mask(target, false).unwrap_or_else(|e| panic!("{} off: {e}", target.id));
+        let mut candle = target.clone();
+        project_candle_training_limits(&mut candle);
+        assert_eq!(
+            target_supports_subject_mask_loss(&candle),
+            target_supports_subject_mask_loss(target),
+            "{}: the Candle projection must not change subject-mask support",
+            target.id
+        );
+        match (
+            with_mask(target, true),
+            target_supports_subject_mask_loss(target),
+        ) {
+            (Ok(()), true) => {}
+            (Err(TrainingPlanError::InvalidField { field, .. }), false) => {
+                assert_eq!(field, "subjectMaskLoss", "{}", target.id)
+            }
+            (other, supported) => panic!(
+                "{} (advertised {supported}): unexpected mask-loss validation {other:?}",
                 target.id
             ),
         }

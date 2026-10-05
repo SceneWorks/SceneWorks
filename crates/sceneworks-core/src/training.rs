@@ -245,6 +245,42 @@ pub fn project_candle_training_limits(target: &mut TrainingTarget) {
 /// catalog models.
 pub mod depth_anchoring;
 
+/// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
+/// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
+/// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
+/// and the Krea ControlNet branch, so the flag is static per target and needs no Candle
+/// projection; a worker test pins it to the linked trainer descriptors on each platform. The web
+/// form shows the toggle only where this is `true`, and submit-time validation refuses mask loss
+/// elsewhere with a `subjectMaskLoss` field error.
+pub const SUBJECT_MASK_LOSS_SUPPORT_LIMIT: &str = "supportsSubjectMaskLoss";
+
+/// Whether `target` advertises subject-masked-loss support.
+pub fn target_supports_subject_mask_loss(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, SUBJECT_MASK_LOSS_SUPPORT_LIMIT)
+}
+
+/// `advanced` key that turns on **subject-masked loss weighting** (epic 2123, sc-24828): each
+/// image's subject mask (`<dataset>/masks/<content hash>.png`, see
+/// [`crate::training_subject_masks`]) weights the native trainer's per-element loss. A boolean;
+/// absent or `false` is off.
+pub const SUBJECT_MASK_LOSS_KEY: &str = "subjectMaskLoss";
+/// `advanced` key of the loss weight of a pure-background latent cell, in
+/// `SUBJECT_MASK_BACKGROUND_WEIGHT_RANGE` (absent ⇒ [`SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_KEY: &str = "subjectMaskBackgroundWeight";
+/// `advanced` key of the loss weight of a pure-subject latent cell, `> 0` and at most
+/// [`SUBJECT_MASK_WEIGHT_MAX`] (absent ⇒ [`SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_KEY: &str = "subjectMaskSubjectWeight";
+/// Upper bound of both mask weights — the engine's `SubjectMaskLoss` bounds. The web form uses the
+/// identical bound (`subjectMaskWeightMax` in `apps/web/src/training/trainingConfig.js`; a parity
+/// test pins the two together, epic 2123 E6). The background weight may be `0` (drop the
+/// background); the subject weight must be `> 0`.
+pub const SUBJECT_MASK_WEIGHT_MAX: f64 = 1.0;
+/// Default background weight when masked loss is on: keep a little background signal so the
+/// adapter does not learn arbitrary backgrounds, while the subject dominates.
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT: f64 = 0.1;
+/// Default subject weight when masked loss is on.
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT: f64 = 1.0;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -1625,7 +1661,10 @@ fn mage_flow_lora_target(
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -1708,7 +1747,9 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "supportsGradientNoise": true,
             // Epic 2123 depth anchoring (sc-2125): the Z-Image MLX trainer declares it. Removed for
             // Candle by `project_candle_training_limits`.
-            "supportsDepthAnchoring": true
+            "supportsDepthAnchoring": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -1823,7 +1864,10 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -1928,7 +1972,10 @@ fn krea_raw_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
@@ -2119,7 +2166,10 @@ fn sd3_large_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -2206,7 +2256,10 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2316,6 +2369,12 @@ fn ltx_lora_target(
             "supportsWeightNoise": true,
             "supportsGradientNoise": true
     }));
+    // Epic 2123 subject-masked loss (sc-24828): the LTX-2.3 trainer declares it on both backends;
+    // LTX-2.5 trains from prepared latent bundles, which no image mask can be aligned with, so its
+    // trainers refuse it and it is not advertised.
+    if !is_ltx_2_5 {
+        limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
+    }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(
@@ -2467,7 +2526,10 @@ fn wan_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -2556,7 +2618,10 @@ fn wan_moe_lora_target(
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -2672,7 +2737,10 @@ fn sdxl_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -2756,7 +2824,10 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -2830,7 +2901,10 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -2914,7 +2988,10 @@ fn kolors_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -3270,6 +3347,7 @@ pub fn validate_training_config_for_target(
     validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
     depth_anchoring::validate_support(target, config)?;
+    validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3541,7 +3619,98 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         }
     })?;
     depth_anchoring::validate(config)?;
+    validate_subject_mask_loss(config)?;
     Ok(())
+}
+
+/// The resolved subject-masked-loss weights `(background, subject)` of `config`'s `advanced` bag
+/// (epic 2123, sc-24828): `Ok(None)` when [`SUBJECT_MASK_LOSS_KEY`] is absent or `false`; else
+/// each weight (defaulted when absent) range-checked. Every failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field. Shared by submit-time validation and the
+/// worker, so the two cannot disagree on defaults or bounds.
+pub fn subject_mask_loss_weights(
+    advanced: &JsonObject,
+) -> Result<Option<(f64, f64)>, TrainingPlanError> {
+    let field_error = |field: &str, message: String| TrainingPlanError::InvalidField {
+        field: field.to_owned(),
+        message,
+    };
+    let enabled = match advanced.get(SUBJECT_MASK_LOSS_KEY) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => {
+            return Err(field_error(
+                SUBJECT_MASK_LOSS_KEY,
+                format!("{SUBJECT_MASK_LOSS_KEY} must be true or false."),
+            ))
+        }
+    };
+    let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
+        let Some(value) = advanced.get(key).filter(|value| !value.is_null()) else {
+            return Ok(default);
+        };
+        let weight = value
+            .as_f64()
+            .filter(|weight| weight.is_finite())
+            .ok_or_else(|| field_error(key, format!("{key} must be a number.")))?;
+        let in_range = if zero_ok {
+            (0.0..=SUBJECT_MASK_WEIGHT_MAX).contains(&weight)
+        } else {
+            weight > 0.0 && weight <= SUBJECT_MASK_WEIGHT_MAX
+        };
+        if !in_range {
+            let range = if zero_ok {
+                format!("between 0 and {SUBJECT_MASK_WEIGHT_MAX}")
+            } else {
+                format!("greater than 0 and at most {SUBJECT_MASK_WEIGHT_MAX}")
+            };
+            return Err(field_error(
+                key,
+                format!("{key} ({weight}) must be {range}."),
+            ));
+        }
+        Ok(weight)
+    };
+    // The weights are range-checked even while the toggle is off, so a stored out-of-range value
+    // never lies dormant until someone flips the switch.
+    let background = weight(
+        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+        true,
+    )?;
+    let subject = weight(
+        SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
+        false,
+    )?;
+    Ok(enabled.then_some((background, subject)))
+}
+
+/// Refuses subject-masked loss on a target that does not advertise
+/// [`SUBJECT_MASK_LOSS_SUPPORT_LIMIT`] — a `subjectMaskLoss` field error at submit time instead of a
+/// refusal after the job is queued (for a control target, after its condition render). Runs after
+/// [`validate_subject_mask_loss`], so the keys are already well-formed here.
+fn validate_subject_mask_loss_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    if subject_mask_loss_weights(&config.advanced)?.is_some()
+        && !target_supports_subject_mask_loss(target)
+    {
+        return Err(TrainingPlanError::InvalidField {
+            field: SUBJECT_MASK_LOSS_KEY.to_owned(),
+            message: format!(
+                "{} does not support subject-masked loss ({SUBJECT_MASK_LOSS_KEY}).",
+                target.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validates the subject-masked-loss keys (epic 2123 E6) — see [`subject_mask_loss_weights`].
+fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    subject_mask_loss_weights(&config.advanced).map(|_| ())
 }
 
 /// Target half of the `advanced.resolutionBuckets` validation (epic 2123 sc-2127, E6): every bucket
@@ -3819,7 +3988,10 @@ fn anima_base_lora_target() -> TrainingTarget {
             "outputScopes": ["project", "global"],
             // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
             "supportsWeightNoise": true,
-            "supportsGradientNoise": true
+            "supportsGradientNoise": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",
