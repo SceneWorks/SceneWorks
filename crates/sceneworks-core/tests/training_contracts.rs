@@ -2148,11 +2148,13 @@ fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
         ("wan2_2_i2v_14b", Catalog(&TAEW2_1_MODEL)),
         ("wan2_2_ti2v_5b", Catalog(&TAEW2_2_MODEL)),
         ("ltx_2_3", Catalog(&TAELTX2_3_MODEL)),
+        ("ltx_2_5", Catalog(&TAELTX2_3_MODEL)),
+        ("ltx_2_5_distilled", Catalog(&TAELTX2_3_MODEL)),
         ("mage_flow_base", BaseModelVae),
     ] {
         assert_eq!(x0_decoder_for_trainer(trainer), Some(expected), "{trainer}");
     }
-    for trainer in ["krea_2_control", "ltx_2_5", "unknown"] {
+    for trainer in ["krea_2_control", "unknown"] {
         assert_eq!(x0_decoder_for_trainer(trainer), None, "{trainer}");
     }
 }
@@ -2543,7 +2545,7 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
 }
 
 /// sc-2125 / sc-24830: only targets whose trainer declares depth anchoring advertise it — every
-/// LoRA target except the Krea ControlNet branch and LTX-2.5, on both platforms — and an enabled
+/// LoRA target except the Krea ControlNet branch, on both platforms — and an enabled
 /// depth weight on any other target is a submit-time `depthAnchoringWeight` field error.
 /// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
 /// the Krea ControlNet case is accepted ⇒ red.
@@ -2573,7 +2575,7 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    assert_eq!(unsupported, ["krea_2_control"]);
 
     for target in &registry.targets {
         with_weight(target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));

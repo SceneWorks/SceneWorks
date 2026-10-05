@@ -38,7 +38,7 @@ pub const DEPTH_ANCHORING_MODELS: [&str; 3] = ["small", "base", "large"];
 /// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
 /// depth anchoring (its `TrainerDescriptor::techniques.depth_anchoring`). Absent = no. The same
 /// gating as weight noise ([`super::WEIGHT_NOISE_SUPPORT_LIMIT`]): every LoRA trainer declares it
-/// on MLX and Candle alike except the Krea ControlNet branch and LTX-2.5 (sc-24830), so the builtin
+/// on MLX and Candle alike except the Krea ControlNet branch (sc-24830), so the builtin
 /// catalog flag is static per target; the web form shows the toggle only where it is `true`,
 /// submit-time validation refuses a non-zero weight elsewhere, and a worker test pins the flag to
 /// the linked trainer descriptors on each platform.
@@ -148,7 +148,7 @@ pub const TAEW2_2_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "taew2_2.safetensors",
 };
 
-/// TAELTX2.3 (TAEHV) — the tiny decoder for the LTX-2.3 128-channel latent family.
+/// TAELTX2.3 (TAEHV) — the tiny decoder for the LTX-2.3 / LTX-2.5 128-channel latent family.
 pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
     id: "taeltx2_3",
     label: "TAELTX2.3 tiny decoder",
@@ -213,8 +213,7 @@ pub enum X0DecoderSource {
 }
 
 /// The x0 decoder for a native trainer's latent family (keyed by the engine trainer id, sc-24830).
-/// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch,
-/// LTX-2.5's prepared latent bundles).
+/// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch).
 pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
     use X0DecoderSource::{BaseModelVae, Catalog};
     Some(match trainer_id {
@@ -226,7 +225,9 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
             Catalog(&TAEW2_1_MODEL)
         }
         "wan2_2_ti2v_5b" => Catalog(&TAEW2_2_MODEL),
-        "ltx_2_3" => Catalog(&TAELTX2_3_MODEL),
+        // LTX-2.5 shares the LTX-2.3 latent space (upstream lists TAELTX2.3 for both); its
+        // prepared bundles carry the clean video latent the reference decodes.
+        "ltx_2_3" | "ltx_2_5" | "ltx_2_5_distilled" => Catalog(&TAELTX2_3_MODEL),
         "mage_flow_base" => BaseModelVae,
         _ => return None,
     })

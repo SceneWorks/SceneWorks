@@ -2377,13 +2377,13 @@ fn ltx_lora_target(
     // trainers refuse it and it is not advertised.
     if !is_ltx_2_5 {
         limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
-        // Epic 2123 depth anchoring (sc-24830): LTX-2.3 decodes x0 per frame through TAELTX2.3;
-        // LTX-2.5's prepared latent bundles carry no decodable image, so it refuses depth too.
-        limits.insert(
-            depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
-            json!(true),
-        );
     }
+    // Epic 2123 depth anchoring (sc-24830): both LTX-2.3 and LTX-2.5 decode the video latent per
+    // frame through TAELTX2.3 (2.5's prepared bundles carry the clean video latent).
+    limits.insert(
+        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
+        json!(true),
+    );
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(

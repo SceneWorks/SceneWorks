@@ -1307,6 +1307,7 @@
           200,
           4000
         ],
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
         "supportsWeightNoise": true
       },
