@@ -33,3 +33,7 @@ pub(crate) mod support;
 mod training;
 mod uploads;
 mod workflows;
+mod yue2_catalog;
+mod yue2_jobs;
+mod yue2_scores;
+mod yue2_transcriptions;

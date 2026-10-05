@@ -6,8 +6,8 @@
 //
 // The pins live in crates/sceneworks-worker/Cargo.toml and
 // crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
-// candle-kernels to the multi-arch vendored copy inside the same inference revision (sc-7544 /
-// sc-13510) — that rev must move in lockstep or the patched kernels skew against candle-core. This
+// candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
+// revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
@@ -48,7 +48,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
 const MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-memory-adapter/Cargo.toml");
 const LOCKFILE = join(repoRoot, "Cargo.lock");
-// Root workspace manifest: holds the candle-core + candle-kernels [patch] pins (same repo, same rev).
+// Root workspace manifest: holds the Candle [patch] pins (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
@@ -64,10 +64,9 @@ const INFERENCE_CRATES = [
   "mlx-gen",
   "candle-gen",
 ];
-// Resolved through the root [patch], not a direct dependency — still pinned to the inference
-// repo, so their lock entries must be refreshed on every bump. candle-core joined candle-kernels
-// when inference vendored it (sc-24441, epic sc-24432).
-const PATCHED_CRATES = ["candle-kernels", "candle-core"];
+// Resolved through the root [patch], not direct dependencies. Both vendored packages must move
+// with the inference pin and have their lock entries refreshed by Cargo.
+const PATCHED_CRATES = ["candle-core", "candle-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -151,6 +150,28 @@ function repin(manifestText, sha, manifestPath = MANIFEST) {
     throw new Error(`expected to rewrite ${inferenceLines} inference pin(s), rewrote ${rewrote}`);
   }
   return out.join("\n");
+}
+
+// Before any bump writes, require the root workspace patch to carry every vendored package.
+// Cargo ignores a dependency workspace's [patch], so repinning direct crates alone is unsafe.
+function verifyCandlePatches(manifestText, sha) {
+  const marker = `[patch."https://github.com/huggingface/candle"]`;
+  const lines = manifestText.split("\n");
+  const afterMarker = lines.findIndex((line) => line.trim() === marker);
+  const section = [];
+  for (let i = afterMarker + 1; afterMarker >= 0 && i < lines.length; i += 1) {
+    if (lines[i].trim().startsWith("[")) break;
+    section.push(lines[i]);
+  }
+  for (const crate of PATCHED_CRATES) {
+    const matches = section.filter((line) =>
+      new RegExp(`^${crate}\\s*=`).test(line.trim()));
+    if (matches.length !== 1 ||
+        !matches[0].includes(`git = "${INFERENCE_GIT}"`) ||
+        !matches[0].includes(`rev = "${sha}"`)) {
+      throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
+    }
+  }
 }
 
 function repinSemanticProvenance(source, sha) {
@@ -908,6 +929,26 @@ function selfTest() {
     repin(`candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }`, SHA) ===
       `candle-kernels = { git = "${INFERENCE_GIT}", rev = "${SHA}" }`,
   );
+  const bothPatches = repin(
+    `[patch."https://github.com/huggingface/candle"]\n` +
+    `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
+  check("root Candle patches repin together", (() => {
+    try { verifyCandlePatches(bothPatches, SHA); return true; } catch { return false; }
+  })());
+  check("a missing vendored core patch refuses a later pin", (() => {
+    try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    catch { return true; }
+  })());
+  check("a core patch in another TOML section cannot satisfy the root patch", (() => {
+    try {
+      verifyCandlePatches(
+        bothPatches.replace(/^candle-core.*\n/m, "") +
+          `[workspace.dependencies]\ncandle-core = { git = "${INFERENCE_GIT}", rev = "${SHA}" }\n`,
+        SHA);
+      return false;
+    } catch { return true; }
+  })());
   let threw = false;
   try {
     repin(`foo = "bar"`, SHA);
@@ -1553,7 +1594,7 @@ function main() {
   const repoIdx = args.indexOf("--repo");
   const explicitRepo = repoIdx >= 0 ? resolve(args[repoIdx + 1] ?? "") : null;
 
-  // Three files the tool can safely rewrite: the worker's direct deps, the root's candle-kernels
+  // Three files the tool can safely rewrite: the worker's direct deps, the root's Candle
   // [patch], and the worker's semantic-provenance stamp. They must land on the same rev, so bump
   // them as one unit. `cargo update` below refreshes a fourth, Cargo.lock.
   //
@@ -1605,6 +1646,9 @@ function main() {
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
   const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
   const cargoPinsAlreadyInManifests = cargoManifestsAlreadyPinned(manifests);
+  if (!dryRun) {
+    verifyCandlePatches(manifests.find((m) => m.path === ROOT_MANIFEST)?.bumped ?? "", sha);
+  }
   if (cargoPinsAlreadyInManifests) {
     console.log(
       lockHasStaleInferenceRevision(sha)

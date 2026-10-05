@@ -1,0 +1,189 @@
+{
+  "schema": "sceneworks-yue2-memory-profile-record-v2",
+  "caseId": "yue2:bf16:cuda:experimental-fp8-ar",
+  "lane": "candle:yue2",
+  "backend": "cuda",
+  "identity": {
+    "model": {
+      "id": "yue2",
+      "repo": "m-a-p/YuE2-3B",
+      "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+      "tier": "bf16",
+      "weightsSha256": null,
+      "weightsBytes": null,
+      "conversion": null
+    },
+    "decoder": {
+      "choice": "standard",
+      "componentId": "vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8"
+    },
+    "engine": {
+      "lane": "candle:yue2",
+      "inferenceRevision": "c1e8f8e023bf4e1fe94a61c4c39e08f881fdd8e6",
+      "closureDigest": "b3cfd4fe7ce8b1a6abe94d705a8f82eaf8afa12cafca4958db4183ddd2b0350c",
+      "digestVersion": "inference-closure-digest v4"
+    },
+    "sceneworks": {
+      "revision": "91a9a582c9531b7b648b76b53d9aee2cb116e630",
+      "dirty": false
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "memoryBytes": 102641958912,
+    "computeCap": "12.0",
+    "driver": "596.36",
+    "os": "Windows_NT 10.0.26200"
+  },
+  "request": {
+    "name": "experimental-fp8-ar",
+    "arMode": "experimentalFp8",
+    "planning": "full",
+    "style": "indie pop, female vocal, guitar and drums",
+    "lyrics": "[verse]\nMorning light, I hear your song\n\n[chorus]\nHold on, sing along",
+    "seed": 831003
+  },
+  "admission": {
+    "caseId": "yue2:bf16:cuda:experimental-fp8-ar",
+    "outcome": "admitted",
+    "estimate": {
+      "tier": "bf16",
+      "backend": "cuda",
+      "evidence": "measured_weights_estimate_pending_terminal_calibration",
+      "controls": {
+        "stageResidency": false,
+        "attentionChunkSize": 100663296,
+        "decodeTileEdge": 224
+      },
+      "weights": {
+        "deviceBytes": 5852083088,
+        "hostBytes": 2818572288
+      },
+      "stages": {
+        "acoustic": {
+          "deviceBytes": 10928409728,
+          "hostBytes": 0,
+          "totalBytes": 10928409728
+        },
+        "decode": {
+          "deviceBytes": 16268327040,
+          "hostBytes": 0,
+          "totalBytes": 16268327040
+        },
+        "load": {
+          "deviceBytes": 7261368448,
+          "hostBytes": 7261368448,
+          "totalBytes": 14522736896
+        },
+        "plan": {
+          "deviceBytes": 6503697296,
+          "hostBytes": 2818572288,
+          "totalBytes": 9322269584
+        },
+        "semantic": {
+          "deviceBytes": 7757491088,
+          "hostBytes": 2818572288,
+          "totalBytes": 10576063376
+        }
+      }
+    }
+  },
+  "measured": {
+    "sampler": "nvidia-smi memory.used",
+    "stages": {
+      "load": {
+        "peakBytes": 8009023488,
+        "samples": 104
+      },
+      "plan": {
+        "peakBytes": 8076132352,
+        "samples": 289
+      },
+      "semantic": {
+        "peakBytes": 8816427008,
+        "samples": 801
+      },
+      "acoustic": {
+        "peakBytes": 8816427008,
+        "samples": 34
+      },
+      "decode": {
+        "peakBytes": 10024386560,
+        "samples": 4
+      }
+    },
+    "peakBytes": 10024386560,
+    "timingNote": "Stage wall times include external sample waits; observed peaks may miss transient maxima."
+  },
+  "outcome": {
+    "status": "completed",
+    "caseId": "yue2:bf16:cuda:experimental-fp8-ar",
+    "outcome": "completed",
+    "audioSeconds": 84.87866666666666,
+    "rms": 0.1568545550107956,
+    "truncated": {
+      "abc": false,
+      "semantic": false
+    },
+    "stageSeconds": {
+      "acoustic": 8.884461641311646,
+      "decode": 1.0609893798828125,
+      "load": 27.1960551738739,
+      "plan": 75.92986965179443,
+      "semantic": 210.71846628189087
+    },
+    "engineTiming": {
+      "abc": {
+        "seconds": 74.6348218,
+        "prefill_seconds": 1.8852503,
+        "output_tokens": 737,
+        "content_tokens": 736,
+        "prefix_tokens": 61,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "semantic": {
+        "seconds": 212.6886867,
+        "prefill_seconds": 3.1532954,
+        "output_tokens": 2123,
+        "content_tokens": 2122,
+        "prefix_tokens": 799,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "nar_seconds": 8.8518707,
+      "vae_seconds": 1.5170993,
+      "load": {
+        "resolve_verify_and_load_seconds": 24.8459216
+      },
+      "e2e_seconds": 298.5556002
+    },
+    "runIdentity": "a1d1142e0c506e91a47a64c5be07e8f53e18c98eca06cfb2bd9b6a197e5a5504",
+    "planIdentity": "268c43c5f060353c0dfc5ec50f743b7cb14e4f0773de1f6721511a29031cf9da",
+    "decoder": {
+      "component": "yue2_vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+      "decoder_release": "standard",
+      "config_sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970",
+      "weights_sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    "latent": {
+      "schema": 1,
+      "sha256": "6362f2d92324ac87d33d7d595bde6d8ccf8e2615ecd793a6f798c1a5ab1393d2",
+      "shape": [
+        2122,
+        64
+      ],
+      "dtype": "F32",
+      "source": {
+        "kind": "synthesis",
+        "stage_identity": "caa7dfdce096b66d58539150bac333ad1e93a10121a658cdcc6381415dd468f3"
+      }
+    },
+    "engineQuantization": "fp8"
+  },
+  "capturedAt": "2026-09-30T03:09:25.952Z"
+}

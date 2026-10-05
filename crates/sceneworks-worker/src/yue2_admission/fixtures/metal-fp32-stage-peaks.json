@@ -1,0 +1,76 @@
+{
+  "provenance": {
+    "workflowRun": 37345072908,
+    "recordSha256": "a77281cd3bd2fd5b05f239d233a14f05e14f69e94012ac862a10efc1c849d00f",
+    "inferenceRevision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "sceneworksRevision": "f63d173089f81a8cc591d9e905ec952eaa5cda83",
+    "capturedAt": "2026-10-05T17:13:47.629Z",
+    "hardware": {
+      "memoryBytes": 137438953472,
+      "chip": "Apple M5 Max",
+      "os": "Darwin 25.6.0"
+    },
+    "notes": "Stage wall times include external sample waits; observed peaks may miss transient maxima. Original f63 estimates and samples; not a capture of this accounting repair."
+  },
+  "case": {
+    "id": "yue2:bf16:metal:strict-fp32-standard",
+    "tier": "bf16",
+    "decoder": "standard",
+    "computePolicy": "fp32",
+    "request": {
+      "planning": "off",
+      "style": "indie pop, female vocal, acoustic guitar, bass, steady drums",
+      "lyrics": "[verse]\nMorning light, I hear your song\n\n[chorus]\nHold on, sing along",
+      "seed": 831004,
+      "semanticSampling": {
+        "minTokens": 200,
+        "maxTokens": 200
+      }
+    }
+  },
+  "originalStages": {
+    "acoustic": {
+      "deviceBytes": 17494800640,
+      "hostBytes": 0,
+      "totalBytes": 17494800640
+    },
+    "decode": {
+      "deviceBytes": 23893690624,
+      "hostBytes": 0,
+      "totalBytes": 23893690624
+    },
+    "load": {
+      "deviceBytes": 16938656000,
+      "hostBytes": 0,
+      "totalBytes": 16938656000
+    },
+    "semantic": {
+      "deviceBytes": 17494800640,
+      "hostBytes": 0,
+      "totalBytes": 17494800640
+    }
+  },
+  "measuredStages": {
+    "load": {
+      "peakBytes": 19392301360,
+      "samples": 3
+    },
+    "semantic": {
+      "peakBytes": 19412191536,
+      "samples": 9
+    },
+    "acoustic": {
+      "peakBytes": 19486411008,
+      "samples": 5
+    },
+    "decode": {
+      "peakBytes": 21806385264,
+      "samples": 2
+    }
+  },
+  "originalControls": {
+    "stageResidency": false,
+    "attentionChunkSize": 100663296,
+    "decodeTileEdge": 224
+  }
+}

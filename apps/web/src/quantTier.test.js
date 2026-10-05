@@ -995,3 +995,28 @@ describe("qwen_image_2_1 per-tier memory floors in the Model Manager", () => {
     }
   });
 });
+
+// sc-22998 / sc-22999: a locally DERIVED tier (YuE2 q8 / q4) reads `derivationPending` until a
+// derived snapshot exists, but it is installable — its download fetches the original and the worker
+// derives the tier — so it is the lightest installable tier a floor is quoted for. A tier that is
+// genuinely unpublished (`pending`) stays excluded.
+describe("a derivation-pending tier is installable (sc-22999)", () => {
+  it("offers the derivable q4 as the lightest installable tier", () => {
+    const model = {
+      hasVariantMatrix: true,
+      variants: [
+        { variant: "bf16", installState: "missing" },
+        { variant: "q8", installState: "derivationPending", derivationPending: true },
+        { variant: "q4", installState: "derivationPending", derivationPending: true },
+      ],
+    };
+    expect(lightestInstallableTier(model)).toBe("q4");
+    const unpublished = {
+      ...model,
+      variants: model.variants.map((variant) =>
+        variant.variant === "q4" ? { variant: "q4", installState: "pending", pendingArtifact: true } : variant,
+      ),
+    };
+    expect(lightestInstallableTier(unpublished)).toBe("q8");
+  });
+});

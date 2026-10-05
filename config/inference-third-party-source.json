@@ -124,6 +124,20 @@
       "evidence": "Candle reimplementation written against those pinned references (parity fixtures under the crate's tests/fixtures/); the upstream terms are already mapped in the About manifest as components `yue` (the six stage-1 checkpoints + stage-2, Apache-2.0 LICENSE + NOTICE) and `xcodec-mini-infer` (codec, HuBERT branch and both Vocos decoders, Apache-2.0 LICENSE + NOTICE). The candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
+      "id": "architecture:crates/audio/candle-audio-sheetsage2",
+      "pathPrefix": "crates/audio/candle-audio-sheetsage2/src/",
+      "provenance": "Native Rust/Candle transcription port of the remote Python in m-a-p/SheetSage2 and m-a-p/MERT-v2-FullSong, with SheetSage2 post-processing pinned to code revision 4f89269db831bdc1880124164a00d4f9385cd129 (candle-audio-sheetsage2/src/lib.rs).",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Upstream licenses the model weights, not the remote Python. The owner's 2026-09-27 noncommercial CC BY-NC 4.0 distribution basis for this modified port and its attribution are recorded in candle-audio-sheetsage2/NOTICE, candle-audio-yue2/src/license.rs (COVER_PORT_OWNER_DECISION), and About component sheetsage2-port. That basis covers port code only; the engine separately refuses weight redistribution. The candidate inventory pins each marker-bearing source blob and its normalized markers."
+    },
+    {
+      "id": "architecture:crates/audio/candle-audio-yue2",
+      "pathPrefix": "crates/audio/candle-audio-yue2/src/",
+      "provenance": "Native Rust/Candle architecture, request-protocol and decoder port of multimodal-art-projection/YuE at source commit 92a73cc7652fcc1f937855e4b765e0a0edd7ff2e (candle-audio-yue2/src/lib.rs and license.rs).",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "The pinned YuE2 source is Apache-2.0 with separate MIT Oobleck VAE and SnakeBeta notices, recorded by candle-audio-yue2/src/license.rs and About component yue2-source. This classifies the source port only: model weights are separately CC BY-NC 4.0 and their redistribution remains refused by the engine. The candidate inventory pins each marker-bearing source blob and its normalized markers."
+    },
+    {
       "id": "architecture:crates/contracts/core-llm",
       "pathPrefix": "crates/contracts/core-llm/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
@@ -135,9 +149,18 @@
       "paths": [
         "crates/contracts/core-llm/core-llm-testkit/src/comparison.rs"
       ],
-      "provenance": "The scanner matches first-party prose in this diagnostic comparison suite: \"not a reproduction of a vendor's aggregate benchmark\" (the model vendor's published scores, which it deliberately does not reproduce) and the identifier `follow_up` for its tool round-trip case.",
+      "provenance": "The scanner matches first-party prose in this diagnostic comparison suite: \"not a reproduction of a vendor's aggregate benchmark\" and the identifier `follow_up` for its tool round-trip case.",
       "disposition": "first-party-source",
       "evidence": "SceneWorks-authored text-LLM comparison cases driven through the public core-llm TextLlm trait; no upstream source, prompt set or benchmark is copied. The crate remains explicitly classified as first-party-original in crateDispositions."
+    },
+    {
+      "id": "architecture:crates/contracts/core-llm/core-llm-testkit/baseline",
+      "paths": [
+        "crates/contracts/core-llm/core-llm-testkit/baseline/speculative_bench_baseline.rs"
+      ],
+      "provenance": "Pre-epic speculative benchmark baseline driver, copied from this repository's own current core-llm testkit because the older revision cannot import its newer API.",
+      "disposition": "first-party-source",
+      "evidence": "The driver copies SceneWorks-authored prompt sets, budgets and statistics within the same repository, not upstream benchmark source. The crate remains first-party-original in crateDispositions."
     },
     {
       "id": "architecture:crates/contracts/gen-core",
@@ -414,6 +437,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-core",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-core/",
+      "provenance": "Vendored Hugging Face Candle core 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d, including upstream CUDA graph parameter-cache commits cabbc30191b352814d8bb94e821e82faa883c7b5 and f53ed3bfbd2e3291c70e4db81eaf0faeccbb8e83 plus the local zeroed quantized-padding change, as documented in VENDORED.md.",
+      "disposition": "about-license",
+      "component": "candle-transformers-source"
     },
     {
       "id": "architecture:crates/media/candle-gen/vendor/candle-kernels",

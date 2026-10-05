@@ -1,0 +1,186 @@
+{
+  "schema": "sceneworks-yue2-memory-profile-record-v2",
+  "caseId": "yue2:q4:cuda:default",
+  "lane": "candle:yue2",
+  "backend": "cuda",
+  "identity": {
+    "model": {
+      "id": "yue2",
+      "repo": "m-a-p/YuE2-3B",
+      "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+      "tier": "q4",
+      "weightsSha256": "df443371ec5b39b3b53525bf4cb8fc36e78c3597899e35d2aef585415fb4a9a6",
+      "weightsBytes": 2658814800,
+      "conversion": "yue2-ggml-tier-v1"
+    },
+    "decoder": {
+      "choice": "standard",
+      "componentId": "vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8"
+    },
+    "engine": {
+      "lane": "candle:yue2",
+      "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+      "closureDigest": "927461189947deb4323538d30c42c62c5cad6f4a788f095fa18039fda7c0b688",
+      "digestVersion": "inference-closure-digest v4"
+    },
+    "sceneworks": {
+      "revision": "26a149e7b9f33b6d5471e2ff4f74bd68fa0a79c8",
+      "dirty": false
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "memoryBytes": 102641958912,
+    "computeCap": "12.0",
+    "driver": "596.36",
+    "os": "Windows_NT 10.0.26200"
+  },
+  "request": {
+    "name": "default",
+    "planning": "full",
+    "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+    "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+    "seed": 831001
+  },
+  "admission": {
+    "caseId": "yue2:q4:cuda:default",
+    "outcome": "admitted",
+    "estimate": {
+      "tier": "q4",
+      "backend": "cuda",
+      "evidence": "measured_weights_estimate_pending_terminal_calibration",
+      "controls": {
+        "stageResidency": false,
+        "attentionChunkSize": 100663296,
+        "decodeTileEdge": 224
+      },
+      "weights": {
+        "deviceBytes": 2658856736,
+        "hostBytes": 0
+      },
+      "stages": {
+        "acoustic": {
+          "deviceBytes": 6383930144,
+          "hostBytes": 0,
+          "totalBytes": 6383930144
+        },
+        "decode": {
+          "deviceBytes": 11665815328,
+          "hostBytes": 0,
+          "totalBytes": 11665815328
+        },
+        "load": {
+          "deviceBytes": 2658856736,
+          "hostBytes": 2658742400,
+          "totalBytes": 5317599136
+        },
+        "plan": {
+          "deviceBytes": 3380938528,
+          "hostBytes": 0,
+          "totalBytes": 3380938528
+        },
+        "semantic": {
+          "deviceBytes": 4634732320,
+          "hostBytes": 0,
+          "totalBytes": 4634732320
+        }
+      }
+    }
+  },
+  "measured": {
+    "sampler": "nvidia-smi memory.used",
+    "stages": {
+      "load": {
+        "peakBytes": 3848273920,
+        "samples": 13
+      },
+      "plan": {
+        "peakBytes": 3881828352,
+        "samples": 108
+      },
+      "semantic": {
+        "peakBytes": 4588568576,
+        "samples": 338
+      },
+      "acoustic": {
+        "peakBytes": 4588568576,
+        "samples": 61
+      },
+      "decode": {
+        "peakBytes": 5460983808,
+        "samples": 4
+      }
+    },
+    "peakBytes": 5460983808
+  },
+  "outcome": {
+    "status": "completed",
+    "caseId": "yue2:q4:cuda:default",
+    "outcome": "completed",
+    "audioSeconds": 107.55866666666667,
+    "rms": 0.14890256524085999,
+    "truncated": {
+      "abc": false,
+      "semantic": false
+    },
+    "stageSeconds": {
+      "acoustic": 15.885341882705688,
+      "decode": 1.087268590927124,
+      "load": 3.395707368850708,
+      "plan": 28.64736294746399,
+      "semantic": 89.0440366268158
+    },
+    "engineTiming": {
+      "abc": {
+        "seconds": 28.6024714,
+        "prefill_seconds": 0.1470591,
+        "output_tokens": 886,
+        "content_tokens": 885,
+        "prefix_tokens": 193,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "semantic": {
+        "seconds": 88.136117,
+        "prefill_seconds": 0.1579545,
+        "output_tokens": 2690,
+        "content_tokens": 2689,
+        "prefix_tokens": 1080,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "nar_seconds": 16.4860639,
+      "vae_seconds": 1.3971571,
+      "load": {
+        "resolve_verify_and_load_seconds": 3.1530756
+      },
+      "e2e_seconds": 134.736649
+    },
+    "runIdentity": "63db2d38c73322a245469bc691b756550a35a172bbaa1cddd37a34da084316c9",
+    "planIdentity": "1006d15252d6f9651ddbe40f7998b7bab430266d70cfde123fd2716ccea63a21",
+    "decoder": {
+      "component": "yue2_vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+      "decoder_release": "standard",
+      "config_sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970",
+      "weights_sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    "latent": {
+      "schema": 1,
+      "sha256": "0d10e6cecac2a20a3a003b8094f3ff46bdcd31e6ea28e90813615b51c36e4487",
+      "shape": [
+        2689,
+        64
+      ],
+      "dtype": "F32",
+      "source": {
+        "kind": "synthesis",
+        "stage_identity": "d7d81aedaab4597e08e7c26c0b68f1fe9831f0c6c8324334a33c2540e03810e9"
+      }
+    }
+  },
+  "capturedAt": "2026-09-27T23:46:42.937Z"
+}

@@ -292,6 +292,26 @@ describe("WorkerProgressCard layout", () => {
     expect(labels).toEqual(["Cancel"]);
   });
 
+  it("requires a visible compute choice before duplicating a pre-policy YuE2 job", () => {
+    const job = {
+      id: "old-yue2", type: "audio_generate", status: "completed", attempts: 1,
+      payload: { model: "yue2", yue2: { kind: "create", lyrics: "la", runId: "yue2run_old" } },
+    };
+    const onDuplicate = vi.fn();
+    api = render(<WorkerProgressCard job={job} onDuplicate={onDuplicate} />, makeContext([]));
+    const choice = api.container.querySelector('select[aria-label="Compute precision for duplicate"]');
+    const button = [...api.container.querySelectorAll("button")].find((item) => item.textContent === "Duplicate");
+    expect(choice).not.toBeNull();
+    expect(button.disabled).toBe(true);
+    act(() => {
+      choice.value = "fp32";
+      choice.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(button.disabled).toBe(false);
+    act(() => button.click());
+    expect(onDuplicate).toHaveBeenCalledWith(job, "fp32");
+  });
+
   it("renders a pending_caption job as an in-flight, cancelable job (sc-9120)", () => {
     // A pending_caption Ideogram job (awaiting the async prompt rewrite) is non-terminal: it gets a
     // readable badge and can be canceled before a worker starts, like a queued job.
