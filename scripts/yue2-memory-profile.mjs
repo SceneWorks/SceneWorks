@@ -845,12 +845,18 @@ async function readOptional(file) {
   }
 }
 
+export function isWithinRepository(root, target, pathApi = path) {
+  const relative = pathApi.relative(pathApi.resolve(root), pathApi.resolve(target));
+  return relative === "" || (relative !== ".." &&
+    !relative.startsWith(`..${pathApi.sep}`) && !pathApi.isAbsolute(relative));
+}
+
 /** Plan one capture: the case, its files and the exact commands, without running anything. */
 export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, gpuId, budgetMinutes = 240,
   cudaSharedDevice = false, cudaSharedDeviceProof, sources, root = ROOT }) {
   const { plan, manifest } = sources;
   validatePlan(plan, sources);
-  if (externalCaseFile && !path.relative(root, path.resolve(externalCaseFile)).startsWith("..")) {
+  if (externalCaseFile && isWithinRepository(root, externalCaseFile)) {
     fail("--case-file must be outside the repository");
   }
   const item = externalCaseFile
@@ -866,7 +872,7 @@ export async function planCapture({ caseId, externalCaseFile, outDir, dataDir, g
     ? sharedDeviceProof(await readFile(cudaSharedDeviceProof), gpuId)
     : null;
   const resolvedOut = path.resolve(outDir, item.id.replaceAll(":", "__"));
-  if (!path.relative(root, resolvedOut).startsWith("..")) {
+  if (isWithinRepository(root, resolvedOut)) {
     fail("--out must be outside the repository: a capture from a dirty checkout is not evidence");
   }
   const caseFilePath = path.join(resolvedOut, "case.json");

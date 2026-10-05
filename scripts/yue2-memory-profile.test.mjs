@@ -24,6 +24,7 @@ import {
   expandCases,
   externalCaseItem,
   gradeRecord,
+  isWithinRepository,
   parseArgs,
   parseStageMarks,
   parseWatchdogSamples,
@@ -159,6 +160,10 @@ test("an off-plan explicit precision case uses the guarded capture path without 
     const planned = await planCapture({ externalCaseFile: file, outDir: dir, sources });
     assert.equal(planned.item.computePolicy, "bf16");
     assert.equal(planned.guarded.eventFile, path.join(planned.outDir, "watchdog.jsonl"));
+    await assert.rejects(planCapture({ externalCaseFile: path.join(dir, "repo", "..case.json"),
+      outDir: dir, sources, root: path.join(dir, "repo") }), /--case-file must be outside/);
+    await assert.rejects(planCapture({ externalCaseFile: file, outDir: path.join(dir, "repo", "..cache"),
+      sources, root: path.join(dir, "repo") }), /--out must be outside/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -554,6 +559,26 @@ test("capture planning: CUDA builds the candle feature, Metal runs under the foo
   const envOptions = { caseFilePath: path.join(external, "case.json"), outDir: external, gpuId: 1, base: { CUDA_VISIBLE_DEVICES: "0" } };
   assert.equal(captureEnv({ ...envOptions, backend: "cuda" }).CUDA_VISIBLE_DEVICES, "1");
   assert.equal(captureEnv({ ...envOptions, backend: "metal" }).CUDA_VISIBLE_DEVICES, "0");
+});
+
+test("capture paths stay outside the repo across Windows volumes and exact directory boundaries", () => {
+  const cases = [
+    [path.win32, "D:\\actions\\app", "E:\\sceneworks-terminal\\cases\\case.json", false],
+    [path.win32, "D:\\actions\\app", "D:\\actions\\cases\\case.json", false],
+    [path.win32, "D:\\actions\\app", "D:\\actions\\app-next\\case.json", false],
+    [path.win32, "D:\\actions\\app", "D:\\actions\\app", true],
+    [path.win32, "D:\\actions\\app", "D:\\actions\\app\\cases\\case.json", true],
+    [path.win32, "D:\\actions\\app", "D:\\actions\\app\\..cache\\case.json", true],
+    [path.posix, "/repo/app", "/cases/case.json", false],
+    [path.posix, "/repo/app", "/repo/cases/case.json", false],
+    [path.posix, "/repo/app", "/repo/app-next/case.json", false],
+    [path.posix, "/repo/app", "/repo/app", true],
+    [path.posix, "/repo/app", "/repo/app/cases/case.json", true],
+    [path.posix, "/repo/app", "/repo/app/..cache/case.json", true],
+  ];
+  for (const [pathApi, root, target, inside] of cases) {
+    assert.equal(isWithinRepository(root, target, pathApi), inside, `${root} -> ${target}`);
+  }
 });
 
 test("a record states the run's truncation, stage times and identities, or none of them (sc-23002)", () => {
