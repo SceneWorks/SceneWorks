@@ -61,6 +61,24 @@ export const depthAnchoringModelLabels = {
   base: "Base",
   large: "Large (much smaller weight)",
 };
+// Body losses (epic 2123, sc-24832): three auxiliary losses on the same decoded prediction —
+// ViTPose bone-length proportions, HybrIK SMPL body shape and Sapiens surface normals; images with
+// no detected person are skipped. Each is off (empty weight) by default and has its own weight,
+// noise window and alternation period. These bounds are the API's
+// (crates/sceneworks-core/src/training/body_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const bodyLossWeightMax = 1;
+export const bodyLossWeightSuggested = 0.1;
+export const bodyLossEveryMax = 16;
+export const bodyLossEveryDefault = 2;
+export const bodyShapeMinCosDefault = 0.2;
+// The three losses: the `advanced` key prefix, the target support flag, the default noise window
+// (upstream: proportion [0, 1], shape/normal [0.4, 0.8]) and the UI label.
+export const bodyLosses = [
+  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, 1], label: "Body proportion" },
+  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: [0.4, 0.8], label: "Body shape" },
+  { prefix: "normal", limit: "supportsNormalLoss", window: [0.4, 0.8], label: "Surface normals" },
+];
 
 // Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
 // trainer's per-element loss — background cells by the background weight, subject cells by the
@@ -129,6 +147,13 @@ export function targetSupportsResolutionBuckets(target) {
 // (pinned to the trainer descriptors by a worker test). Absent means unsupported.
 export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Whether the target's trainer on the serving platform honors the body loss `loss` (an entry of
+// `bodyLosses`) — the platform-effective `limits.<loss.limit>` (pinned to the trainer descriptors
+// and the cataloged weights by a worker test). Absent means unsupported.
+export function targetSupportsBodyLoss(target, loss) {
+  return target?.limits?.[loss.limit] === true;
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -461,6 +486,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
     depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
     depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
+    // Empty weight = that body loss off (the default); its knobs only reach the job while it is on.
+    ...bodyLossesDraft(advanced),
     // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
     subjectMaskLoss: advanced.subjectMaskLoss === true,
     subjectMaskBackgroundWeight: numericDraft(
@@ -681,6 +708,9 @@ export function configValidation(
   for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
+  for (const [field, message] of bodyLossIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
   // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
   // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
@@ -862,6 +892,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
         }))
       : undefined,
     ...depthAnchoringSnapshot(configDraft),
+    ...bodyLossSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
     subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
     subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
@@ -988,4 +1019,104 @@ export function depthAnchoringSnapshot(configDraft) {
     depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
     depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
   });
+}
+
+// The body-loss draft fields of a target/preset `advanced` bag (empty weight = off).
+function bodyLossesDraft(advanced) {
+  const draft = {
+    bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
+    bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
+    normalRestrictToSubject: advanced.normalRestrictToSubject === true,
+  };
+  for (const { prefix } of bodyLosses) {
+    for (const suffix of ["Weight", "MinT", "MaxT", "Every"]) {
+      draft[`${prefix}${suffix}`] = numericDraft(advanced[`${prefix}${suffix}`]);
+    }
+  }
+  return draft;
+}
+
+// A body loss is on whenever the draft carries its weight (empty = off).
+export function bodyLossEnabled(configDraft, loss) {
+  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
+}
+
+// Field issues for the body-loss knobs — the API's bounds (E6), per loss while it is on: weight in
+// [0, bodyLossWeightMax], a [0, 1] noise window with min <= max, a whole alternation period in
+// [1, bodyLossEveryMax]; plus the shape loss's cosine gate in [-1, 1].
+export function bodyLossIssues(configDraft, selectedTarget) {
+  const issues = [];
+  for (const loss of bodyLosses) {
+    if (!bodyLossEnabled(configDraft, loss)) continue;
+    const { prefix, window: [minDefault, maxDefault] } = loss;
+    const weight = numberFromDraft(configDraft[`${prefix}Weight`]);
+    if (weight === null || weight < 0 || weight > bodyLossWeightMax) {
+      issues.push([`${prefix}Weight`, `${loss.label} loss weight must be between 0 and ${bodyLossWeightMax}`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget && !targetSupportsBodyLoss(selectedTarget, loss)) {
+      // The toggle is hidden for such a target, so this names no input: the value can only arrive
+      // from a carried-over draft, and the API refuses it anyway.
+      issues.push([null, `This target does not support the ${loss.label.toLowerCase()} loss — clear it or pick a supporting target`]);
+      continue;
+    }
+    const bounds = {};
+    for (const suffix of ["MinT", "MaxT"]) {
+      const field = `${prefix}${suffix}`;
+      if (!String(configDraft[field] ?? "").trim()) continue;
+      const t = numberFromDraft(configDraft[field]);
+      if (t === null || t < 0 || t > 1) {
+        issues.push([field, "Noise window bounds must be between 0 and 1"]);
+      } else {
+        bounds[suffix] = t;
+      }
+    }
+    if ((bounds.MinT ?? minDefault) > (bounds.MaxT ?? maxDefault)) {
+      issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
+    }
+    const everyField = `${prefix}Every`;
+    if (String(configDraft[everyField] ?? "").trim()) {
+      const every = numberFromDraft(configDraft[everyField]);
+      if (every === null || !Number.isInteger(every) || every < 1 || every > bodyLossEveryMax) {
+        issues.push([everyField, `Alternation period must be a whole number from 1 to ${bodyLossEveryMax}`]);
+      }
+    }
+    if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
+      const c = numberFromDraft(configDraft.bodyShapeMinCos);
+      if (c === null || c < -1 || c > 1) {
+        issues.push(["bodyShapeMinCos", "Shape cosine gate must be between -1 and 1"]);
+      }
+    }
+  }
+  return issues;
+}
+
+// The body-loss keys a job snapshot carries: none for a loss that is off (a default job's snapshot
+// is unchanged); its weight plus every set knob while on (unset knobs take the API defaults).
+export function bodyLossSnapshot(configDraft) {
+  const out = {};
+  for (const loss of bodyLosses) {
+    if (!bodyLossEnabled(configDraft, loss)) continue;
+    const { prefix } = loss;
+    Object.assign(
+      out,
+      compactObject({
+        [`${prefix}Weight`]: numberFromDraft(configDraft[`${prefix}Weight`]),
+        [`${prefix}MinT`]: numberFromDraft(configDraft[`${prefix}MinT`]),
+        [`${prefix}MaxT`]: numberFromDraft(configDraft[`${prefix}MaxT`]),
+        [`${prefix}Every`]: numberFromDraft(configDraft[`${prefix}Every`]),
+      }),
+    );
+    if (prefix === "bodyProportion" && configDraft.bodyProportionIncludeHead) {
+      out.bodyProportionIncludeHead = true;
+    }
+    if (prefix === "bodyShape") {
+      const c = numberFromDraft(configDraft.bodyShapeMinCos);
+      if (c !== null) out.bodyShapeMinCos = c;
+    }
+    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+      out.normalRestrictToSubject = true;
+    }
+  }
+  return out;
 }

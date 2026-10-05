@@ -23,6 +23,7 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
+use sceneworks_core::training::body_losses::{body_loss_settings, BodyLoss};
 use sceneworks_core::training::depth_anchoring::{
     depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
 };
@@ -905,6 +906,43 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         }
     }
 
+    // Epic 2123 body losses (sc-24832): strictly parsed (the API's parser); each enabled loss is
+    // refused for a trainer whose descriptor does not declare it (E3), whose latent family has no
+    // cataloged tiny x0 decoder, or whose frozen model is not cataloged — before any load, on both
+    // the dry and the real path. Installation is checked where the request is built
+    // (`apply_body_losses`).
+    let body = body_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    for loss in BodyLoss::ALL {
+        if body.schedule(loss).is_none() {
+            continue;
+        }
+        let key = loss.weight_key();
+        let declared = match loss {
+            BodyLoss::Proportion => descriptor.techniques.body_proportion_loss,
+            BodyLoss::Shape => descriptor.techniques.body_shape_loss,
+            BodyLoss::Normal => descriptor.techniques.normal_loss,
+        };
+        if !declared {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the {} ({key}).",
+                loss.label()
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no tiny x0 decoder for the {} ({key}).",
+                loss.label()
+            )));
+        }
+        if !loss.weights_cataloged() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "The {} ({key}) needs a frozen model that is not in the model catalog yet.",
+                loss.label()
+            )));
+        }
+    }
+
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
     // refuses it (E3) — before any load, on both the dry and the real path.
@@ -1035,6 +1073,7 @@ fn training_request_from_plan(
         .collect::<WorkerResult<Vec<_>>>()?;
     let mut config = finalize_training_config(map_training_config(&plan.config), plan);
     apply_depth_anchoring(settings, plan, &mut config)?;
+    apply_body_losses(settings, plan, &mut config)?;
     // The weights were validated by `validate_training_target_config` (same reader), so a
     // malformed value is already refused; this propagates rather than defaulting regardless.
     config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
@@ -1268,7 +1307,8 @@ fn apply_depth_anchoring(
     let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
     })?;
-    config.perceptual_decoder_dir = Some(installed_aux_model_dir(settings, decoder)?);
+    config.perceptual_decoder_dir =
+        Some(installed_aux_model_dir(settings, decoder, "Depth anchoring")?);
     config.depth_anchoring = gen_core::DepthAnchoringConfig {
         schedule: gen_core::AuxLossSchedule {
             weight: depth.weight as f32,
@@ -1282,7 +1322,83 @@ fn apply_depth_anchoring(
                 depth.model
             ))
         })?,
-        model_dir: Some(installed_aux_model_dir(settings, da2)?),
+        model_dir: Some(installed_aux_model_dir(settings, da2, "Depth anchoring")?),
+    };
+    Ok(())
+}
+
+/// Epic 2123 body losses (sc-24832): map the strictly parsed `advanced` body-loss keys onto the
+/// engine's typed [`gen_core::BodyLossesConfig`] and resolve every checkpoint the enabled losses
+/// load — the trainer family's tiny x0 decoder, ViTPose+ (the proportion encoder and every body
+/// loss's person detector), and the shape/normal loss's own model — from the installed model
+/// library. A missing or uncataloged checkpoint is refused naming the model; nothing is downloaded
+/// mid-job. All off (the default) leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_body_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
+
+    let body = body_loss_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if !body.any_enabled() {
+        return Ok(());
+    }
+    const PURPOSE: &str = "The body losses";
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' has no tiny x0 decoder for the body losses."
+        ))
+    })?;
+    config.perceptual_decoder_dir = Some(installed_aux_model_dir(settings, decoder, PURPOSE)?);
+    let schedule = |loss: BodyLoss| {
+        body.schedule(loss)
+            .map(|s| gen_core::AuxLossSchedule {
+                weight: s.weight as f32,
+                t_min: s.min_t as f32,
+                t_max: s.max_t as f32,
+                every_n: s.every,
+            })
+            .unwrap_or_default()
+    };
+    let own_dir = |loss: BodyLoss| -> WorkerResult<Option<PathBuf>> {
+        if body.schedule(loss).is_none() {
+            return Ok(None);
+        }
+        let model = loss.own_model().ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "The {} needs a frozen model that is not in the model catalog yet.",
+                loss.label()
+            ))
+        })?;
+        installed_aux_model_dir(settings, model, PURPOSE).map(Some)
+    };
+    config.body_losses = gen_core::BodyLossesConfig {
+        proportion: schedule(BodyLoss::Proportion),
+        include_head: body.include_head,
+        shape: schedule(BodyLoss::Shape),
+        shape_min_cos: body.shape_min_cos as f32,
+        normal: schedule(BodyLoss::Normal),
+        normal_restrict_to_subject: body.normal_restrict_to_subject,
+        pose_model_dir: Some(installed_aux_model_dir(
+            settings,
+            &VITPOSE_PLUS_BASE_MODEL,
+            PURPOSE,
+        )?),
+        shape_model_dir: own_dir(BodyLoss::Shape)?,
+        normal_model_dir: own_dir(BodyLoss::Normal)?,
     };
     Ok(())
 }
@@ -1290,7 +1406,7 @@ fn apply_depth_anchoring(
 /// The installed snapshot directory of an auxiliary training model (its pinned revision with the
 /// weight file present), installed through the Model Manager into the app-managed Hugging Face
 /// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
-/// model.
+/// model and the technique (`purpose`) that needs it.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1298,6 +1414,7 @@ fn apply_depth_anchoring(
 fn installed_aux_model_dir(
     settings: &Settings,
     model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+    purpose: &str,
 ) -> WorkerResult<PathBuf> {
     if let Some(dir) = crate::model_jobs::huggingface_pinned_snapshot_dir(
         &settings.data_dir,
@@ -1309,8 +1426,8 @@ fn installed_aux_model_dir(
         }
     }
     Err(WorkerError::InvalidPayload(format!(
-        "Depth anchoring needs the '{}' model ({}), which is not installed. Install it from the \
-         Models screen.",
+        "{purpose} needs the '{}' model ({}), which is not installed. Install it from the Models \
+         screen.",
         model.label, model.id
     )))
 }
@@ -1329,10 +1446,14 @@ fn preflight_subject_mask_paths(
     settings: &Settings,
     plan: &TrainingPlan,
 ) -> WorkerResult<Option<Vec<PathBuf>>> {
-    if subject_mask_loss_weights(&plan.config.advanced)
+    let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-        .is_none()
-    {
+        .is_some();
+    // sc-24832: the normal loss restricted to the subject reads the same per-image masks.
+    let body = body_loss_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let restricted_normals = body.normal.is_some() && body.normal_restrict_to_subject;
+    if !masked_loss && !restricted_normals {
         return Ok(None);
     }
     let root = normalize_app_managed_path(settings, &plan.dataset.root_path, "Dataset root")?;
@@ -1373,8 +1494,13 @@ fn preflight_subject_mask_paths(
     if missing.len() > shown {
         names.push_str(&format!(" and {} more", missing.len() - shown));
     }
+    let technique = if masked_loss {
+        "Subject-masked loss"
+    } else {
+        "The subject-restricted normal loss"
+    };
     Err(WorkerError::InvalidPayload(format!(
-        "Subject-masked loss needs a subject mask on every dataset image, but {} of {} have none: \
+        "{technique} needs a subject mask on every dataset image, but {} of {} have none: \
          {names}. Generate subject masks for the dataset (or replace the empty ones), then retry.",
         missing.len(),
         plan.dataset.items.len()
@@ -1848,6 +1974,8 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // the plan enables it.
         depth_anchoring: Default::default(),
         perceptual_decoder_dir: None,
+        // Epic 2123 body losses (sc-24832) start off here; `apply_body_losses` fills them in.
+        body_losses: Default::default(),
         // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
         // whose fallible reader refuses malformed weights instead of defaulting them to off.
         subject_mask_loss: None,
@@ -3980,6 +4108,52 @@ mod tests {
                  descriptor",
                 target.id
             );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-24832: each body loss's catalog flag (`supportsBodyProportionLoss` / `…ShapeLoss` /
+    /// `…NormalLoss`, which gate the web toggles and submit-time validation) must equal "the linked
+    /// trainer descriptor declares it AND its frozen models are cataloged" for every target this
+    /// runtime can train — the builtin (MLX) value on macOS, the Candle projection off-Mac.
+    /// Mutation: drop `supportsBodyProportionLoss` from the Z-Image target ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_body_loss_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+        let mut checked = 0;
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            for loss in BodyLoss::ALL {
+                let declared = match loss {
+                    BodyLoss::Proportion => descriptor.techniques.body_proportion_loss,
+                    BodyLoss::Shape => descriptor.techniques.body_shape_loss,
+                    BodyLoss::Normal => descriptor.techniques.normal_loss,
+                };
+                assert_eq!(
+                    target_supports(&target, loss),
+                    declared && loss.weights_cataloged(),
+                    "{} ({engine_id}): catalog {} disagrees with the trainer descriptor / \
+                     cataloged weights",
+                    target.id,
+                    loss.support_limit()
+                );
+            }
             checked += 1;
         }
         assert!(

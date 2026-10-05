@@ -2611,3 +2611,228 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         }
     }
 }
+
+/// sc-24832 (epic 2123 E6): in-range body-loss values survive into the plan verbatim and parse
+/// into the per-loss schedules (with upstream's default windows); every out-of-range / wrong-type
+/// value is a field-level error naming the offending key. Mutation: drop the `min_t > max_t` check
+/// in `body_losses::schedule` ⇒ the inverted-window case is accepted ⇒ red.
+#[test]
+fn build_training_plan_validates_body_losses_as_field_errors() {
+    use sceneworks_core::training::body_losses::*;
+    let good = [
+        ("bodyProportionWeight", json!(BODY_LOSS_WEIGHT_SUGGESTED)),
+        ("bodyProportionIncludeHead", json!(true)),
+        ("bodyProportionEvery", json!(1)),
+        ("bodyShapeWeight", json!(0.2)),
+        ("bodyShapeMinCos", json!(0.5)),
+        ("normalWeight", json!(BODY_LOSS_WEIGHT_MAX)),
+        ("normalMinT", json!(0.1)),
+        ("normalMaxT", json!(0.9)),
+        ("normalEvery", json!(BODY_LOSS_EVERY_MAX)),
+        ("normalRestrictToSubject", json!(true)),
+    ];
+    let plan = build_plan_with_body_advanced(&good).expect("in-range body losses are accepted");
+    for (key, value) in &good {
+        assert_eq!(&plan.config.advanced[*key], value, "{key}");
+    }
+    let s = body_loss_settings(&plan.config.advanced).unwrap();
+    let p = s.proportion.as_ref().expect("proportion on");
+    assert_eq!((p.min_t, p.max_t, p.every), (0.0, 1.0, 1));
+    let sh = s.shape.as_ref().expect("shape on");
+    assert_eq!((sh.min_t, sh.max_t, sh.every), (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT));
+    assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
+    assert!(s.include_head && s.normal_restrict_to_subject);
+    assert_eq!(s.shape_min_cos, 0.5);
+    let off = build_plan_with_body_advanced(&[("bodyShapeWeight", json!(0))]).unwrap();
+    assert!(!body_loss_settings(&off.config.advanced).unwrap().any_enabled());
+
+    for (key, value, extra) in [
+        ("bodyProportionWeight", json!(-0.01), None),
+        ("bodyShapeWeight", json!(BODY_LOSS_WEIGHT_MAX + 0.001), None),
+        ("normalWeight", json!("0.1"), None),
+        ("bodyProportionMinT", json!(-0.1), None),
+        ("bodyShapeMaxT", json!(1.5), None),
+        ("normalMaxT", json!(0.3), Some(("normalMinT", json!(0.6)))),
+        ("bodyProportionEvery", json!(0), None),
+        ("bodyShapeEvery", json!(BODY_LOSS_EVERY_MAX + 1), None),
+        ("normalEvery", json!(2.5), None),
+        ("bodyShapeMinCos", json!(1.5), None),
+        ("bodyProportionIncludeHead", json!("yes"), None),
+        ("normalRestrictToSubject", json!(1), None),
+    ] {
+        let mut advanced = vec![(key, value.clone())];
+        if let Some(pair) = extra {
+            advanced.push(pair);
+        }
+        match build_plan_with_body_advanced(&advanced) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, key, "{key}={value}")
+            }
+            other => panic!("{key}={value}: expected a field error naming {key}, got {other:?}"),
+        }
+    }
+}
+
+/// Build a Z-Image plan whose `advanced` carries the given body-loss keys, on a target that
+/// advertises all three body losses (so the parser — not the support gate — is under test).
+fn build_plan_with_body_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+    use sceneworks_core::training::body_losses::BodyLoss;
+    let dataset = dataset_fixture();
+    let registry = builtin_training_targets();
+    let mut target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z_image_turbo_lora target present")
+        .clone();
+    for loss in BodyLoss::ALL {
+        target.limits.insert(loss.support_limit().to_owned(), json!(true));
+    }
+    let mut config = target.defaults.clone();
+    for (key, value) in extra {
+        config.advanced.insert((*key).to_owned(), value.clone());
+    }
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_body",
+        target: &target,
+        dataset: &dataset,
+        config,
+        preset: None,
+        lora_id: "lora_body",
+        base_model_path: "/data/models/z_image_turbo".to_owned(),
+        dataset_root: Path::new("/data/training/ds_abc123"),
+        output_dir: Path::new("/data/loras/lora_body"),
+        file_name: "body.safetensors".to_owned(),
+        created_at: "2026-10-05T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24832 (epic 2123 E6): the web form's body-loss bounds are the API's bounds.
+#[test]
+fn web_body_loss_bounds_match_the_api_bounds() {
+    use sceneworks_core::training::body_losses::*;
+    let num = |name: &str| -> f64 {
+        web_training_const(name)
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not numeric ({error})"))
+    };
+    assert_eq!(num("bodyLossWeightMax"), BODY_LOSS_WEIGHT_MAX);
+    assert_eq!(num("bodyLossWeightSuggested"), BODY_LOSS_WEIGHT_SUGGESTED);
+    assert_eq!(num("bodyLossEveryMax"), BODY_LOSS_EVERY_MAX as f64);
+    assert_eq!(num("bodyLossEveryDefault"), BODY_LOSS_EVERY_DEFAULT as f64);
+    assert_eq!(num("bodyShapeMinCosDefault"), BODY_SHAPE_MIN_COS_DEFAULT);
+}
+
+/// sc-24832: the body losses' cataloged auxiliary model (ViTPose+) is a `componentOnly` utility
+/// entry whose repo / revision / file are exactly the worker's resolution constants, and a loss
+/// is only cataloged when every checkpoint it loads is. Mutation: change the catalog revision ⇒
+/// red.
+#[test]
+fn body_loss_aux_models_are_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::body_losses::{BodyLoss, VITPOSE_PLUS_BASE_MODEL};
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    let mut aux = vec![&VITPOSE_PLUS_BASE_MODEL];
+    aux.extend(BodyLoss::ALL.iter().filter_map(|l| l.own_model()));
+    for aux in aux {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == aux.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", aux.id));
+        assert_eq!(entry["type"], "utility", "{}", aux.id);
+        assert_eq!(entry["componentOnly"], true, "{}", aux.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], aux.repo, "{}", aux.id);
+        assert_eq!(download["revision"], aux.revision, "{}", aux.id);
+        assert!(
+            download["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|f| f == aux.file),
+            "{} does not download {}",
+            aux.id,
+            aux.file
+        );
+    }
+    for loss in BodyLoss::ALL {
+        assert_eq!(
+            loss.weights_cataloged(),
+            loss == BodyLoss::Proportion || loss.own_model().is_some(),
+            "{loss:?}"
+        );
+    }
+}
+
+/// sc-24832 (S1 mechanism): a body loss is advertised only by targets whose platform trainer
+/// declares it AND whose weights are cataloged (today: the proportion loss on Z-Image MLX); an
+/// enabled weight anywhere else is a submit-time `<loss>Weight` field error, off is always admitted,
+/// and the Candle projection withdraws the MLX-only support. Mutation: drop
+/// `body_losses::validate_support` from `validate_training_config_for_target` ⇒ red.
+#[test]
+fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
+    use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+    let registry = builtin_training_targets();
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    let with_weight = |target: &sceneworks_core::training::TrainingTarget,
+                       loss: BodyLoss,
+                       weight: Value| {
+        let mut config = target.defaults.clone();
+        config.advanced.insert(loss.weight_key(), weight);
+        validate_training_config_for_target(target, &config)
+    };
+    for loss in BodyLoss::ALL {
+        let advertising: Vec<&str> = registry
+            .targets
+            .iter()
+            .filter(|target| target_supports(target, loss))
+            .map(|target| target.id.as_str())
+            .collect();
+        let expected: &[&str] = if loss == BodyLoss::Proportion {
+            &["z_image_turbo_lora"]
+        } else {
+            &[]
+        };
+        assert_eq!(advertising, expected, "{loss:?}");
+    }
+    let z_image = by_id("z_image_turbo_lora");
+    with_weight(&z_image, BodyLoss::Proportion, json!(0.1)).expect("Z-Image MLX admits it");
+    let mut z_image_candle = z_image.clone();
+    project_candle_training_limits(&mut z_image_candle);
+    for loss in BodyLoss::ALL {
+        assert!(!target_supports(&z_image_candle, loss), "{loss:?}");
+    }
+    for (target, loss) in [
+        (by_id("sdxl_lora"), BodyLoss::Proportion),
+        (z_image_candle.clone(), BodyLoss::Proportion),
+        (z_image.clone(), BodyLoss::Shape),
+        (z_image.clone(), BodyLoss::Normal),
+    ] {
+        with_weight(&target, loss, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
+        match with_weight(&target, loss, json!(0.1)) {
+            Err(TrainingPlanError::InvalidField { field, .. }) => {
+                assert_eq!(field, loss.weight_key(), "{}", target.id)
+            }
+            other => panic!(
+                "{} {loss:?}: expected a {} field error, got {other:?}",
+                target.id,
+                loss.weight_key()
+            ),
+        }
+    }
+}

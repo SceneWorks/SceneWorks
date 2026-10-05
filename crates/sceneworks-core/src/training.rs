@@ -231,15 +231,23 @@ pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
 pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
 
 /// Project a builtin (MLX-truth) target's technique-support `limits` onto the Candle backend. Since
-/// sc-24827 every adapter-noise and resolution-bucket flag is the same on both backends, so the only
-/// flag left to withdraw is depth anchoring: the Z-Image MLX trainer declares it and no Candle
-/// trainer does yet (sc-2125; S8 adds them). Callers that serve the Candle catalog (the API off
-/// macOS) apply it, and the worker drift test pins the projected flag to the Candle descriptors.
+/// sc-24827 every adapter-noise and resolution-bucket flag is the same on both backends, so the
+/// flags left to withdraw are the decoded-x0 perceptual losses: the Z-Image MLX trainer declares
+/// depth anchoring (sc-2125) and the body losses (sc-24832) and no Candle trainer does yet (S8 wires
+/// them). Callers that serve the Candle catalog (the API off macOS) apply it, and the worker drift
+/// tests pin the projected flags to the Candle descriptors.
 pub fn project_candle_training_limits(target: &mut TrainingTarget) {
     target
         .limits
         .remove(depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT);
+    for loss in body_losses::BodyLoss::ALL {
+        target.limits.remove(loss.support_limit());
+    }
 }
+
+/// Body losses (epic 2123, sc-24832): ViTPose proportion, HybrIK shape and Sapiens normal losses —
+/// keys, bounds, the shared strict parser, support flags and auxiliary catalog models.
+pub mod body_losses;
 
 /// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
 /// catalog models.
@@ -1749,7 +1757,12 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // Candle by `project_candle_training_limits`.
             "supportsDepthAnchoring": true,
             // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
-            "supportsSubjectMaskLoss": true
+            "supportsSubjectMaskLoss": true,
+            // Epic 2123 body losses (sc-24832): the Z-Image MLX trainer declares all three; only
+            // the proportion loss's weights (ViTPose+) are cataloged, so only it is advertised —
+            // shape (HybrIK) and normal (Sapiens) join once their re-hosts are cataloged. Removed
+            // for Candle by `project_candle_training_limits`.
+            "supportsBodyProportionLoss": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -3347,6 +3360,7 @@ pub fn validate_training_config_for_target(
     validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
     depth_anchoring::validate_support(target, config)?;
+    body_losses::validate_support(target, config)?;
     validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -3619,6 +3633,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         }
     })?;
     depth_anchoring::validate(config)?;
+    body_losses::validate(config)?;
     validate_subject_mask_loss(config)?;
     Ok(())
 }

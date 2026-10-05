@@ -42,6 +42,14 @@ import {
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
   depthAnchoringWeightSuggested,
+  bodyLosses,
+  bodyLossEnabled,
+  bodyLossEveryDefault,
+  bodyLossEveryMax,
+  bodyLossWeightMax,
+  bodyLossWeightSuggested,
+  bodyShapeMinCosDefault,
+  targetSupportsBodyLoss,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -168,6 +176,10 @@ export function ConfigureJobPanel({
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
   const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
+  // Body losses (sc-24832): each is offered only where the target's trainer on this platform
+  // declares it and its weights are cataloged (`limits.supportsBodyProportionLoss` / …ShapeLoss /
+  // …NormalLoss); on whenever the draft carries its weight, knobs shown while on.
+  const supportedBodyLosses = bodyLosses.filter((loss) => targetSupportsBodyLoss(selectedTarget, loss));
   // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
   // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
   // through configValidation instead of rendering a toggle the run would refuse.
@@ -726,6 +738,98 @@ export function ConfigureJobPanel({
                   </label>
                 </>
               ) : null}
+              {supportedBodyLosses
+                .filter((loss) => bodyLossEnabled(configDraft, loss))
+                .map((loss) => (
+                  <React.Fragment key={loss.prefix}>
+                    <label title={`${loss.label} loss weight. ${bodyLossWeightSuggested} is the suggested starting weight.`}>
+                      {loss.label} weight
+                      <input
+                        max={bodyLossWeightMax}
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}Weight`, event.target.value)}
+                        step="0.01"
+                        type="number"
+                        value={configDraft[`${loss.prefix}Weight`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}Weight`)}
+                      />
+                    </label>
+                    <label title={`Lowest noise level (0 = clean image, 1 = pure noise) at which the ${loss.label.toLowerCase()} loss applies. Empty = ${loss.window[0]}.`}>
+                      {loss.label} window min
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}MinT`, event.target.value)}
+                        placeholder={String(loss.window[0])}
+                        step="0.05"
+                        type="number"
+                        value={configDraft[`${loss.prefix}MinT`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}MinT`)}
+                      />
+                    </label>
+                    <label title={`Highest noise level at which the ${loss.label.toLowerCase()} loss applies. Empty = ${loss.window[1]}.`}>
+                      {loss.label} window max
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}MaxT`, event.target.value)}
+                        placeholder={String(loss.window[1])}
+                        step="0.05"
+                        type="number"
+                        value={configDraft[`${loss.prefix}MaxT`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}MaxT`)}
+                      />
+                    </label>
+                    <label title={`Every Nth step trains the ${loss.label.toLowerCase()} loss alone; the steps between train the normal loss. 1 adds it to every step instead.`}>
+                      {loss.label} every N steps
+                      <input
+                        max={bodyLossEveryMax}
+                        min="1"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}Every`, event.target.value)}
+                        placeholder={String(bodyLossEveryDefault)}
+                        step="1"
+                        type="number"
+                        value={configDraft[`${loss.prefix}Every`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}Every`)}
+                      />
+                    </label>
+                    {loss.prefix === "bodyProportion" ? (
+                      <label className="training-checkbox-field" title="Also compare head proportions (nose-to-shoulders height, ear-to-ear width).">
+                        <input
+                          checked={Boolean(configDraft.bodyProportionIncludeHead)}
+                          onChange={(event) => updateConfigDraft("bodyProportionIncludeHead", event.target.checked)}
+                          type="checkbox"
+                        />
+                        Include head proportions
+                      </label>
+                    ) : null}
+                    {loss.prefix === "bodyShape" ? (
+                      <label title={`The shape loss only counts while the predicted body shape is already this similar (cosine) to the reference. Empty = ${bodyShapeMinCosDefault}.`}>
+                        Body shape cosine gate
+                        <input
+                          max="1"
+                          min="-1"
+                          onChange={(event) => updateConfigDraft("bodyShapeMinCos", event.target.value)}
+                          placeholder={String(bodyShapeMinCosDefault)}
+                          step="0.05"
+                          type="number"
+                          value={configDraft.bodyShapeMinCos ?? ""}
+                          {...invalidProps(configValidity, "bodyShapeMinCos")}
+                        />
+                      </label>
+                    ) : null}
+                    {loss.prefix === "normal" ? (
+                      <label className="training-checkbox-field" title="Average the normal loss over each image's subject mask only (needs a subject mask on every image).">
+                        <input
+                          checked={Boolean(configDraft.normalRestrictToSubject)}
+                          onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
+                          type="checkbox"
+                        />
+                        Normals on the subject only
+                      </label>
+                    ) : null}
+                  </React.Fragment>
+                ))}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -906,6 +1010,22 @@ export function ConfigureJobPanel({
                   Depth anchoring
                 </label>
               ) : null}
+              {supportedBodyLosses.map((loss) => (
+                <label
+                  className="training-checkbox-field"
+                  key={loss.prefix}
+                  title={`${loss.label} loss: the model's prediction is decoded and compared to the training image by a frozen body model; images with no person are skipped. Needs the ViTPose+ model installed. Off by default.`}
+                >
+                  <input
+                    checked={bodyLossEnabled(configDraft, loss)}
+                    onChange={(event) =>
+                      updateConfigDraft(`${loss.prefix}Weight`, event.target.checked ? String(bodyLossWeightSuggested) : "")
+                    }
+                    type="checkbox"
+                  />
+                  {loss.label} loss
+                </label>
+              ))}
               {subjectMaskLossSupported ? (
                 <label
                   className="training-checkbox-field"

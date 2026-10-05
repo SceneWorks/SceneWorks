@@ -28752,6 +28752,36 @@
         "description": "Monocular depth estimator (ViT-L) used by LoRA training's depth anchoring; larger gradients, so use a much smaller weight - not a generation model. CC-BY-NC-4.0.",
         "recommendedFor": []
       }
+    },
+    {
+      // ViTPose+ Base — the frozen keypoint model of the native trainer's body-proportion loss and every body loss's reference-time person detector (epic 2123, sc-24832). componentOnly: staged by the training lane, never a routable model. repo/revision/file MUST equal sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL (parity test).
+      "id": "vitpose_plus_base",
+      "autoDownload": false,
+      "name": "ViTPose+ Base",
+      "family": "vitpose",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "usyd-community/vitpose-plus-base",
+          "revision": "92be54d7a29e42fad47b6e2ca01dd9e685a61e0d",
+          "files": ["model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 501627628,
+          "footprint": { "diskSizeBytes": 501627628 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/usyd-community/vitpose-plus-base"
+      },
+      "licenseUrl": "https://huggingface.co/usyd-community/vitpose-plus-base/tree/92be54d7a29e42fad47b6e2ca01dd9e685a61e0d",
+      "ui": {
+        "label": "ViTPose+ Base",
+        "description": "Human keypoint estimator used by LoRA training's body losses to keep a character's body proportions consistent and to detect whether a training image shows a person - not a generation model. Apache-2.0.",
+        "recommendedFor": []
+      }
     }
   ]
 }

@@ -907,6 +907,77 @@ describe("ConfigureJobPanel depth anchoring", () => {
   });
 });
 
+// sc-24832 (epic 2123): each body loss is an off-by-default advanced toggle offered only for a
+// target that advertises it; checking it seeds the suggested weight; its knobs exist only while on.
+describe("ConfigureJobPanel body losses", () => {
+  const PROPORTION_ONLY = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsBodyProportionLoss: true },
+  };
+  const ALL = {
+    ...PROPORTION_ONLY,
+    limits: { supportsBodyProportionLoss: true, supportsBodyShapeLoss: true, supportsNormalLoss: true },
+  };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = PROPORTION_ONLY, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  // Mutation: render every body toggle regardless of the target flag ⇒ the shape toggle appears ⇒ red.
+  it("offers only the advertised losses, off by default, seeding 0.1 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle("Body proportion loss").checked).toBe(false);
+    expect(toggle("Body shape loss")).toBeUndefined();
+    expect(toggle("Surface normals loss")).toBeUndefined();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body proportion loss").click());
+    expect(calls).toEqual([["bodyProportionWeight", "0.1"]]);
+  });
+
+  it("shows each enabled loss's knobs and clears the weight when disabled", () => {
+    const calls = mountWith({ target: ALL, draft: { ...VALID_DRAFT, bodyShapeWeight: "0.1", normalWeight: "0.2" } });
+    expect(toggle("Body shape loss").checked).toBe(true);
+    expect(field("Body shape weight").value).toBe("0.1");
+    expect(field("Body shape weight").getAttribute("max")).toBe("1");
+    expect(field("Body shape window min").getAttribute("placeholder")).toBe("0.4");
+    expect(field("Body shape every N steps").getAttribute("max")).toBe("16");
+    expect(field("Body shape cosine gate")).toBeTruthy();
+    expect(field("Surface normals weight").value).toBe("0.2");
+    expect(field("Normals on the subject only")).toBeTruthy();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body shape loss").click());
+    expect(calls).toEqual([["bodyShapeWeight", ""]]);
+  });
+
+  it("outlines an out-of-range alternation period", () => {
+    mountWith({ draft: { ...VALID_DRAFT, bodyProportionWeight: "0.1", bodyProportionEvery: "40" } });
+    expect(field("Body proportion every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
 // sc-24828 (epic 2123): subject-masked loss is an off-by-default advanced toggle. While on, the two
 // weight inputs and the dataset's mask coverage appear; incomplete coverage is an error on the
 // toggle (it blocks Start) and offers "Generate subject masks".

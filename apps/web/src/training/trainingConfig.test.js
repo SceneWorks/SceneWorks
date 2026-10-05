@@ -32,6 +32,11 @@ import {
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
+  bodyLosses,
+  bodyLossEveryMax,
+  bodyLossWeightMax,
+  bodyLossWeightSuggested,
+  targetSupportsBodyLoss,
 } from "./trainingConfig.js";
 
 const ltxWorkflows = [
@@ -1127,5 +1132,118 @@ describe("subject-masked loss (sc-24828)", () => {
       missing: 2,
       complete: false,
     });
+  });
+});
+
+// sc-24832 (epic 2123): the three body losses are off by default, each round-trips from the form
+// draft into the job snapshot only while on, every knob is bounded by the API's limits (E6), and a
+// loss the target does not advertise blocks Start.
+describe("body losses (sc-24832)", () => {
+  const allLimits = Object.fromEntries(bodyLosses.map((loss) => [loss.limit, true]));
+  const bodyTarget = { ...target, limits: { ...target.limits, ...allLimits } };
+  const snap = (draft, selectedTarget = bodyTarget) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+  const issuesOn = (draft, field, selectedTarget = bodyTarget) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget }).filter(
+      (entry) => entry.field === field,
+    );
+
+  it("seeds every loss off and leaves a default snapshot without any body key", () => {
+    const draft = configDraftFromTarget(bodyTarget, dataset, ["auto"]);
+    for (const { prefix } of bodyLosses) expect(draft[`${prefix}Weight`]).toBe("");
+    const advanced = snap(draft).config.advanced;
+    for (const key of Object.keys(advanced)) {
+      expect(/^(bodyProportion|bodyShape|normal)/.test(key)).toBe(false);
+    }
+  });
+
+  // Mutation: drop the per-loss `bodyLossEnabled` guard in bodyLossSnapshot ⇒ the off losses'
+  // knobs leak into the snapshot ⇒ red.
+  it("round-trips each enabled loss (and only it) as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(bodyTarget, dataset, ["auto"]),
+      bodyProportionWeight: String(bodyLossWeightSuggested),
+      bodyProportionIncludeHead: true,
+      bodyProportionEvery: "1",
+      bodyShapeMinT: "0.3",
+      normalWeight: "0.2",
+      normalMinT: "0.1",
+      normalMaxT: "0.9",
+      normalRestrictToSubject: true,
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.bodyProportionWeight).toBe(0.1);
+    expect(advanced.bodyProportionIncludeHead).toBe(true);
+    expect(advanced.bodyProportionEvery).toBe(1);
+    expect(advanced.normalWeight).toBe(0.2);
+    expect(advanced.normalMinT).toBe(0.1);
+    expect(advanced.normalMaxT).toBe(0.9);
+    expect(advanced.normalRestrictToSubject).toBe(true);
+    // The shape loss is off: its stray knob never reaches the job.
+    expect(advanced.bodyShapeMinT).toBeUndefined();
+    expect(advanced.bodyShapeWeight).toBeUndefined();
+    const seeded = configDraftFromTarget(
+      { ...target, defaults: { ...target.defaults, advanced: { networkType: "lora", bodyShapeWeight: 0.05, bodyShapeMinCos: 0.4 } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.bodyShapeWeight).toBe("0.05");
+    expect(seeded.bodyShapeMinCos).toBe("0.4");
+  });
+
+  it("flags out-of-range knobs on their own fields, only while the loss is on", () => {
+    expect(issuesOn({ bodyShapeEvery: "0" }, "bodyShapeEvery")).toEqual([]);
+    for (const bad of ["-0.1", String(bodyLossWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ normalWeight: bad }, "normalWeight")).toHaveLength(1);
+    }
+    const on = { bodyShapeWeight: "0.1" };
+    expect(issuesOn(on, "bodyShapeWeight")).toEqual([]);
+    expect(issuesOn({ ...on, bodyShapeMinT: "-0.1" }, "bodyShapeMinT")).toHaveLength(1);
+    expect(issuesOn({ ...on, bodyShapeMaxT: "1.5" }, "bodyShapeMaxT")).toHaveLength(1);
+    // The shape window defaults to [0.4, 0.8]: a lone max below the default min is inverted.
+    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toHaveLength(1);
+    expect(issuesOn({ ...on, bodyShapeMinCos: "1.5" }, "bodyShapeMinCos")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(bodyLossEveryMax + 1)]) {
+      expect(issuesOn({ ...on, bodyShapeEvery: bad }, "bodyShapeEvery")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, bodyShapeEvery: String(bodyLossEveryMax) }, "bodyShapeEvery")).toEqual([]);
+  });
+
+  // Mutation: drop the `targetSupportsBodyLoss` check in bodyLossIssues ⇒ the carried-over weight
+  // passes ⇒ red.
+  it("blocks a loss the target does not advertise and reads the flag strictly", () => {
+    const proportionOnly = { ...target, limits: { ...target.limits, supportsBodyProportionLoss: true } };
+    const blocking = configValidation({ ...whole, normalWeight: "0.1" }, { activeDataset: dataset, selectedTarget: proportionOnly });
+    expect(blocking.some((entry) => entry.field === null && /normals loss/.test(entry.message))).toBe(true);
+    const fine = configValidation({ ...whole, bodyProportionWeight: "0.1" }, { activeDataset: dataset, selectedTarget: proportionOnly });
+    expect(fine.filter((entry) => /does not support the/.test(entry.message))).toEqual([]);
+    expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: "true" } }, bodyLosses[1])).toBe(false);
+    expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: true } }, bodyLosses[1])).toBe(true);
+  });
+
+  it("uses the API's bounds", () => {
+    expect(bodyLossWeightMax).toBe(1);
+    expect(bodyLossEveryMax).toBe(16);
+    expect(bodyLosses.map((loss) => loss.limit)).toEqual([
+      "supportsBodyProportionLoss",
+      "supportsBodyShapeLoss",
+      "supportsNormalLoss",
+    ]);
   });
 });
