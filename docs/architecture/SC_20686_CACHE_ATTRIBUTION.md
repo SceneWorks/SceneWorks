@@ -1,0 +1,193 @@
+# SC-20686 cache attribution contract
+
+This source-only lane records where a future real-weight receipt must measure persistent/reused
+cross-attention state, transient read/dequant/workspace, process/allocator peak, and generation
+timing. The campaign has two measurement lanes selected by the safety policy's backend: the
+**Metal lane** (`darwin-mlx`) measures the MLX providers the SceneWorks Mac product runs, and the
+**CUDA lane** (`linux-cuda`/`windows-cuda`) measures the Candle providers. The route map below is the
+CUDA lane; the [Metal lane](#metal-mlx-lane) section maps the MLX product path. Changing self-attention is explicitly excluded: it is request-dependent and is never counted
+as a reusable cache opportunity.
+
+## Supported route map
+
+| Family | Route | K/V creation and position handling | Reuse boundary |
+| --- | --- | --- | --- |
+| FLUX.2 Klein | `flux2_klein_9b_edit` reference edit | `candle-gen-flux2/src/transformer.rs:365-381` creates image/text K/V for `DoubleAttention`; `sc20686_observer.rs:620-621` isolates the exact reference slice | `transformer.rs:393` consumes the dense joint context on every denoise evaluation. No persistent reference-K/V reader exists, so this route is a source-backed no-go candidate rather than a promotable cache. |
+| Wan | TI2V-5B, T2V-14B, I2V-14B, `wan_vace`, and VACE-Fun 14B | `candle-gen-wan/src/transformer.rs:347` registers each prepared cross-K/V cache and `:413` records its reads | Each request-scoped cache is reused across denoise steps and released by its owning prepared-cache lifetime; latent self-attention remains excluded. |
+
+The paired inference reducer is `scripts/sc20686_cache_attribution.py`. It accepts injected runtime
+rows only, rejects inferred rows and self-attention, applies the tracker-recorded thresholds, and
+produces separate family decisions. No real-weight claim or Go/No-go is emitted without rows.
+
+## Campaign producer boundary
+
+The paired producer is `inference/scripts/sc20686_campaign_adapter.py`. It deliberately does not
+pin a fixed inference commit in this document. Initial capture requires
+`--inference-revision <40-hex-commit>` and verifies it against the inference checkout; the captured
+revision is sealed into the resolved inputs, command transcript, observer metadata, and row receipt.
+Resume instead reads that captured revision and rechecks the sealed executable, snapshot, route
+inputs, coverage, source map, adapter, and safety policy. Moving Git HEAD alone does not invalidate
+an identical completed arm. The adapter is inert unless called with `--campaign`; normal generation
+has no observer or receipt overhead.
+
+Both single and matrix campaigns require `--safety-policy` and an absolute external `--resume-dir`.
+The strict schema-version-1 policy requires a host-matched `darwin-mlx`, `linux-cuda` or
+`windows-cuda` backend, positive process deadlines and polling/grace periods, host-free reserve and
+child-footprint cap, stdout/stderr/event caps and, for CUDA, a selected CUDA GPU UUID, GPU-free
+reserve, and child GPU cap. The backend selects the lane, and a resume directory is bound to it. The resume
+identity binds the canonical resolved inputs, policy, coverage, source map, and adapter hashes.
+Each successful normal or cancel arm is
+preserved as a sealed unit with observer events, bounded logs, media or verified absence, process
+samples, and clean supervisor exit/reap. Corrupt, incomplete, or identity-mismatched units cannot be
+reused. A watchdog failure is an incomplete campaign, not a product cancellation or terminal No-go.
+The final `sc-20686-campaign-bundle-v6` (one lane per bundle) seals `safety-policy.json`, `resume-identity.json`, resolved
+inputs, coverage/source map, per-arm artifacts, rows, and media through `campaign.json` and its
+sidecar. The inference reducer verifies the complete bundle before publication.
+
+The Windows backend starts each child suspended, assigns it to a kill-on-close Job Object, then
+resumes it. It checks host memory and selected-GPU UUID telemetry and fails closed on missing,
+`N/A`, or unattributable GPU memory. The native child/grandchild ownership, memory-cap, and
+termination smoke passed on the Windows runner in
+[CI run 36431524700](https://github.com/SceneWorks/inference/actions/runs/36431524700/job/108958837629)
+at inference `5115cf7f4c5e7ca868a7caf312423f728889a99e`, without GPU execution. Actual GPU
+telemetry remains unverified on real weights. No static whole-process transient peak bound is
+required: each arm is admitted by the supervisor's runtime guards (deadline, sampling, termination
+grace, host reserve, child footprint cap, selected-GPU reserve and cap) when pre-spawn host and GPU
+free memory cover cap plus reserve, and the watchdogs terminate the owned tree on a breach. Each
+sealed unit records that admission with `wholeProcessPeakBoundBytes: null` plus its unknown-peak
+reason. A pre-spawn refusal, watchdog abort, or failed child is sealed as an `accepted: false`
+record under the resume directory's `failed/` diagnostics, never as an accepted arm. These
+constraints do not reduce the fixed coverage.
+
+For every arm, the adapter creates a separate `sealed-run` directory, uses it as the child working
+directory, and passes absolute sibling paths ending in `sealed-run/events.jsonl` for
+`--sc20686-events` and either `sealed-run/media.png` (FLUX) or `sealed-run/media` (Wan) for `--out`.
+This keeps default or explicit images and video frames inside the exact child-run closure. Before
+that private directory is deleted, every normal-arm output is copied into the final campaign
+bundle. A canonical per-run manifest seals its output kind, relative paths, byte counts, and exact
+content hashes; the row and aggregate receipts bind both the manifest hash and each media hash.
+Cancellation arms instead seal an `absent` manifest and fail if partial media remains. The reducer
+also rejects command evidence when the event and media paths do not share the isolated parent.
+Provider stdout and stderr remain diagnostics and are never parsed as event evidence.
+
+The adapter rejects a missing, non-JSONL, or carriage-return-containing event stream before
+requiring product-owned metadata, creation/reuse/invalidation/release, allocator samples, and
+process samples, then atomically writes the canonical raw row and its SHA-256 sidecar. A cancellation
+row must contain its product-owned arm identity and exactly one `cancelled` terminal followed by
+metrics, invalidation, and release in product order. Every coordinate decision is explicitly bound
+to that verified cancellation arm. Missing geometry, identity, exact source binding, product
+residency, or explicit campaign mode also fails closed.
+
+### Independent source and model provenance
+
+`source_ref` identifies the verified inference repository commit. It is independent from both
+`model_snapshot_revision`, which identifies the immutable Hugging Face model revision, and
+`model_snapshot_sha256`, which hashes the exact selected model/tier contents. A selected FLUX or
+VACE model root may be either a component/tier directory containing `config.json`, or a Diffusers
+pipeline root containing `model_index.json` plus component `config.json` files. For a nested tier
+such as `<snapshot-revision>/q4`, the revision is resolved from the nearest two ancestors while the
+content hash remains scoped to `q4`; unrelated sibling tiers cannot change or satisfy that identity.
+
+### Product-equivalent residency
+
+`residency_strategy` is a sealed route axis and is passed to the real entrypoint as
+`--sc20686-residency`. The entrypoint applies it to `LoadSpec`; FLUX.2 edit additionally enables its
+request-scoped generation staging. The exact SceneWorks-equivalent map is:
+
+| Product route | Residency |
+| --- | --- |
+| `flux2_klein_9b_edit` | `sequential` |
+| `wan2_2_ti2v_5b` | `sequential` |
+| `wan2_2_t2v_14b` | `sequential` |
+| `wan2_2_i2v_14b` | `sequential` |
+| `wan_vace` | `resident` |
+| `wan2_2_vace_fun_14b` | `sequential` |
+
+The manifest, adapter, entrypoints, observers, receipts, and reducer reject any other route/strategy
+pair rather than accepting evidence from a non-product memory shape. The Wan 14B ComfyUI-expert
+entrypoint passes the same campaign policy through its explicit-residency external-expert loader;
+it cannot silently use that loader's ordinary resident default while sealing a sequential receipt.
+
+The Rust entrypoints require a dedicated event file when campaign mode is selected, so provider
+progress output cannot corrupt the observer transcript. The default observer remains `None`, and
+self-attention is never emitted as a reusable event.
+
+### FLUX.2 Klein route limitation
+
+The supported reference-image route enters `Flux2Edit::generate_inner` at
+`crates/media/candle-gen/candle-gen-flux2/src/edit_provider.rs:506`, with campaign activation at
+`:524`. The edit transformer's `DoubleAttention` projects image K/V at
+`transformer.rs:365-367`, projects the text additions at `:376-381`, and evaluates their dense joint
+attention at `:393`. The observer isolates the reference portion at
+`sc20686_observer.rs:620-621`. It does not create a persistent reference-image K/V cache or packed
+reader. Caption-upsample `ContiguousKvCache` self-attention is outside this route and is never
+campaign evidence. This is the source-backed SC-20686 no-go boundary; a terminal decision still
+requires the sealed campaign. No persistent reference-K/V productization or promotable FLUX cache is
+claimed unless a product-owned persistent cross-attention K/V boundary and reader are actually
+introduced and measured.
+
+### Wan variant closure
+
+The registered campaign surface is asserted by `candle-gen-wan/src/sc20686_observer.rs:43-48`:
+TI2V-5B, T2V-14B, I2V-14B, `wan_vace`, and VACE-Fun 14B. Shared cross-K/V ownership registers caches
+at `transformer.rs:347`, records reads at `:413`, and releases them with the prepared-cache owner.
+Product activation occurs in `lib.rs:1147`, `wan14b.rs:1171`, `model_vace.rs:471`, and
+`model_vace_fun.rs:576`. The checked-in coverage manifest lists all five IDs and requires exact
+geometry axes before reduction. No terminal family decision is valid until each listed variant has
+a real full-generation row for every representative geometry coordinate and its matching deliberate
+cancellation arm.
+
+Thresholds: opportunity ≥512 MiB and ≥5% peak with reuse ≥2; projected saving ≥256 MiB and ≥3%
+peak without replacement transient; runtime-only opportunity ≥5% generation time.
+
+Real-weight generation receipts require the exact FLUX.2 Klein and Wan assets and, per lane, a
+qualified uncontended CUDA host (Candle) or Apple Silicon host (MLX) whose free memory covers the
+policy caps plus reserves at spawn. No
+measurement is fabricated by this source-only lane.
+
+### Wan producer context is wired
+
+The former Wan producer API blocker is superseded by the live runtime context sealed to each run's
+verified inference revision. `sc20686_observer::activate_requested` activates only after the product
+route has reached its snapshot-backed runtime, and `bind_cross_kv_geometry` threads the exact
+product-owned cross-K/V geometry into the observer before it emits metadata. The five registered Wan
+routes therefore emit lifecycle, allocator, model identity, source identity, and residency facts
+from their real producer context; caller-authored JSON remains non-evidence and is rejected by the
+adapter and reducer.
+
+## Metal (MLX) lane
+
+The Metal lane is the Mac product-path lane. It runs the CUDA matrix unchanged — the same six routes,
+native coordinates and normal/cancel arms — through the MLX provider loaders the SceneWorks worker
+uses, with the frozen residency applied as `LoadSpec::offload_policy`, plus one MLX-only route the
+Mac product ships: `flux2_klein_9b_kv_edit` (the `flux2_klein_9b_kv` model's reference-K/V cache).
+Inference records the extension as `lane_extensions.mlx-metal` in
+`scripts/sc20686_coverage_manifest.json` and the lane's anchors under `lanes.mlx-metal` in
+`scripts/sc20686_source_map.json`; dropping a route blocks its family decision.
+
+| Route | MLX entrypoint | Cache kind on MLX |
+| --- | --- | --- |
+| `flux2_klein_9b_edit` | `sc20686_flux2_edit` | recomputed reference slice (no persistent boundary) |
+| `flux2_klein_9b_kv_edit` | `sc20686_flux2_edit` | persistent reference K/V per double/single layer, one cache per CFG branch |
+| `wan2_2_ti2v_5b`, `wan2_2_t2v_14b`, `wan2_2_i2v_14b` | `sc20686_wan` | persistent cross-K/V per block, CFG cond+uncond stacked on the batch axis |
+| `wan_vace`, `wan2_2_vace_fun_14b` | `sc20686_wan` | recomputed text K/V: MLX Wan-VACE projects it in every block on every CFG forward |
+
+The observer (`inference/crates/media/mlx-gen/src/sc20686.rs`) is inert unless a campaign
+entrypoint arms it. It attributes persistent bytes as the exact `nbytes` of the retained K/V arrays,
+transient reads as MLX active-allocator high-water above each read window (inputs evaluated first,
+output evaluated inside — campaign-only evaluation boundaries), and every generation phase
+(`encode`, `load`, `prepare-cache`, `denoise-step`, `decode`) as a `phase-window` event with its own
+peak (reset per window) and Darwin `phys_footprint`. Every event carries `"backend": "mlx-metal"`;
+the adapter and reducer reject a Metal row without it, without denoise/decode windows, or whose
+persistent bytes disagree with the live CFG batch. The one-command launch is documented in
+`inference/docs/architecture/SC_20686_PERSISTENT_KV_CAMPAIGN.md` (`### One-command Metal campaign`).
+The decision arms' run/phase peaks and durations are campaign-schedule numbers (the per-read
+evaluation windows cut the lazy graph); the Metal-only `--schedule-control` arm re-runs every
+coordinate with phase windows but no read windows and seals product-schedule peaks in a separate
+`sc-20686-schedule-control-v1` bundle.
+
+This lane also fixed a pre-existing Mac product defect: under guidance > 1 the FLUX.2 Klein kv-edit
+route shared one reference-K/V cache between the CFG branches, so the negative extract overwrote the
+positive slots and the positive cached steps attended over negative-prompt reference K/V. Each branch
+now owns its cache; a CFG parity test pins kv-edit to the non-kv forward. No Metal real-weight run is
+claimed by this document.

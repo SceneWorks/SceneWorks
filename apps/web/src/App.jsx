@@ -4065,6 +4065,7 @@ export function App() {
         {activeView === "Settings" ? (
           <SettingsScreen
             accent={accent}
+            appUpdate={appUpdate}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}

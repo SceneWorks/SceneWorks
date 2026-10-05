@@ -10,6 +10,7 @@ import {
   splitPromptLines,
 } from "../promptBatch.js";
 import { fromPromptBatchImport, serializePromptBatchExport } from "../promptBatchIO.js";
+import { saveExportFile } from "../saveExportFile.js";
 import { Icon } from "./Icons.jsx";
 
 // Batch authoring panel (sc-9955, epic 9952). Rendered in place of the single-prompt
@@ -132,20 +133,17 @@ export default function BatchPromptPanel({
     lastValues: Object.fromEntries(variables.map((variable) => [variable.key, variable.values])),
   });
 
-  const handleExport = () => {
+  const handleExport = async () => {
     setIoError("");
-    const blob = new Blob([serializePromptBatchExport(currentExport())], {
+    const slug = (name || "prompt-batch").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+    const file = new File([serializePromptBatchExport(currentExport())], `${slug || "prompt-batch"}.json`, {
       type: "application/json",
     });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    const slug = (name || "prompt-batch").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    anchor.download = `${slug || "prompt-batch"}.json`;
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    try {
+      await saveExportFile(file);
+    } catch (error) {
+      setIoError(`Export failed: ${error?.message ?? String(error)}`);
+    }
   };
 
   const handleImportFile = async (event) => {

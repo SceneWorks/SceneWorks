@@ -177,6 +177,10 @@ pub(crate) struct LoadIdentity {
     /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
     /// beneath any `WeightsSource` slot.
     prepared_files: Vec<PinnedWeightsFile>,
+    /// sc-24806: an MLX load released from its declared Sequential policy to eager Resident
+    /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
+    /// still needs the declared Sequential load (or the reverse); the two reload instead.
+    released_resident: bool,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
@@ -350,6 +354,9 @@ impl LoadIdentity {
                 .iter()
                 .map(|(_, pin)| pin.clone())
                 .collect(),
+            released_resident: cfg!(target_os = "macos")
+                && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
+                && spec.offload_policy == OffloadPolicy::Resident,
         })
     }
 }
@@ -769,6 +776,45 @@ pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
             write_gpu_telemetry(&config_dir);
         }
     });
+}
+
+/// The MLX soft memory limit this worker applied (configured or derived default), or `None` when it
+/// left MLX on its own default. Every request-scoped guard only ever LOWERS it
+/// ([`apply_request_gpu_memory_limit`]), so it upper-bounds the free memory a provider measures at
+/// decode time (`limit − active`) -- the budget a budget-planned VAE decode tiles against.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    match EFFECTIVE_GPU_MEMORY_LIMIT.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        limit => Some(limit),
+    }
+}
+
+/// Off macOS no MLX limit is ever applied.
+#[cfg(all(not(target_os = "macos"), not(test)))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_APPLIED_MLX_MEMORY_LIMIT: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Tests never apply an MLX limit (see [`apply_gpu_memory_limit`]); a test that exercises a
+/// consumer of the applied limit sets it for its own thread with
+/// [`set_test_applied_mlx_memory_limit`].
+#[cfg(test)]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(std::cell::Cell::get)
+}
+
+/// Set (or clear) the applied MLX limit [`applied_mlx_memory_limit_bytes`] reports on this test
+/// thread.
+#[cfg(test)]
+pub(crate) fn set_test_applied_mlx_memory_limit(limit: Option<u64>) {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(|cell| cell.set(limit));
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -1749,6 +1795,21 @@ mod tests {
             LoadIdentity::from_load_spec("z_image_turbo", &base),
             LoadIdentity::from_load_spec("z_image_turbo", &declared_refused),
             "a declaration refusal must not force a weights reload",
+        );
+        // sc-24806: an MLX load released from its declared Sequential policy cannot stage, so it
+        // must not warm-serve the declared Sequential load of the same weights, nor the reverse.
+        let released = base.clone().with_eligible_load_shape_declaration();
+        let declared_sequential = staged_deferred
+            .clone()
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released)
+                != LoadIdentity::from_load_spec("z_image_turbo", &declared_sequential),
+            cfg!(target_os = "macos"),
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released),
+            LoadIdentity::from_load_spec("z_image_turbo", &released.clone()),
         );
         assert_ne!(
             ExecutionPolicy::from_load_spec(&base),

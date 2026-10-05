@@ -21674,6 +21674,39 @@
           "estimatedSizeBytes": 24197122980,
           "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // macOS Wan-VACE (sc-20686): the dense Wan2.1-VACE-1.3B transformer the native `wan_vace`
+        // engine serves `replace_person` and the tier-C extend_clip/video_bridge path with. Nothing
+        // else downloaded it, so `wan_vace` was unreachable from a clean install. Only `transformer/`
+        // is fetched: the worker assembles it with a base-Wan 14B tier's UMT5/z16-VAE/tokenizer
+        // (`resolve_wan_vace_model_dir`). Soft: extend/bridge falls back to the TI2V-5B keyframe
+        // path without it, so TI2V-5B stays usable when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+          "revision": "ec4d2cb062b548996b179d493fdd05340de702a1",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7146182696,
+          "footprint": { "diskSizeBytes": 7146182696, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ...and the shared base-Wan components that assembly links beside the transformer: the UMT5
+        // text encoder, z16 VAE and tokenizer from the T2V-A14B `q4/` tier (the TI2V-5B's own VAE is
+        // the z48 one, so it cannot stand in). Only these three files — not the 14B experts — so a
+        // TI2V-5B-only install can serve `wan_vace`; the worker's base resolver takes the first T2V/
+        // I2V tier holding all three (`wan_vace_base_dir_from`). Soft, for the same reason as above.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["q4/t5_encoder.safetensors", "q4/vae.safetensors", "q4/tokenizer.json"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11886274274,
+          "footprint": { "diskSizeBytes": 11886274274, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
         // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
         // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.
@@ -28629,8 +28662,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 243023,
-                  "sha256": "a7754eccd40ab453475f3243b03522d80d31ef5c7fab2157cc6816ba8987514c"
+                  "byteSize": 250492,
+                  "sha256": "210410d6ebcc96c337bc010f95e33a2b6d006804ee71bfe3808d9851ba55628c"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -28644,8 +28677,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 311124,
-                  "sha256": "da33dadf316918eed582abdfbab98f4c613ac9836c36e92abb9073af4f03ae62"
+                  "byteSize": 319655,
+                  "sha256": "49b918ead87860a92983c44270f33d73a4eb94bdfd5ead06230630ffacd27fc3"
                 },
                 {
                   "path": "package.json",

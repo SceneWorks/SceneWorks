@@ -178,13 +178,12 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-// Re-pinned by the sc-22988 main sync: `config/download-pattern-evidence.json` is the union of
-// sc-19383's re-record (YuE1 — six stage-1 re-hosts, the stage-2 re-host and the xcodec re-host) and
-// sc-22998's (YuE2's three upstream m-a-p repos): 120 repo@revision keys incl. the two frozen
-// importer authorities (sc-24114 left 109).
+// Re-pinned after the main sync: `config/download-pattern-evidence.json` retains the YuE1
+// re-hosts, YuE2's three upstream m-a-p repos, and the Wan-VACE base/transformer entries:
+// 121 repo@revision keys including the two frozen importer authorities.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "3e643d6312f75ae0a2d715ee740c6c4918fe42572918bdf71e3ed1f5cc91adde";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "9ac5343ea88c615289fee9e5ca9c65867b023e8a5b65a3c1ab8a4827b991b19d";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

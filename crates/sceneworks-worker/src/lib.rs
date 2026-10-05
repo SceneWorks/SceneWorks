@@ -160,6 +160,16 @@ mod refine_model_cache;
     allow(dead_code)
 )]
 mod mlx_decode_cache;
+// Compressed-KV opt-in and the KV-cache report SceneWorks records for a local LLM generation
+// (sc-20682). Dead off both natives for the same reason as the two modules above.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod llm_kv_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
 // (sc-3723). All-targets: the table is pure data and the derivation runs off-macOS off an

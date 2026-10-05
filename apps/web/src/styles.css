@@ -5249,6 +5249,60 @@ label {
   gap: 10px;
 }
 
+/* sc-24815: the trained-LoRA attach offer. A transient prompt at the top of the Train
+   page — same hairline/surface language as the panels around it, with the accent rail
+   as the only thing that distinguishes it from a static panel. It exists only while the
+   question is unanswered, so it gets no collapsed or empty state. */
+.trained-lora-offer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.trained-lora-offer-copy {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 320px;
+  min-width: 0;
+}
+
+.trained-lora-offer-copy h3 {
+  margin: 2px 0 0;
+  font-size: 16px;
+}
+
+.trained-lora-offer-copy > span {
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+
+.trained-lora-offer-error {
+  color: var(--danger);
+  font-size: 12.5px;
+}
+
+.trained-lora-offer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* The global .primary-action is 44px; every other control on the Train page is
+   --control-h (the config panel resets it the same way at .training-config-actions),
+   so the card would otherwise read taller than the panel it sits in. */
+.trained-lora-offer-actions .primary-action,
+.trained-lora-offer-actions .secondary-action {
+  min-height: var(--control-h);
+}
+
 /* .training-status-pill retired in sc-10654 — generalized to .ready-pill (<ReadyPill>),
    which fixes its two-states-look-identical bug. */
 
@@ -9751,6 +9805,25 @@ details[open] > summary.lora-scope-group-heading::before,
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.4;
+}
+
+/* Derived (suggested) quant tier note + its "Keep" affirm control (sc-22246). */
+.quant-tier-suggested-note .link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.quant-tier-suggested-note .link-button:hover {
+  text-decoration: underline;
+}
+
+.quant-tier-suggested-note .link-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .control-scale-field .field-hint {

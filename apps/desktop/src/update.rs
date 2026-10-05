@@ -9,8 +9,9 @@
 //! installs, and restarts into the new version. Linux self-update is supported by
 //! the AppImage release; `.deb` users upgrade through their package installer.
 //!
-//! The shell checks at startup and hourly. The sidebar reads the cached offer;
-//! downloads and installation stay native so remote browsers cannot self-update.
+//! The shell checks at startup and hourly, and on demand from Settings (sc-8663). The
+//! sidebar reads the cached offer; downloads and installation stay native so remote
+//! browsers cannot self-update.
 
 use std::{
     ffi::{OsStr, OsString},
@@ -56,13 +57,23 @@ pub fn get_update_status(state: State<'_, UpdateState>, ready: Option<bool>) -> 
     }
 }
 
-/// Release bundles only; Linux package-manager installations cannot self-update.
-pub fn spawn_startup_check(app: &AppHandle) {
+/// Why this build cannot self-update, if it cannot: dev builds have no signed release
+/// to compare against, and Linux package-manager installations upgrade through that
+/// package manager rather than the AppImage updater.
+fn self_update_unavailable_reason() -> Option<&'static str> {
     if cfg!(debug_assertions) {
-        return;
+        return Some("Update checks are only available in release builds.");
     }
     #[cfg(target_os = "linux")]
     if std::env::var_os("APPIMAGE").is_none() {
+        return Some("This installation is updated through your system's package manager.");
+    }
+    None
+}
+
+/// Release bundles only; Linux package-manager installations cannot self-update.
+pub fn spawn_startup_check(app: &AppHandle) {
+    if self_update_unavailable_reason().is_some() {
         return;
     }
     let app = app.clone();
@@ -84,6 +95,29 @@ pub fn spawn_startup_check(app: &AppHandle) {
             startup = false;
         }
     });
+}
+
+/// On-demand check from Settings (sc-8663). Runs the same check as the startup/hourly
+/// timer but without the startup dialog: the offer lands in [`UpdateState`] and the
+/// `app-update-changed` event, so the existing sidebar + Settings install flow picks it
+/// up. Returns the available version (`None` = up to date). Unlike the timer, failures
+/// are surfaced — the user asked, so "offline" is an answer they should see.
+#[tauri::command]
+pub async fn check_for_app_update(app: AppHandle) -> Result<Option<String>, String> {
+    if let Some(reason) = self_update_unavailable_reason() {
+        return Err(reason.to_owned());
+    }
+    match tokio::time::timeout(Duration::from_secs(30), check_for_update(&app, false)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => return Err(err.to_string()),
+        Err(_) => return Err("The update server did not respond in time.".to_owned()),
+    }
+    let session = app.state::<UpdateState>();
+    let session = session.0.lock().expect("update lock");
+    Ok(session
+        .available
+        .as_ref()
+        .map(|update| update.version.clone()))
 }
 
 async fn check_for_update(app: &AppHandle, startup: bool) -> tauri_plugin_updater::Result<()> {

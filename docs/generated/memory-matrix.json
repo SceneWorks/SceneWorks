@@ -25,11 +25,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "d990d6069ed9c80822f44ca3c50ca2b066d5686f23cde823979080f112d2b0ba"
+        "sha256": "e5cd6e58f038fe536ec5e77b8a14282ceabd0875fe3dc7b1e0f70a00fc910988"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "3a5ae6b8837fa05b385ed24f4e26145ccd8d83b1b3a54daa2d7390a208d56fc1"
+        "sha256": "366f8a17f30527e3e196ca4800b60087739041a2bc4e2b5203c0cfc076f7192a"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "d68a99c4d929c64032c36dfe67b7239c745caa5278911dfe08efb615761dafbf"
+        "sha256": "3f92b83e4fa787a71e5641f07bbb731c32e98221b8f634891dffb50cb8593c81"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -81,7 +81,7 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "a89e01ffc265b9ae765e4a31a5bcb98b990709fdcb5b40d989561dee1fa182c5"
+        "sha256": "674254f50808bc0a2da33ca86ef9512bf083a2935065b9070a62f8ddfe418e88"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",

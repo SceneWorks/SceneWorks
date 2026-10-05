@@ -996,3 +996,79 @@ describe("SettingsScreen embedded-workflow toggle (sc-15953)", () => {
     expect(link.getAttribute("rel")).toContain("noopener");
   });
 });
+
+// Settings → Updates (sc-8663): an on-demand check through the shell's `check_for_app_update`,
+// with installation delegated to App's single `useAppUpdate` flow (passed in as `appUpdate`).
+describe("SettingsScreen updates (desktop)", () => {
+  let container;
+  let root;
+  let invoke;
+  let SettingsScreen;
+  let checkResult;
+
+  beforeEach(async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    checkResult = async () => null;
+    invoke = vi.fn(async (command) => {
+      switch (command) {
+        case "check_for_app_update":
+          return checkResult();
+        case "get_app_settings":
+          return {};
+        case "get_gpu_info":
+          return { platform: "windows", devices: [] };
+        case "list_credentials":
+          return [];
+        default:
+          return null;
+      }
+    });
+    window.__TAURI__ = { core: { invoke } };
+    vi.resetModules();
+    SettingsScreen = await loadScreen();
+    container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(async () => {
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+    delete window.__TAURI__;
+    vi.restoreAllMocks();
+  });
+
+  async function render(props = {}) {
+    await renderScreen(root, SettingsScreen, props);
+    await openTab(container, "Settings");
+  }
+
+  it("reports up to date when the shell finds no newer release", async () => {
+    await render({ appUpdate: { version: null, phase: "", install: vi.fn() } });
+    await click(buttonByText(container, "Check for updates"));
+    expect(invoke).toHaveBeenCalledWith("check_for_app_update", undefined);
+    expect(container.textContent).toContain("You're up to date.");
+  });
+
+  it("reports an available version and installs through the shared update flow", async () => {
+    checkResult = async () => "9.9.9";
+    const install = vi.fn();
+    await render({ appUpdate: { version: "9.9.9", phase: "", install } });
+    await click(buttonByText(container, "Check for updates"));
+    expect(container.textContent).toContain("SceneWorks 9.9.9 is available.");
+    await click(buttonByText(container, "Update to 9.9.9"));
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a failed check instead of swallowing it", async () => {
+    // Tauri rejects a command's `Err(String)` with the bare string, not an Error.
+    checkResult = () => Promise.reject("Update checks are only available in release builds.");
+    await render({ appUpdate: null });
+    await click(buttonByText(container, "Check for updates"));
+    expect(container.textContent).toContain(
+      "Couldn't check for updates: Update checks are only available in release builds.",
+    );
+  });
+});

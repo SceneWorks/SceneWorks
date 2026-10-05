@@ -1546,8 +1546,9 @@ fn candle_video_families_keep_explicit_cross_module_boundaries() {
         "VACE shared helpers must import only their shared Wan contract on the Candle cfg"
     );
     assert!(
-        VACE.contains("generate_video, resolve_wan_model_dir, resolve_wan_quant,")
-            && VACE.contains("VideoGenInput,"),
+        VACE.contains(
+            "generate_video, resolve_wan_model_dir, resolve_wan_vace_adapters, wan_load_quant,"
+        ) && VACE.contains("VideoGenInput,"),
         "VACE macOS implementation must import generation and MLX-only Wan resolvers separately"
     );
     assert!(
@@ -7937,13 +7938,16 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
     assert_eq!(bernini_engine_video_mode(""), "t2v");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_timeout_operator_override_is_absolute() {
     // A valid positive override wins even when it is below both the default and the H3 workload
     // budget. This is the explicit operator escape hatch, not a lower bound.
     assert_eq!(
-        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345),
+        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345, None),
         VideoStallTimeoutPolicy {
             timeout: Duration::from_secs(120),
             basis: "operator_override",
@@ -7955,7 +7959,8 @@ fn video_stall_timeout_operator_override_is_absolute() {
             "wan2_2_ti2v_5b",
             u32::MAX,
             u32::MAX,
-            u32::MAX
+            u32::MAX,
+            None
         ),
         VideoStallTimeoutPolicy {
             timeout: Duration::from_secs(90),
@@ -7965,18 +7970,21 @@ fn video_stall_timeout_operator_override_is_absolute() {
     // Invalid values are not overrides; H3 must still receive its request-derived budget.
     for raw in [Some(""), Some("nope"), Some("0")] {
         assert_eq!(
-            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243).timeout,
+            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243, None).timeout,
             Duration::from_secs(1176)
         );
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_timeout_non_h3_remains_the_global_default() {
     for raw in [None, Some(""), Some("nope"), Some("0")] {
         assert_eq!(
-            video_stall_timeout_policy(raw, "wan2_2_ti2v_5b", u32::MAX, u32::MAX, u32::MAX,),
+            video_stall_timeout_policy(raw, "wan2_2_ti2v_5b", u32::MAX, u32::MAX, u32::MAX, None),
             VideoStallTimeoutPolicy {
                 timeout: VIDEO_STALL_TIMEOUT,
                 basis: "default",
@@ -7986,12 +7994,15 @@ fn video_stall_timeout_non_h3_remains_the_global_default() {
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_baseline() {
     for (width, height) in [(768, 1344), (1344, 768)] {
         assert_eq!(
-            video_stall_timeout_policy(None, "minimax_h3", width, height, 124),
+            video_stall_timeout_policy(None, "minimax_h3", width, height, 124, None),
             VideoStallTimeoutPolicy {
                 timeout: VIDEO_STALL_TIMEOUT,
                 basis: "minimax_h3_baseline",
@@ -8001,30 +8012,36 @@ fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_
     // A long small-canvas request carries less packed pixel-frame work than the measured shortest
     // full-canvas baseline, so it does not weaken genuine stall detection either.
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345).timeout,
+        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345, None).timeout,
         VIDEO_STALL_TIMEOUT
     );
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_threshold() {
-    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243);
-    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243);
+    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243, None);
+    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243, None);
     assert_eq!(portrait, landscape, "orientation cannot change packed work");
     assert_eq!(portrait.timeout, Duration::from_secs(1176));
     assert_eq!(portrait.basis, "minimax_h3_pixel_frames");
     assert!(portrait.timeout > Duration::from_secs(600));
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lattice() {
     use sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
 
     let mut previous = VIDEO_STALL_TIMEOUT;
     for frames in MINIMAX_H3_LEGAL_FRAME_COUNTS {
-        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames);
+        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames, None);
         assert!(
             policy.timeout >= previous,
             "timeout regressed at legal frame count {frames}"
@@ -8044,12 +8061,118 @@ fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lat
     // Mutation/bound proof: out-of-contract dimensions and frame counts cannot expand the stall
     // budget beyond the largest legal H3 request, and zeroes cannot lower the existing baseline.
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", u32::MAX, u32::MAX, u32::MAX,).timeout,
+        video_stall_timeout_policy(None, "minimax_h3", u32::MAX, u32::MAX, u32::MAX, None).timeout,
         Duration::from_secs(1670)
     );
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0).timeout,
+        video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0, None).timeout,
         VIDEO_STALL_TIMEOUT
+    );
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_stall_timeout_wan_a14b_default_request_outlasts_the_measured_silent_window() {
+    // sc-10299: the shipped default (1280x720, 5 s @ 16 fps -> 77 frames, Lightning 4-step with
+    // guidance 1.0) measured ~527 s of cold load plus ~453 s per denoise step with no event between,
+    // so the first silent window (~980 s) overran the flat 600 s default on every A14B engine.
+    for engine in ["wan2_2_t2v_14b", "wan2_2_i2v_14b", "wan2_2_vace_fun_14b"] {
+        let policy = video_stall_timeout_policy(None, engine, 1280, 720, 77, Some(1.0));
+        assert_eq!(
+            policy,
+            VideoStallTimeoutPolicy {
+                timeout: Duration::from_secs(1200 + 3 * 453),
+                basis: "wan_a14b_token_work",
+            },
+            "{engine}"
+        );
+        // At least 2x the measured ~980 s first silent window.
+        assert!(policy.timeout >= Duration::from_secs(2 * (527 + 453)));
+    }
+    // Other Wan-derived engines are not A14B-scaled and keep the global default.
+    for engine in [
+        "wan2_2_ti2v_5b",
+        "wan_vace",
+        "bernini",
+        "scail2_14b",
+        "krea_realtime_14b",
+    ] {
+        assert_eq!(
+            video_stall_timeout_policy(None, engine, 1280, 720, 77, None),
+            VideoStallTimeoutPolicy {
+                timeout: VIDEO_STALL_TIMEOUT,
+                basis: "default",
+            },
+            "{engine}"
+        );
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_stall_timeout_wan_a14b_scales_with_tokens_and_cfg() {
+    // The original sc-10299 repro: 832x480, 33 frames -> 52*30*9 = 14,040 tokens.
+    // ceil(453 * 14040 / 72000) = 89 s per step under Lightning (CFG off).
+    assert_eq!(
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 832, 480, 33, Some(1.0)).timeout,
+        Duration::from_secs(1200 + 3 * 89)
+    );
+    // Lightning off: guidance > 1 runs a second (negative) forward per step -> twice the work.
+    // `None` is the engine's CFG-on default and must budget the same as an explicit guidance.
+    for guidance in [None, Some(5.0)] {
+        assert_eq!(
+            video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 77, guidance).timeout,
+            Duration::from_secs(1200 + 3 * 2 * 453),
+            "{guidance:?}"
+        );
+    }
+    // More frames never shrink the budget.
+    let mut previous = Duration::ZERO;
+    for frames in (5..=81).step_by(4) {
+        let timeout =
+            video_stall_timeout_policy(None, "wan2_2_i2v_14b", 832, 480, frames, Some(1.0)).timeout;
+        assert!(timeout >= previous, "budget regressed at {frames} frames");
+        previous = timeout;
+    }
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_stall_timeout_wan_a14b_is_bounded_and_overridable() {
+    // Largest legal request: 1280x720 area cap, 81 frames (21 latent), CFG on ->
+    // ceil(906 * 75600 / 72000) = 952 s per step.
+    let max = Duration::from_secs(1200 + 3 * 952);
+    assert_eq!(
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 81, None).timeout,
+        max
+    );
+    // Out-of-contract input clamps to that bound instead of producing an unbounded budget.
+    assert_eq!(
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", u32::MAX, u32::MAX, u32::MAX, None)
+            .timeout,
+        max
+    );
+    // Degenerate dimensions add no step work but keep the cold-load allowance.
+    assert_eq!(
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 0, 0, 0, Some(1.0)).timeout,
+        Duration::from_secs(1200)
+    );
+    // The operator override stays absolute for Wan too.
+    assert_eq!(
+        video_stall_timeout_policy(Some("300"), "wan2_2_t2v_14b", 1280, 720, 81, None),
+        VideoStallTimeoutPolicy {
+            timeout: Duration::from_secs(300),
+            basis: "operator_override",
+        }
     );
 }
 
@@ -9975,6 +10098,27 @@ fn wan_engine_id_maps_the_three_models() {
     assert_eq!(wan_engine_id("wan_2_2_vace_fun_14b"), None);
 }
 
+/// sc-20686: the MLX Wan-family load quantization is the provider crate's `product_load` decision
+/// (the single source the Metal campaign loads through): VACE-Fun defaults to Q4, `wan_vace` stays
+/// dense, and a packed Wan tier never requantizes while a flat root takes the pick.
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_load_quant_is_the_product_decision() {
+    let absent = request(json!({ "projectId": "p" }));
+    let q8 = request(json!({ "projectId": "p", "advanced": { "mlxQuantize": 8 } }));
+    let quant = |engine_id, request, packed| wan_load_quant(engine_id, request, packed).unwrap();
+    assert_eq!(
+        quant("wan2_2_vace_fun_14b", &absent, false),
+        Some(Quant::Q4)
+    );
+    assert_eq!(quant("wan2_2_vace_fun_14b", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan_vace", &absent, false), None);
+    assert_eq!(quant("wan_vace", &q8, false), Some(Quant::Q8));
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, true), None);
+    assert_eq!(quant("wan2_2_t2v_14b", &q8, false), Some(Quant::Q8));
+    assert!(wan_load_quant("ltx_2_3", &absent, false).is_err());
+}
+
 /// Per-model sampling (sc-4997 / sc-10047): with the Lightning toggle on (the default) both A14B
 /// MoE models (T2V + I2V) force the 4-step Lightning preset (CFG off); the dense 5B honors an
 /// explicit user `steps`/`guidanceScale` and otherwise applies the interim default with CFG retained.
@@ -10507,6 +10651,47 @@ fn wan_vace_adapters_are_single_dense() {
         resolve_wan_vace_adapters(&settings, &over),
         Err(WorkerError::InvalidPayload(_))
     ));
+}
+
+/// sc-20686: a TI2V-5B-only install carries just the `wan_2_2` soft co-requisite files from the
+/// T2V-A14B repo — its `q4/` UMT5/VAE/tokenizer, no experts, no config — and the VACE base resolver
+/// must find them there (the assembly needs nothing else from the 14B snapshot).
+#[cfg(target_os = "macos")]
+#[test]
+fn wan_vace_base_resolves_from_a_ti2v_5b_only_install() {
+    let dir_guard = tempfile::Builder::new()
+        .prefix("sw_wan_vace_base_")
+        .tempdir()
+        .expect("temp dir");
+    let dir = dir_guard.path();
+    let _env = EnvVars::set(&[(
+        "HF_HUB_CACHE",
+        fake_hf_hub_dir(dir).to_str().expect("utf-8 fixture hub"),
+    )]);
+    let settings = Settings {
+        data_dir: dir.to_path_buf(),
+        ..Settings::from_env()
+    };
+    assert_eq!(
+        resolve_wan_vace_base_dir(&settings),
+        None,
+        "nothing installed yet"
+    );
+    let q4 = fake_hf_hub_dir(dir)
+        .join("models--SceneWorks--wan2.2-t2v-a14b-mlx")
+        .join("snapshots")
+        .join("991eb255c544bbb2e1f1e07da4355c2f0a5337b7")
+        .join("q4");
+    std::fs::create_dir_all(&q4).unwrap();
+    for name in [
+        "t5_encoder.safetensors",
+        "vae.safetensors",
+        "tokenizer.json",
+    ] {
+        std::fs::write(q4.join(name), name).unwrap();
+    }
+    let base = resolve_wan_vace_base_dir(&settings).expect("the co-requisite tier files resolve");
+    assert_eq!(base.canonicalize().unwrap(), q4.canonicalize().unwrap());
 }
 
 /// Lay down a fake `lightx2v/Wan2.2-Lightning` HF snapshot under `data_dir` with the
