@@ -35,15 +35,6 @@ jobs:
       QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
       QWEN_APP_RUNNER_TARGET: ${{ inputs.runner_target }}
     steps:
-      - name: Require the selected Mac and immutable inputs
-        run: |
-          case "$QWEN_APP_RUNNER_TARGET:$RUNNER_NAME" in
-            primary:nax-macos|secondary:nax-macos-2) ;;
-            *) echo "selected app runner target/name mismatch" >&2; exit 1 ;;
-          esac
-          test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"
-          [[ "$QWEN_APP_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          [[ "$QWEN_APP_INFERENCE_SHA" =~ ^[0-9a-f]{40}$ ]]
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
@@ -52,6 +43,10 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Record and require the selected Mac before build
+        run: node scripts/qwen-image-2-1-app-lifecycle.mjs --preflight-only
+        env:
+          QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"

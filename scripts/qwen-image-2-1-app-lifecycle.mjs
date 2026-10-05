@@ -153,11 +153,12 @@ async function assertOwnedFile(file, state) {
   return resolved;
 }
 
-export async function runLifecycle(env = process.env) {
+export async function runLifecycle(env = process.env, runtime = {}) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."), output = path.resolve(env.QWEN_APP_OUTPUT ?? "");
   requireFact(env.QWEN_APP_OUTPUT && env.RUNNER_TEMP && output.startsWith(path.resolve(env.RUNNER_TEMP) + path.sep), "output must be a unique directory under RUNNER_TEMP");
-  await mkdir(output); const evidence = path.join(output, "evidence"); await mkdir(evidence);
-  const receipt = { schema_version: 1, kind: "qwen_image_2_1_mlx_app_lifecycle", status: "running", started_at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, identity: { requested_runner_target: env.QWEN_APP_RUNNER_TARGET, runner_name: env.RUNNER_NAME, sceneworks_revision: env.QWEN_APP_SOURCE_SHA, inference_revision: env.QWEN_APP_INFERENCE_SHA, run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, hardware: null }, cases: [] };
+  await mkdir(output, { recursive: true }); const evidence = path.join(output, "evidence"); await mkdir(evidence, { recursive: true });
+  const platform = { os: runtime.platform ?? process.platform, arch: runtime.arch ?? process.arch };
+  const receipt = { schema_version: 1, kind: "qwen_image_2_1_mlx_app_lifecycle", status: "running", phase: runtime.preflightOnly ? "preflight" : "lifecycle", started_at: new Date().toISOString(), run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, identity: { requested_runner_target: env.QWEN_APP_RUNNER_TARGET, runner_name: env.RUNNER_NAME, platform, sceneworks_revision: env.QWEN_APP_SOURCE_SHA, inference_revision: env.QWEN_APP_INFERENCE_SHA, run_id: env.GITHUB_RUN_ID, run_attempt: env.GITHUB_RUN_ATTEMPT, hardware: { status: "pending", query: ["system_profiler", "SPHardwareDataType", "-json"] } }, cases: [] };
   const save = async () => { const temporary = path.join(evidence, "receipt.tmp"); await writeFile(temporary, JSON.stringify(receipt, null, 2) + "\n"); await rename(temporary, path.join(evidence, "receipt.json")); };
   await save();
   const children = [], handles = [], controller = new AbortController();
@@ -183,13 +184,35 @@ export async function runLifecycle(env = process.env) {
     try { alive(); const result = await Promise.race([child.done, interruption]); alive(); requireFact(result.code === 0, `${name} failed; see owned log`); } finally { controller.signal.removeEventListener("abort", interrupted); }
   };
   try {
+    try {
+      const result = await (runtime.execSystemProfiler ?? execFile)("system_profiler", ["SPHardwareDataType", "-json"], { timeout: 30_000 });
+      const raw = result.stdout, parsed = JSON.parse(raw), devices = parsed.SPHardwareDataType;
+      requireFact(Array.isArray(devices), "system_profiler output omitted SPHardwareDataType");
+      receipt.identity.hardware = {
+        status: "observed",
+        query: ["system_profiler", "SPHardwareDataType", "-json"],
+        stdout_sha256: createHash("sha256").update(raw).digest("hex"),
+        devices: devices.map(({ chip_type, physical_memory, machine_model }) => ({ chip_type, physical_memory, machine_model })),
+      };
+    } catch (error) {
+      receipt.identity.hardware = {
+        status: "query_failed",
+        query: ["system_profiler", "SPHardwareDataType", "-json"],
+        error: { name: error.name ?? "Error", message: String(error.message ?? error), code: error.code ?? null, signal: error.signal ?? null },
+      };
+      await save();
+      throw new Error(`hardware inventory query failed: ${receipt.identity.hardware.error.message}`);
+    }
+    await save();
     assertRunnerIdentity(env.QWEN_APP_RUNNER_TARGET, env.RUNNER_NAME);
     assertImmutableRevisions(env.QWEN_APP_SOURCE_SHA, env.QWEN_APP_INFERENCE_SHA);
-    requireFact(process.platform === "darwin" && process.arch === "arm64", "Darwin arm64 runner required");
+    requireFact(platform.os === "darwin" && platform.arch === "arm64", "Darwin arm64 runner required");
+    assertHardwareIdentity(receipt.identity.hardware.devices);
     const git = async (...args) => (await execFile("git", args, { cwd: root })).stdout.trim();
     requireFact(await git("rev-parse", "HEAD") === env.QWEN_APP_SOURCE_SHA && await git("status", "--porcelain") === "", "exact clean feature checkout required");
     const manifests = await Promise.all(["Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"].map((file) => readFile(path.join(root, file), "utf8")));
     assertPins(manifests, await readFile(path.join(root, "Cargo.lock"), "utf8"), env.QWEN_APP_INFERENCE_SHA);
+    if (runtime.preflightOnly) { receipt.status = "passed"; return receipt; }
     const home = await realpath(env.HOME), weights = path.join(home, "sceneworks-rw-weights"), hub = path.join(weights, "hub"), repo = path.join(hub, "models--Qwen--Qwen-Image-2.1"), snapshots = path.join(repo, "snapshots"), base = path.join(snapshots, BASE_REVISION);
     for (const directory of [weights, hub, repo, snapshots, base]) await physicalDirectory(directory);
     requireFact((await readdir(snapshots)).every((name) => name === BASE_REVISION), "dense repo must contain only the frozen snapshot");
@@ -202,9 +225,7 @@ export async function runLifecycle(env = process.env) {
     const childEnv = { ...env };
     for (const key of Object.keys(childEnv)) if (key.startsWith("SCENEWORKS_") || /TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key) || ["HF_ENDPOINT", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "CARGO_TARGET_DIR"].includes(key)) delete childEnv[key];
     Object.assign(childEnv, { SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "17921", SCENEWORKS_API_URL: url, SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_POLL_SECONDS: "1", SCENEWORKS_HEARTBEAT_SECONDS: "2", SCENEWORKS_BACKEND_MLX_ENABLED: "true", SCENEWORKS_BACKEND_CANDLE_ENABLED: "false", SCENEWORKS_MLX_REQUIRED: "1", SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce", HF_HOME: weights, HF_HUB_CACHE: hub, HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" });
-    const hardware = JSON.parse((await execFile("system_profiler", ["SPHardwareDataType", "-json"])).stdout).SPHardwareDataType.map(({ chip_type, physical_memory, machine_model }) => ({ chip_type, physical_memory, machine_model }));
-    assertHardwareIdentity(hardware);
-    Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId, hardware });
+    Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId });
     await save();
     await checkedCommand("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api"], { ...env, CARGO_TARGET_DIR: path.join(root, "target") }, "build");
     requireFact(await git("status", "--porcelain") === "", "build changed the pinned checkout");
@@ -280,4 +301,7 @@ export async function runLifecycle(env = process.env) {
   requireFact(receipt.status === "passed", "lifecycle cleanup failed"); return receipt;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) runLifecycle().then((receipt) => console.log(`${receipt.status}: ${receipt.cases.length} completed app jobs`)).catch((error) => { console.error(error.message); process.exitCode = 1; });
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const args = process.argv.slice(2);
+  runLifecycle(process.env, { preflightOnly: args.length === 1 && args[0] === "--preflight-only" }).then((receipt) => console.log(`${receipt.status}: ${receipt.cases.length} completed app jobs`)).catch((error) => { console.error(error.message); process.exitCode = 1; });
+}

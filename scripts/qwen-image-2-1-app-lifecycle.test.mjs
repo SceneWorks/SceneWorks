@@ -115,11 +115,13 @@ function assertWorkflowScope(workflow) {
   assert.match(trigger, /workflow_call:/); assert.doesNotMatch(trigger, /\b(workflow_dispatch|push|pull_request|schedule):/);
   assert.match(workflow, /runner_target:[\s\S]*?default: primary/);
   assert.match(workflow, /inputs\.runner_target == 'secondary'.*\["self-hosted","macOS","ARM64","rw-mage"\].*\["self-hosted","macOS","ARM64","rw-starvector"\]/);
-  assert.match(workflow, /primary:nax-macos\|secondary:nax-macos-2/);
   assert.match(workflow, /QWEN_APP_RUNNER_TARGET: \$\{\{ inputs.runner_target \}\}/);
-  assert.match(workflow, /test "\$GITHUB_SHA" = "\$QWEN_APP_SOURCE_SHA"\s*$/m);
   assert.match(workflow, /ref: \$\{\{ inputs.source_sha \}\}/);
   assert.match(workflow, /QWEN_APP_SOURCE_SHA: \$\{\{ inputs.source_sha \}\}/);
+  assert.match(workflow, /- name: Record and require the selected Mac before build\n        run: node scripts\/qwen-image-2-1-app-lifecycle\.mjs --preflight-only\n        env:\n          QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  const preflight = workflow.indexOf("--preflight-only"), toolchain = workflow.indexOf("dtolnay/rust-toolchain"), fetch = workflow.indexOf("Fetch Release libmlx"), lifecycle = workflow.indexOf("Build and exercise the owned API");
+  assert.ok(preflight > workflow.indexOf("actions/setup-node") && preflight < toolchain && toolchain < fetch && fetch < lifecycle, "receipt-producing route/hardware preflight must run before build setup and services");
+  assert.doesNotMatch(workflow, /case "\$QWEN_APP_RUNNER_TARGET:\$RUNNER_NAME"/, "workflow shell must not bypass the receipt-producing harness");
   assert.match(workflow, /- name: Build and exercise the owned API and MLX worker\n        run: node scripts\/qwen-image-2-1-app-lifecycle\.mjs\n        env:\n          QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/evidence\//);
   assert.doesNotMatch(workflow, /^      QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}/m, "runner.temp is unavailable in job-level env");
@@ -132,7 +134,7 @@ test("reusable app workflow selects one exact app runner while preserving immuta
   const workflow = read(".github/workflows/qwen-image-2-1-app-lifecycle.yml"); assertWorkflowScope(workflow);
   const runnerTempAtJobScope = workflow.replace("      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}", "      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}\n      QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}");
   assert.throws(() => assertWorkflowScope(runnerTempAtJobScope), /runner\.temp is unavailable in job-level env/);
-  for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace('"rw-mage"', '"nax"'), workflow.replace('"rw-starvector"', '"nax"'), workflow.replace("secondary:nax-macos-2", "secondary:nax-macos"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace('test "$GITHUB_SHA" = "$QWEN_APP_SOURCE_SHA"', 'test -n "$GITHUB_SHA"'), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
+  for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace('"rw-mage"', '"nax"'), workflow.replace('"rw-starvector"', '"nax"'), workflow.replace("--preflight-only", "--route-check-only"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
   const harness = read("scripts/qwen-image-2-1-app-lifecycle.mjs");
   assert.match(harness, /SCENEWORKS_CREDENTIALS_DIR: path.join\(state, "credentials"\)/);
   assert.match(harness, /HF_HUB_OFFLINE: "1"/); assert.match(harness, /SCENEWORKS_WORKER_ONLY: "1"/);
@@ -201,15 +203,49 @@ test("runner route admits only the selected exact target/name pair", () => {
   for (const hardware of [[], [{ chip_type: "Apple M4 Max", physical_memory: "128 GB" }], [{ chip_type: "Apple M5 Max", physical_memory: "64 GB" }], [{ chip_type: "Apple M5 Max", physical_memory: "128 GB" }, { chip_type: "Apple M5 Max", physical_memory: "128 GB" }]]) assert.throws(() => assertHardwareIdentity(hardware), /128 GB M5 Max/);
 });
 
-test("wrong runtime writes selected route and immutable identity to a failed receipt before build", async () => {
+const profiler = (devices) => async (command, args) => {
+  assert.equal(command, "system_profiler"); assert.deepEqual(args, ["SPHardwareDataType", "-json"]);
+  return { stdout: JSON.stringify({ SPHardwareDataType: devices }) };
+};
+const m5 = [{ chip_type: "Apple M5 Max", physical_memory: "128 GB", machine_model: "Mac" }];
+
+test("route and hardware failures record actual identity before build", async () => {
   const temporary = await mkdtemp(path.join(tmpdir(), "qwen-app-guard-")), output = path.join(temporary, "attempt");
   try {
-    await assert.rejects(runLifecycle({ QWEN_APP_RUNNER_TARGET: "secondary", RUNNER_NAME: "nax-macos", RUNNER_TEMP: temporary, QWEN_APP_OUTPUT: output, QWEN_APP_SOURCE_SHA: sha, QWEN_APP_INFERENCE_SHA: "b".repeat(40), GITHUB_RUN_ID: "42", GITHUB_RUN_ATTEMPT: "3" }), /target\/name mismatch/);
-    const receipt = JSON.parse(await readFile(path.join(output, "evidence", "receipt.json"), "utf8"));
-    assert.equal(receipt.status, "failed"); assert.deepEqual(receipt.cases, []); assert.deepEqual(receipt.cleanup, []); assert.ok(receipt.finished_at);
-    assert.deepEqual(receipt.identity, { requested_runner_target: "secondary", runner_name: "nax-macos", sceneworks_revision: sha, inference_revision: "b".repeat(40), run_id: "42", run_attempt: "3", hardware: null });
+    const cases = [
+      { name: "wrong target", target: "unknown", runner: "nax-macos", devices: m5, error: /target\/name mismatch/ },
+      { name: "wrong name", target: "secondary", runner: "nax-macos", devices: m5, error: /target\/name mismatch/ },
+      { name: "wrong chip", target: "secondary", runner: "nax-macos-2", devices: [{ chip_type: "Apple M4 Max", physical_memory: "128 GB", machine_model: "Mac" }], error: /128 GB M5 Max/ },
+      { name: "wrong memory", target: "secondary", runner: "nax-macos-2", devices: [{ chip_type: "Apple M5 Max", physical_memory: "64 GB", machine_model: "Mac" }], error: /128 GB M5 Max/ },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const attempt = path.join(output, String(index));
+      await assert.rejects(runLifecycle({ QWEN_APP_RUNNER_TARGET: item.target, RUNNER_NAME: item.runner, RUNNER_TEMP: temporary, QWEN_APP_OUTPUT: attempt, QWEN_APP_SOURCE_SHA: sha, QWEN_APP_INFERENCE_SHA: "b".repeat(40), GITHUB_RUN_ID: "42", GITHUB_RUN_ATTEMPT: "3" }, { platform: "darwin", arch: "arm64", execSystemProfiler: profiler(item.devices) }), item.error, item.name);
+      const receipt = JSON.parse(await readFile(path.join(attempt, "evidence", "receipt.json"), "utf8"));
+      assert.equal(receipt.status, "failed"); assert.deepEqual(receipt.cases, []); assert.deepEqual(receipt.cleanup, []); assert.ok(receipt.finished_at);
+      assert.equal(receipt.identity.requested_runner_target, item.target); assert.equal(receipt.identity.runner_name, item.runner);
+      assert.deepEqual(receipt.identity.platform, { os: "darwin", arch: "arm64" });
+      assert.equal(receipt.identity.sceneworks_revision, sha); assert.equal(receipt.identity.inference_revision, "b".repeat(40));
+      assert.equal(receipt.identity.run_id, "42"); assert.equal(receipt.identity.run_attempt, "3");
+      assert.equal(receipt.identity.hardware.status, "observed"); assert.deepEqual(receipt.identity.hardware.devices, item.devices);
+      assert.match(receipt.identity.hardware.stdout_sha256, /^[0-9a-f]{64}$/);
+    }
   } finally {
     // Exact mkdtemp path remains inside the OS temporary directory before recursive cleanup.
+    assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir()) + path.sep));
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
+test("system profiler failure records its concrete query error before build", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "qwen-app-profiler-")), output = path.join(temporary, "attempt");
+  try {
+    const unavailable = Object.assign(new Error("system_profiler unavailable"), { code: "ENOENT" });
+    await assert.rejects(runLifecycle({ QWEN_APP_RUNNER_TARGET: "secondary", RUNNER_NAME: "nax-macos-2", RUNNER_TEMP: temporary, QWEN_APP_OUTPUT: output, QWEN_APP_SOURCE_SHA: sha, QWEN_APP_INFERENCE_SHA: "b".repeat(40), GITHUB_RUN_ID: "43", GITHUB_RUN_ATTEMPT: "1" }, { platform: "darwin", arch: "arm64", execSystemProfiler: async () => { throw unavailable; } }), /hardware inventory query failed: system_profiler unavailable/);
+    const receipt = JSON.parse(await readFile(path.join(output, "evidence", "receipt.json"), "utf8"));
+    assert.equal(receipt.status, "failed"); assert.deepEqual(receipt.identity.platform, { os: "darwin", arch: "arm64" });
+    assert.deepEqual(receipt.identity.hardware, { status: "query_failed", query: ["system_profiler", "SPHardwareDataType", "-json"], error: { name: "Error", message: "system_profiler unavailable", code: "ENOENT", signal: null } });
+  } finally {
     assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir()) + path.sep));
     await rm(temporary, { recursive: true, force: true });
   }
