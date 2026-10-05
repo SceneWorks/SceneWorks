@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { apiFetch } from "../../api.js";
+import { saveJsonExport } from "../../saveExportFile.js";
 import { assetCanRenderAsImage } from "../assetMedia.jsx";
 import {
   FindingList,
@@ -327,14 +328,12 @@ export function FilmReferences({
     });
   }
 
-  function exportPack() {
-    const blob = new Blob([`${JSON.stringify(draft.referencePack, null, 2)}\n`], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = `${draft.referencePack.id}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
+  async function exportPack() {
+    try {
+      await saveJsonExport(`${draft.referencePack.id}.json`, draft.referencePack);
+    } catch (error) {
+      setNotice(`Export failed: ${error?.message ?? String(error)}`);
+    }
   }
 
   async function importPack(event) {
