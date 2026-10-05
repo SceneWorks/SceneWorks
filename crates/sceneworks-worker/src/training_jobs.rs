@@ -3519,9 +3519,12 @@ mod tests {
             { "resolution": 512, "repeats": 2 },
             { "resolution": 1024, "repeats": 1 },
         ]);
-        for (kernel, base) in [
-            ("z_image_lora", "z_image_turbo"),
-            ("sdxl_lora", "sdxl"),
+        // Image LoRA trainers declare buckets on both backends; LTX-2.5 trains on prepared latent
+        // packs with no spatial edge, so it declares none and must refuse.
+        for (kernel, base, expected) in [
+            ("z_image_lora", "z_image_turbo", true),
+            ("sdxl_lora", "sdxl", true),
+            ("ltx_mlx_lora", "ltx_2_5", false),
         ] {
             let declared = crate::inference_runtime::trainer_descriptor(
                 engine_trainer_id_for(kernel, base).expect("native trainer"),
@@ -3529,6 +3532,7 @@ mod tests {
             .expect("trainer registered")
             .techniques
             .resolution_buckets;
+            assert_eq!(declared, expected, "{base} bucket declaration");
             let bucketed = plan(kernel, base, good.clone());
             if declared {
                 validate_training_target_config(&bucketed)

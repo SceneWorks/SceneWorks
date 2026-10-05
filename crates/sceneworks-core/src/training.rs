@@ -112,7 +112,9 @@ pub fn parse_resolution_buckets(
     for (index, row) in rows.iter().enumerate() {
         let n = index + 1;
         let row = row.as_object().ok_or_else(|| {
-            format!("{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats.")
+            format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats."
+            )
         })?;
         let resolution = row
             .get("resolution")
