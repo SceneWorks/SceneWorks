@@ -1315,7 +1315,7 @@
       "publisher": "Hugging Face",
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/candle",
-      "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source.",
+      "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source. The native Candle backend also links a vendored candle-core 0.10.2 copy from Hugging Face Candle, with its CUDA graph parameter-cache cherry-picks and zeroed quantized-padding change documented in inference's VENDORED.md.",
       "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {

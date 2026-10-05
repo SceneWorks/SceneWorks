@@ -174,7 +174,6 @@ import {
 import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
-import { readLastTier } from "../lastTierStore.js";
 import {
   PROMPT_REFINE_MODEL_ID,
   QWEN_IMAGE_2_1_MODEL_ID,
@@ -1060,16 +1059,17 @@ export function ImageStudio() {
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
     [selectedModel, unifiedMemoryGb, activeBackend],
   );
-  const { quantTier, tierSwitching, handleTierChange } = useQuantTierPicker({
-    screen: TIER_SCREEN,
-    model,
-    selectedModel,
-    availableTiers,
-    tierOptions,
-    autoTier,
-    useGenerationQuality: true,
-    preferencesHydrated,
-  });
+  const { quantTier, tierSwitching, handleTierChange, tierExplicit, tierSuggested, confirmTier } =
+    useQuantTierPicker({
+      screen: TIER_SCREEN,
+      model,
+      selectedModel,
+      availableTiers,
+      tierOptions,
+      autoTier,
+      useGenerationQuality: true,
+      preferencesHydrated,
+    });
   const possibleTiers = useMemo(
     () => allPossibleTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
@@ -2488,12 +2488,10 @@ export function ImageStudio() {
       // guard VideoStudio/Editor already apply. Empty string ⇒ `tierQuantize("")` is null ⇒ no mlxQuantize.
       quantTier: availableTiers.includes(quantTier) ? quantTier : "",
       // sc-10733: the tier is a DELIBERATE pick (not the pure global/base default) when it equals this
-      // (screen, model)'s persisted sticky — a prior explicit pick, which `handleTierChange` writes and
-      // the seed effect reads back into `quantTier`. The worker honors an explicit pick (never silently
-      // downtiers it); only a non-explicit default is capability-clamped. Gate on the same installed-set
-      // membership so an uninstalled sticky is never flagged explicit.
-      tierExplicit:
-        availableTiers.includes(quantTier) && readLastTier(TIER_SCREEN, model) === quantTier,
+      // (screen, model)'s persisted sticky — derived by `useQuantTierPicker`, which the picker also uses
+      // to label a non-explicit tier as a suggestion (sc-22246). The worker honors an explicit pick (never
+      // silently downtiers it); only a non-explicit default is capability-clamped.
+      tierExplicit,
       showPidToggle,
       usePid,
       pidTarget,
@@ -3704,12 +3702,15 @@ export function ImageStudio() {
                   items={tierPickerItems}
                   tierSwitching={tierSwitching}
                   tierLabel={tierLabel}
+                  suggested={tierSuggested}
+                  onConfirm={confirmTier}
                   title="Switch which installed quant tier generates, for A/B comparison. Higher precision = larger memory footprint; switching a heavy tier reloads it before the next generation. Tiers you haven't downloaded are shown but disabled — install them from the Models page to enable."
                   warning={tierBelowFloor ? (
                     <span className="field-hint quant-tier-floor-note">
                       {tierLabel(quantTier)} is below the {tierLabel(qualityFloor)} recommended for{" "}
                       {selectedModel?.name ?? "this model"} — it can look washed or lose fine detail
-                      here (quantization error is amplified under CFG). Your pick is honored.
+                      here (quantization error is amplified under CFG).
+                      {tierExplicit ? " Your pick is honored." : ""}
                     </span>
                   ) : null}
                 />

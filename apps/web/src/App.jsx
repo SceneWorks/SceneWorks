@@ -3404,7 +3404,13 @@ export function App() {
         const path = action === "duplicate" ? `/api/v1/jobs/${job.id}/duplicate` : `/api/v1/jobs/${job.id}/${action}`;
         const body =
           action === "duplicate"
-            ? { payloadChanges: { duplicatedAt: new Date().toISOString() } }
+            ? {
+                ...options.body,
+                payloadChanges: {
+                  ...options.body?.payloadChanges,
+                  duplicatedAt: new Date().toISOString(),
+                },
+              }
             : (options.body ?? {});
         const updatedJob = await apiFetch(path, token, { method: "POST", body: JSON.stringify(body) });
         setJobs((items) => upsertJobNewest(items, updatedJob));
@@ -4059,6 +4065,7 @@ export function App() {
         {activeView === "Settings" ? (
           <SettingsScreen
             accent={accent}
+            appUpdate={appUpdate}
             embedWorkflow={embedWorkflow}
             lockedToSimple={uiModeLocked}
             onAccentChange={changeAccent}

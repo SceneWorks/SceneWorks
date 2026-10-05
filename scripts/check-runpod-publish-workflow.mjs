@@ -4,11 +4,12 @@ import { readFile } from "node:fs/promises";
 import { findActionPinViolations } from "./lib/action-pins.mjs";
 
 const workflowPath = ".github/workflows/publish-runpod.yml";
-const [workflow, dockerfile, serverCandle, desktopWindows] = await Promise.all([
+const [workflow, dockerfile, serverCandle, desktopWindows, candleSmoke] = await Promise.all([
   readFile(workflowPath, "utf8"),
   readFile("docker/rust.Dockerfile", "utf8"),
   readFile(".github/workflows/server-candle-linux.yml", "utf8"),
   readFile(".github/workflows/desktop-windows.yml", "utf8"),
+  readFile("scripts/check-docker-candle-runtime.sh", "utf8"),
 ]);
 
 function requireText(body, text, message = `missing ${text}`) {
@@ -63,6 +64,109 @@ for (const contract of [
   requireText(workflow, contract);
 }
 
+function validateCandleRuntimeGate(candidate) {
+  const steps = candidate.split(/(?=^      - name: )/m);
+  const byId = (id) => {
+    const matches = steps.filter((step) => new RegExp(`^        id: ${id}$`, "m").test(step));
+    assert.equal(matches.length, 1, `expected one ${id} step`);
+    return matches[0];
+  };
+  const combined = byId("build_staging");
+  const stagedCheck = byId("verify_staging");
+  const candle = byId("build_candle_runtime");
+  const smoke = byId("smoke_candle_runtime");
+  const combinedSmoke = byId("smoke_published_runtime");
+  const promote = byId("promote");
+  requireText(combined, "target: runpod");
+  requireText(combined, "platforms: linux/amd64");
+  requireText(combined, "push: true");
+  requireText(combined, "tags: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}");
+  requireText(combined, "cache-to: type=gha,mode=max,scope=runpod-amd64");
+  assert.ok(!combined.includes("load: true"), "the staged registry digest, not a separately loaded image, must be tested");
+  assert.ok(!combined.includes("steps.metadata.outputs.tags"), "release/manual tags must not be exposed before runtime gates pass");
+  requireText(stagedCheck, "${{ steps.build_staging.outputs.digest }}");
+  requireText(stagedCheck, 'docker pull --platform linux/amd64 "$staged_ref"');
+  requireText(stagedCheck, "scripts/check-runpod-staged-image.mjs");
+  requireText(stagedCheck, '"$GITHUB_SHA"');
+  for (const [step, target] of [[candle, "rust-worker-candle"]]) {
+    requireText(step, `target: ${target}`);
+    requireText(step, "platforms: linux/amd64");
+    requireText(step, "push: false");
+    requireText(step, "load: true");
+    assert.ok(!step.includes("no-cache: true"), "acceptance builds must share cached CUDA stages");
+  }
+  requireText(smoke, "bash scripts/check-docker-candle-runtime.sh");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci");
+  requireText(smoke, "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat");
+  requireText(smoke, "timeout-minutes: 5");
+  requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}");
+  requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}");
+  requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT: /usr/local/bin/sceneworks-rust-worker");
+  requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_WORKER_USER: 1000:1000");
+  requireText(combinedSmoke, "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat");
+  requireText(candleSmoke, 'worker_entrypoint="${SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT:-}"');
+  requireText(candleSmoke, 'worker_default_user="${SCENEWORKS_CANDLE_SMOKE_WORKER_USER:-}"');
+  requireText(candleSmoke, 'worker_entrypoint_args=(--entrypoint "${worker_entrypoint}")');
+  requireText(candleSmoke, 'user_args=(--user "${worker_default_user}")');
+  requireText(promote, "if: success()");
+  requireText(promote, "STANDALONE_SMOKE_RESULT: ${{ steps.smoke_candle_runtime.outcome }}");
+  requireText(promote, "PUBLISHED_SMOKE_RESULT: ${{ steps.smoke_published_runtime.outcome }}");
+  requireText(promote, "run: node scripts/promote-runpod-image.mjs");
+  assert.ok(!promote.includes("docker/build-push-action"), "promotion must reuse the staged manifest instead of building");
+  const runpodBuilds = steps.filter((step) => /^          target: runpod$/m.test(step));
+  assert.equal(runpodBuilds.length, 1, "combined RunPod target must be built exactly once");
+  assert.ok(steps.indexOf(combined) < steps.indexOf(stagedCheck));
+  assert.ok(steps.indexOf(stagedCheck) < steps.indexOf(candle));
+  assert.ok(steps.indexOf(candle) < steps.indexOf(smoke));
+  assert.ok(steps.indexOf(smoke) < steps.indexOf(combinedSmoke));
+  assert.ok(steps.indexOf(combinedSmoke) < steps.indexOf(promote), "all staged-image runtime checks must pass before final tags are promoted");
+  assert.equal(candidate.match(/uses: docker\/setup-buildx-action@/g)?.length, 1,
+    "the standalone CUDA image and single combined image must share one builder");
+}
+
+function validateRuntimeFixture(script) {
+  requireText(script, "assert_service_identity_and_writes() {");
+  for (const contract of [
+    'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = "$3"',
+    'awk -v uid="$1" -v gid="$2"',
+    "/proc/1/status",
+    'for dir in "$HOME" /smoke/data /smoke/data/cache /smoke/config /smoke/credentials /smoke/hf;',
+    "! touch /etc/sceneworks-candle-smoke",
+  ]) requireText(script, contract);
+  requireText(script, 'assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data');
+  requireText(script, 'assert_service_identity_and_writes "${worker}" "${uid}" "${gid}" "${expected_home}"');
+  const apiHealthy = script.indexOf('[[ "${ready}" == 1 ]]');
+  const apiIdentity = script.indexOf('assert_service_identity_and_writes "${api}"');
+  const workerStart = script.indexOf('docker run -d --name "${worker}"');
+  const workerRegistered = script.indexOf('[[ "${registered}" == 1 ]]');
+  const workerIdentity = script.indexOf('assert_service_identity_and_writes "${worker}"');
+  const workerStop = script.indexOf('docker stop -t 15 "${worker}"');
+  assert.ok(apiHealthy >= 0 && apiIdentity > apiHealthy && workerStart > apiIdentity,
+    "API identity and bind checks must run after health and before worker startup");
+  assert.ok(workerRegistered >= 0 && workerIdentity > workerRegistered && workerStop > workerIdentity,
+    "worker identity and bind checks must run after registration and before clean stop");
+}
+
+validateRuntimeFixture(candleSmoke);
+for (const mutated of [
+  candleSmoke.replace('assert_service_identity_and_writes "${api}" "${uid}" "${gid}" /smoke/data', ""),
+  candleSmoke.replace('assert_service_identity_and_writes "${worker}" "${uid}" "${gid}" "${expected_home}"', ""),
+  candleSmoke.replace('! touch /etc/sceneworks-candle-smoke', "touch /etc/sceneworks-candle-smoke"),
+]) assert.throws(() => validateRuntimeFixture(mutated));
+
+validateCandleRuntimeGate(workflow);
+for (const mutated of [
+  workflow.replace("target: rust-worker-candle", "target: rust-worker"),
+  workflow.replace("id: smoke_candle_runtime", "id: skipped_smoke"),
+  workflow.replace("load: true", "load: false"),
+  workflow.replace("push: true\n          tags: ${{ env.IMAGE_NAME }}:staging-", "push: false\n          tags: ${{ env.IMAGE_NAME }}:staging-"),
+  workflow.replace("SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat", "SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /missing-driver"),
+  workflow.replace("SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}", "SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}"),
+  workflow.replace("if: success()\n        env:\n          IMAGE_NAME:", "if: always()\n        env:\n          IMAGE_NAME:"),
+  workflow.replace("run: node scripts/promote-runpod-image.mjs", "uses: docker/build-push-action@deadbeef"),
+]) assert.throws(() => validateCandleRuntimeGate(mutated));
+
 // Pin *shape* is enforced repo-wide by scripts/check-action-pins.mjs, which stays
 // true across Dependabot bumps. Naming exact SHAs here only re-broke this check
 // every time Dependabot rewrote the workflow it was guarding.
@@ -103,7 +207,7 @@ assert.ok(
   "publication workflow must never print an inference credential",
 );
 
-const runtimeCuda = /FROM nvidia\/cuda:([0-9.]+)-runtime-ubuntu24\.04 AS rust-worker-candle/.exec(
+const runtimeCuda = /FROM nvidia\/cuda:([0-9.]+)-runtime-ubuntu24\.04 AS rust-worker-candle-base/.exec(
   dockerfile,
 )?.[1];
 const builderCuda = /FROM nvidia\/cuda:([0-9.]+)-devel-ubuntu22\.04 AS candle-builder/.exec(

@@ -89,16 +89,18 @@ test("the plan runs every case on a real run and skips only with a stated reason
   assert.throws(() => planCases({ platform: "rocm" }), /metal or cuda/);
 });
 
-test("FP8 profile preparation runs only the cold install and never claims acceptance", () => {
-  const planned = planCases({ platform: "cuda", profileInstallOnly: true });
-  assert.deepEqual(planned.filter((item) => item.action === "run").map((item) => item.id), ["install-cold"]);
-  assert.equal(planned.filter((item) => item.action === "skip").length, CASES.length - 1);
-  for (const item of planned.filter((row) => row.action === "skip")) assert.match(item.reason, /not an acceptance run/);
-  const summary = buildSummary([passedRecord("install-cold", { jobs: [] })], {
-    platform: "cuda", profileInstallOnly: true,
-  });
-  assert.equal(summary.verdict, "incomplete");
-  assert.match(renderMarkdown(summary), /installation preparation.*not acceptance/);
+test("profile preparation on either backend runs only cold install and never claims acceptance", () => {
+  for (const platform of ["cuda", "metal"]) {
+    const planned = planCases({ platform, profileInstallOnly: true });
+    assert.deepEqual(planned.filter((item) => item.action === "run").map((item) => item.id), ["install-cold"]);
+    assert.equal(planned.filter((item) => item.action === "skip").length, CASES.length - 1);
+    for (const item of planned.filter((row) => row.action === "skip")) assert.match(item.reason, /not an acceptance run/);
+    const summary = buildSummary([passedRecord("install-cold", { jobs: [] })], {
+      platform, profileInstallOnly: true,
+    });
+    assert.equal(summary.verdict, "incomplete");
+    assert.match(renderMarkdown(summary), new RegExp(`installation preparation.*${platform}.*not acceptance`));
+  }
 });
 
 test("a Metal worker kill needs the owner's explicit opt-in; CUDA always runs it", () => {
@@ -135,7 +137,7 @@ test("arguments: platform and out are required; --skip repeats; unknown input is
   assert.throws(() => parseArgs(["--platform", "cuda", "--out", "x", "--hf-hub", "E:/huggingface/hub"]), /unknown argument --hf-hub/);
   assert.equal(options.dryRun, true);
   assert.equal(parseArgs(["--platform", "cuda", "--out", "x", "--profile-install-only"]).profileInstallOnly, true);
-  assert.throws(() => parseArgs(["--platform", "metal", "--out", "x", "--profile-install-only"]), /requires CUDA/);
+  assert.equal(parseArgs(["--platform", "metal", "--out", "x", "--profile-install-only"]).profileInstallOnly, true);
   assert.throws(() => parseArgs(["--platform", "cuda", "--out", "x", "--profile-install-only", "--skip", "install-cold"]), /cannot combine/);
   assert.throws(() => parseArgs(["--out", "x"]), /--platform/);
   assert.throws(() => parseArgs(["--platform", "metal"]), /--out/);
@@ -562,7 +564,7 @@ test("the services get the desktop's shipped environment and nothing inherited f
   const apiCommon = { ...shared, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "5000", SCENEWORKS_TRUST_LOOPBACK: "true", SCENEWORKS_RUN_UTILITY_INPROCESS: "true", SCENEWORKS_PARENT_PID: "42" };
   const pick = (env) => Object.fromEntries(driverKeys(env).map((key) => [key, env[key]]));
   assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "api" })), { ...apiCommon, SCENEWORKS_MLX_REQUIRED: "1" });
-  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "api" })), { ...apiCommon, SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce" });
+  assert.deepEqual(pick(serviceEnv({ ...common, platform: "cuda", role: "api" })), { ...apiCommon, SCENEWORKS_CANDLE_REQUIRED: "1", SCENEWORKS_CANDLE_UNSUPPORTED_MODE: "enforce", CUDA_VISIBLE_DEVICES: "0" });
   // supervise_mlx_worker (no parent-death watch on Metal: see serviceDeviations).
   assert.deepEqual(pick(serviceEnv({ ...common, platform: "metal", role: "worker" })), {
     ...shared, SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_WORKER_ID: "w", SCENEWORKS_API_URL: "http://127.0.0.1:5000",
@@ -578,6 +580,23 @@ test("the services get the desktop's shipped environment and nothing inherited f
   assert.equal(serviceDeviations("metal").length, 2);
   assert.match(serviceDeviations("metal")[0], /Recording transcription uses this decoder/);
   assert.match(serviceDeviations("cuda").join(" "), /per-GPU child/);
+});
+
+test("CUDA API and worker select the same single physical GPU despite inherited or extra masks", () => {
+  for (const gpuId of ["0", "1"]) {
+    const api = serviceEnv({ ...common, platform: "cuda", role: "api", gpuId, extra: { CUDA_VISIBLE_DEVICES: "3" } });
+    const worker = serviceEnv({ ...common, platform: "cuda", role: "worker", gpuId,
+      extra: { CUDA_VISIBLE_DEVICES: "3", SCENEWORKS_GPU_ID: "3" } });
+    assert.equal(api.CUDA_VISIBLE_DEVICES, gpuId);
+    assert.equal(worker.CUDA_VISIBLE_DEVICES, gpuId);
+    assert.equal(worker.SCENEWORKS_GPU_ID, gpuId);
+    assert.equal(api.SCENEWORKS_GPU_ID, undefined);
+  }
+  for (const gpuId of ["0,1", "-1", "gpu1", "01"]) {
+    assert.throws(() => serviceEnv({ ...common, platform: "cuda", role: "api", gpuId }), /one physical CUDA GPU index/);
+  }
+  assert.equal(serviceEnv({ ...common, platform: "metal", role: "api", gpuId: "1" }).CUDA_VISIBLE_DEVICES, undefined);
+  assert.equal(serviceEnv({ ...common, platform: "metal", role: "worker", gpuId: "1" }).CUDA_VISIBLE_DEVICES, undefined);
 });
 
 test("the ffmpeg preflight resolves and probes the exact binary recorded in both service environments", async () => {

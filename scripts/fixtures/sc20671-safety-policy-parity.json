@@ -1,0 +1,12 @@
+{
+  "childFootprintCapBytes": 2048,
+  "hostFreeReserveBytes": 1024,
+  "maxContextTokens": 4096,
+  "maxRequestTokens": 4096,
+  "pollMillis": 100,
+  "rowDeadlineSeconds": 10,
+  "schemaVersion": 1,
+  "stderrCapBytes": 4096,
+  "stdoutCapBytes": 4096,
+  "termGraceMillis": 500
+}

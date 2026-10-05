@@ -523,6 +523,8 @@ export function Yue2SongLab({ header }) {
   function applyPreset(preset) {
     // A preset saved by an earlier build may still carry excluded keys; they never apply.
     const controls = Object.fromEntries(Object.entries(preset.settings).filter(([key]) => !PRESET_EXCLUDED.has(key)));
+    // An old preset cannot silently inherit the current run's compute choice.
+    if (!("computePolicy" in controls)) controls.computePolicy = controls.precision === "fp32" ? "fp32" : "";
     setSettings((current) => restoreYue2Settings({ ...current, ...controls }));
   }
 
@@ -647,9 +649,9 @@ export function Yue2SongLab({ header }) {
                   </select>
                 </label>
                 <label className="settings-field settings-field-tier">
-                  Tier
-                  <select aria-label="Tier" disabled={Boolean(why("tier"))} title={why("tier") ?? undefined} onChange={(event) => update({ tier: event.target.value })} value={settings.tier}>
-                    <option value="">Default (BF16)</option>
+                  Weight tier
+                  <select aria-label="Weight tier" disabled={Boolean(why("tier"))} title={why("tier") ?? undefined} onChange={(event) => update({ tier: event.target.value })} value={settings.tier}>
+                    <option value="">Default (BF16 weights)</option>
                     {tierRows.map((row) => (
                       <option key={row.tier} value={row.tier}>
                         {TIER_LABELS[row.tier] ?? row.tier}
@@ -657,6 +659,16 @@ export function Yue2SongLab({ header }) {
                       </option>
                     ))}
                   </select>
+                </label>
+                <label className="settings-field">
+                  Compute precision
+                  <select aria-label="Compute precision" disabled={Boolean(why("computePolicy"))} title={why("computePolicy") ?? undefined} onChange={(event) => update({ computePolicy: event.target.value })} value={settings.computePolicy}>
+                    <option value="">Choose compute precision</option>
+                    <option value="auto">Auto (BF16 model + FP32 VAE on GPU; FP32 on CPU)</option>
+                    <option value="bf16">BF16 (model + VAE on GPU)</option>
+                    <option value="fp32">FP32 (model + VAE)</option>
+                  </select>
+                  <small>Q8/Q4 describe weight storage and quantized matmuls; each quantized matmul briefly uses FP32 input and result tensors before returning to the selected stage precision. This selector governs YuE2 song stages and the VAE, including cached decode; recording transcription runs separately on CPU. Kernels may also use FP32 reductions and audio output formats.</small>
                 </label>
                 <label className="settings-field">
                   Decoder
@@ -1098,7 +1110,7 @@ export function Yue2SongLab({ header }) {
             <ErrorNotice error={submitError} testId="yue2-submit-error" />
 
             <AdvancedSection
-              hint="Sampling, guidance, seed, synthesis steps, AR mode, precision and memory"
+              hint="Sampling, guidance, seed, synthesis steps, AR mode, compute precision and memory"
               onToggle={() => update({ advancedOpen: !settings.advancedOpen })}
               open={settings.advancedOpen}
             >
@@ -1114,14 +1126,6 @@ export function Yue2SongLab({ header }) {
                 <label>
                   Acoustic ODE steps
                   <input aria-label="ODE steps" disabled={Boolean(why("steps"))} title={why("steps") ?? undefined} max="10000" min="1" onChange={(event) => update({ steps: event.target.value })} placeholder="Model default" step="1" type="number" value={settings.steps} />
-                </label>
-                <label>
-                  Precision
-                  <select aria-label="Precision" disabled={Boolean(why("precision"))} title={why("precision") ?? undefined} onChange={(event) => update({ precision: event.target.value })} value={settings.precision}>
-                    <option value="">Default (BF16 on GPU)</option>
-                    <option value="default">Default</option>
-                    <option value="fp32">FP32</option>
-                  </select>
                 </label>
                 <label>
                   AR mode

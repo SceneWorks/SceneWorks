@@ -3,7 +3,7 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const DOCKER_RELEVANT =
-  /^(?:docker\/|config\/|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
+  /^(?:docker\/|vendor\/glib-0\.18\.5\/|config\/|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
 
 export function dockerSmokeDecision(changedFileCount, files) {
   if (!Number.isSafeInteger(changedFileCount) || changedFileCount < 0) {

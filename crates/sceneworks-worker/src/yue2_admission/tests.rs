@@ -111,6 +111,257 @@ fn load(tier: Yue2Tier) -> Yue2LoadFacts {
 }
 
 #[test]
+fn explicit_compute_policy_prices_mot_and_names_selected_vae() {
+    use gen_core::{LoadSpec, WeightsSource, Yue2ComputePolicy};
+    let source = WeightsSource::Dir(std::path::PathBuf::from("/unused-yue2-weights"));
+    let facts = |policy| {
+        Yue2LoadFacts::of(
+            Yue2Tier::Bf16,
+            &LoadSpec::new(source.clone()).with_yue2_compute_policy(policy),
+        )
+    };
+    assert_eq!(
+        facts(Yue2ComputePolicy::Auto).precision,
+        Yue2Precision::Default
+    );
+    assert_eq!(
+        facts(Yue2ComputePolicy::Bf16).precision,
+        Yue2Precision::StrictBf16
+    );
+    assert_eq!(
+        facts(Yue2ComputePolicy::Fp32).precision,
+        Yue2Precision::Fp32
+    );
+    assert!(weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cpu,
+        Yue2Precision::StrictBf16,
+        Yue2ArMode::Native,
+        None
+    )
+    .is_err());
+    let auto = weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cuda,
+        Yue2Precision::Default,
+        Yue2ArMode::Native,
+        None,
+    )
+    .unwrap();
+    let fp32 = weight_residency(
+        Yue2Tier::Bf16,
+        Yue2Backend::Cuda,
+        Yue2Precision::Fp32,
+        Yue2ArMode::Native,
+        None,
+    )
+    .unwrap();
+    assert!(
+        fp32.device_bytes > auto.device_bytes * 3 / 2,
+        "FP32 dense MoT must not reuse BF16's weight reservation"
+    );
+    let dense_delta: u64 = tensor_table()
+        .iter()
+        .filter(|group| !group.class.follows_tier())
+        .map(|group| group.rows * group.cols * group.count * 2)
+        .sum();
+    for tier in [Yue2Tier::Q8, Yue2Tier::Q4] {
+        let auto = weight_residency(
+            tier,
+            Yue2Backend::Cuda,
+            Yue2Precision::Default,
+            Yue2ArMode::Native,
+            None,
+        )
+        .unwrap();
+        let fp32 = weight_residency(
+            tier,
+            Yue2Backend::Cuda,
+            Yue2Precision::Fp32,
+            Yue2ArMode::Native,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            fp32.stored_bytes, auto.stored_bytes,
+            "Q-tier storage remains quantized"
+        );
+        assert_eq!(
+            fp32.device_bytes - auto.device_bytes,
+            dense_delta,
+            "FP32 must double each non-quantized Q-tier tensor's loaded bytes"
+        );
+    }
+    let mut shape = shape_of(
+        &builtin_yue2_entry(),
+        &default_request(),
+        facts(Yue2ComputePolicy::Bf16),
+        None,
+        Yue2ArMode::Native,
+    )
+    .unwrap();
+    let bf16 = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let decode = bf16
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert!(decode
+        .terms
+        .iter()
+        .any(|term| term.what.contains("BF16 VAE")));
+    // The current decoder fits inside the fixed 1 GiB reserve. A larger checkpoint must price
+    // its transient F32 load plus BF16 resident copy, rather than only half its source bytes.
+    shape.decoder_bytes = 2 << 30;
+    let future = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let future_decode = future
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert_eq!(future_decode.terms[1].device_bytes, 3 << 30);
+    shape.precision = Yue2Precision::Fp32;
+    let fp32 = estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+    let decode = fp32
+        .stages
+        .iter()
+        .find(|stage| stage.stage == Yue2Stage::Decode)
+        .unwrap();
+    assert!(decode
+        .terms
+        .iter()
+        .any(|term| term.what.contains("FP32 VAE")));
+}
+
+/// The M6 GPU1 FP32 standard load exceeded resident weights plus the independent CUDA reserve.
+/// Every advertised CUDA case uses this one estimator: only explicit FP32 loads acquire the
+/// additional term, including Q-tier loads. A near-budget card must refuse before loading.
+#[test]
+fn fp32_cuda_load_allowance_covers_the_observation_and_only_fp32_loads() {
+    let controls = Yue2Controls::production();
+    let mut cases = Vec::new();
+    for (tier, precision) in [
+        (Yue2Tier::Bf16, Yue2Precision::StrictBf16),
+        (Yue2Tier::Bf16, Yue2Precision::Fp32),
+        (Yue2Tier::Q8, Yue2Precision::StrictBf16),
+        (Yue2Tier::Q8, Yue2Precision::Fp32),
+        (Yue2Tier::Q4, Yue2Precision::StrictBf16),
+        (Yue2Tier::Q4, Yue2Precision::Fp32),
+    ] {
+        let mut shape = shape(tier, &default_request());
+        shape.precision = precision;
+        cases.push(shape);
+    }
+    let legacy_request = with_song(SongParams {
+        decoder: Some(SongDecoder::Legacy),
+        ..Default::default()
+    });
+    let mut legacy = shape(Yue2Tier::Bf16, &legacy_request);
+    legacy.precision = Yue2Precision::StrictBf16;
+    cases.push(legacy);
+    let mut fp8 = shape(Yue2Tier::Bf16, &default_request());
+    fp8.ar = Yue2ArMode::Fp8;
+    cases.push(fp8);
+    assert_eq!(cases.len(), 8);
+
+    for shape in cases {
+        let cuda = priced(&shape, Yue2Backend::Cuda, controls);
+        let load = cuda.stage(Yue2Stage::Load).unwrap();
+        let transient = load
+            .terms
+            .iter()
+            .filter(|term| term.what == "FP32 CUDA load transient")
+            .collect::<Vec<_>>();
+        if shape.precision == Yue2Precision::Fp32 {
+            assert_eq!(transient.len(), 1, "{shape:?}");
+            assert_eq!(transient[0].device_bytes, CUDA_FP32_LOAD_TRANSIENT_BYTES);
+            assert_eq!(transient[0].host_bytes, 0);
+            assert_eq!(
+                load.device_bytes(),
+                cuda.weights.restored_device_bytes + CUDA_FP32_LOAD_TRANSIENT_BYTES
+            );
+            assert!(
+                cuda.stages
+                    .iter()
+                    .filter(|stage| stage.stage != Yue2Stage::Load)
+                    .flat_map(|stage| &stage.terms)
+                    .all(|term| term.what != "FP32 CUDA load transient"),
+                "later stages retain their own formulas"
+            );
+        } else {
+            assert!(transient.is_empty(), "{shape:?}");
+            assert_eq!(load.device_bytes(), cuda.weights.restored_device_bytes);
+        }
+    }
+
+    let mut fp32_shape = shape(Yue2Tier::Bf16, &default_request());
+    fp32_shape.precision = Yue2Precision::Fp32;
+    let full = priced(&fp32_shape, Yue2Backend::Cuda, controls);
+    let load = full.stage(Yue2Stage::Load).unwrap().clone();
+    assert_eq!(full.weights.restored_device_bytes, 14_522_736_896);
+    assert!(
+        load.device_bytes() + dedicated_reserve_bytes() >= 16_848_289_792,
+        "the original 17-sample M6 owned load peak must fit the new estimate"
+    );
+    let load_only = Yue2Estimate {
+        stages: vec![load.clone()],
+        ..full
+    };
+    let needed = load.device_bytes() + dedicated_reserve_bytes();
+    assert_eq!(fit(&load_only, &cuda(needed, needed), 0), Fit::Fits);
+    assert!(matches!(
+        fit(&load_only, &cuda(needed - 1, needed), 0),
+        Fit::Short {
+            stage: Yue2Stage::Load,
+            pool: Pool::Device,
+            needed: shortfall,
+            available,
+        } if shortfall == needed && available == needed - 1
+    ));
+    // The extra term is not a global reserve or a precision change on another backend.
+    for backend in [Yue2Backend::Cpu, Yue2Backend::Metal] {
+        let est = priced(&fp32_shape, backend, controls);
+        assert!(est
+            .stages
+            .iter()
+            .flat_map(|stage| &stage.terms)
+            .all(|term| term.what != "FP32 CUDA load transient"));
+    }
+    assert_eq!(dedicated_reserve_bytes(), 2 << 30);
+}
+
+#[test]
+fn quantized_stages_reserve_their_f32_matmul_operands() {
+    let request = default_request();
+    for tier in [Yue2Tier::Q8, Yue2Tier::Q4] {
+        let shape = shape_of(
+            &builtin_yue2_entry(),
+            &request,
+            load(tier),
+            None,
+            Yue2ArMode::Native,
+        )
+        .unwrap();
+        let estimate =
+            estimate(&shape, Yue2Backend::Cuda, Yue2Controls::production(), None).unwrap();
+        for stage in [Yue2Stage::AcousticPrefill, Yue2Stage::AcousticSolve] {
+            let stage = estimate
+                .stages
+                .iter()
+                .find(|item| item.stage == stage)
+                .unwrap();
+            assert!(
+                stage.terms.iter().any(|term| {
+                    term.what == "GGML F32 matmul operand + result"
+                        && term.device_bytes >= ggml_matmul_transient_bytes(PREFILL_CHUNK)
+                }),
+                "{tier:?} {stage:?} must price transient F32 QMatMul tensors"
+            );
+        }
+    }
+}
+
+#[test]
 fn production_load_facts_keep_explicit_fp8_for_host_originals() {
     let load_spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(
         std::path::PathBuf::from("/unused-yue2-weights"),
@@ -1991,6 +2242,163 @@ fn fixture_shape(fixture: &Value) -> Yue2Shape {
         Yue2Tier::from_key(fixture["case"]["tier"].as_str().unwrap()).unwrap(),
         &request,
     )
+}
+
+/// The owned M6 capture completed FP32 synthesis but failed three stage-coverage checks.
+/// Retain its f63 observations as historical samples, not as validation of a new GPU run.
+#[test]
+fn fp32_metal_allowance_covers_saved_stages_without_changing_standard_controls() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/metal-fp32-stage-peaks.json")).unwrap();
+    let mut s = fixture_shape(&fixture);
+    s.precision = Yue2Precision::Fp32;
+    let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+    let mut uncovered = 0;
+    for (key, observation) in fixture["measuredStages"].as_object().unwrap() {
+        let peak = observation["peakBytes"].as_u64().unwrap();
+        let original = fixture["originalStages"][key]["totalBytes"]
+            .as_u64()
+            .unwrap();
+        uncovered += usize::from(original < peak);
+        let stage_bytes = est
+            .stages
+            .iter()
+            .filter(|stage| match stage.stage {
+                Yue2Stage::AcousticPrefill | Yue2Stage::AcousticSolve => key == "acoustic",
+                other => key == other.key(),
+            })
+            .map(Yue2StageResidency::total_bytes)
+            .max()
+            .unwrap();
+        assert!(observation["samples"].as_u64().unwrap() > 0);
+        assert!(stage_bytes >= peak, "{key}: {stage_bytes} < saved {peak}");
+        if key == "decode" {
+            assert_eq!(stage_bytes, original, "standard decode was already covered");
+        } else {
+            assert_eq!(stage_bytes, original + METAL_FP32_MOT_FOOTPRINT_BYTES);
+        }
+    }
+    assert_eq!(uncovered, 3);
+    // The captured host had over 109 GB available before this case. At that ample budget the
+    // amended accounting still sends the same production controls to the unchanged M6 provider.
+    let admitted = admitted(decide("yue2", &s, Some(&metal(109_672_284_160)), 0));
+    assert_eq!(admitted.controls, Yue2Controls::production());
+    let memory = s.pins.memory_block(&admitted.controls);
+    assert_eq!(memory, Yue2Controls::production().generation_memory());
+    assert!(!memory.stage_residency);
+    assert_eq!(memory.attention_chunk_size, Some(100_663_296));
+    assert_eq!(memory.decode_tile_edge, Some(224));
+    let small_decode = priced(
+        &s,
+        Yue2Backend::Metal,
+        Yue2Controls {
+            decode_core_frames: 1,
+            ..Yue2Controls::production()
+        },
+    );
+    assert_eq!(
+        small_decode.stage(Yue2Stage::Decode).unwrap().total_bytes(),
+        small_decode
+            .stage(Yue2Stage::AcousticSolve)
+            .unwrap()
+            .total_bytes(),
+        "a smaller decoder retains the preceding FP32 MoT high-water"
+    );
+    // A host below the saved load footprint must now refuse before loading, even though the
+    // earlier estimator's load and semantic stages fit and decode could choose a smaller tile.
+    let message = refused(decide("yue2", &s, Some(&metal(19_392_301_359)), 0));
+    assert!(message.contains("load"), "{message}");
+}
+
+#[test]
+fn fp32_metal_allowance_applies_to_all_mot_phases_and_quantized_routes() {
+    for tier in [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4] {
+        let mut s = shape(tier, &default_request());
+        s.precision = Yue2Precision::Fp32;
+        s.transcription_secs = Some(30);
+        let est = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        for phase in [
+            Yue2Stage::Load,
+            Yue2Stage::Plan,
+            Yue2Stage::Semantic,
+            Yue2Stage::AcousticPrefill,
+            Yue2Stage::AcousticSolve,
+        ] {
+            assert!(
+                est.stage(phase).is_some(),
+                "{tier:?} must exercise {phase:?}"
+            );
+        }
+        for stage in &est.stages {
+            let allowances: Vec<_> = stage
+                .terms
+                .iter()
+                .filter(|term| term.what == "FP32 Metal MoT footprint allowance")
+                .collect();
+            if matches!(stage.stage, Yue2Stage::Transcription | Yue2Stage::Decode) {
+                assert!(allowances.is_empty(), "{tier:?} {:?}", stage.stage);
+            } else {
+                assert_eq!(allowances.len(), 1, "{tier:?} {:?}", stage.stage);
+                assert_eq!(allowances[0].device_bytes, 3 << 30);
+                assert_eq!(allowances[0].host_bytes, 0);
+            }
+        }
+        // All tiers retain this load floor even when no sampling or decoder is requested.
+        s.transcription_secs = None;
+        s.work = Yue2Work::PlanOnly {
+            planning: Yue2Planning::Off,
+        };
+        let load_only = priced(&s, Yue2Backend::Metal, Yue2Controls::production());
+        let (_, needed) = load_only.unified_floor();
+        assert_eq!(
+            needed,
+            load_only.weights.restored_device_bytes
+                + METAL_PROCESS_RESERVE_BYTES
+                + METAL_FP32_MOT_FOOTPRINT_BYTES
+        );
+        admitted(decide("yue2", &s, Some(&metal(needed)), 0));
+        refused(decide("yue2", &s, Some(&metal(needed - 1)), 0));
+    }
+}
+
+#[test]
+fn fp32_metal_allowance_preserves_other_backends_and_precision_policies() {
+    for tier in [Yue2Tier::Bf16, Yue2Tier::Q8, Yue2Tier::Q4] {
+        for (backend, precision) in [
+            (Yue2Backend::Cpu, Yue2Precision::Default),
+            (Yue2Backend::Cpu, Yue2Precision::Fp32),
+            (Yue2Backend::Cuda, Yue2Precision::Default),
+            (Yue2Backend::Cuda, Yue2Precision::StrictBf16),
+            (Yue2Backend::Cuda, Yue2Precision::Fp32),
+            (Yue2Backend::Metal, Yue2Precision::Default),
+            (Yue2Backend::Metal, Yue2Precision::StrictBf16),
+        ] {
+            let mut s = shape(tier, &default_request());
+            s.precision = precision;
+            let est = priced(&s, backend, Yue2Controls::production());
+            assert!(est
+                .stages
+                .iter()
+                .flat_map(|stage| &stage.terms)
+                .all(|term| { term.what != "FP32 Metal MoT footprint allowance" }));
+            let load = est.stage(Yue2Stage::Load).unwrap();
+            let extra = match (backend, precision) {
+                (Yue2Backend::Metal, _) => METAL_PROCESS_RESERVE_BYTES,
+                (Yue2Backend::Cuda, Yue2Precision::Fp32) => CUDA_FP32_LOAD_TRANSIENT_BYTES,
+                _ => 0,
+            };
+            assert_eq!(
+                load.device_bytes(),
+                est.weights.restored_device_bytes + extra
+            );
+            if backend == Yue2Backend::Cpu {
+                s.precision = Yue2Precision::Default;
+                assert_eq!(est, priced(&s, backend, Yue2Controls::production()));
+            }
+        }
+    }
+    assert_eq!(dedicated_reserve_bytes(), 2 << 30);
+    assert_eq!(METAL_PROCESS_RESERVE_BYTES, 9 << 28);
 }
 
 #[test]

@@ -60,11 +60,17 @@ description: >
 # neither has a bin\. Deriving rustup
 # from CARGO_HOME silently skipped the authoritative resolution and emitted a
 # permanent bogus "rustup was deleted" warning. Keep the two notions separate.
+inputs:
+  workspace-directory:
+    description: Checkout directory containing the repository rust-toolchain.toml
+    required: false
+    default: .
 runs:
   using: composite
   steps:
     - name: Select & verify the real Rust toolchain bin (sc-13166)
       shell: powershell
+      working-directory: ${{ inputs.workspace-directory }}
       run: |
         $ErrorActionPreference = 'Stop'
 

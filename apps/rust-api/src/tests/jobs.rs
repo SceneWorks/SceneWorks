@@ -973,17 +973,21 @@ fn builtin_starvector_manifests_are_exact_native_image_to_svg_closures() {
                 candidate["corpusSha256"],
                 "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
             );
+            // Preserve packaged provenance and validate its integrity. Current source
+            // currency is advisory; controlled JS fixtures cover source drift.
             let closure_check = std::process::Command::new("node")
                 .args([
-                    "scripts/starvector-production-closure.mjs",
-                    "check-manifest",
+                    "--input-type=module",
+                    "--eval",
+                    "import { validateProductionClosureShape } from './scripts/starvector-production-closure.mjs'; validateProductionClosureShape(JSON.parse(process.argv[1]));",
                 ])
+                .arg(candidate["productionClosure"].to_string())
                 .current_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."))
                 .output()
-                .expect("run the authoritative source-closure checker");
+                .expect("run the authoritative production-closure integrity checker");
             assert!(
                 closure_check.status.success(),
-                "source closure mismatch: {}",
+                "production closure integrity failure: {}",
                 String::from_utf8_lossy(&closure_check.stderr)
             );
             assert_eq!(
@@ -7910,6 +7914,42 @@ async fn non_ideogram_image_job_skips_auto_caption() {
             .all(|job| job["type"] != "prompt_refine"),
         "a non-Ideogram job must not enqueue a magic_prompt job"
     );
+}
+
+/// sc-20682: the compressed-KV opt-in rides the prompt-refine job payload as `kvCompression`
+/// (`off` | `qualified`); absent leaves the worker default, and anything else is refused here.
+#[tokio::test]
+async fn prompt_refine_forwards_a_validated_kv_compression_opt_in() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    for policy in ["off", "qualified"] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/prompts/refine",
+            json!({ "prompt": "a lighthouse", "kvCompression": policy }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["payload"]["kvCompression"], policy);
+    }
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "prompt": "a lighthouse" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert!(job["payload"].get("kvCompression").is_none(), "{job}");
+    let (status, _) = request(
+        app,
+        "POST",
+        "/api/v1/prompts/refine",
+        json!({ "prompt": "a lighthouse", "kvCompression": "on" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

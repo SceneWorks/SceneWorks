@@ -2058,6 +2058,48 @@ async fn explicit_fp8_ar_reaches_the_engine_load_and_effective_settings() {
 }
 
 #[tokio::test]
+async fn fresh_compute_policy_reaches_load_and_readback_without_relabeling_legacy() {
+    let h = Harness::new().await;
+    for (policy, engine, precision) in [
+        ("auto", EngineComputePolicy::Auto, Precision::Bf16),
+        ("bf16", EngineComputePolicy::Bf16, Precision::Bf16),
+        ("fp32", EngineComputePolicy::Fp32, Precision::Fp32),
+    ] {
+        let spec: Yue2JobSpec = serde_json::from_value(json!({
+            "kind": "create", "lyrics": "[verse]\nla", "tier": "bf16", "computePolicy": policy,
+        }))
+        .unwrap();
+        let load = resolve_load(&h.settings, &h.entry, &spec).unwrap();
+        assert_eq!(load.spec.yue2_compute_policy, engine);
+        assert_eq!(load.spec.precision, precision);
+        let stage_dtype = if policy == "bf16" {
+            "bfloat16"
+        } else {
+            "float32"
+        };
+        let engine_config = json!({
+            "compute_policy": policy,
+            "model_dtype": if policy == "fp32" { "float32" } else { "bfloat16" },
+            "vae_dtype": stage_dtype,
+        });
+        let readback = effective_settings(&spec, &load, &Inputs::default(), Some(&engine_config));
+        assert_eq!(readback["computePolicy"], policy);
+        assert!(readback["precision"].is_null());
+        assert_eq!(readback["engineConfig"]["compute_policy"], policy);
+        assert_eq!(readback["engineConfig"]["vae_dtype"], stage_dtype);
+    }
+    let legacy: Yue2JobSpec = serde_json::from_value(json!({
+        "kind": "create", "lyrics": "[verse]\nla", "tier": "bf16", "precision": "fp32",
+    }))
+    .unwrap();
+    let load = resolve_load(&h.settings, &h.entry, &legacy).unwrap();
+    assert_eq!(load.spec.yue2_compute_policy, EngineComputePolicy::Legacy);
+    let readback = effective_settings(&legacy, &load, &Inputs::default(), None);
+    assert_eq!(readback["computePolicy"], "legacy");
+    assert_eq!(readback["precision"], "fp32");
+}
+
+#[tokio::test]
 async fn fp8_on_metal_is_refused_by_admission_before_loading_weights() {
     let h = Harness::new().await;
     let _budget =

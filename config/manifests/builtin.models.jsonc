@@ -21674,6 +21674,39 @@
           "estimatedSizeBytes": 24197122980,
           "footprint": { "diskSizeBytes": 24197122980, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
+        // macOS Wan-VACE (sc-20686): the dense Wan2.1-VACE-1.3B transformer the native `wan_vace`
+        // engine serves `replace_person` and the tier-C extend_clip/video_bridge path with. Nothing
+        // else downloaded it, so `wan_vace` was unreachable from a clean install. Only `transformer/`
+        // is fetched: the worker assembles it with a base-Wan 14B tier's UMT5/z16-VAE/tokenizer
+        // (`resolve_wan_vace_model_dir`). Soft: extend/bridge falls back to the TI2V-5B keyframe
+        // path without it, so TI2V-5B stays usable when it is absent.
+        {
+          "provider": "huggingface",
+          "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+          "revision": "ec4d2cb062b548996b179d493fdd05340de702a1",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["transformer/*"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 7146182696,
+          "footprint": { "diskSizeBytes": 7146182696, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // ...and the shared base-Wan components that assembly links beside the transformer: the UMT5
+        // text encoder, z16 VAE and tokenizer from the T2V-A14B `q4/` tier (the TI2V-5B's own VAE is
+        // the z48 one, so it cannot stand in). Only these three files — not the 14B experts — so a
+        // TI2V-5B-only install can serve `wan_vace`; the worker's base resolver takes the first T2V/
+        // I2V tier holding all three (`wan_vace_base_dir_from`). Soft, for the same reason as above.
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+          "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7",
+          "coRequisite": true,
+          "required": "soft",
+          "files": ["q4/t5_encoder.safetensors", "q4/vae.safetensors", "q4/tokenizer.json"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11886274274,
+          "footprint": { "diskSizeBytes": 11886274274, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
         // Windows/Linux candle quant matrix (sc-10027, epic 10043): the candle-native packed tiers
         // (sc-10026) at SceneWorks/wan2.2-ti2v-5b-candle — q4 (default) / q8 subdirs the sc-10025
         // packed-detect seam loads unchanged; bf16 stays the dense Wan-AI diffusers snapshot.
@@ -28535,12 +28568,12 @@
             },
             "productionClosure": {
               "schemaVersion": 1,
-              "sha256": "453c6cc67806710206f9722842ce76fc2d194d514a3af9f1cdd2f17a7077749a",
+              "sha256": "eac3c763fa64790fdb102f61948716afc6fb4ad1130de1d18e8a13a64ffbb09c",
               "entries": [
                 {
                   "path": ".github/workflows/starvector-terminal-provision.yml",
                   "byteSize": 25919,
-                  "sha256": "e24be76ba456522eafe46a1b555b591db1d6fa6332bad686ccc796dd7b43352a"
+                  "sha256": "262ece9afb6150680a49f4fb9b881c98fa16b7b4586df4f3e7ba05cfb914ba1f"
                 },
                 {
                   "path": ".github/workflows/starvector-terminal-readiness.yml",
@@ -28550,22 +28583,22 @@
                 {
                   "path": ".github/workflows/starvector-terminal.yml",
                   "byteSize": 25188,
-                  "sha256": "d4d3cb8167dab5dc049d7bc1817750e825958c1159b6af5755b124f60d855128"
+                  "sha256": "052b84cd72b1e5cbe8dfa29e69c05fd8e8352bfa47e65c379100d852a040121e"
                 },
                 {
                   "path": "Cargo.lock",
-                  "byteSize": 252907,
-                  "sha256": "abdd58c4b40850ac42a5219b72e24079ac8d2c859dbc2970497e06dfd3f3327a"
+                  "byteSize": 252286,
+                  "sha256": "3a1bbb5ef98bb70cdc8abff7481bf22b864e8de90b7865df7d0348a6527c7e94"
                 },
                 {
                   "path": "Cargo.toml",
-                  "byteSize": 9799,
-                  "sha256": "21aa231ed48f5cfbe42b2ccff65bc00f8f9b7de086e019a6890319b50c796895"
+                  "byteSize": 10213,
+                  "sha256": "40a6166399ec89c1bfc64f9c9aae82a67511905e87a04dcad8ea53b40a31f8f2"
                 },
                 {
                   "path": "apps/rust-api/src/dto.rs",
-                  "byteSize": 73853,
-                  "sha256": "cd962acf4bd8d019df949124f20692787b2fcd34839e15677e137d8545ca1400"
+                  "byteSize": 74515,
+                  "sha256": "50f37331e5f3f398c803c15afee3a5f54cbbcab265e233d02098377ad78d9ac9"
                 },
                 {
                   "path": "apps/rust-api/src/generation.rs",
@@ -28584,13 +28617,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/Cargo.toml",
-                  "byteSize": 9161,
-                  "sha256": "1e4d4c941a3f1338537bf835c10326ea4ea63a4d2dd7212fb59a559cbc589c4b"
+                  "byteSize": 9288,
+                  "sha256": "3c58ab9ffeda740bec5842d6472c7dad4c5dde7e029d7f3ed5c3f083b7b66fea"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_corpus.rs",
-                  "byteSize": 23941,
-                  "sha256": "88eb29deb9ff783310fe87ff927c1f9a1aaabed9a6c6da966f955bacedffb7fe"
+                  "byteSize": 26436,
+                  "sha256": "844de8708203218c99506ed76acf6bbfb47491e48694eb6e2a08bc20b82c507b"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/bin/starvector_terminal_lease.rs",
@@ -28604,18 +28637,18 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/engines.rs",
-                  "byteSize": 143423,
-                  "sha256": "21ff1d629a4b437ad6cee469ee209e5cac8eef70143bb9cdd76af5f3590c62fd"
+                  "byteSize": 143460,
+                  "sha256": "1b3b9ee797dc7607fdebe32854842e6611ba70b134fc79ff7770400a5a70f718"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/inference_runtime.rs",
-                  "byteSize": 39195,
-                  "sha256": "ca48a435e9a90af4c8de8ae54c7de6862b9814a35ff168d231bea7065a4e8eb0"
+                  "byteSize": 39636,
+                  "sha256": "8ca1c68e28bf95965d94a8234efab962aacf47ccf71cd8b3c6df290d8cff4202"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/lib.rs",
-                  "byteSize": 149623,
-                  "sha256": "af2b746c459018ac6cc8c455e4fe71c94d13ab5b9dd30daf03160994709bb4a5"
+                  "byteSize": 149970,
+                  "sha256": "e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/mlx_decode_cache.rs",
@@ -28629,8 +28662,8 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
-                  "byteSize": 243023,
-                  "sha256": "a7754eccd40ab453475f3243b03522d80d31ef5c7fab2157cc6816ba8987514c"
+                  "byteSize": 250530,
+                  "sha256": "13f61bcbc1c5b3f1b2e0df4b8a6a1074b4f2f213cf2c9d81fd7e28546beed75a"
                 },
                 {
                   "path": "crates/sceneworks-worker/src/refine_model_cache.rs",
@@ -28644,13 +28677,13 @@
                 },
                 {
                   "path": "crates/sceneworks-worker/src/vector_jobs.rs",
-                  "byteSize": 311124,
-                  "sha256": "da33dadf316918eed582abdfbab98f4c613ac9836c36e92abb9073af4f03ae62"
+                  "byteSize": 319655,
+                  "sha256": "49b918ead87860a92983c44270f33d73a4eb94bdfd5ead06230630ffacd27fc3"
                 },
                 {
                   "path": "package.json",
-                  "byteSize": 7627,
-                  "sha256": "78e0a38a0b554395629e30bee61248f511418b1cf4fa004e777c3a943cc6a8a5"
+                  "byteSize": 8040,
+                  "sha256": "2b41a0c38fd4bc2b3bb0ba3731cab4dfe09c99497382dd6dc7fb4d13392a9dbd"
                 },
                 {
                   "path": "packages/schemas/model-manifest.schema.json",

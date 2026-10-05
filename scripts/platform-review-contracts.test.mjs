@@ -49,6 +49,11 @@ test("RunPod validation provisions the same inference fixtures as PR scaffold ch
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
+  const terminalFetchName = "Fetch the exact public inference terminal contract";
+  const terminalFetch = workflowStep(publish, terminalFetchName);
+  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
+  assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
   assert.ok(dependencies.includes("npm ci --ignore-scripts"));
   assert.ok(publish.indexOf(dependencies) < publish.indexOf(fetch));
@@ -194,6 +199,13 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
     action,
     /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/,
   );
+});
+
+test("Windows runner prep reads the toolchain pin from its selected checkout", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  assert.match(action, /inputs:\s+workspace-directory:\s+description:[^\n]+\s+required: false\s+default: \./);
+  assert.match(action, /- name: Select & verify the real Rust toolchain bin[^\n]*\n\s+shell: powershell\n\s+working-directory: \$\{\{ inputs\.workspace-directory \}\}/);
+  assert.match(action, /Select-String -Path 'rust-toolchain\.toml'/);
 });
 
 test("Windows runner prep resolves rustup outside the job's CARGO_HOME", async () => {
@@ -949,6 +961,36 @@ function jobBlock(workflow, at) {
   return workflow.slice(at, next === -1 ? undefined : at + 1 + next + 1);
 }
 
+test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU 0", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const worker = jobBlock(candle, candle.indexOf("  candle-worker:\n"));
+  const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
+  assert.match(worker, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  const route = worker.match(/^ {6}CUDA_VISIBLE_DEVICES: \$\{\{ github\.event_name == 'workflow_dispatch' && '([01])' \|\| '([01])' \}\}$/m);
+  assert.ok(route, "ordinary worker must make the event-specific device choice explicit");
+  for (const [event, expected] of [["pull_request", "1"], ["push", "1"], ["workflow_dispatch", "0"]]) {
+    assert.equal(event === "workflow_dispatch" ? route[1] : route[2], expected, event);
+  }
+  assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
+
+  const desktop = await source(".github/workflows/desktop-windows.yml");
+  const pack = jobBlock(desktop, desktop.indexOf("  package-windows:\n"));
+  const select = stepBody(pack, "Select physical GPU 1 for main-push packaging");
+  const selectEvent = select.match(/if: \$\{\{ github\.event_name == '([^']+)' \}\}/)?.[1];
+  assert.equal(selectEvent, "push");
+  assert.match(select, /Add-Content -Path \$env:GITHUB_ENV -Value 'CUDA_DEVICE_ORDER=PCI_BUS_ID'/);
+  assert.match(select, /Add-Content -Path \$env:GITHUB_ENV -Value 'CUDA_VISIBLE_DEVICES=1'/);
+  assert.ok(pack.indexOf("Select physical GPU 1 for main-push packaging") <
+            pack.indexOf("uses: ./.github/actions/prepare-rust-runner"));
+  assert.equal("push" === selectEvent, true, "main push runs the selection step");
+  assert.equal("workflow_dispatch" === selectEvent, false, "manual packaging retains its prior environment");
+  for (const [name, job] of [["candle-worker", worker], ["imported", imported], ["package", pack]]) {
+    assert.doesNotMatch(job, /^\s+CUDA_VISIBLE_DEVICES:\s*["']?0["']?\s*$/m, name);
+    assert.doesNotMatch(job, /--gpu-id[= ]0\b/, name);
+  }
+});
+
 // SC-23002: the YuE2 terminal CUDA evidence job. Dispatch-only, one real-weights card shared with the
 // other GPU-measuring jobs, the release app built with backend-candle, the acceptance driver and the
 // profile campaign by default, receipts uploaded before the verdict -- and never the CC BY-NC audio.
@@ -1531,6 +1573,37 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   const script = await source("scripts/check-docker-api-runtime.mjs");
   assert.doesNotMatch(script, /--entrypoint", "rm"/);
   assert.match(script, /SCENEWORKS_UID/);
+});
+
+test("standard server and web development images default to nonroot users", async () => {
+  const [rustDockerfile, webDockerfile] = await Promise.all([
+    source("docker/rust.Dockerfile"),
+    source("docker/web.Dockerfile"),
+  ]);
+  const stage = (dockerfile, name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(dockerfile);
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+
+  for (const name of ["rust-api", "rust-worker", "rust-worker-candle"]) {
+    const body = stage(rustDockerfile, name);
+    assert.match(body, /^ENV HOME=\/home\/sceneworks$/m, `${name} must set a writable home`);
+    const identity = name === "rust-worker-candle" ? /^USER 1000:1000$/m : /^USER sceneworks$/m;
+    assert.match(body, identity, `${name} must default to its nonroot service identity`);
+  }
+  assert.match(webDockerfile, /^ENV HOME=\/home\/node$/m);
+  assert.match(webDockerfile, /^USER node$/m);
+
+  for (const dockerfile of [rustDockerfile, webDockerfile]) {
+    assert.doesNotMatch(
+      dockerfile,
+      /\bchmod\s+(?:-R\s+)?(?:777|a\+w|o\+w)\b/,
+      "container hardening must not introduce broad writable permissions",
+    );
+  }
 });
 
 test("Rust Docker dependency layers include every memory-strategy adapter target", async () => {

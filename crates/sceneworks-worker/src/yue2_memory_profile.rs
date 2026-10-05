@@ -86,6 +86,8 @@ pub(crate) struct ProfileCase {
     decoder: String,
     #[serde(default)]
     ar_mode: Option<contract::ArMode>,
+    #[serde(default)]
+    compute_policy: Option<contract::ComputePolicy>,
     request: CaseRequest,
 }
 
@@ -113,6 +115,7 @@ pub(crate) fn case_spec(case: &ProfileCase) -> Result<Yue2JobSpec, String> {
         "decoder": case.decoder,
         "tier": case.tier,
         "arMode": case.ar_mode,
+        "computePolicy": case.compute_policy,
     });
     let spec: Yue2JobSpec =
         serde_json::from_value(body).map_err(|error| format!("{}: {error}", case.id))?;
@@ -257,7 +260,8 @@ impl StageBoundary {
             Err(error) => panic!("remove previous stage ack: {error}"),
         }
         let requested_at = now_secs();
-        let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at});
+        let value = json!({"sequence": self.sequence, "stage": stage, "requestedAt": requested_at,
+            "processId": std::process::id()});
         let temp = self.dir.join("request.tmp");
         let mut file = std::fs::File::create(&temp).expect("create stage request");
         writeln!(file, "{value}").expect("write stage request");
@@ -330,13 +334,19 @@ pub(crate) fn stage_seconds(marks: &[(&'static str, f64)]) -> serde_json::Map<St
 /// flags and identities (`result.json`: run, plan, decoder, latent) and its engine timings, and the
 /// per-stage wall times. Every run field is required — a run record that lacks one is an error, never
 /// a default, so a record can never claim an identity or a truncation state the run did not state.
-pub(crate) fn outcome_json(
+struct OutcomeModes<'a> {
+    ar_mode: contract::ArMode,
+    compute_policy: Option<contract::ComputePolicy>,
+    backend: crate::yue2_admission::Yue2Backend,
+    engine_config: Option<&'a Value>,
+}
+
+fn outcome_json(
     case_id: &str,
     audio_seconds: f64,
     rms: f32,
     run_result: &Value,
-    ar_mode: contract::ArMode,
-    engine_config: Option<&Value>,
+    modes: OutcomeModes<'_>,
     stage_seconds: serde_json::Map<String, Value>,
 ) -> Result<Value, String> {
     let field = |key: &str| {
@@ -375,8 +385,9 @@ pub(crate) fn outcome_json(
         "decoder": field("decoder")?,
         "latent": latent,
     });
-    if ar_mode == contract::ArMode::ExperimentalFp8 {
-        let quantization = engine_config
+    if modes.ar_mode == contract::ArMode::ExperimentalFp8 {
+        let quantization = modes
+            .engine_config
             .and_then(|config| config.get("quantization"))
             .and_then(Value::as_str)
             .ok_or_else(|| "the run's config.json has no effective quantization".to_owned())?;
@@ -386,6 +397,51 @@ pub(crate) fn outcome_json(
             ));
         }
         outcome["engineQuantization"] = json!(quantization);
+    }
+    if let Some(policy) = modes.compute_policy {
+        let expected = match policy {
+            contract::ComputePolicy::Auto => ("auto", "bfloat16", "float32"),
+            contract::ComputePolicy::Bf16 => ("bf16", "bfloat16", "bfloat16"),
+            contract::ComputePolicy::Fp32 => ("fp32", "float32", "float32"),
+        };
+        let config = modes
+            .engine_config
+            .ok_or("the run has no effective config.json")?;
+        for (key, wanted) in [
+            ("compute_policy", expected.0),
+            ("model_dtype", expected.1),
+            ("vae_dtype", expected.2),
+        ] {
+            if config.get(key).and_then(Value::as_str) != Some(wanted) {
+                return Err(format!(
+                    "the run's effective {key} is not requested {wanted}"
+                ));
+            }
+        }
+        outcome["engineComputePolicy"] = json!(expected.0);
+        outcome["engineModelDtype"] = json!(expected.1);
+        outcome["engineVaeDtype"] = json!(expected.2);
+        // The backend is the admission gate's selected device, never a case-file claim. Only
+        // CUDA's strict BF16 VAE uses fixed-order convolution; all other paths must omit its policy.
+        let math_policy = config
+            .get("vae_cuda_bf16_math_policy")
+            .and_then(Value::as_str);
+        if modes.backend == crate::yue2_admission::Yue2Backend::Cuda
+            && policy == contract::ComputePolicy::Bf16
+        {
+            const EXPECTED: &str = "fixed_order_bf16_convolution_v1";
+            if math_policy != Some(EXPECTED) {
+                return Err(format!(
+                    "the run's effective vae_cuda_bf16_math_policy is not {EXPECTED}"
+                ));
+            }
+            outcome["engineVaeCudaBf16MathPolicy"] = json!(EXPECTED);
+        } else if config.get("vae_cuda_bf16_math_policy").is_some() {
+            return Err(
+                "the run has a CUDA BF16 VAE math policy on another backend or compute policy"
+                    .into(),
+            );
+        }
     }
     Ok(outcome)
 }
@@ -420,6 +476,22 @@ fn capture_case() {
             "{leftover:?} already exists; capture into a fresh output directory"
         );
     }
+    let process_file = out.join("profile-process.json");
+    let mut process_out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&process_file)
+        .expect("refuse an old profile process identity");
+    writeln!(
+        process_out,
+        "{}",
+        json!({ "processId": std::process::id() })
+    )
+    .expect("write profile process identity");
+    process_out
+        .sync_all()
+        .expect("sync profile process identity");
+    drop(process_out);
     let spec = case_spec(&case).unwrap_or_else(|why| panic!("{why}"));
     let load = resolve_load(&settings, &entry, &spec).unwrap_or_else(|why| panic!("{why}"));
     let mut request = build_request(&spec, &Inputs::default(), &run_dir, CancelFlag::new());
@@ -465,6 +537,7 @@ fn capture_case() {
         }),
     );
     request.memory = Some(admitted.memory);
+    let backend = admitted.lease.estimate().backend;
     let mut lease = admitted.lease;
     let boundary = PathBuf::from(std::env::var(BOUNDARY_ENV).expect(BOUNDARY_ENV));
     assert_eq!(
@@ -503,7 +576,9 @@ fn capture_case() {
         &std::fs::read(published.dir.join("result.json")).expect("read the run's result.json"),
     )
     .expect("the run's result.json is JSON");
-    let engine_config = if case.ar_mode == Some(contract::ArMode::ExperimentalFp8) {
+    let engine_config = if case.ar_mode == Some(contract::ArMode::ExperimentalFp8)
+        || case.compute_policy.is_some()
+    {
         Some(
             serde_json::from_slice::<Value>(
                 &std::fs::read(published.dir.join("config.json"))
@@ -532,8 +607,12 @@ fn capture_case() {
         seconds,
         rms,
         &run_result,
-        case.ar_mode.unwrap_or_default(),
-        engine_config.as_ref(),
+        OutcomeModes {
+            ar_mode: case.ar_mode.unwrap_or_default(),
+            compute_policy: case.compute_policy,
+            backend,
+            engine_config: engine_config.as_ref(),
+        },
         stage_seconds(&marks.marks),
     )
     .unwrap_or_else(|why| panic!("{why}"));
@@ -583,6 +662,10 @@ mod tests {
         });
         let request = wait_request(&dir);
         assert_eq!(request["stage"], "load");
+        assert_eq!(
+            request["processId"].as_u64(),
+            Some(u64::from(std::process::id()))
+        );
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(
             std::fs::read_to_string(&marks_path)
@@ -777,8 +860,12 @@ mod tests {
             42.0,
             0.2,
             &run_result(),
-            contract::ArMode::Native,
-            None,
+            OutcomeModes {
+                ar_mode: contract::ArMode::Native,
+                compute_policy: None,
+                backend: crate::yue2_admission::Yue2Backend::Cpu,
+                engine_config: None,
+            },
             marks,
         )
         .unwrap();
@@ -810,8 +897,12 @@ mod tests {
                     42.0,
                     0.2,
                     &result,
-                    contract::ArMode::Native,
-                    None,
+                    OutcomeModes {
+                        ar_mode: contract::ArMode::Native,
+                        compute_policy: None,
+                        backend: crate::yue2_admission::Yue2Backend::Cpu,
+                        engine_config: None
+                    },
                     Default::default(),
                 )
                 .is_err(),
@@ -829,8 +920,12 @@ mod tests {
                 42.0,
                 0.2,
                 &result,
-                contract::ArMode::ExperimentalFp8,
-                config,
+                OutcomeModes {
+                    ar_mode: contract::ArMode::ExperimentalFp8,
+                    compute_policy: None,
+                    backend: crate::yue2_admission::Yue2Backend::Cuda,
+                    engine_config: config,
+                },
                 Default::default(),
             )
         };
@@ -838,6 +933,119 @@ mod tests {
         assert_eq!(capture(Some(&fp8)).unwrap()["engineQuantization"], "fp8");
         assert!(capture(None).is_err());
         assert!(capture(Some(&json!({ "quantization": "none" }))).is_err());
+    }
+
+    #[test]
+    fn explicit_precision_case_binds_job_and_effective_stage_dtypes() {
+        let mut case = full_case();
+        case.compute_policy = Some(contract::ComputePolicy::Bf16);
+        let spec = case_spec(&case).unwrap();
+        assert_eq!(spec.compute_policy, Some(contract::ComputePolicy::Bf16));
+        contract::validate_new_submission(&spec).unwrap();
+        let config = json!({
+            "compute_policy": "bf16", "model_dtype": "bfloat16", "vae_dtype": "bfloat16",
+        });
+        let capture = |config: &Value| {
+            outcome_json(
+                &case.id,
+                42.0,
+                0.2,
+                &run_result(),
+                OutcomeModes {
+                    ar_mode: contract::ArMode::Native,
+                    compute_policy: case.compute_policy,
+                    backend: crate::yue2_admission::Yue2Backend::Cpu,
+                    engine_config: Some(config),
+                },
+                Default::default(),
+            )
+        };
+        let outcome = capture(&config).unwrap();
+        assert_eq!(outcome["engineComputePolicy"], "bf16");
+        assert_eq!(outcome["engineModelDtype"], "bfloat16");
+        assert_eq!(outcome["engineVaeDtype"], "bfloat16");
+        assert!(capture(
+            &json!({ "compute_policy": "bf16", "model_dtype": "bfloat16", "vae_dtype": "float32" })
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn effective_vae_math_policy_is_bound_to_the_selected_backend_and_precision() {
+        use crate::yue2_admission::Yue2Backend;
+
+        let config = |policy: &str, dtype: &str, math: Option<&str>| {
+            let mut config = json!({
+                "compute_policy": policy,
+                "model_dtype": dtype,
+                "vae_dtype": dtype,
+            });
+            if let Some(math) = math {
+                config["vae_cuda_bf16_math_policy"] = json!(math);
+            }
+            config
+        };
+        let outcome = |backend, compute_policy, config: &Value| {
+            outcome_json(
+                "case",
+                42.0,
+                0.2,
+                &run_result(),
+                OutcomeModes {
+                    ar_mode: contract::ArMode::Native,
+                    compute_policy: Some(compute_policy),
+                    backend,
+                    engine_config: Some(config),
+                },
+                Default::default(),
+            )
+        };
+        let selected = "fixed_order_bf16_convolution_v1";
+        let cuda_bf16 = config("bf16", "bfloat16", Some(selected));
+        assert_eq!(
+            outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &cuda_bf16).unwrap()
+                ["engineVaeCudaBf16MathPolicy"],
+            selected
+        );
+        for invalid in [
+            config("bf16", "bfloat16", None),
+            config("bf16", "bfloat16", Some("stale_or_unknown")),
+            config(
+                "bf16",
+                "bfloat16",
+                Some("disallow_reduced_precision_reduction_v1"),
+            ),
+        ] {
+            assert!(outcome(Yue2Backend::Cuda, contract::ComputePolicy::Bf16, &invalid).is_err());
+        }
+        for backend in [Yue2Backend::Cpu, Yue2Backend::Metal] {
+            assert!(outcome(backend, contract::ComputePolicy::Bf16, &cuda_bf16).is_err());
+            assert!(outcome(
+                backend,
+                contract::ComputePolicy::Bf16,
+                &config("bf16", "bfloat16", None)
+            )
+            .unwrap()
+            .get("engineVaeCudaBf16MathPolicy")
+            .is_none());
+        }
+        for backend in [Yue2Backend::Cuda, Yue2Backend::Cpu, Yue2Backend::Metal] {
+            for policy in [contract::ComputePolicy::Fp32, contract::ComputePolicy::Auto] {
+                let mut effective = if policy == contract::ComputePolicy::Fp32 {
+                    config("fp32", "float32", None)
+                } else {
+                    let mut auto = config("auto", "bfloat16", None);
+                    auto["vae_dtype"] = json!("float32");
+                    auto
+                };
+                assert!(outcome(backend, policy, &effective)
+                    .unwrap()
+                    .get("engineVaeCudaBf16MathPolicy")
+                    .is_none());
+                effective["vae_cuda_bf16_math_policy"] = json!(selected);
+                assert!(outcome(backend, policy, &effective).is_err());
+            }
+        }
     }
 
     /// The plan's case shape maps onto the job's request; unknown fields and values are refused.

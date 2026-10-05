@@ -29,7 +29,7 @@
 //! | semantic | one KV cache per CFG branch (two under guidance) of `prefix + semantic max_tokens` positions + the prefill workspace |
 //! | acoustic prefill | per chunk: a KV cache of `ar + nar` positions + the AR prefill workspace over the chunk's AR sequence (AR path resident) |
 //! | acoustic solve | per chunk: the same cache + the NAR score tiles ([`Yue2Controls::attention_elements`]) + the NAR activations + the latents; with AR offload the AR-only weights sit in host memory for the solve |
-//! | decode | the FP32 VAE decoder + one halo/crop tile ([`Yue2Controls::decode_core_frames`]) + the song's waveform |
+//! | decode | the selected VAE decoder + one halo/crop tile ([`Yue2Controls::decode_core_frames`]) + the song's waveform |
 //!
 //! Every KV cache is `layers × 2 (K, V) × kv_heads × head_dim × positions` in the compute dtype
 //! (`StaticKvCache`, batch 1 per branch), capped at the released 24 576-position context the engine
@@ -47,7 +47,8 @@
 //! originals retained in host memory until they are restored before the acoustic stage). The totals
 //! reproduce sc-22995's recorded residencies exactly (CPU q8 5.12 GB / q4 3.52 GB; CUDA bf16 7.26 GB,
 //! FP8 5.85 GB + 2.82 GB host, q8 4.26 GB, q4 2.66 GB) — content-derived numbers, not measurements of
-//! a machine. The VAE is FP32 at every tier and is priced from the decoder component's own file.
+//! a machine. Legacy and Auto use an FP32 VAE; explicit BF16 uses a BF16 VAE. The decode reserve
+//! remains conservatively at the historical FP32 bound even for BF16.
 //!
 //! # Budgets
 //!
@@ -162,6 +163,25 @@ const FP8_COMPUTE_CAP_FLOOR: f32 = 8.9;
 /// established on every host/request. It is independent of CUDA's device-only 2 GiB reserve.
 const METAL_PROCESS_RESERVE_BYTES: u64 = 9 << 28;
 
+/// Additional explicit-FP32 Metal MoT footprint beyond the tensor formulas and the existing
+/// process reserve. In the owned M6 capture 37345072908 (app f63d1730), load's sampled
+/// 19_392_301_360-byte footprint exceeded its 16_938_656_000-byte estimate by 2.285 GiB;
+/// semantic and acoustic also exceeded their estimates. Round the largest residual up to 3 GiB.
+/// The fixture preserves the original revisions, estimates and samples. The pinned Metal
+/// allocator rounds FP32 conversion buffers beyond logical tensor bytes, but the complete
+/// footprint residual is not isolated. This is not a measured bound for other requests or tiers.
+/// Charge every FP32 MoT phase, including quantized routes; the existing retained high-water
+/// carries it into smaller decode tiles without changing the separately covered decode formula.
+const METAL_FP32_MOT_FOOTPRINT_BYTES: u64 = 3 << 30;
+
+/// Additional device residency during an explicit FP32 CUDA MoT load. In the owned M6 GPU1
+/// capture 37314391667, the 16_848_289_792-byte load peak exceeded the 14_522_736_896-byte
+/// resident-weight estimate plus the separate 2 GiB allocator reserve by 178_069_248 bytes.
+/// Round that observed residual up to 1 GiB rather than claiming its source or an upper bound
+/// for every GPU. Only the load stage uses this allowance; later stages retain their own
+/// estimates, and the allocator reserve remains independent.
+const CUDA_FP32_LOAD_TRANSIENT_BYTES: u64 = 1 << 30;
+
 // ---- Transcription (SheetSage2 + MERT-v2-FullSong, `candle-audio-sheetsage2`) -----------------------
 
 /// MERT-v2's encoder rate: frames per second of source audio (ConvNeXt subsampler to 25 Hz).
@@ -244,12 +264,14 @@ impl Yue2Backend {
     }
 }
 
-/// The dense compute precision (`LoadSpec::precision`): the default is BF16 on an accelerator and
-/// F32 on the CPU; `Fp32` forces F32 everywhere.
+/// Dense MoT residency. Auto and historical Legacy use BF16 on an accelerator and F32 on CPU;
+/// the VAE policy is priced separately below.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Yue2Precision {
     #[default]
     Default,
+    /// Explicit BF16 for both model stages; unsupported on CPU.
+    StrictBf16,
     /// An explicit F32 load. The audio job loads with the default precision; priced so the
     /// accelerator F32 residency (14.52 GB) is never read as the BF16 one.
     #[cfg_attr(not(test), allow(dead_code))]
@@ -270,7 +292,10 @@ pub(crate) enum Yue2ArMode {
 fn dense_bytes(backend: Yue2Backend, precision: Yue2Precision) -> u64 {
     match (backend, precision) {
         (Yue2Backend::Cpu, _) | (_, Yue2Precision::Fp32) => 4,
-        (Yue2Backend::Cuda | Yue2Backend::Metal, Yue2Precision::Default) => 2,
+        (
+            Yue2Backend::Cuda | Yue2Backend::Metal,
+            Yue2Precision::Default | Yue2Precision::StrictBf16,
+        ) => 2,
     }
 }
 
@@ -463,6 +488,9 @@ pub(crate) fn weight_residency(
     ar: Yue2ArMode,
     compute_cap: Option<f32>,
 ) -> Result<Yue2WeightResidency, String> {
+    if backend == Yue2Backend::Cpu && precision == Yue2Precision::StrictBf16 {
+        return Err("explicit BF16 requires a GPU backend; CPU YuE2 runs in FP32".into());
+    }
     if ar == Yue2ArMode::Fp8 {
         fp8_supported(tier, backend, precision, compute_cap)?;
     }
@@ -509,7 +537,7 @@ fn fp8_supported(
             tier.key()
         ));
     }
-    if precision == Yue2Precision::Fp32 {
+    if precision != Yue2Precision::Default {
         return Err("the experimental FP8 AR mode needs BF16 compute, not an F32 load".into());
     }
     match compute_cap {
@@ -727,9 +755,15 @@ impl Yue2LoadFacts {
     pub(crate) fn of(tier: Yue2Tier, spec: &gen_core::LoadSpec) -> Self {
         Self {
             tier,
-            precision: match spec.precision {
-                gen_core::Precision::Fp32 => Yue2Precision::Fp32,
-                _ => Yue2Precision::Default,
+            precision: match spec.yue2_compute_policy {
+                gen_core::Yue2ComputePolicy::Bf16 => Yue2Precision::StrictBf16,
+                gen_core::Yue2ComputePolicy::Fp32 => Yue2Precision::Fp32,
+                gen_core::Yue2ComputePolicy::Legacy | gen_core::Yue2ComputePolicy::Auto => {
+                    match spec.precision {
+                        gen_core::Precision::Fp32 => Yue2Precision::Fp32,
+                        _ => Yue2Precision::Default,
+                    }
+                }
             },
             ar: match spec.yue2_ar_mode {
                 gen_core::Yue2ArMode::Native => Yue2ArMode::Native,
@@ -864,7 +898,7 @@ impl Yue2Stage {
             Self::Semantic => "the semantic-token stage",
             Self::AcousticPrefill => "the acoustic stage's per-chunk AR prefill",
             Self::AcousticSolve => "the acoustic flow-matching solve",
-            Self::Decode => "the FP32 VAE decode",
+            Self::Decode => "the VAE decode",
         }
     }
 }
@@ -1030,6 +1064,12 @@ fn nar_activation_bytes(rows: u64, dense: u64) -> u64 {
     3 * rows * INTERMEDIATE * dense + 4 * rows * HIDDEN * dense
 }
 
+/// A GGML QMatMul keeps an F32 input operand and F32 result at once even when its surrounding
+/// stage tensors are BF16. The largest projection maps hidden ↔ intermediate width.
+fn ggml_matmul_transient_bytes(rows: u64) -> u64 {
+    rows * (HIDDEN + INTERMEDIATE) * 4
+}
+
 /// The song's latents: the F32 noise over the whole song on the host, plus the chunk's ODE state,
 /// midpoint state and two velocities in the compute dtype.
 fn latent_bytes(song_frames: u64, rows: u64, dense: u64) -> u64 {
@@ -1112,14 +1152,24 @@ pub(crate) fn estimate(
     }
     stages.push(Yue2StageResidency {
         stage: Yue2Stage::Load,
-        terms: vec![
-            term("resident weights", weights.restored_device_bytes, 0),
-            term(
-                "the mapped weights file",
-                0,
-                mapped_file_bytes(backend, weights.stored_bytes),
-            ),
-        ],
+        terms: {
+            let mut terms = vec![
+                term("resident weights", weights.restored_device_bytes, 0),
+                term(
+                    "the mapped weights file",
+                    0,
+                    mapped_file_bytes(backend, weights.stored_bytes),
+                ),
+            ];
+            if backend == Yue2Backend::Cuda && shape.precision == Yue2Precision::Fp32 {
+                terms.push(term(
+                    "FP32 CUDA load transient",
+                    CUDA_FP32_LOAD_TRANSIENT_BYTES,
+                    0,
+                ));
+            }
+            terms
+        },
     });
     // Resident weights while the AR stages run (FP8: FP8 on the device, originals on the host).
     let ar_weights = || {
@@ -1152,6 +1202,13 @@ pub(crate) fn estimate(
             ar_prefill_workspace_bytes(positions, dense),
             0,
         ));
+        if shape.tier != Yue2Tier::Bf16 {
+            terms.push(term(
+                "GGML F32 matmul operand + result",
+                ggml_matmul_transient_bytes(PREFILL_CHUNK.min(positions)),
+                0,
+            ));
+        }
         stages.push(Yue2StageResidency { stage, terms });
     };
     let (planning, song_frames) = match shape.work {
@@ -1212,6 +1269,13 @@ pub(crate) fn estimate(
                 ),
             ],
         });
+        if shape.tier != Yue2Tier::Bf16 {
+            stages.last_mut().unwrap().terms.push(term(
+                "GGML F32 matmul operand + result",
+                ggml_matmul_transient_bytes(PREFILL_CHUNK.min(ar_len)),
+                0,
+            ));
+        }
         if backend == Yue2Backend::Metal {
             stages.last_mut().unwrap().terms.push(term(
                 "Metal KV buffer allocation padding",
@@ -1250,6 +1314,13 @@ pub(crate) fn estimate(
             term("NAR activations", nar_activation_bytes(nar_rows, dense), 0),
             term("latents", latent_bytes(song_frames, nar_rows, dense), 0),
         ]);
+        if shape.tier != Yue2Tier::Bf16 {
+            solve.push(term(
+                "GGML F32 matmul operand + result",
+                ggml_matmul_transient_bytes(nar_rows),
+                0,
+            ));
+        }
         stages.push(Yue2StageResidency {
             stage: Yue2Stage::AcousticSolve,
             terms: solve,
@@ -1260,12 +1331,23 @@ pub(crate) fn estimate(
             stage: Yue2Stage::Decode,
             terms: vec![
                 term("resident weights", weights.restored_device_bytes, 0),
-                // The engine's `TILE_RESERVE_BYTES` (1 GiB) already covers the process, the FP32
-                // decoder-only weights (folded at load) and their mapped pages, so the decoder is not
-                // charged again on top of it — unless a decoder file ever outgrows the reserve.
+                // The engine's fixed 1 GiB reserve covers today's ~531 MB decoder file. Explicit
+                // BF16 still loads an F32 checkpoint and preprocesses it before keeping BF16
+                // weights, so price F32 source plus BF16 resident bytes if a future decoder
+                // outgrows that reserve. Tile activations retain their conservative FP32 bound.
                 term(
-                    "FP32 VAE decoder + decode reserve",
-                    DECODE_TILE_RESERVE_BYTES.max(shape.decoder_bytes),
+                    if shape.precision == Yue2Precision::StrictBf16 {
+                        "BF16 VAE decoder + conservative decode reserve"
+                    } else {
+                        "FP32 VAE decoder + decode reserve"
+                    },
+                    DECODE_TILE_RESERVE_BYTES.max(
+                        if shape.precision == Yue2Precision::StrictBf16 {
+                            shape.decoder_bytes.saturating_add(shape.decoder_bytes / 2)
+                        } else {
+                            shape.decoder_bytes
+                        },
+                    ),
                     0,
                 ),
                 term(
@@ -1284,6 +1366,22 @@ pub(crate) fn estimate(
         // not a sum of mutually exclusive caches or repeated process reserves.
         let mut high_water = 0;
         for stage in &mut stages {
+            if shape.precision == Yue2Precision::Fp32
+                && matches!(
+                    stage.stage,
+                    Yue2Stage::Load
+                        | Yue2Stage::Plan
+                        | Yue2Stage::Semantic
+                        | Yue2Stage::AcousticPrefill
+                        | Yue2Stage::AcousticSolve
+                )
+            {
+                stage.terms.push(term(
+                    "FP32 Metal MoT footprint allowance",
+                    METAL_FP32_MOT_FOOTPRINT_BYTES,
+                    0,
+                ));
+            }
             stage.terms.push(term(
                 "Metal process and allocator reserve",
                 METAL_PROCESS_RESERVE_BYTES,

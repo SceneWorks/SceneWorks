@@ -154,6 +154,10 @@ pub struct Yue2RenderArgs {
     pub decoder: Option<String>,
     #[schemars(description = "Installed weight tier: \"bf16\" (default), \"q8\" or \"q4\".")]
     pub tier: Option<String>,
+    #[schemars(
+        description = "Required YuE2 compute policy: \"auto\", \"bf16\" or \"fp32\". Separate from the weight tier."
+    )]
+    pub compute_policy: String,
 }
 
 /// Arguments for `yue2_cover_score_version`.
@@ -188,6 +192,10 @@ pub struct Yue2CoverArgs {
     pub decoder: Option<String>,
     #[schemars(description = "Installed weight tier: \"bf16\" (default), \"q8\" or \"q4\".")]
     pub tier: Option<String>,
+    #[schemars(
+        description = "Required YuE2 compute policy: \"auto\", \"bf16\" or \"fp32\". Separate from the weight tier."
+    )]
+    pub compute_policy: String,
 }
 
 /// Arguments for `yue2_get_render`.
@@ -325,6 +333,7 @@ pub(crate) fn render_body(args: &Yue2RenderArgs) -> Result<Value, ErrorData> {
     insert_some(&mut body, "steps", args.steps);
     insert_some(&mut body, "decoder", args.decoder.as_deref());
     insert_some(&mut body, "tier", args.tier.as_deref());
+    body["computePolicy"] = json!(args.compute_policy);
     Ok(body)
 }
 
@@ -346,6 +355,7 @@ pub(crate) fn cover_body(args: &Yue2CoverArgs) -> Result<Value, ErrorData> {
     insert_some(&mut body, "steps", args.steps);
     insert_some(&mut body, "decoder", args.decoder.as_deref());
     insert_some(&mut body, "tier", args.tier.as_deref());
+    body["computePolicy"] = json!(args.compute_policy);
     Ok(body)
 }
 
@@ -683,11 +693,12 @@ mod tests {
             steps: Some(8),
             decoder: None,
             tier: Some("q8".into()),
+            compute_policy: "auto".into(),
         })
         .unwrap();
         assert_eq!(
             render,
-            json!({"kind": "renderVersion", "versionId": "yue2v_a", "steps": 8, "tier": "q8"})
+            json!({"kind": "renderVersion", "versionId": "yue2v_a", "steps": 8, "tier": "q8", "computePolicy": "auto"})
         );
         let cover = cover_body(&Yue2CoverArgs {
             project_id: "p1".into(),
@@ -701,12 +712,13 @@ mod tests {
             steps: None,
             decoder: None,
             tier: None,
+            compute_policy: "bf16".into(),
         })
         .unwrap();
         assert_eq!(
             cover,
             json!({"kind": "cover", "lyrics": "[Verse]\nla", "style": "folk", "seed": 3,
-                   "cover": {"versionId": "yue2v_a", "mode": "melody", "keep": "vocal"}})
+                   "cover": {"versionId": "yue2v_a", "mode": "melody", "keep": "vocal"}, "computePolicy": "bf16"})
         );
         assert!(render_body(&Yue2RenderArgs {
             project_id: "p1".into(),
@@ -714,6 +726,7 @@ mod tests {
             steps: None,
             decoder: None,
             tier: None,
+            compute_policy: "auto".into(),
         })
         .is_err());
     }
