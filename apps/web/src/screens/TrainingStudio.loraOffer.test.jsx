@@ -212,6 +212,23 @@ async function click(node) {
   await settle();
 }
 
+// A second completed run of the same dataset, newer than adapterJob().
+function newerAdapterJob() {
+  const newer = adapterJob({
+    id: "job-train-2",
+    result: { loraRegistered: true, loraId: "mira_v4", datasetId: "dataset-1" },
+  });
+  newer.payload = {
+    ...newer.payload,
+    manifestEntry: { ...newer.payload.manifestEntry, id: "mira_v4", name: "Mira v4" },
+  };
+  return newer;
+}
+
+function offerHeading() {
+  return offerPanel()?.querySelector("h3")?.textContent ?? "";
+}
+
 function offerPanel() {
   return container.querySelector('[aria-label="Attach trained LoRA"]');
 }
@@ -401,5 +418,48 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
 
     expect(offerPanel()).toBeNull();
     expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  // sc-24930: an answer lives in a ref and in storage, neither of which re-runs the
+  // offer effect on its own. No re-render here on purpose — the older run has to appear
+  // from the decline alone, not from some unrelated state change.
+  it("offers the next undecided run as soon as the displayed one is declined", async () => {
+    await render({ jobs: [newerAdapterJob(), adapterJob()] });
+    expect(offerHeading()).toBe("Attach “Mira v4” to Mira?");
+
+    await click(buttonByText("Not now"));
+
+    expect(offerHeading()).toBe("Attach “Mira v3” to Mira?");
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
+  it("offers the next undecided run when another window answers the displayed one", async () => {
+    await render({ jobs: [newerAdapterJob(), adapterJob()] });
+    expect(offerHeading()).toBe("Attach “Mira v4” to Mira?");
+
+    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(["job-train-2"]));
+    act(() => {
+      window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
+    });
+    await settle();
+
+    expect(offerHeading()).toBe("Attach “Mira v3” to Mira?");
+  });
+
+  it("shows an attach failure only on the offer whose attach failed", async () => {
+    apiFetchMock.mockRejectedValue(new Error("disk full"));
+    await render({ jobs: [newerAdapterJob(), adapterJob()] });
+    await click(buttonByText("Attach to Mira"));
+    expect(offerPanel()?.textContent).toContain("Could not attach Mira v4");
+
+    // Another window answers the failed run; the next offer must not inherit its error.
+    window.localStorage.setItem(DECISIONS_KEY, JSON.stringify(["job-train-2"]));
+    act(() => {
+      window.dispatchEvent(new window.StorageEvent("storage", { key: DECISIONS_KEY }));
+    });
+    await settle();
+
+    expect(offerHeading()).toBe("Attach “Mira v3” to Mira?");
+    expect(offerPanel()?.textContent).not.toContain("Could not attach");
   });
 });
