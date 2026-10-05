@@ -2382,6 +2382,39 @@ async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_e
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
     assert_eq!(error["detail"], "Training dataset not found");
+    assert_eq!(target["limits"]["supportsResolutionBuckets"], json!(true));
+
+    // sc-2127 review: LTX-2.5's trainer declares no bucket support on either platform, so the
+    // targets endpoint withholds the flag and a bucket list there is refused at submit with the
+    // field error — never queued for the worker preflight to refuse.
+    let ltx25 = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    assert!(ltx25["limits"].get("supportsResolutionBuckets").is_none());
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["resolutionBuckets"] = json!([
+        { "resolution": ltx25["limits"]["resolutions"][0].clone(), "repeats": 2 },
+    ]);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Resolution buckets",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "resolutionBuckets");
 }
 
 #[tokio::test]

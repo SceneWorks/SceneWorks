@@ -13,6 +13,7 @@ import {
   resolutionBucketsMax,
   resolutionBucketStride,
   seedResolutionBuckets,
+  targetSupportsResolutionBuckets,
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
@@ -659,7 +660,10 @@ describe("weight noise (sc-24826)", () => {
 // sc-2127 (epic 2123): multi-resolution buckets are off by default, round-trip from the form draft
 // into the job's training snapshot as typed rows, and are held to the same limits as the API.
 describe("resolution buckets (sc-2127)", () => {
-  const bucketTarget = { ...target, limits: { ...target.limits, resolutions: [512, 768, 1024] } };
+  const bucketTarget = {
+    ...target,
+    limits: { ...target.limits, resolutions: [512, 768, 1024], supportsResolutionBuckets: true },
+  };
   const snap = (draft) =>
     trainingConfigSnapshot({
       activeDataset: dataset,
@@ -709,6 +713,23 @@ describe("resolution buckets (sc-2127)", () => {
   it("seeds the toggle with the target's resolutions up to the current one", () => {
     expect(seedResolutionBuckets(bucketTarget, "768")).toEqual(rows([512, 1], [768, 1]));
     expect(seedResolutionBuckets({ limits: {} }, "640")).toEqual(rows([640, 1]));
+  });
+
+  it("reads only an explicit true flag as support, and blocks a list on an unsupported target", () => {
+    expect(targetSupportsResolutionBuckets(bucketTarget)).toBe(true);
+    expect(targetSupportsResolutionBuckets({ limits: { supportsResolutionBuckets: "true" } })).toBe(false);
+    expect(targetSupportsResolutionBuckets({ limits: {} })).toBe(false);
+    expect(targetSupportsResolutionBuckets(null)).toBe(false);
+    // LTX-2.5 withholds the flag: a carried-over list is an error there, off is fine.
+    const ltx25 = { ...bucketTarget, id: "ltx_2_5_video_lora", limits: { resolutions: [512, 768, 1024] } };
+    const issuesOn = (resolutionBuckets) =>
+      configValidation({ ...whole, resolutionBuckets }, { activeDataset: dataset, selectedTarget: ltx25 }).filter(
+        (entry) => entry.field === "resolutionBuckets",
+      );
+    expect(issuesOn(rows([512, 2])).map((entry) => entry.message)).toEqual([
+      "This target does not support multi-resolution buckets — turn them off or pick a supporting target",
+    ]);
+    expect(issuesOn(null)).toEqual([]);
   });
 
   it("uses the API's limits", () => {

@@ -618,7 +618,7 @@ describe("ConfigureJobPanel weight noise", () => {
 // seeds rows from the target's resolutions; the row editor edits/adds/removes rows through the draft
 // and is outlined when the list is invalid.
 describe("ConfigureJobPanel resolution buckets", () => {
-  const bucketTarget = { ...TARGET, limits: { resolutions: [512, 768, 1024] } };
+  const bucketTarget = { ...TARGET, limits: { resolutions: [512, 768, 1024], supportsResolutionBuckets: true } };
   function toggle() {
     return [...container.querySelectorAll(".training-advanced-toggles label")]
       .find((node) => node.textContent.includes("Multi-resolution buckets"))
@@ -680,6 +680,22 @@ describe("ConfigureJobPanel resolution buckets", () => {
       ["resolutionBuckets", [...rows([512, 16], [1024, 1]), { resolution: String(VALID_DRAFT.resolution), repeats: "1" }]],
       ["resolutionBuckets", null],
     ]);
+  });
+
+  it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {
+    const ltx25 = { ...TARGET, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { resolutions: [512, 768, 1024] } };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: ltx25,
+          configValidity: validityFor(VALID_DRAFT, { activeDataset: DATASET, selectedTarget: ltx25 }),
+        })}
+      />,
+    );
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(editor()).toBeNull();
   });
 
   it("outlines a list with a non-positive repeat", () => {

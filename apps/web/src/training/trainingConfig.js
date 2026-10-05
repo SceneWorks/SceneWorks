@@ -67,6 +67,13 @@ export function seedResolutionBuckets(target, resolution) {
 export function targetSupportsWeightNoise(target) {
   return target?.limits?.supportsWeightNoise === true;
 }
+
+// Whether the target's trainer on the serving platform honors multi-resolution buckets — the
+// platform-effective `limits.supportsResolutionBuckets` (pinned to the trainer descriptors by a
+// worker test; withheld for LTX-2.5). Absent means unsupported.
+export function targetSupportsResolutionBuckets(target) {
+  return target?.limits?.supportsResolutionBuckets === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -430,6 +437,12 @@ function validateResolutionBuckets(rows, target, issues) {
     return;
   }
   const field = "resolutionBuckets";
+  // A list carried over from another target (or a preset) on a target that cannot honor it would be
+  // refused by the API — block it here with the same reason.
+  if (!targetSupportsResolutionBuckets(target)) {
+    issues.push(issue.error(field, "This target does not support multi-resolution buckets — turn them off or pick a supporting target"));
+    return;
+  }
   if (!rows.length) {
     issues.push(issue.error(field, "Add at least one resolution bucket, or turn multi-resolution buckets off"));
     return;

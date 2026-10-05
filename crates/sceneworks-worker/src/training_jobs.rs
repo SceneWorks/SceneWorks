@@ -2726,6 +2726,17 @@ fn training_result(
     result.insert("rank".to_owned(), json!(plan.config.rank));
     result.insert("alpha".to_owned(), json!(plan.config.alpha));
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
+    // sc-2127: a bucketed run trains at every listed resolution (which replace `resolution`), so
+    // record the rows it actually trained on. Absent for a single-resolution run.
+    if let Ok(Some(buckets)) = parse_resolution_buckets(&plan.config.advanced) {
+        result.insert(
+            RESOLUTION_BUCKETS_KEY.to_owned(),
+            json!(buckets
+                .iter()
+                .map(|bucket| json!({ "resolution": bucket.resolution, "repeats": bucket.repeats }))
+                .collect::<Vec<_>>()),
+        );
+    }
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
     // Record the REAL backend that ran the training (mlx on macOS, candle off-Mac, cpu fallback),
@@ -3377,6 +3388,48 @@ mod tests {
             checked > 0,
             "no builtin target resolved to a linked trainer"
         );
+    }
+
+    /// sc-2127 review: the catalog's `supportsResolutionBuckets` flag (which gates the web toggle
+    /// and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
+    /// catalog on macOS, the Candle projection off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_resolution_buckets_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        let mut withheld = Vec::new();
+        for mut target in sceneworks_core::training::builtin_training_targets().targets {
+            if !cfg!(target_os = "macos") {
+                sceneworks_core::training::project_candle_training_limits(&mut target);
+            }
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            let advertised = sceneworks_core::training::target_supports_resolution_buckets(&target);
+            assert_eq!(
+                advertised, descriptor.techniques.resolution_buckets,
+                "{} ({engine_id}): catalog supportsResolutionBuckets disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            if !advertised {
+                withheld.push(target.id.clone());
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+        // The refusal side is exercised, not just the agreeing side.
+        assert_eq!(withheld, ["ltx_2_5_video_lora"]);
     }
 
     /// sc-24826 (epic 2123): `advanced.weightNoiseSigma` reaches the engine's typed
@@ -4675,6 +4728,21 @@ mod tests {
         assert_eq!(result["networkType"], json!("full"));
         assert_eq!(result["outputId"], json!("finetune_mage"));
         assert_eq!(result["backend"], json!("candle"));
+        // sc-2127: a single-resolution run records no bucket rows...
+        assert!(!result.contains_key("resolutionBuckets"));
+
+        // ...and a bucketed run records the rows it trained on next to `resolution`.
+        let mut bucketed = plan.clone();
+        bucketed.config.advanced.insert(
+            "resolutionBuckets".to_owned(),
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }]),
+        );
+        let result = training_result(&bucketed, &output, &[], &[], &[], 0, 0.0, "candle");
+        assert_eq!(
+            result["resolutionBuckets"],
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }])
+        );
+        assert_eq!(result["resolution"], json!(bucketed.config.resolution));
     }
 
     #[cfg(any(

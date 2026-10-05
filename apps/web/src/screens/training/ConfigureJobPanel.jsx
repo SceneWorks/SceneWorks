@@ -19,6 +19,7 @@ import {
   resolutionBucketsMax,
   resolutionBucketStride,
   seedResolutionBuckets,
+  targetSupportsResolutionBuckets,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
   targetSupportsWeightNoise,
@@ -125,6 +126,10 @@ export function ConfigureJobPanel({
     weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
   // Multi-resolution buckets are on whenever the draft carries a row list (null = off).
   const resolutionBuckets = Array.isArray(configDraft.resolutionBuckets) ? configDraft.resolutionBuckets : null;
+  // Offered only where the target's trainer on this platform declares buckets
+  // (`limits.supportsResolutionBuckets`, withheld for LTX-2.5) — elsewhere the run would be refused.
+  // A list carried onto an unsupported target keeps its toggle so it can be turned off.
+  const resolutionBucketsSupported = targetSupportsResolutionBuckets(selectedTarget);
   // Bucket rows pick from the resolutions the target advertises (the API's menu, E6).
   const bucketResolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
   const updateResolutionBucket = (index, key, value) =>
@@ -712,22 +717,24 @@ export function ConfigureJobPanel({
                   Weight noise
                 </label>
               ) : null}
-              <label
-                className="training-checkbox-field"
-                title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
-              >
-                <input
-                  checked={Boolean(resolutionBuckets)}
-                  onChange={(event) =>
-                    updateConfigDraft(
-                      "resolutionBuckets",
-                      event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
-                    )
-                  }
-                  type="checkbox"
-                />
-                Multi-resolution buckets
-              </label>
+              {resolutionBucketsSupported || resolutionBuckets ? (
+                <label
+                  className="training-checkbox-field"
+                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                >
+                  <input
+                    checked={Boolean(resolutionBuckets)}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        "resolutionBuckets",
+                        event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  Multi-resolution buckets
+                </label>
+              ) : null}
             </div>
 
             {resolutionBuckets ? (

@@ -78,6 +78,30 @@ pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
 /// removed for every target. Callers that serve the Candle catalog (the API off macOS) apply it.
 pub fn project_candle_training_limits(target: &mut TrainingTarget) {
     target.limits.remove(WEIGHT_NOISE_SUPPORT_LIMIT);
+    // `supportsResolutionBuckets` needs no Candle projection: every Candle trainer that declares
+    // or withholds it agrees with its MLX twin (LTX-2.5 withholds it on both). The worker drift
+    // test pins the Candle catalog to the Candle descriptors all the same.
+}
+
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`RESOLUTION_BUCKETS_KEY`] (its `TrainerDescriptor::techniques.resolution_buckets`, sc-2127).
+/// Absent = no. The same mechanism as [`WEIGHT_NOISE_SUPPORT_LIMIT`]: the web form shows the
+/// buckets toggle only where this is `true`, submit-time validation refuses a bucket list
+/// elsewhere, and a worker test pins the flag to the linked trainer descriptors per platform.
+pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
+
+/// Builtin targets whose trainer does NOT honor resolution buckets on any platform: LTX-2.5 trains
+/// on prepared latent packs whose geometry is fixed by the bundle, so there is no spatial edge to
+/// bucket. Every other builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 1] = ["ltx_2_5_video_lora"];
+
+/// Whether `target` (as projected for the serving platform) advertises resolution-bucket support.
+pub fn target_supports_resolution_buckets(target: &TrainingTarget) -> bool {
+    target
+        .limits
+        .get(RESOLUTION_BUCKETS_SUPPORT_LIMIT)
+        .and_then(Value::as_bool)
+        == Some(true)
 }
 
 /// `advanced` key of the **multi-resolution buckets** list (epic 2123, sc-2127): an array of
@@ -624,7 +648,7 @@ pub struct TrainingProvenance {
 /// by common LoRA practice (and `ai-toolkit` as reference), not derived from
 /// any external config format.
 pub fn builtin_training_targets() -> TrainingTargetRegistry {
-    TrainingTargetRegistry {
+    let mut registry = TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
             z_image_turbo_lora_target(),
@@ -665,7 +689,18 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             ),
         ],
         extra: ExtraFields::new(),
+    };
+    // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
+    // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
+    for target in &mut registry.targets {
+        if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
+            target.limits.insert(
+                RESOLUTION_BUCKETS_SUPPORT_LIMIT.to_owned(),
+                Value::Bool(true),
+            );
+        }
     }
+    registry
 }
 
 /// The built-in training presets Rust owns out of the box.
@@ -3430,6 +3465,18 @@ fn validate_resolution_buckets_for_target(
     let Ok(Some(buckets)) = parse_resolution_buckets(&config.advanced) else {
         return Ok(());
     };
+    // The target's trainer on this platform must declare buckets (sc-2127 review): refuse here, at
+    // submit, instead of queueing a job the worker preflight then refuses (E3/E6).
+    if !target_supports_resolution_buckets(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message: format!(
+                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this \
+                 platform.",
+                target.name
+            ),
+        });
+    }
     let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
         return Ok(());
     };

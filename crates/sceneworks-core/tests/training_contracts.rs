@@ -10,8 +10,8 @@ use sceneworks_core::training::{
     WEIGHT_NOISE_SIGMA_MAX, WEIGHT_NOISE_SIGMA_SUGGESTED,
 };
 use sceneworks_core::training::{
-    project_candle_training_limits, target_supports_weight_noise,
-    validate_training_config_for_target,
+    project_candle_training_limits, target_supports_resolution_buckets,
+    target_supports_weight_noise, validate_training_config_for_target,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -1970,5 +1970,61 @@ fn weight_noise_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
                 target.id
             ),
         }
+    }
+}
+
+/// sc-2127 review: every builtin target advertises `supportsResolutionBuckets` except LTX-2.5
+/// (prepared latent packs, no spatial edge) — on both catalogs — and a bucket list on a target that
+/// does not advertise it is a submit-time `resolutionBuckets` field error, never a queued job.
+#[test]
+fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
+    let registry = builtin_training_targets();
+    for candle in [false, true] {
+        let withheld: Vec<String> = registry
+            .targets
+            .iter()
+            .cloned()
+            .map(|mut target| {
+                if candle {
+                    project_candle_training_limits(&mut target);
+                }
+                target
+            })
+            .filter(|target| !target_supports_resolution_buckets(target))
+            .map(|target| target.id)
+            .collect();
+        assert_eq!(withheld, ["ltx_2_5_video_lora"], "candle={candle}");
+    }
+
+    let buckets = |target: &sceneworks_core::training::TrainingTarget| {
+        let allowed = target.limits["resolutions"]
+            .as_array()
+            .expect("resolutions")[0]
+            .clone();
+        let mut config = target.defaults.clone();
+        config.advanced.insert(
+            "resolutionBuckets".to_owned(),
+            json!([{ "resolution": allowed, "repeats": 2 }]),
+        );
+        validate_training_config_for_target(target, &config)
+    };
+    let by_id = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} target present"))
+            .clone()
+    };
+    buckets(&by_id("z_image_turbo_lora")).expect("Z-Image admits buckets");
+    match buckets(&by_id("ltx_2_5_video_lora")) {
+        Err(TrainingPlanError::InvalidField { field, message }) => {
+            assert_eq!(field, "resolutionBuckets");
+            assert!(
+                message.contains("does not support multi-resolution buckets"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a resolutionBuckets field error, got {other:?}"),
     }
 }
