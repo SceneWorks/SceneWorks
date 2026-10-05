@@ -855,10 +855,9 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
     // is where a merge, rather than an agreement, would show up.
     //
-    // The row moves to the combined `candle_quant_lora` column at inference 8f986217 (sc-24157): the candle
-    // provider now declares `supports_lora`/`supports_lokr` and installs LoRA / LoKr as forward-time
-    // additive residuals that serve the dense bf16 tier AND the packed q8/q4 tiers alike (the base
-    // is never touched). LoHa on a packed tier is still the engine's own typed `Unsupported`.
+    // sc-24157 adds LoRA and PEFT LoKr as additive residuals over dense and packed projections.
+    // This is the composed quant+adapter route, not two independent capabilities that silently
+    // reject a packed tier with an adapter. LoHa remains a typed engine refusal on packed tiers.
     ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
@@ -2392,8 +2391,6 @@ mod tests {
         "z_image_turbo",
         "z_image",
         "qwen_image",
-        // inference 8f986217 (sc-24157): the candle 2.1 provider serves LoRA / LoKr on its packed
-        // tiers as well as bf16, so the id moved here from the quant-only list below.
         "qwen_image_2_1",
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -2438,8 +2435,8 @@ mod tests {
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
         //
-        // sc-24112 added `qwen_image_2_1` here when its candle packed loader landed; inference
-        // 8f986217 (sc-24157) moved it to the combined quant+adapter list above.
+        // Qwen-Image 2.1 moved to the combined quant+adapter list after sc-24157 added additive
+        // LoRA/LoKr residuals to its dense and packed projections.
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",

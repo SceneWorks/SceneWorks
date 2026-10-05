@@ -141,17 +141,13 @@ all = "warn"
 # apply when SceneWorks builds the graph, which is how the sc-7544 fix silently dropped out at
 # the candle-gen -> inference cutover. This patch re-applies it for every SceneWorks build.
 #
-# Since sc-24441 (epic sc-24432) inference also vendors candle-core: upstream 1e6aa85e plus the
-# CUDA-graph parameter cache its decode graph runner needs (crates/media/candle-gen/vendor/
-# candle-core/VENDORED.md there). It is patched for the same reason — inference's own [patch] does
-# not reach this workspace — and without it the graph runner compiles against upstream candle-core.
-#
-# The rev MUST stay in lockstep with the inference pins in crates/sceneworks-worker/Cargo.toml
-# (scripts/bump-inference.mjs rewrites all of them; crates/sceneworks-worker/tests/
-# candle_kernels_patch_guard.rs fails the build if they skew or a patch is dropped).
+# Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
+# candle-llm. Cargo ignores dependency-workspace patches, so both root patches must resolve from
+# the same inference revision as the direct crates. The bump script moves both revs and the lock
+# guard refuses a missing, upstream, or skewed resolution.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "1b47a9886b234e6d80a47fbcda549ed314832c24" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "1b47a9886b234e6d80a47fbcda549ed314832c24" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "25bd55cdb6a56c78b07584a12150c9f5d46be439" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "25bd55cdb6a56c78b07584a12150c9f5d46be439" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

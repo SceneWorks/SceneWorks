@@ -4613,9 +4613,7 @@ mod tests {
                 // The PE checkpoints carry their vision tower inside the snapshot (`model.visual.*`),
                 // like every other `qwen3_5` wrapper, so there is no separate projector to point at.
                 projector_source: None,
-                // Draft model, companion MTP head and prefix-cache budget (epic sc-24432): none, and
-                // the runtime's default budget.
-                ..Default::default()
+                ..LoadSpec::default()
             },
             &ModelRequirements::from_request(&request),
         )

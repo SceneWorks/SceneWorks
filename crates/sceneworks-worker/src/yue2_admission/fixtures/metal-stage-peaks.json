@@ -1,0 +1,327 @@
+{
+  "provenance": {
+    "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+    "sceneworksRevision": "b934d5dc41fdf48e7fd975892345948301a7fa36",
+    "captureDirectory": "/private/tmp/sc-23002-yue2-metal-20260928T025736Z-77969-npxENA/profile",
+    "notes": "Exact saved process-group phys_footprint samples, lower bounds only. Four valid records plus four q4-default stage bins replayed from raw artifacts. Q4 default has no valid record because its load stage was missed; its load is not fabricated here."
+  },
+  "cases": [
+    {
+      "case": {
+        "id": "yue2:bf16:metal:default",
+        "tier": "bf16",
+        "decoder": "standard",
+        "request": {
+          "planning": "full",
+          "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+          "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+          "seed": 831001
+        }
+      },
+      "recordSha256": "24b608846d544f1466221bb7ce018e4086acf5821cba20a71eae11c555202811",
+      "capturedAt": "2026-09-28T09:05:10.029Z",
+      "originalStages": {
+        "acoustic": {
+          "deviceBytes": 10986441856,
+          "hostBytes": 0,
+          "totalBytes": 10986441856
+        },
+        "decode": {
+          "deviceBytes": 16268327040,
+          "hostBytes": 0,
+          "totalBytes": 16268327040
+        },
+        "load": {
+          "deviceBytes": 7261368448,
+          "hostBytes": 0,
+          "totalBytes": 7261368448
+        },
+        "plan": {
+          "deviceBytes": 7983450240,
+          "hostBytes": 0,
+          "totalBytes": 7983450240
+        },
+        "semantic": {
+          "deviceBytes": 9237244032,
+          "hostBytes": 0,
+          "totalBytes": 9237244032
+        }
+      },
+      "measuredStages": {
+        "load": {
+          "peakBytes": 8298733104,
+          "samples": 4
+        },
+        "plan": {
+          "peakBytes": 8555486864,
+          "samples": 9
+        },
+        "semantic": {
+          "peakBytes": 9858817968,
+          "samples": 27
+        },
+        "acoustic": {
+          "peakBytes": 9898319648,
+          "samples": 33
+        },
+        "decode": {
+          "peakBytes": 11347779384,
+          "samples": 2
+        }
+      }
+    },
+    {
+      "case": {
+        "id": "yue2:q4:metal:long-context",
+        "tier": "q4",
+        "decoder": "standard",
+        "request": {
+          "planning": "off",
+          "style": "cinematic orchestral rock, male vocal, strings, piano, big drums",
+          "lyrics": "[verse]\nOver the ridge where the old roads end\nI carried the fire, I carried my friend\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside\n\n[bridge]\nAnd the night is long but the night will turn\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside",
+          "seed": 831002,
+          "cfgScale": 1.01,
+          "semanticSampling": {
+            "minTokens": 16000,
+            "maxTokens": 16000
+          }
+        }
+      },
+      "recordSha256": "3f73771e83eb4d03881db1ce366515a0f0062f560f83ac24eb0089d5693c6a6d",
+      "capturedAt": "2026-09-28T09:39:22.439Z",
+      "originalStages": {
+        "acoustic": {
+          "deviceBytes": 6745993344,
+          "hostBytes": 0,
+          "totalBytes": 6745993344
+        },
+        "decode": {
+          "deviceBytes": 11990052992,
+          "hostBytes": 0,
+          "totalBytes": 11990052992
+        },
+        "load": {
+          "deviceBytes": 2658742400,
+          "hostBytes": 0,
+          "totalBytes": 2658742400
+        },
+        "semantic": {
+          "deviceBytes": 6915483776,
+          "hostBytes": 0,
+          "totalBytes": 6915483776
+        }
+      },
+      "measuredStages": {
+        "load": {
+          "peakBytes": 1324601544,
+          "samples": 1
+        },
+        "semantic": {
+          "peakBytes": 11194242400,
+          "samples": 284
+        },
+        "acoustic": {
+          "peakBytes": 11222783352,
+          "samples": 502
+        },
+        "decode": {
+          "peakBytes": 10150532184,
+          "samples": 15
+        }
+      }
+    },
+    {
+      "case": {
+        "id": "yue2:q8:metal:default",
+        "tier": "q8",
+        "decoder": "standard",
+        "request": {
+          "planning": "full",
+          "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+          "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+          "seed": 831001
+        }
+      },
+      "recordSha256": "b8504dfd6f6f984453095fb8725a12260522f7f9327503ac05d4cc5bdd934586",
+      "capturedAt": "2026-09-28T09:07:54.636Z",
+      "originalStages": {
+        "acoustic": {
+          "deviceBytes": 7984729216,
+          "hostBytes": 0,
+          "totalBytes": 7984729216
+        },
+        "decode": {
+          "deviceBytes": 13266614400,
+          "hostBytes": 0,
+          "totalBytes": 13266614400
+        },
+        "load": {
+          "deviceBytes": 4259655808,
+          "hostBytes": 0,
+          "totalBytes": 4259655808
+        },
+        "plan": {
+          "deviceBytes": 4981737600,
+          "hostBytes": 0,
+          "totalBytes": 4981737600
+        },
+        "semantic": {
+          "deviceBytes": 6235531392,
+          "hostBytes": 0,
+          "totalBytes": 6235531392
+        }
+      },
+      "measuredStages": {
+        "load": {
+          "peakBytes": 6554737000,
+          "samples": 2
+        },
+        "plan": {
+          "peakBytes": 6810900912,
+          "samples": 4
+        },
+        "semantic": {
+          "peakBytes": 8164039184,
+          "samples": 17
+        },
+        "acoustic": {
+          "peakBytes": 8149817848,
+          "samples": 40
+        },
+        "decode": {
+          "peakBytes": 8778209304,
+          "samples": 2
+        }
+      }
+    },
+    {
+      "case": {
+        "id": "yue2:q8:metal:legacy-decoder",
+        "tier": "q8",
+        "decoder": "legacy",
+        "request": {
+          "planning": "full",
+          "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+          "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+          "seed": 831001
+        }
+      },
+      "recordSha256": "63711d2ffc4f0a70ba94ed4c28a2d53ab1e6fcf3cab9cbb1238f9d4138b0e56c",
+      "capturedAt": "2026-09-28T09:11:07.081Z",
+      "originalStages": {
+        "acoustic": {
+          "deviceBytes": 7953878144,
+          "hostBytes": 0,
+          "totalBytes": 7953878144
+        },
+        "decode": {
+          "deviceBytes": 13266614400,
+          "hostBytes": 0,
+          "totalBytes": 13266614400
+        },
+        "load": {
+          "deviceBytes": 4259655808,
+          "hostBytes": 0,
+          "totalBytes": 4259655808
+        },
+        "plan": {
+          "deviceBytes": 4944275584,
+          "hostBytes": 0,
+          "totalBytes": 4944275584
+        },
+        "semantic": {
+          "deviceBytes": 6198069376,
+          "hostBytes": 0,
+          "totalBytes": 6198069376
+        }
+      },
+      "measuredStages": {
+        "load": {
+          "peakBytes": 138971584,
+          "samples": 1
+        },
+        "plan": {
+          "peakBytes": 6777559520,
+          "samples": 2
+        },
+        "semantic": {
+          "peakBytes": 7804279312,
+          "samples": 6
+        },
+        "acoustic": {
+          "peakBytes": 7841552936,
+          "samples": 15
+        },
+        "decode": {
+          "peakBytes": 8336840704,
+          "samples": 1
+        }
+      }
+    },
+    {
+      "case": {
+        "id": "yue2:q4:metal:default",
+        "tier": "q4",
+        "decoder": "standard",
+        "request": {
+          "planning": "full",
+          "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+          "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+          "seed": 831001
+        }
+      },
+      "rawArtifactsSha256": {
+        "case.json": "0180a0dab9628daf6c99dcda263b54cdd3d263f197a12c3d966f94861a9456af",
+        "admission.json": "644df70ad0abdc9c25eecc47ee1bcc2c7428640d779eb64675ef89ca6630b3aa",
+        "watchdog.jsonl": "be8b5a3ff24aa9b40a7a54d30f59db5222ddc12f3b0518f52d39fab85f158602",
+        "stages.jsonl": "b94faa658770c1c08a310f403e8a9d26a199da09d51b097279f7f65df13faf24"
+      },
+      "notes": "Raw stage replay only; the missing load sample prevented creation of a valid completed record. No load peak is inferred.",
+      "originalStages": {
+        "acoustic": {
+          "deviceBytes": 6383815808,
+          "hostBytes": 0,
+          "totalBytes": 6383815808
+        },
+        "decode": {
+          "deviceBytes": 11665700992,
+          "hostBytes": 0,
+          "totalBytes": 11665700992
+        },
+        "load": {
+          "deviceBytes": 2658742400,
+          "hostBytes": 0,
+          "totalBytes": 2658742400
+        },
+        "plan": {
+          "deviceBytes": 3380824192,
+          "hostBytes": 0,
+          "totalBytes": 3380824192
+        },
+        "semantic": {
+          "deviceBytes": 4634617984,
+          "hostBytes": 0,
+          "totalBytes": 4634617984
+        }
+      },
+      "measuredStages": {
+        "plan": {
+          "peakBytes": 4606546792,
+          "samples": 4
+        },
+        "semantic": {
+          "peakBytes": 5942580168,
+          "samples": 15
+        },
+        "acoustic": {
+          "peakBytes": 5950690248,
+          "samples": 38
+        },
+        "decode": {
+          "peakBytes": 6521983560,
+          "samples": 2
+        }
+      }
+    }
+  ]
+}

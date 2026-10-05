@@ -1936,20 +1936,22 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // A user adapter is served off-Mac (inference 8f986217, sc-24157): the candle provider declares
-    // `supports_lora`/`supports_lokr`, so the id's `candle_lora` column is true and the generic lane
-    // claims it, on a packed tier as well as on bf16.
-    for payload in [
-        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }),
-        json!({ "prompt": "p", "loras": [{ "networkType": "lokr" }] }),
-        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 4 } }),
-    ] {
-        let payload = object(payload);
-        assert!(
-            image_request_candle_eligible("qwen_image_2_1", &payload),
-            "2.1 adapters route to candle: {payload:?}"
-        );
-        assert_eq!(candle_image_first_refusal("qwen_image_2_1", &payload), None);
+    // The current provider applies LoRA and PEFT LoKr residuals on dense and packed tiers. Both
+    // are admitted by the same production scheduler gate, including with an explicit tier select.
+    for adapter in ["lora", "lokr"] {
+        for bits in [0, 4, 8] {
+            let payload = json!({
+                "model": "qwen_image_2_1", "prompt": "p",
+                "loras": [{ "id": "probe", "networkType": adapter }],
+                "advanced": { "mlxQuantize": bits }
+            });
+            assert!(
+                image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+                "{adapter} with Q{bits} must reach the Candle provider"
+            );
+            let job = image_generate_job(payload);
+            assert!(worker_supports_job(&gpu_worker(CANDLE_CAPS), &job));
+        }
     }
 
     // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
@@ -2006,8 +2008,8 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
 /// is served rather than refused.
 ///
 /// **That agreement is not a merge, and the distinction is the whole point of this test.** Nothing
-/// anywhere reads "the supported quants of `qwen_image_2_1`". `ModelCaps::candle_quant` is the
-/// Candle column and only the Candle column; the MLX lane's tier surface is the manifest's own
+/// anywhere reads "the supported quants of `qwen_image_2_1`". The Candle quant+adapter column is
+/// specific to Candle; the MLX lane's tier surface is the manifest's own
 /// `mlx` block; the catalog's `variant` rows are the INSTALL axis, which is a third thing again. A
 /// future revision that narrows one provider must be expressible by changing one of them, and the
 /// assertions below are written so that it is.
@@ -2121,7 +2123,7 @@ fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
         "the MLX block declares the lane's default tier, not its tier set"
     );
     // The candle lane has NO manifest tier key at all, and must not grow one: its tier surface is
-    // the routing catalog's `candle_quant` column. A `candle.quantize` here would be a second,
+    // the routing catalog's quant+adapter column. A `candle.quantize` here would be a second,
     // silently-diverging declaration of the same fact.
     let candle = entry
         .get("candle")
@@ -5545,5 +5547,41 @@ fn a_plan_backed_entry_under_a_builtin_model_id_is_refused_by_the_mlx_lane() {
     assert!(video_request_is_candle_eligible(
         &JobType::VideoGenerate,
         &plan_backed
+    ));
+}
+
+/// sc-22999: a YuE2 derived-tier install (`model_download` carrying `localDerivation`) is claimed
+/// only by a worker that links the audio lane (advertises `audio_generate`) — never by the utility
+/// worker of a build without it (the Docker "neither" image), which cannot run the preparer. An
+/// ordinary download still goes to the utility worker. Mutation that reds this: dropping the
+/// `localDerivation` arm of `required_capability`.
+#[test]
+fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
+    let job = |payload: Value| -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_derive", "type": "model_download", "status": "queued", "payload": payload,
+            "result": {}, "requestedGpu": "auto", "progress": 0, "stage": "queued", "message": "",
+            "attempts": 1, "cancelRequested": false, "createdAt": "2026-09-26T00:00:00Z",
+            "updatedAt": "2026-09-26T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    };
+    let derive = job(json!({"modelId": "yue2", "localDerivation": {"variant": "q8"}}));
+    let plain = job(json!({"modelId": "yue2"}));
+    // The utility worker of a server build without the audio lane.
+    let utility: &[&str] = &["cpu", "model_download", "model_import", "model_convert"];
+    // A GPU worker that links the audio lane (candle off-Mac, mlx on the Mac).
+    let audio_lane: &[&str] = &["gpu", "image_generate", "audio_generate", "candle"];
+    assert!(!worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(audio_lane, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &plain
     ));
 }
