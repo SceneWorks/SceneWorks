@@ -158,6 +158,45 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     assert!(advertising(true).is_empty());
 }
 
+/// sc-24833: the targets endpoint advertises the latent-perceptual losses per platform — the MLX
+/// tables on the MLX catalog; on the Candle catalog only Mage-Flow's VAE anchor (no Candle trainer
+/// declares E-LatentLPIPS). Mutation: drop `project_candle_training_limits` from the Candle path ⇒
+/// red.
+#[test]
+fn platform_effective_training_catalog_projects_latent_perceptual_support() {
+    use sceneworks_core::training::latent_perceptual::{
+        target_supports, CANDLE_VAE_ANCHOR_TARGETS, LATENT_LOSSES, LATENT_LPIPS_TARGETS,
+        VAE_ANCHOR_TARGETS,
+    };
+    let sorted = |ids: &[&str]| {
+        let mut v: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+        v.sort();
+        v
+    };
+    for (spec, mlx, candle) in [
+        (
+            LATENT_LOSSES[0],
+            &VAE_ANCHOR_TARGETS[..],
+            &CANDLE_VAE_ANCHOR_TARGETS[..],
+        ),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..], &[][..]),
+    ] {
+        let advertising = |candle: bool| -> Vec<String> {
+            let mut ids: Vec<String> =
+                crate::training::effective_training_targets_for_candle(candle)
+                    .targets
+                    .iter()
+                    .filter(|target| target_supports(&spec, target))
+                    .map(|target| target.id.clone())
+                    .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(advertising(false), sorted(mlx), "{}", spec.support_limit);
+        assert_eq!(advertising(true), sorted(candle), "{}", spec.support_limit);
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

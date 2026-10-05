@@ -28752,6 +28752,126 @@
         "description": "Monocular depth estimator (ViT-L) used by LoRA training's depth anchoring; larger gradients, so use a much smaller weight - not a generation model. CC-BY-NC-4.0.",
         "recommendedFor": []
       }
+    },
+    {
+      // FLUX.2 VAE (the VAE inside the SceneWorks/flux2-dev-mlx re-host, same revision as the FLUX.2 [dev] entry) — the frozen encoder of the native trainer's VAE perceptual anchor loss (epic 2123, sc-24833). componentOnly: fetches only bf16/vae/ (~336 MB) into the shared snapshot; an installed FLUX.2 [dev] tier satisfies it too. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::FLUX2_VAE_MODEL (parity test).
+      "id": "flux2_vae",
+      "autoDownload": false,
+      "name": "FLUX.2 VAE",
+      "family": "flux2_vae",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "SceneWorks/flux2-dev-mlx",
+          "revision": "2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+          "files": ["bf16/vae/config.json", "bf16/vae/diffusion_pytorch_model.safetensors"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 336214326,
+          "footprint": { "diskSizeBytes": 336214326 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SceneWorks/flux2-dev-mlx"
+      },
+      "licenseUrl": "https://huggingface.co/SceneWorks/flux2-dev-mlx/tree/2868b1461b2b6e6e05d84e52534df3632b4c7d5d",
+      "ui": {
+        "label": "FLUX.2 VAE",
+        "description": "FLUX.2 autoencoder whose encoder the VAE anchor loss of LoRA training uses to compare the model prediction with the training image at several scales - not a generation model. FLUX Non-Commercial License.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for SDXL latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for SDXL / Illustrious / Kolors. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_sdxl",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (SDXL)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/sdxl_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58969974,
+          "footprint": { "diskSizeBytes": 58969974 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (SDXL)",
+        "description": "Latent-space perceptual metric for SDXL latents (SDXL / Illustrious / Kolors) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for SD3 latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for SD3.5. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_sd3",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (SD3)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/sd3_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58997522,
+          "footprint": { "diskSizeBytes": 58997522 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (SD3)",
+        "description": "Latent-space perceptual metric for SD3 latents (SD3.5) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
+      }
+    },
+    {
+      // E-LatentLPIPS weights for FLUX.1 latents (mingukkang/elatentlpips, ECCV 2024) — the learned latent-space perceptual metric of the native trainer's E-LatentLPIPS loss (epic 2123, sc-24833) for Z-Image. componentOnly. repo/revision/file MUST equal sceneworks_core::training::latent_perceptual::ELATENTLPIPS_MODELS (parity test).
+      "id": "elatentlpips_flux",
+      "autoDownload": false,
+      "name": "E-LatentLPIPS (FLUX.1)",
+      "family": "elatentlpips",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "Mingguksky/elatentlpips",
+          "revision": "0ff7f3f693029324916ed2a392a20694e5f219f3",
+          "files": ["elatentlpips_ckpt/flux_latest_vgg16_tuned.pth"],
+          "platforms": ["macos", "windows", "linux"],
+          "estimatedSizeBytes": 58997622,
+          "footprint": { "diskSizeBytes": 58997622 }
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/Mingguksky/elatentlpips"
+      },
+      "licenseUrl": "https://huggingface.co/Mingguksky/elatentlpips/tree/0ff7f3f693029324916ed2a392a20694e5f219f3",
+      "ui": {
+        "label": "E-LatentLPIPS (FLUX.1)",
+        "description": "Latent-space perceptual metric for FLUX.1 latents (Z-Image) used by the E-LatentLPIPS loss of LoRA training - not a generation model. CC-BY-NC.",
+        "recommendedFor": []
+      }
     }
   ]
 }

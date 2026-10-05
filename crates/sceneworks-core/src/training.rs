@@ -235,15 +235,23 @@ pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
 /// flag left to withdraw is depth anchoring: the Z-Image MLX trainer declares it and no Candle
 /// trainer does yet (sc-2125; S8 adds them). Callers that serve the Candle catalog (the API off
 /// macOS) apply it, and the worker drift test pins the projected flag to the Candle descriptors.
+///
+/// The latent-space perceptual losses (sc-24833) are projected from their Candle tables
+/// ([`latent_perceptual::CANDLE_VAE_ANCHOR_TARGETS`]; no Candle trainer declares E-LatentLPIPS).
 pub fn project_candle_training_limits(target: &mut TrainingTarget) {
     target
         .limits
         .remove(depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT);
+    latent_perceptual::project_candle_limits(target);
 }
 
 /// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
 /// catalog models.
 pub mod depth_anchoring;
+
+/// The latent-space perceptual losses (epic 2123, sc-24833): VAE anchor + E-LatentLPIPS keys,
+/// bounds, the shared strict parser, support flags and auxiliary catalog models.
+pub mod latent_perceptual;
 
 /// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
 /// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
@@ -774,6 +782,11 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
         ],
         extra: ExtraFields::new(),
     };
+    // Epic 2123 latent-space perceptual losses (sc-24833): the MLX-truth support flags, per target
+    // (`latent_perceptual::{VAE_ANCHOR_TARGETS, LATENT_LPIPS_TARGETS}`).
+    for target in &mut registry.targets {
+        latent_perceptual::insert_mlx_limits(target);
+    }
     // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
     // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
     for target in &mut registry.targets {
@@ -3347,6 +3360,7 @@ pub fn validate_training_config_for_target(
     validate_resolution_buckets_for_target(target, config)?;
     validate_technique_support(target, config)?;
     depth_anchoring::validate_support(target, config)?;
+    latent_perceptual::validate_support(target, config)?;
     validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
@@ -3619,6 +3633,7 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         }
     })?;
     depth_anchoring::validate(config)?;
+    latent_perceptual::validate(config)?;
     validate_subject_mask_loss(config)?;
     Ok(())
 }

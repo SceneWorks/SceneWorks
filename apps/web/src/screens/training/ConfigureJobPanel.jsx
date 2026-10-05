@@ -42,6 +42,9 @@ import {
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
   depthAnchoringWeightSuggested,
+  latentLossEnabled,
+  latentPerceptualLosses,
+  targetSupportsLatentLoss,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -168,6 +171,15 @@ export function ConfigureJobPanel({
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
   const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
+  // The latent-space perceptual losses (sc-24833) follow the same mechanism, one per entry of
+  // `latentPerceptualLosses` (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`).
+  const latentLosses = latentPerceptualLosses.filter((loss) => targetSupportsLatentLoss(selectedTarget, loss));
+  const latentLossHelp = {
+    vaeAnchor:
+      "Match the training image at several scales: the model's prediction is decoded and a frozen FLUX.2 VAE encoder compares its features with the training image's. Needs the tiny decoder and the FLUX.2 VAE installed. Off by default.",
+    latentLpips:
+      "A learned perceptual similarity measured directly on the latent (E-LatentLPIPS) between the model's prediction and the training image. Needs the E-LatentLPIPS weights for this model family installed. Off by default.",
+  };
   // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
   // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
   // through configValidation instead of rendering a toggle the run would refuse.
@@ -726,6 +738,63 @@ export function ConfigureJobPanel({
                   </label>
                 </>
               ) : null}
+              {latentLosses
+                .filter((loss) => latentLossEnabled(configDraft, loss))
+                .map((loss) => (
+                  <React.Fragment key={loss.prefix}>
+                    <label title={`${loss.label} loss weight. ${loss.weightSuggested} is the starting weight.`}>
+                      {loss.label} weight
+                      <input
+                        max={loss.weightMax}
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}Weight`, event.target.value)}
+                        step="0.1"
+                        type="number"
+                        value={configDraft[`${loss.prefix}Weight`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}Weight`)}
+                      />
+                    </label>
+                    <label title={`Lowest noise level (0 = clean image, 1 = pure noise) at which the ${loss.label} loss applies. Empty = 0.`}>
+                      {loss.label} window min
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}MinT`, event.target.value)}
+                        placeholder="0"
+                        step="0.05"
+                        type="number"
+                        value={configDraft[`${loss.prefix}MinT`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}MinT`)}
+                      />
+                    </label>
+                    <label title={`Highest noise level at which the ${loss.label} loss applies. Empty = ${loss.maxTDefault}.`}>
+                      {loss.label} window max
+                      <input
+                        max="1"
+                        min="0"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}MaxT`, event.target.value)}
+                        placeholder={String(loss.maxTDefault)}
+                        step="0.05"
+                        type="number"
+                        value={configDraft[`${loss.prefix}MaxT`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}MaxT`)}
+                      />
+                    </label>
+                    <label title={`1 adds the ${loss.label} loss to every step. N above 1 makes every Nth step train the ${loss.label} loss alone.`}>
+                      {loss.label} every N steps
+                      <input
+                        max={loss.everyMax}
+                        min="1"
+                        onChange={(event) => updateConfigDraft(`${loss.prefix}Every`, event.target.value)}
+                        placeholder={String(loss.everyDefault)}
+                        step="1"
+                        type="number"
+                        value={configDraft[`${loss.prefix}Every`] ?? ""}
+                        {...invalidProps(configValidity, `${loss.prefix}Every`)}
+                      />
+                    </label>
+                  </React.Fragment>
+                ))}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -906,6 +975,21 @@ export function ConfigureJobPanel({
                   Depth anchoring
                 </label>
               ) : null}
+              {latentLosses.map((loss) => (
+                <label className="training-checkbox-field" key={loss.prefix} title={latentLossHelp[loss.prefix]}>
+                  <input
+                    checked={latentLossEnabled(configDraft, loss)}
+                    onChange={(event) =>
+                      updateConfigDraft(
+                        `${loss.prefix}Weight`,
+                        event.target.checked ? String(loss.weightSuggested) : "",
+                      )
+                    }
+                    type="checkbox"
+                  />
+                  {loss.label} loss
+                </label>
+              ))}
               {subjectMaskLossSupported ? (
                 <label
                   className="training-checkbox-field"

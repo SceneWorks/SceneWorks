@@ -209,9 +209,10 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // Re-pinned by sc-19383 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
   // re-recorded when the catalog gained the eight YuE re-host keys. The Illustrious file
   // censuses below are the real subject of this test and did NOT move — which is the point of
-  // asserting them beside the digest.
+  // asserting them beside the digest. Re-pinned again by sc-24833 (the epic-2123 auxiliary
+  // training-model keys); the Illustrious censuses again did not move.
   assert.equal(current.downloadEvidenceSha256,
-    "e54da3132ca340d054da8ac138d5426963f52572edaf83dafbc64d7f6d31a1f0");
+    "a56c3edcde8ea26badc5fc54704e7d69c9ce4b3bb0d138936d841b605c323bb1");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

@@ -84,8 +84,10 @@
         ],
         "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -182,8 +184,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -281,8 +285,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -379,8 +385,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -477,8 +485,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -581,6 +591,7 @@
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -874,8 +885,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -981,8 +994,10 @@
           6000
         ],
         "supportsGradientNoise": true,
+        "supportsLatentLpipsLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1693,6 +1708,7 @@
         "supportsGradientNoise": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
