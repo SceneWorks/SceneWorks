@@ -1936,26 +1936,21 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // An adapter is handled DIFFERENTLY per backend, and both answers are deliberate:
-    //   * off-Mac the candle lane REFUSES it (`CandleImageRefusal::UserLora`), because the id's
-    //     `candle_lora` column is false — the provider declares `supports_lora`/`supports_lokr`
-    //     false, so the refusal names the missing adapter slot;
-    //   * on a Mac the MLX arm lets it through on purpose, so the engine answers with a typed
-    //     `Unsupported` instead of the job sitting unclaimable.
-    // On a Windows/Linux-only install there is no MLX worker to fall through to, so the candle
-    // refusal IS the terminal answer — which is why it has to carry the adapter-slot reason rather
-    // than a generic one.
-    assert!(!image_request_candle_eligible(
-        "qwen_image_2_1",
-        &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-    ));
-    assert_eq!(
-        candle_image_first_refusal(
-            "qwen_image_2_1",
-            &object(json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }))
-        ),
-        Some(CandleImageRefusal::UserLora),
-    );
+    // A user adapter is served off-Mac (inference 8f986217, sc-24157): the candle provider declares
+    // `supports_lora`/`supports_lokr`, so the id's `candle_lora` column is true and the generic lane
+    // claims it, on a packed tier as well as on bf16.
+    for payload in [
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lokr" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 4 } }),
+    ] {
+        let payload = object(payload);
+        assert!(
+            image_request_candle_eligible("qwen_image_2_1", &payload),
+            "2.1 adapters route to candle: {payload:?}"
+        );
+        assert_eq!(candle_image_first_refusal("qwen_image_2_1", &payload), None);
+    }
 
     // ── The contract's own numbers, asserted against the shipped catalog rather than implied by
     // the payload loop above. One entry serves BOTH backends, so neither an `mlx` nor a `candle`

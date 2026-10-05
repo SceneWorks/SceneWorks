@@ -855,10 +855,11 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
     // is where a merge, rather than an agreement, would show up.
     //
-    // `candle_lora` and `candle_quant_lora` stay FALSE: the provider still declares
-    // `supports_lora`/`supports_lokr` false on both lanes, so there is no adapter to apply on a
-    // packed tier or anywhere else, and a LoRA request stays the typed `CandleImageRefusal::UserLora`.
-    ModelCaps::new("qwen_image_2_1", true, true, true, false, false),
+    // The row moves to the combined `candle_quant_lora` column at inference 8f986217 (sc-24157): the candle
+    // provider now declares `supports_lora`/`supports_lokr` and installs LoRA / LoKr as forward-time
+    // additive residuals that serve the dense bf16 tier AND the packed q8/q4 tiers alike (the base
+    // is never touched). LoHa on a packed tier is still the engine's own typed `Unsupported`.
+    ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2391,6 +2392,9 @@ mod tests {
         "z_image_turbo",
         "z_image",
         "qwen_image",
+        // inference 8f986217 (sc-24157): the candle 2.1 provider serves LoRA / LoKr on its packed
+        // tiers as well as bf16, so the id moved here from the quant-only list below.
+        "qwen_image_2_1",
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
@@ -2434,13 +2438,8 @@ mod tests {
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
         //
-        // sc-24112: `qwen_image_2_1`, once `candle-gen-qwen-image-2-1` gained the SAME packed load
-        // path (inference #1007 — `AdaptLinear::linear_detect_gs` on the DiT and the Qwen3 tower).
-        // Quant-only, not quant+adapter: the provider declares `supports_lora`/`supports_lokr`
-        // false, so it belongs here rather than in the combined list above. This is the identical
-        // shape as the SenseNova row directly below — an engine gaining a packed loader, and the
-        // routing half following it in the same story rather than a release later.
-        "qwen_image_2_1",
+        // sc-24112 added `qwen_image_2_1` here when its candle packed loader landed; inference
+        // 8f986217 (sc-24157) moved it to the combined quant+adapter list above.
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",

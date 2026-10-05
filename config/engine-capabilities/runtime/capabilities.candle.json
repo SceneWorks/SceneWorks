@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "8d625c68cfd0903213ad38f311ec8b072adeedfb",
+    "inferenceRevision": "8f986217ad31475b288f452d78a30ef05a4d7268",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -1601,8 +1601,8 @@
           "referenceRgba",
           "multiReference"
         ],
-        "supports_lora": false,
-        "supports_lokr": false,
+        "supports_lora": true,
+        "supports_lokr": true,
         "supported_quants": [
           "q4",
           "q8"
@@ -2227,6 +2227,7 @@
       "ltx_2_3",
       "ltx_2_5_distilled",
       "mage_flow_base",
+      "qwen_image_2_1",
       "sd3_5_large",
       "sd3_5_medium",
       "sdxl",
@@ -2244,7 +2245,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "kolors",
@@ -2254,7 +2256,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "krea_2_raw",
@@ -2264,7 +2267,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "krea_2_control",
@@ -2274,7 +2278,8 @@
         "supports_lora": false,
         "supports_lokr": false,
         "supports_control": true,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "lens",
@@ -2284,7 +2289,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "ltx_2_3",
@@ -2294,7 +2300,8 @@
         "supports_lora": true,
         "supports_lokr": false,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "ltx_2_5_distilled",
@@ -2304,7 +2311,8 @@
         "supports_lora": true,
         "supports_lokr": false,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "mage_flow_base",
@@ -2314,7 +2322,19 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": true
+        "supports_full_finetune": true,
+        "max_reference_images": 0
+      },
+      {
+        "id": "qwen_image_2_1",
+        "family": "qwen-image-2-1",
+        "backend": "candle",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supports_control": false,
+        "supports_full_finetune": false,
+        "max_reference_images": 10
       },
       {
         "id": "sd3_5_large",
@@ -2324,7 +2344,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "sd3_5_medium",
@@ -2334,7 +2355,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "sdxl",
@@ -2344,7 +2366,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "wan2_2_t2v_14b",
@@ -2354,7 +2377,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "wan2_2_i2v_14b",
@@ -2364,7 +2388,8 @@
         "supports_lora": true,
         "supports_lokr": false,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "wan2_2_ti2v_5b",
@@ -2374,7 +2399,8 @@
         "supports_lora": true,
         "supports_lokr": false,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       },
       {
         "id": "z_image_turbo",
@@ -2384,7 +2410,8 @@
         "supports_lora": true,
         "supports_lokr": true,
         "supports_control": false,
-        "supports_full_finetune": false
+        "supports_full_finetune": false,
+        "max_reference_images": 0
       }
     ],
     "captioner_ids": [

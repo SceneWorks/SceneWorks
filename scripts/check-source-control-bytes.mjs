@@ -66,6 +66,7 @@ export const SOURCE_EXTENSIONS = new Set([
   ".rs",
   ".scss",
   ".sh",
+  ".sha256",
   ".snap",
   ".sql",
   ".svelte",
