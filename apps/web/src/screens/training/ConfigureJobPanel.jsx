@@ -35,7 +35,7 @@ import {
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEnabled,
-  targetSupportsDepthAnchoring,
+  depthAnchoringAvailable,
   depthAnchoringEveryDefault,
   depthAnchoringEveryMax,
   depthAnchoringModelLabels,
@@ -49,7 +49,7 @@ import {
   bodyLossWeightMax,
   bodyLossWeightSuggested,
   bodyShapeMinCosDefault,
-  targetSupportsBodyLoss,
+  bodyLossAvailable,
 } from "../../training/trainingConfig.js";
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
@@ -174,12 +174,13 @@ export function ConfigureJobPanel({
     );
   // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
-  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
+  // A full fine-tune or an LTX-2.5 workflow with no generated video hides it too (sc-24830).
+  const depthAnchoringSupported = depthAnchoringAvailable(selectedTarget, configDraft);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   // Body losses (sc-24832): each is offered only where the target's trainer on this platform
   // declares it and its weights are cataloged (`limits.supportsBodyProportionLoss` / …ShapeLoss /
   // …NormalLoss); on whenever the draft carries its weight, knobs shown while on.
-  const supportedBodyLosses = bodyLosses.filter((loss) => targetSupportsBodyLoss(selectedTarget, loss));
+  const supportedBodyLosses = bodyLosses.filter((loss) => bodyLossAvailable(selectedTarget, loss, configDraft));
   // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
   // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
   // through configValidation instead of rendering a toggle the run would refuse.
@@ -816,16 +817,6 @@ export function ConfigureJobPanel({
                           value={configDraft.bodyShapeMinCos ?? ""}
                           {...invalidProps(configValidity, "bodyShapeMinCos")}
                         />
-                      </label>
-                    ) : null}
-                    {loss.prefix === "normal" ? (
-                      <label className="training-checkbox-field" title="Average the normal loss over each image's subject mask only (needs a subject mask on every image).">
-                        <input
-                          checked={Boolean(configDraft.normalRestrictToSubject)}
-                          onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
-                          type="checkbox"
-                        />
-                        Normals on the subject only
                       </label>
                     ) : null}
                   </React.Fragment>

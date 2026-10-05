@@ -1340,7 +1340,11 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
         "supportsGradientNoise": true,
+        "supportsNormalLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {

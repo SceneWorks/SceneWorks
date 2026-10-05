@@ -1287,7 +1287,7 @@ fn apply_depth_anchoring(
     plan: &TrainingPlan,
     config: &mut TrainingConfig,
 ) -> WorkerResult<()> {
-    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
+    use sceneworks_core::training::depth_anchoring::{depth_anything_v2_model, X0DecoderSource};
 
     let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
@@ -1478,14 +1478,10 @@ fn preflight_subject_mask_paths(
     settings: &Settings,
     plan: &TrainingPlan,
 ) -> WorkerResult<Option<Vec<PathBuf>>> {
-    let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
+    if subject_mask_loss_weights(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
-        .is_some();
-    // sc-24832: the normal loss restricted to the subject reads the same per-image masks.
-    let body = body_loss_settings(&plan.config.advanced)
-        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    let restricted_normals = body.normal.is_some() && body.normal_restrict_to_subject;
-    if !masked_loss && !restricted_normals {
+        .is_none()
+    {
         return Ok(None);
     }
     let root = normalize_app_managed_path(settings, &plan.dataset.root_path, "Dataset root")?;
@@ -1526,13 +1522,8 @@ fn preflight_subject_mask_paths(
     if missing.len() > shown {
         names.push_str(&format!(" and {} more", missing.len() - shown));
     }
-    let technique = if masked_loss {
-        "Subject-masked loss"
-    } else {
-        "The subject-restricted normal loss"
-    };
     Err(WorkerError::InvalidPayload(format!(
-        "{technique} needs a subject mask on every dataset image, but {} of {} have none: \
+        "Subject-masked loss needs a subject mask on every dataset image, but {} of {} have none: \
          {names}. Generate subject masks for the dataset (or replace the empty ones), then retry.",
         missing.len(),
         plan.dataset.items.len()
@@ -4567,9 +4558,27 @@ mod tests {
         ))
         .is_ok());
 
-        // The Krea ControlNet branch trains no x0-decodable LoRA: refused on either backend.
-        assert!(err(plan("krea_control", "krea_2_raw", &on))
-            .contains("does not support depth anchoring"));
+        // The Krea ControlNet branch trains no x0-decodable LoRA. It is a Candle-only trainer (not
+        // registered in the MLX runtime); where it is registered its control request is refused.
+        let control_on = [
+            ("depthAnchoringWeight", json!(0.1)),
+            ("networkType", json!("control")),
+        ];
+        let control = err(plan("krea_control", "krea_2_raw", &control_on));
+        if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+            assert!(
+                control.contains("does not support depth anchoring"),
+                "{control}"
+            );
+            assert!(validate_training_target_config(&plan(
+                "krea_control",
+                "krea_2_raw",
+                &[("networkType", json!("control"))]
+            ))
+            .is_ok());
+        } else {
+            assert!(control.contains("not registered"), "{control}");
+        }
 
         // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
         // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.

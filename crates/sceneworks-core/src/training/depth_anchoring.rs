@@ -38,7 +38,7 @@ pub const DEPTH_ANCHORING_MODELS: [&str; 3] = ["small", "base", "large"];
 /// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
 /// depth anchoring (its `TrainerDescriptor::techniques.depth_anchoring`). Absent = no. The same
 /// gating as weight noise ([`super::WEIGHT_NOISE_SUPPORT_LIMIT`]): every LoRA trainer declares it
-/// on MLX and Candle alike except the Krea ControlNet branch and LTX-2.5 (sc-24830), so the builtin
+/// on MLX and Candle alike except the Krea ControlNet branch (sc-24830), so the builtin
 /// catalog flag is static per target; the web form shows the toggle only where it is `true`,
 /// submit-time validation refuses a non-zero weight elsewhere, and a worker test pins the flag to
 /// the linked trainer descriptors on each platform.
@@ -53,16 +53,59 @@ pub fn target_supports_depth_anchoring(target: &TrainingTarget) -> bool {
         == Some(true)
 }
 
+/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, web: `depthAnchoringNoVideoLtxWorkflows`) that
+/// generate no video stream — audio-only, or video as frozen conditioning — so there is no x0 video
+/// latent to decode; the engine's LTX-2.5 trainers refuse depth anchoring for them (sc-24830).
+pub const DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS: [&str; 6] = [
+    "v2a_lora",
+    "t2a_lora",
+    "audio_extend_lora",
+    "audio_inpainting_lora",
+    "audio_suffix_lora",
+    "a2a_ic_lora",
+];
+
+/// Why depth anchoring cannot run for this target + config combination even though the target
+/// advertises it, or `None`: a full base fine-tune (the engine trains aux losses through the adapter
+/// step only), or an LTX-2.5 workflow that generates no video. Mirrors the engine's typed refusals.
+pub fn depth_anchoring_combination_refusal(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Option<String> {
+    if super::config_is_full_finetune(config) {
+        return Some(
+            "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
+        );
+    }
+    if target.base_model == "ltx_2_5" {
+        let workflow = config
+            .advanced
+            .get("ltxWorkflow")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
+            return Some(format!(
+                "Depth anchoring needs a generated video stream; the LTX-2.5 workflow '{workflow}' \
+                 generates none."
+            ));
+        }
+    }
+    None
+}
+
 /// Refuses an enabled depth-anchoring request on a target that does not advertise
-/// [`DEPTH_ANCHORING_SUPPORT_LIMIT`] — a `depthAnchoringWeight` field error at submit time instead
-/// of a refusal after the job is queued.
+/// [`DEPTH_ANCHORING_SUPPORT_LIMIT`], or on a combination the engine refuses
+/// ([`depth_anchoring_combination_refusal`]) — a `depthAnchoringWeight` field error at submit time
+/// instead of a refusal after the job is queued.
 pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
-    if depth_anchoring_settings(&config.advanced)?.is_some()
-        && !target_supports_depth_anchoring(target)
-    {
+    if depth_anchoring_settings(&config.advanced)?.is_none() {
+        return Ok(());
+    }
+    if !target_supports_depth_anchoring(target) {
         return Err(field_error(
             DEPTH_ANCHORING_WEIGHT_KEY,
             format!(
@@ -71,6 +114,9 @@ pub(super) fn validate_support(
                 target.name
             ),
         ));
+    }
+    if let Some(reason) = depth_anchoring_combination_refusal(target, config) {
+        return Err(field_error(DEPTH_ANCHORING_WEIGHT_KEY, reason));
     }
     Ok(())
 }
@@ -148,7 +194,7 @@ pub const TAEW2_2_MODEL: AuxTrainingModel = AuxTrainingModel {
     file: "taew2_2.safetensors",
 };
 
-/// TAELTX2.3 (TAEHV) — the tiny decoder for the LTX-2.3 128-channel latent family.
+/// TAELTX2.3 (TAEHV) — the tiny decoder for the LTX-2.3 / LTX-2.5 128-channel latent family.
 pub const TAELTX2_3_MODEL: AuxTrainingModel = AuxTrainingModel {
     id: "taeltx2_3",
     label: "TAELTX2.3 tiny decoder",
@@ -213,8 +259,7 @@ pub enum X0DecoderSource {
 }
 
 /// The x0 decoder for a native trainer's latent family (keyed by the engine trainer id, sc-24830).
-/// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch,
-/// LTX-2.5's prepared latent bundles).
+/// `None` for a trainer that cannot run a decoded-x0 perceptual loss (the Krea ControlNet branch).
 pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
     use X0DecoderSource::{BaseModelVae, Catalog};
     Some(match trainer_id {
@@ -226,7 +271,9 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
             Catalog(&TAEW2_1_MODEL)
         }
         "wan2_2_ti2v_5b" => Catalog(&TAEW2_2_MODEL),
-        "ltx_2_3" => Catalog(&TAELTX2_3_MODEL),
+        // LTX-2.5 shares the LTX-2.3 latent space (upstream lists TAELTX2.3 for both); its
+        // prepared bundles carry the clean video latent the reference decodes.
+        "ltx_2_3" | "ltx_2_5" | "ltx_2_5_distilled" => Catalog(&TAELTX2_3_MODEL),
         "mage_flow_base" => BaseModelVae,
         _ => return None,
     })

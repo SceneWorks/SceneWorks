@@ -302,16 +302,52 @@ pub(super) fn validate(config: &TrainingConfig) -> Result<(), TrainingPlanError>
     body_loss_settings(&config.advanced).map(|_| ())
 }
 
-/// Refuses an enabled body loss on a target that does not advertise it — a `<loss>Weight` field
-/// error at submit time instead of a refusal after the job is queued.
+/// Why the body losses cannot run for this target + config combination even though the target
+/// advertises them, or `None` — the same combinations the engine refuses for every decoded-x0 loss
+/// (mirrors [`super::depth_anchoring::depth_anchoring_combination_refusal`]): a full base fine-tune
+/// (aux losses train through the adapter step only), or an LTX-2.5 workflow that generates no video.
+pub fn body_loss_combination_refusal(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Option<String> {
+    if super::config_is_full_finetune(config) {
+        return Some(
+            "The body losses train a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
+        );
+    }
+    if target.base_model == "ltx_2_5" {
+        let workflow = config
+            .advanced
+            .get("ltxWorkflow")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&workflow) {
+            return Some(format!(
+                "The body losses need a generated video stream; the LTX-2.5 workflow '{workflow}' \
+                 generates none."
+            ));
+        }
+    }
+    None
+}
+
+/// Refuses, as a field error at submit time instead of after the job is queued: an enabled body
+/// loss on a target that does not advertise it or on a combination the engine refuses
+/// ([`body_loss_combination_refusal`]) — on the loss's `<loss>Weight` key — and the
+/// subject-restricted normal loss ([`NORMAL_RESTRICT_TO_SUBJECT_KEY`]), which the engine refuses
+/// because no trainer feeds subject masks to the perceptual path yet.
 pub(super) fn validate_support(
     target: &TrainingTarget,
     config: &TrainingConfig,
 ) -> Result<(), TrainingPlanError> {
     let settings = body_loss_settings(&config.advanced)?;
     for loss in BodyLoss::ALL {
-        if settings.schedule(loss).is_some() && !target_supports(target, loss) {
-            let key = loss.weight_key();
+        if settings.schedule(loss).is_none() {
+            continue;
+        }
+        let key = loss.weight_key();
+        if !target_supports(target, loss) {
             return Err(field_error(
                 &key,
                 format!(
@@ -321,6 +357,15 @@ pub(super) fn validate_support(
                 ),
             ));
         }
+        if let Some(reason) = body_loss_combination_refusal(target, config) {
+            return Err(field_error(&key, reason));
+        }
+    }
+    if settings.normal.is_some() && settings.normal_restrict_to_subject {
+        return Err(field_error(
+            NORMAL_RESTRICT_TO_SUBJECT_KEY,
+            "Restricting the normal loss to the subject mask is not supported yet.".to_owned(),
+        ));
     }
     Ok(())
 }

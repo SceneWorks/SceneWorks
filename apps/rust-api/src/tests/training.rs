@@ -140,8 +140,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
 }
 
 /// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
-/// platforms — every LoRA target except the Krea ControlNet branch and LTX-2.5 (their trainers
-/// cannot decode x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
+/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
 /// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
@@ -165,7 +165,7 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .targets
         .iter()
         .map(|target| target.id.clone())
-        .filter(|id| id != "krea_2_control" && id != "ltx_2_5_video_lora")
+        .filter(|id| id != "krea_2_control")
         .collect();
     assert_eq!(mlx, all);
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));

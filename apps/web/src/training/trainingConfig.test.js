@@ -20,6 +20,8 @@ import {
   targetSupportsGradientNoise,
   trainingConfigSnapshot,
   targetSupportsDepthAnchoring,
+  depthAnchoringAvailable,
+  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
@@ -33,6 +35,7 @@ import {
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   bodyLosses,
+  bodyLossCombinationRefusal,
   bodyLossEveryMax,
   bodyLossWeightMax,
   bodyLossWeightSuggested,
@@ -1024,6 +1027,32 @@ describe("depth anchoring target support (sc-2125)", () => {
     expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
+
+  // sc-24830 review: an advertising target still refuses the combinations the engine refuses — a
+  // full base fine-tune and an LTX-2.5 workflow with no generated video — as a weight issue, and
+  // the control is not offered for them. Mutation: return null from
+  // depthAnchoringCombinationRefusal ⇒ red.
+  it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const messages = (draft, selectedTarget) =>
+      configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
+        .filter((entry) => entry.field === "depthAnchoringWeight")
+        .map((entry) => entry.message);
+    expect(messages({ networkType: "full" }, supported)).toEqual([
+      "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
+    ]);
+    expect(depthAnchoringAvailable(supported, { networkType: "full" })).toBe(false);
+    expect(depthAnchoringAvailable(supported, { networkType: "lora" })).toBe(true);
+    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
+    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+      expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
+      expect(depthAnchoringAvailable(ltx, { ltxWorkflow: workflow })).toBe(false);
+      // The same name on a non-LTX-2.5 target is no refusal.
+      expect(depthAnchoringAvailable(supported, { ltxWorkflow: workflow })).toBe(true);
+    }
+    expect(depthAnchoringAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+  });
 });
 
 // sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
@@ -1235,6 +1264,19 @@ describe("body losses (sc-24832)", () => {
     expect(fine.filter((entry) => /does not support the/.test(entry.message))).toEqual([]);
     expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: "true" } }, bodyLosses[1])).toBe(false);
     expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: true } }, bodyLosses[1])).toBe(true);
+  });
+
+  // Mirrors the API's combination refusals. Mutation: drop the LTX-2.5 workflow check ⇒ red.
+  it("refuses a full fine-tune and a video-less LTX-2.5 workflow", () => {
+    expect(bodyLossCombinationRefusal(bodyTarget, { networkType: "full" })).toMatch(/full fine-tune/);
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "v2a_lora" })).toMatch(/v2a_lora/);
+    expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "t2v_lora" })).toBe(null);
+    const blocked = configValidation(
+      { ...whole, networkType: "full", bodyShapeWeight: "0.1" },
+      { activeDataset: dataset, selectedTarget: bodyTarget },
+    );
+    expect(blocked.some((entry) => entry.field === null && /full fine-tune/.test(entry.message))).toBe(true);
   });
 
   it("uses the API's bounds", () => {

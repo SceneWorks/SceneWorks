@@ -2078,6 +2078,67 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
+    let workflows: Vec<String> =
+        serde_json::from_str(&web_training_const("depthAnchoringNoVideoLtxWorkflows"))
+            .expect("depthAnchoringNoVideoLtxWorkflows is a JSON-compatible string array");
+    assert_eq!(workflows, DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.to_vec());
+}
+
+/// sc-24830 review: submit refuses the depth-anchoring combinations the engine refuses even on an
+/// advertising target — a Mage full base fine-tune and each LTX-2.5 workflow with no generated
+/// video — as a `depthAnchoringWeight` field error; the adapter run and a video LTX-2.5 workflow
+/// are admitted. Mutation: drop the `depth_anchoring_combination_refusal` check from
+/// `validate_support` ⇒ the refused cases are admitted ⇒ red.
+#[test]
+fn depth_anchoring_refuses_full_finetune_and_no_video_ltx_workflows_at_submit() {
+    use sceneworks_core::training::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS;
+    let registry = builtin_training_targets();
+    let target = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .clone()
+    };
+    let with = |target: &sceneworks_core::training::TrainingTarget, extra: &[(&str, Value)]| {
+        let mut config = target.defaults.clone();
+        config
+            .advanced
+            .insert("depthAnchoringWeight".to_owned(), json!(0.1));
+        for (k, v) in extra {
+            config.advanced.insert((*k).to_owned(), v.clone());
+        }
+        validate_training_config_for_target(target, &config)
+    };
+    let refused = |r: Result<(), TrainingPlanError>, what: &str| match r {
+        Err(TrainingPlanError::InvalidField { field, .. }) => {
+            assert_eq!(field, "depthAnchoringWeight", "{what}")
+        }
+        other => panic!("{what}: expected a depthAnchoringWeight field error, got {other:?}"),
+    };
+    let mage = registry
+        .targets
+        .iter()
+        .find(|t| t.base_model == "mage_flow_base")
+        .expect("mage target")
+        .clone();
+    with(&mage, &[("networkType", json!("lora"))]).expect("Mage LoRA admits depth");
+    refused(with(&mage, &[("networkType", json!("full"))]), "mage full");
+    let ltx = target("ltx_2_5_video_lora");
+    with(&ltx, &[("ltxWorkflow", json!("t2v_lora"))]).expect("LTX-2.5 t2v admits depth");
+    for workflow in DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS {
+        refused(with(&ltx, &[("ltxWorkflow", json!(workflow))]), workflow);
+    }
+    // The same workflow name on LTX-2.3 is not an LTX-2.5 bundle workflow: no extra refusal.
+    let ltx23 = target("ltx_video_lora");
+    assert!(
+        sceneworks_core::training::depth_anchoring::depth_anchoring_combination_refusal(
+            &ltx23,
+            &ltx23.defaults
+        )
+        .is_none()
+    );
 }
 
 /// sc-2125 / sc-24830: every auxiliary model depth anchoring loads — each family's tiny x0 decoder
@@ -2148,11 +2209,13 @@ fn every_depth_trainer_maps_to_its_latent_familys_x0_decoder() {
         ("wan2_2_i2v_14b", Catalog(&TAEW2_1_MODEL)),
         ("wan2_2_ti2v_5b", Catalog(&TAEW2_2_MODEL)),
         ("ltx_2_3", Catalog(&TAELTX2_3_MODEL)),
+        ("ltx_2_5", Catalog(&TAELTX2_3_MODEL)),
+        ("ltx_2_5_distilled", Catalog(&TAELTX2_3_MODEL)),
         ("mage_flow_base", BaseModelVae),
     ] {
         assert_eq!(x0_decoder_for_trainer(trainer), Some(expected), "{trainer}");
     }
-    for trainer in ["krea_2_control", "ltx_2_5", "unknown"] {
+    for trainer in ["krea_2_control", "unknown"] {
         assert_eq!(x0_decoder_for_trainer(trainer), None, "{trainer}");
     }
 }
@@ -2543,7 +2606,7 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
 }
 
 /// sc-2125 / sc-24830: only targets whose trainer declares depth anchoring advertise it — every
-/// LoRA target except the Krea ControlNet branch and LTX-2.5, on both platforms — and an enabled
+/// LoRA target except the Krea ControlNet branch, on both platforms — and an enabled
 /// depth weight on any other target is a submit-time `depthAnchoringWeight` field error.
 /// Mutation: drop `depth_anchoring::validate_support` from `validate_training_config_for_target` ⇒
 /// the Krea ControlNet case is accepted ⇒ red.
@@ -2573,7 +2636,7 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         .filter(|target| !target_supports_depth_anchoring(target))
         .map(|target| target.id.as_str())
         .collect();
-    assert_eq!(unsupported, ["krea_2_control", "ltx_2_5_video_lora"]);
+    assert_eq!(unsupported, ["krea_2_control"]);
 
     for target in &registry.targets {
         with_weight(target, json!(0)).unwrap_or_else(|e| panic!("{}: {e}", target.id));
@@ -2652,7 +2715,6 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
         ("normalMinT", json!(0.1)),
         ("normalMaxT", json!(0.9)),
         ("normalEvery", json!(BODY_LOSS_EVERY_MAX)),
-        ("normalRestrictToSubject", json!(true)),
     ];
     let plan = build_plan_with_body_advanced(&good).expect("in-range body losses are accepted");
     for (key, value) in &good {
@@ -2667,7 +2729,7 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
         (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
     );
     assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
-    assert!(s.include_head && s.normal_restrict_to_subject);
+    assert!(s.include_head && !s.normal_restrict_to_subject);
     assert_eq!(s.shape_min_cos, 0.5);
     let off = build_plan_with_body_advanced(&[("bodyShapeWeight", json!(0))]).unwrap();
     assert!(!body_loss_settings(&off.config.advanced)
@@ -2863,5 +2925,67 @@ fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
                 loss.weight_key()
             ),
         }
+    }
+}
+
+/// sc-24832: the body losses mirror depth anchoring's combination refusals — a full fine-tune and a
+/// video-less LTX-2.5 workflow are `<loss>Weight` field errors even on an advertising target — and
+/// the subject-restricted normal loss is a `normalRestrictToSubject` field error (the engine refuses
+/// it: no trainer feeds masks to the perceptual path yet). Mutation: drop the
+/// `body_loss_combination_refusal` check from `validate_support` ⇒ red.
+#[test]
+fn body_losses_refuse_the_combinations_the_engine_refuses() {
+    use sceneworks_core::training::body_losses::{body_loss_combination_refusal, BodyLoss};
+    let registry = builtin_training_targets();
+    let ltx25 = registry
+        .targets
+        .iter()
+        .find(|t| t.base_model == "ltx_2_5")
+        .expect("an LTX-2.5 target")
+        .clone();
+    let mut config = ltx25.defaults.clone();
+    config
+        .advanced
+        .insert("ltxWorkflow".to_owned(), json!("v2a_lora"));
+    config
+        .advanced
+        .insert(BodyLoss::Shape.weight_key(), json!(0.1));
+    assert!(body_loss_combination_refusal(&ltx25, &config).is_some());
+    match validate_training_config_for_target(&ltx25, &config) {
+        Err(TrainingPlanError::InvalidField { field, message }) => {
+            assert_eq!(field, "bodyShapeWeight");
+            assert!(message.contains("v2a_lora"), "{message}");
+        }
+        other => panic!("expected a bodyShapeWeight field error, got {other:?}"),
+    }
+    let mut full = registry
+        .targets
+        .iter()
+        .find(|t| t.id == "z_image_turbo_lora")
+        .unwrap()
+        .defaults
+        .clone();
+    full.advanced
+        .insert("networkType".to_owned(), json!("full"));
+    full.advanced
+        .insert(BodyLoss::Proportion.weight_key(), json!(0.1));
+    let z_image = registry
+        .targets
+        .iter()
+        .find(|t| t.id == "z_image_turbo_lora")
+        .unwrap();
+    assert!(body_loss_combination_refusal(z_image, &full).is_some());
+    let mut restricted = z_image.defaults.clone();
+    restricted
+        .advanced
+        .insert("normalWeight".to_owned(), json!(0.1));
+    restricted
+        .advanced
+        .insert("normalRestrictToSubject".to_owned(), json!(true));
+    match validate_training_config_for_target(z_image, &restricted) {
+        Err(TrainingPlanError::InvalidField { field, .. }) => {
+            assert_eq!(field, "normalRestrictToSubject")
+        }
+        other => panic!("expected a normalRestrictToSubject field error, got {other:?}"),
     }
 }
