@@ -2639,12 +2639,17 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
     let p = s.proportion.as_ref().expect("proportion on");
     assert_eq!((p.min_t, p.max_t, p.every), (0.0, 1.0, 1));
     let sh = s.shape.as_ref().expect("shape on");
-    assert_eq!((sh.min_t, sh.max_t, sh.every), (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT));
+    assert_eq!(
+        (sh.min_t, sh.max_t, sh.every),
+        (0.4, 0.8, BODY_LOSS_EVERY_DEFAULT)
+    );
     assert_eq!(s.normal.as_ref().unwrap().every, BODY_LOSS_EVERY_MAX as u32);
     assert!(s.include_head && s.normal_restrict_to_subject);
     assert_eq!(s.shape_min_cos, 0.5);
     let off = build_plan_with_body_advanced(&[("bodyShapeWeight", json!(0))]).unwrap();
-    assert!(!body_loss_settings(&off.config.advanced).unwrap().any_enabled());
+    assert!(!body_loss_settings(&off.config.advanced)
+        .unwrap()
+        .any_enabled());
 
     for (key, value, extra) in [
         ("bodyProportionWeight", json!(-0.01), None),
@@ -2675,7 +2680,9 @@ fn build_training_plan_validates_body_losses_as_field_errors() {
 
 /// Build a Z-Image plan whose `advanced` carries the given body-loss keys, on a target that
 /// advertises all three body losses (so the parser — not the support gate — is under test).
-fn build_plan_with_body_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan, TrainingPlanError> {
+fn build_plan_with_body_advanced(
+    extra: &[(&str, Value)],
+) -> Result<TrainingPlan, TrainingPlanError> {
     use sceneworks_core::training::body_losses::BodyLoss;
     let dataset = dataset_fixture();
     let registry = builtin_training_targets();
@@ -2686,7 +2693,9 @@ fn build_plan_with_body_advanced(extra: &[(&str, Value)]) -> Result<TrainingPlan
         .expect("z_image_turbo_lora target present")
         .clone();
     for loss in BodyLoss::ALL {
-        target.limits.insert(loss.support_limit().to_owned(), json!(true));
+        target
+            .limits
+            .insert(loss.support_limit().to_owned(), json!(true));
     }
     let mut config = target.defaults.clone();
     for (key, value) in extra {
@@ -2789,13 +2798,12 @@ fn body_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             .unwrap_or_else(|| panic!("{id} target present"))
             .clone()
     };
-    let with_weight = |target: &sceneworks_core::training::TrainingTarget,
-                       loss: BodyLoss,
-                       weight: Value| {
-        let mut config = target.defaults.clone();
-        config.advanced.insert(loss.weight_key(), weight);
-        validate_training_config_for_target(target, &config)
-    };
+    let with_weight =
+        |target: &sceneworks_core::training::TrainingTarget, loss: BodyLoss, weight: Value| {
+            let mut config = target.defaults.clone();
+            config.advanced.insert(loss.weight_key(), weight);
+            validate_training_config_for_target(target, &config)
+        };
     for loss in BodyLoss::ALL {
         let advertising: Vec<&str> = registry
             .targets

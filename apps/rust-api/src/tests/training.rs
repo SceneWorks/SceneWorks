@@ -158,6 +158,31 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     assert!(advertising(true).is_empty());
 }
 
+/// sc-24832: the targets endpoint advertises each body loss per platform — the proportion loss on
+/// Z-Image in the MLX catalog (shape/normal await their cataloged weights), nothing on the Candle
+/// catalog. Mutation: drop the body-loss removal from `project_candle_training_limits` ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_body_loss_support() {
+    use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+    for loss in BodyLoss::ALL {
+        let advertising = |candle: bool| -> Vec<String> {
+            crate::training::effective_training_targets_for_candle(candle)
+                .targets
+                .iter()
+                .filter(|target| target_supports(target, loss))
+                .map(|target| target.id.clone())
+                .collect()
+        };
+        let mlx: Vec<String> = if loss == BodyLoss::Proportion {
+            vec!["z_image_turbo_lora".to_owned()]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(advertising(false), mlx, "{loss:?}");
+        assert!(advertising(true).is_empty(), "{loss:?}");
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);

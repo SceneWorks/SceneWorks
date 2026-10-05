@@ -1307,8 +1307,11 @@ fn apply_depth_anchoring(
     let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
     })?;
-    config.perceptual_decoder_dir =
-        Some(installed_aux_model_dir(settings, decoder, "Depth anchoring")?);
+    config.perceptual_decoder_dir = Some(installed_aux_model_dir(
+        settings,
+        decoder,
+        "Depth anchoring",
+    )?);
     config.depth_anchoring = gen_core::DepthAnchoringConfig {
         schedule: gen_core::AuxLossSchedule {
             weight: depth.weight as f32,
@@ -4697,6 +4700,185 @@ mod tests {
         );
     }
 
+    /// sc-24832: the worker preflight refuses an enabled body loss on a trainer whose descriptor
+    /// does not declare it, a loss whose frozen model is not cataloged, and malformed values
+    /// (naming the key); it admits the proportion loss where the active runtime's trainer declares
+    /// it (Z-Image on MLX). Mutation: drop the per-loss `declared` check ⇒ the SDXL case is
+    /// admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_body_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let on = [("bodyProportionWeight", json!(0.1))];
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("bodyProportionWeight", json!(0))]
+        ))
+        .is_ok());
+        let sdxl_declares = crate::inference_runtime::trainer_descriptor("sdxl")
+            .map(|d| d.techniques.body_proportion_loss)
+            .unwrap_or(false);
+        if !sdxl_declares {
+            assert!(err(plan("sdxl_lora", "sdxl", &on))
+                .contains("does not support the body proportion loss"));
+        }
+        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques;
+        let z_image = plan("z_image_lora", "z_image_turbo", &on);
+        if declared.body_proportion_loss {
+            validate_training_target_config(&z_image).expect("a declaring Z-Image admits it");
+        } else {
+            assert!(err(z_image).contains("does not support the body proportion loss"));
+        }
+        // Shape/normal: refused — undeclared, or (declared) its model is not cataloged yet.
+        for (key, declared) in [
+            ("bodyShapeWeight", declared.body_shape_loss),
+            ("normalWeight", declared.normal_loss),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, json!(0.1))]));
+            let expected = if declared {
+                "not in the model catalog"
+            } else {
+                "does not support the"
+            };
+            assert!(message.contains(expected), "{key}: {message}");
+        }
+        for (key, bad) in [
+            ("bodyProportionWeight", json!(-0.1)),
+            ("bodyShapeMaxT", json!(1.5)),
+            ("normalEvery", json!(0)),
+            ("bodyShapeMinCos", json!("x")),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
+
+    /// sc-24832: an enabled body-loss plan maps onto the engine's typed `BodyLossesConfig` — per-loss
+    /// schedules with upstream's default windows, the knobs — and resolves the tiny decoder and
+    /// ViTPose+ from the installed library at their pinned revisions; a missing (or wrong-revision)
+    /// checkpoint is refused naming the catalog model; an enabled loss whose model is not cataloged
+    /// is refused; off leaves the config untouched. Mutation: drop `pose_model_dir` resolution
+    /// (`None`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn body_losses_map_the_schedules_and_resolve_installed_aux_models() {
+        use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("bodyProportionWeight", json!(0.15)),
+            ("bodyProportionIncludeHead", json!(true)),
+            ("bodyProportionEvery", json!(1)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_body_losses(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_body_losses(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.body_losses.any_enabled());
+        assert_eq!(config.body_losses.pose_model_dir, None);
+        assert_eq!(config.perceptual_decoder_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(VITPOSE_PLUS_BASE_MODEL.id));
+        fake_snapshot(
+            &hub,
+            VITPOSE_PLUS_BASE_MODEL.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            VITPOSE_PLUS_BASE_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(VITPOSE_PLUS_BASE_MODEL.id));
+        let vitpose = fake_snapshot(
+            &hub,
+            VITPOSE_PLUS_BASE_MODEL.repo,
+            VITPOSE_PLUS_BASE_MODEL.revision,
+            VITPOSE_PLUS_BASE_MODEL.file,
+        );
+
+        let mut config = map_training_config(&plan.config);
+        apply_body_losses(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        let body = &config.body_losses;
+        assert_eq!(
+            canon(body.pose_model_dir.as_ref().unwrap()),
+            canon(&vitpose)
+        );
+        assert_eq!(
+            body.proportion,
+            gen_core::AuxLossSchedule {
+                weight: 0.15,
+                t_min: 0.0,
+                t_max: 1.0,
+                every_n: 1,
+            }
+        );
+        assert!(body.include_head);
+        assert!(!body.shape.is_enabled() && !body.normal.is_enabled());
+        assert_eq!(body.shape_model_dir, None);
+        assert_eq!(body.normal_model_dir, None);
+
+        // A loss whose frozen model is not cataloged is refused (never trained without it).
+        let mut shape = plan.clone();
+        shape
+            .config
+            .advanced
+            .insert("bodyShapeWeight".to_owned(), json!(0.1));
+        assert!(refusal(&shape).contains("not in the model catalog"));
+    }
+
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
     /// families (Z-Image, LTX-2.3, and both Wan A14B variants), so `finalize_training_config` must force gradient
     /// checkpointing on for them even when the resolved plan turns it off — a user un-checking the
@@ -6344,6 +6526,7 @@ mod tests {
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
             depth_anchoring: Default::default(),
+            body_losses: Default::default(),
             perceptual_decoder_dir: None,
             subject_mask_loss: None,
         };
@@ -6466,6 +6649,7 @@ mod tests {
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
             depth_anchoring: Default::default(),
+            body_losses: Default::default(),
             perceptual_decoder_dir: None,
             subject_mask_loss: None,
         };
@@ -6591,6 +6775,7 @@ mod tests {
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
             depth_anchoring: Default::default(),
+            body_losses: Default::default(),
             perceptual_decoder_dir: None,
             subject_mask_loss: None,
         };
@@ -6754,6 +6939,7 @@ mod tests {
             gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
             resolution_buckets: Vec::new(),
             depth_anchoring: Default::default(),
+            body_losses: Default::default(),
             perceptual_decoder_dir: None,
             subject_mask_loss: None,
         };

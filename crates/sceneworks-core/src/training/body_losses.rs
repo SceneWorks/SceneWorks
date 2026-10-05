@@ -204,7 +204,12 @@ fn number_in(
         Some(value) => value
             .as_f64()
             .filter(|v| v.is_finite() && (lo..=hi).contains(v))
-            .ok_or_else(|| field_error(key, format!("{key} must be a number between {lo} and {hi}."))),
+            .ok_or_else(|| {
+                field_error(
+                    key,
+                    format!("{key} must be a number between {lo} and {hi}."),
+                )
+            }),
     }
 }
 
