@@ -1667,16 +1667,20 @@ fn installed_aux_model_dir(
     model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
     technique: &str,
 ) -> WorkerResult<PathBuf> {
-    if let Some(dir) = crate::model_jobs::huggingface_pinned_snapshot_dir(
-        &settings.data_dir,
-        model.repo,
-        model.revision,
-    ) {
-        if dir.join(model.file).is_file() {
-            return Ok(dir);
-        }
-    }
-    Err(not_installed(model, technique))
+    installed_aux_training_model_dir(&settings.data_dir, model)
+        .ok_or_else(|| not_installed(model, technique))
+}
+
+/// The installed snapshot directory of an auxiliary training model — the pinned `repo@revision`
+/// snapshot that actually holds `model.file` — or `None`. The ONE install check the worker's
+/// resolution ([`installed_aux_model_dir`]) and the API's submit-time refusal (sc-25213) share, so
+/// the two cannot disagree about what "installed" means.
+pub fn installed_aux_training_model_dir(
+    data_dir: &Path,
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+) -> Option<PathBuf> {
+    crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, model.repo, model.revision)
+        .filter(|dir| dir.join(model.file).is_file())
 }
 
 /// The typed refusal for an auxiliary training model that is not installed, naming the catalog

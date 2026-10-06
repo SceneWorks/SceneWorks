@@ -662,6 +662,7 @@ describe("de-distill training adapter (sc-25213)", () => {
     const issues = adapterIssues([{ id: "zimage_turbo_training_adapter_v2", name: "Z-Image Turbo Training Adapter v2" }]);
     expect(issues).toHaveLength(1);
     expect(issues[0].message).toContain("Z-Image Turbo Training Adapter v2");
+    expect(issues[0].field).toBe("trainingAdapterVersion");
     expect(summarize(issues).surfaced).toHaveLength(1);
     expect(adapterIssues([])).toEqual([]);
     expect(adapterIssues(undefined)).toEqual([]);

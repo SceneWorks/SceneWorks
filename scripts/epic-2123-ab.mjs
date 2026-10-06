@@ -287,6 +287,19 @@ function ladderLabel(ladder) {
   return `Resolution buckets ${ladder.map((b) => b.resolution).join("/")} ×${ladder.map((b) => b.repeats).join(":")}`;
 }
 
+// The de-distill training adapter catalog model a preset's `advanced` selects (sc-25213), or null —
+// the same mapping the worker resolves (`sceneworks_core::training::training_adapter`): v1 → the v1
+// file; v2, the presets' "v2-default" and blank → v2. An unknown repo/version is the API's field
+// error at submit, so setup has nothing to install for it.
+function trainingAdapterModelId(advanced) {
+  const repo = String(advanced?.trainingAdapterRepo ?? "").trim();
+  if (repo !== "ostris/zimage_turbo_training_adapter") return null;
+  const version = String(advanced?.trainingAdapterVersion ?? "").trim().toLowerCase();
+  if (version === "v1") return "zimage_turbo_training_adapter_v1";
+  if (["", "v2", "v2-default"].includes(version)) return "zimage_turbo_training_adapter_v2";
+  return null;
+}
+
 function auxModelsFor(modelKey, opts) {
   const set = new Set(BASE_AUX);
   for (const row of techniqueRows(modelKey, opts)) row.aux.forEach((id) => set.add(id));
@@ -768,6 +781,13 @@ async function resolveModels(opts) {
   }
   for (const id of new Set(Object.keys(MODELS).flatMap((k) => auxModelsFor(k, opts)))) {
     wanted.push({ id, variants: ["default"], role: "aux" });
+  }
+  // The training adapter each model's preset trains with (Z-Image-Turbo's de-distill adapter, at
+  // the preset's own version), installed through the same download path — the API refuses a real run
+  // whose adapter is missing.
+  for (const key of Object.keys(MODELS)) {
+    const id = trainingAdapterModelId((await presetFor(key)).config?.advanced);
+    if (id) wanted.push({ id, variants: ["default"], role: `${MODELS[key].label} training adapter` });
   }
   const resolution = {};
   const toDownload = [];

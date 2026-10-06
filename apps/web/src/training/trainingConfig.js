@@ -902,11 +902,12 @@ export function configValidation(
     );
   }
   // The de-distill training adapter (sc-25213) resolves from the installed library only — a missing
-  // one is refused by the worker, so it gates Start like the preprocessor models above; the panel
-  // renders the download offer.
+  // one is refused at submit by the API and by the worker, so it gates Start like the preprocessor
+  // models above; the panel renders the download offer.
   if (missingTrainingAdapterModels.length > 0) {
     const names = missingTrainingAdapterModels.map((model) => model?.name ?? model?.id).filter(Boolean);
-    issues.push(issue.error(null, `Install ${names.join(" and ")} — this run trains with it.`));
+    // Attached to the version picker — the same field the API's submit-time refusal names.
+    issues.push(issue.error("trainingAdapterVersion", `Install ${names.join(" and ")} — this run trains with it.`));
   }
   if (selectedTarget?.baseModel === "ltx_2_5") {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)

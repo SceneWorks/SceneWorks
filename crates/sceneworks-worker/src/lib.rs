@@ -229,6 +229,8 @@ mod video_admission;
 // (it reuses that module's byte-summing + unified-memory budget probe). Re-exported for the rust-api
 // training submit gate, which calls it alongside `training_base_model_status`/`training_disk_space_error`.
 pub use mlx_fit_gate::full_finetune_memory_error;
+// The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
+pub use training_jobs::installed_aux_training_model_dir;
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
