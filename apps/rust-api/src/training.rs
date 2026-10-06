@@ -584,9 +584,12 @@ pub(crate) async fn create_training_dataset_caption_job(
             })
             .count();
         if missing > 0 {
-            return Err(ApiError::bad_request(format!(
-                "Caption mode triggerOnly needs trigger words on every image; {missing} image(s) have none."
-            )));
+            return Err(training_field_error(
+                "triggerWords",
+                format!(
+                    "Caption mode triggerOnly needs trigger words on every image; {missing} image(s) have none."
+                ),
+            ));
         }
     }
     let options = serde_json::to_value(payload.options)
@@ -1621,6 +1624,17 @@ pub(crate) async fn strip_exif_training_dataset_items(
 pub(crate) const TRAINING_CAPTION_TRIGGER_WORDS_MAX: usize = 16;
 pub(crate) const TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS: usize = 64;
 
+/// A 400 attributed to one training input field (epic 2123 E6): `code: "training_field_error"` and
+/// the field in `context.field`, so the client can mark that input instead of parsing `detail`.
+fn training_field_error(field: &str, detail: impl Into<String>) -> ApiError {
+    ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        detail.into(),
+        "training_field_error",
+        json!({ "field": field }),
+    )
+}
+
 pub(crate) fn validate_training_caption_job_request(
     payload: &TrainingCaptionJobRequest,
 ) -> Result<(), ApiError> {
@@ -1634,33 +1648,42 @@ pub(crate) fn validate_training_caption_job_request(
         // The subject-only prompt is owned by the worker; a caller prompt would silently replace
         // it, so the two are refused together rather than one being ignored.
         CaptionMode::SubjectOnly if !payload.options.caption_prompt.trim().is_empty() => {
-            return Err(ApiError::bad_request(
+            return Err(training_field_error(
+                "mode",
                 "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty.",
             ));
         }
         CaptionMode::SubjectOnly => {}
         _ => {
-            return Err(ApiError::bad_request(
+            return Err(training_field_error(
+                "mode",
                 "Caption mode must be one of default, subjectOnly, or triggerOnly.",
             ));
         }
     }
     if payload.trigger_words.len() > TRAINING_CAPTION_TRIGGER_WORDS_MAX {
-        return Err(ApiError::bad_request(format!(
-            "triggerWords: use at most {TRAINING_CAPTION_TRIGGER_WORDS_MAX} trigger words."
-        )));
+        return Err(training_field_error(
+            "triggerWords",
+            format!(
+                "triggerWords: use at most {TRAINING_CAPTION_TRIGGER_WORDS_MAX} trigger words."
+            ),
+        ));
     }
     for word in &payload.trigger_words {
         let word = word.trim();
         if word.is_empty() {
-            return Err(ApiError::bad_request(
+            return Err(training_field_error(
+                "triggerWords",
                 "triggerWords: trigger words must not be empty.",
             ));
         }
         if word.chars().count() > TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS {
-            return Err(ApiError::bad_request(format!(
-                "triggerWords: each trigger word must be at most {TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS} characters."
-            )));
+            return Err(training_field_error(
+                "triggerWords",
+                format!(
+                    "triggerWords: each trigger word must be at most {TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS} characters."
+                ),
+            ));
         }
     }
     if payload.model_name_or_path.trim().is_empty() {
@@ -2208,12 +2231,7 @@ fn training_plan_error_to_api_error(
             )
         }
         sceneworks_core::training::TrainingPlanError::InvalidField { field, message } => {
-            ApiError::typed(
-                StatusCode::BAD_REQUEST,
-                message,
-                "training_field_error",
-                json!({ "field": field }),
-            )
+            training_field_error(&field, message)
         }
         other => ApiError::bad_request(other.to_string()),
     }

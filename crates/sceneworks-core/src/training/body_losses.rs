@@ -11,7 +11,7 @@
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;
-use super::{TrainingConfig, TrainingPlanError, TrainingTarget};
+use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};
 use crate::contracts::JsonObject;
 
 /// One of the three body losses.
@@ -213,7 +213,7 @@ fn number_in(
     lo: f64,
     hi: f64,
 ) -> Result<f64, TrainingPlanError> {
-    match advanced.get(key) {
+    match technique_value(advanced, key) {
         None => Ok(default),
         Some(value) => value
             .as_f64()
@@ -228,7 +228,7 @@ fn number_in(
 }
 
 fn flag(advanced: &JsonObject, key: &str) -> Result<bool, TrainingPlanError> {
-    match advanced.get(key) {
+    match technique_value(advanced, key) {
         None => Ok(false),
         Some(value) => value
             .as_bool()
@@ -254,7 +254,7 @@ fn schedule(
         ));
     }
     let every_key = format!("{p}Every");
-    let every = match advanced.get(&every_key) {
+    let every = match technique_value(advanced, &every_key) {
         None => BODY_LOSS_EVERY_DEFAULT,
         Some(value) => value
             .as_u64()
@@ -302,20 +302,17 @@ pub(super) fn validate(config: &TrainingConfig) -> Result<(), TrainingPlanError>
     body_loss_settings(&config.advanced).map(|_| ())
 }
 
-/// Why the body losses cannot run for this target + config combination even though the target
+/// Why the body losses cannot run for a `base_model` target + config even though the target
 /// advertises them, or `None` — the same combinations the engine refuses for every decoded-x0 loss
 /// (mirrors [`super::depth_anchoring::depth_anchoring_combination_refusal`]): a full base fine-tune
 /// (aux losses train through the adapter step only), or an LTX-2.5 workflow that generates no video.
-pub fn body_loss_combination_refusal(
-    target: &TrainingTarget,
-    config: &TrainingConfig,
-) -> Option<String> {
+pub fn body_loss_combination_refusal(base_model: &str, config: &TrainingConfig) -> Option<String> {
     if super::config_is_full_finetune(config) {
         return Some(
             "The body losses train a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
         );
     }
-    if target.base_model == "ltx_2_5" {
+    if base_model == "ltx_2_5" {
         let workflow = config
             .advanced
             .get("ltxWorkflow")
@@ -357,7 +354,7 @@ pub(super) fn validate_support(
                 ),
             ));
         }
-        if let Some(reason) = body_loss_combination_refusal(target, config) {
+        if let Some(reason) = body_loss_combination_refusal(&target.base_model, config) {
             return Err(field_error(&key, reason));
         }
     }

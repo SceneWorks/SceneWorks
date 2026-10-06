@@ -2134,7 +2134,7 @@ fn depth_anchoring_refuses_full_finetune_and_no_video_ltx_workflows_at_submit() 
     let ltx23 = target("ltx_video_lora");
     assert!(
         sceneworks_core::training::depth_anchoring::depth_anchoring_combination_refusal(
-            &ltx23,
+            &ltx23.base_model,
             &ltx23.defaults
         )
         .is_none()
@@ -2951,7 +2951,7 @@ fn body_losses_refuse_the_combinations_the_engine_refuses() {
     config
         .advanced
         .insert(BodyLoss::Shape.weight_key(), json!(0.1));
-    assert!(body_loss_combination_refusal(&ltx25, &config).is_some());
+    assert!(body_loss_combination_refusal(&ltx25.base_model, &config).is_some());
     match validate_training_config_for_target(&ltx25, &config) {
         Err(TrainingPlanError::InvalidField { field, message }) => {
             assert_eq!(field, "bodyShapeWeight");
@@ -2975,7 +2975,7 @@ fn body_losses_refuse_the_combinations_the_engine_refuses() {
         .iter()
         .find(|t| t.id == "z_image_turbo_lora")
         .unwrap();
-    assert!(body_loss_combination_refusal(z_image, &full).is_some());
+    assert!(body_loss_combination_refusal(&z_image.base_model, &full).is_some());
     let mut restricted = z_image.defaults.clone();
     restricted
         .advanced
@@ -3564,7 +3564,7 @@ fn latent_perceptual_losses_refuse_the_combinations_the_engine_refuses() {
             .advanced
             .insert("ltxWorkflow".to_owned(), json!(workflow));
         assert!(
-            latent_loss_combination_refusal(&VAE_ANCHOR, &ltx, &config).is_some(),
+            latent_loss_combination_refusal(&VAE_ANCHOR, &ltx.base_model, &config).is_some(),
             "{workflow}"
         );
     }
@@ -3573,7 +3573,105 @@ fn latent_perceptual_losses_refuse_the_combinations_the_engine_refuses() {
         .advanced
         .insert("ltxWorkflow".to_owned(), json!("t2v_lora"));
     assert_eq!(
-        latent_loss_combination_refusal(&VAE_ANCHOR, &ltx, &config),
+        latent_loss_combination_refusal(&VAE_ANCHOR, &ltx.base_model, &config),
         None
     );
+}
+
+/// Epic 2123 feature review: each target advertises the x0 decoder its decoded-x0 losses really
+/// load (`limits.x0Decoder`, projected from `x0_decoder_for_trainer` through the target's trainer
+/// identity) — the per-family label the web help text names, not TAEF1 everywhere. Mage decodes
+/// through its own VAE (nothing to install); the Krea ControlNet branch has no decoder. Mutation:
+/// project TAEF1 for every target, or drop the projection ⇒ red.
+#[test]
+fn builtin_targets_advertise_their_families_x0_decoder() {
+    let registry = builtin_training_targets();
+    let decoder = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|t| t.id == id)
+            .unwrap_or_else(|| panic!("{id}"))
+            .limits
+            .get("x0Decoder")
+            .cloned()
+    };
+    let installed = |label: &str| Some(json!({ "label": label, "install": true }));
+    assert_eq!(
+        decoder("z_image_turbo_lora"),
+        installed("TAEF1 tiny decoder")
+    );
+    assert_eq!(decoder("sdxl_lora"), installed("TAESDXL tiny decoder"));
+    assert_eq!(decoder("kolors_lora"), installed("TAESDXL tiny decoder"));
+    assert_eq!(
+        decoder("sd3_5_medium_lora"),
+        installed("TAESD3 tiny decoder")
+    );
+    assert_eq!(decoder("lens_turbo_lora"), installed("TAEF2 tiny decoder"));
+    assert_eq!(
+        decoder("anima_base_lora"),
+        installed("TAEW2.1 tiny decoder")
+    );
+    assert_eq!(decoder("wan_lora"), installed("TAEW2.2 tiny decoder"));
+    assert_eq!(
+        decoder("ltx_2_5_video_lora"),
+        installed("TAELTX2.3 tiny decoder")
+    );
+    assert_eq!(
+        decoder("mage_flow_base_lora"),
+        Some(json!({ "label": "the base model's own VAE", "install": false }))
+    );
+    assert_eq!(decoder("krea_2_control"), None);
+    // Every target offering a decoded-x0 loss names its decoder.
+    for target in &registry.targets {
+        if target.limits.get("supportsDepthAnchoring") == Some(&json!(true)) {
+            assert!(target.limits.contains_key("x0Decoder"), "{}", target.id);
+        }
+    }
+}
+
+/// Epic 2123 JSON-null policy: an explicit `null` on any technique key means absent — every key
+/// nulled at once, and each key nulled alone, validates exactly like the bare defaults, and each
+/// shared parser reads the nulled bag as "off". Mutation: read any one key with `advanced.get`
+/// instead of `technique_value` ⇒ that key is a type error ⇒ red.
+#[test]
+fn null_technique_keys_mean_absent() {
+    use sceneworks_core::training::body_losses::body_loss_settings;
+    use sceneworks_core::training::depth_anchoring::depth_anchoring_settings;
+    use sceneworks_core::training::face_losses::{
+        face_landmark_loss_settings, identity_loss_settings,
+    };
+    use sceneworks_core::training::latent_perceptual::{latent_loss_settings, LATENT_LOSSES};
+    use sceneworks_core::training::{
+        parse_resolution_buckets, subject_mask_loss_weights, TECHNIQUE_KEYS,
+    };
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|t| t.id == "z_image_turbo_lora")
+        .expect("z-image");
+    let nulled = |keys: &[&str]| {
+        let mut config = target.defaults.clone();
+        for key in keys {
+            config.advanced.insert((*key).to_owned(), Value::Null);
+        }
+        config
+    };
+    for key in TECHNIQUE_KEYS {
+        validate_training_config_for_target(target, &nulled(&[key]))
+            .unwrap_or_else(|error| panic!("{key}: null must mean absent, got {error:?}"));
+    }
+    let all = nulled(&TECHNIQUE_KEYS);
+    validate_training_config_for_target(target, &all).expect("all-null validates");
+    let advanced = &all.advanced;
+    assert_eq!(depth_anchoring_settings(advanced).unwrap(), None);
+    assert!(!body_loss_settings(advanced).unwrap().any_enabled());
+    assert_eq!(identity_loss_settings(advanced).unwrap(), None);
+    assert_eq!(face_landmark_loss_settings(advanced).unwrap(), None);
+    for spec in &LATENT_LOSSES {
+        assert_eq!(latent_loss_settings(spec, advanced).unwrap(), None);
+    }
+    assert_eq!(parse_resolution_buckets(advanced).unwrap(), None);
+    assert_eq!(subject_mask_loss_weights(advanced).unwrap(), None);
 }

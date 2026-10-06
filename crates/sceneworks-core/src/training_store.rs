@@ -1487,9 +1487,13 @@ fn rollback_file_renames(applied: &[AppliedRename]) {
 /// silently on every dataset write path (create/update items, external items, caption sidecars).
 fn validate_caption_input_mode(caption: Option<&CaptionInput>) -> ProjectStoreResult<()> {
     match caption.and_then(|caption| caption.mode.as_ref()) {
-        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::BadRequest(format!(
-            "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
-        ))),
+        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::FieldInvalid {
+            field: "mode",
+            code: "training_field_error",
+            detail: format!(
+                "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
+            ),
+        }),
         _ => Ok(()),
     }
 }
@@ -2415,7 +2419,7 @@ mod tests {
     // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
     // before the source is even opened (the bogus source path would otherwise be NotFound).
     #[test]
-    fn external_item_with_an_unknown_caption_mode_is_a_bad_request() {
+    fn external_item_with_an_unknown_caption_mode_is_a_mode_field_error() {
         let temp = tempfile::tempdir().expect("temp dir");
         let input = ExternalTrainingDatasetItemInput {
             item: TrainingDatasetItemInput {
@@ -2449,10 +2453,15 @@ mod tests {
         )
         .expect_err("unknown caption mode is refused");
         match error {
-            ProjectStoreError::BadRequest(detail) => {
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => {
+                assert_eq!((field, code), ("mode", "training_field_error"));
                 assert!(detail.contains("caption.mode \"faceOnly\""), "{detail}")
             }
-            other => panic!("expected BadRequest, got {other:?}"),
+            other => panic!("expected a mode field error, got {other:?}"),
         }
     }
 

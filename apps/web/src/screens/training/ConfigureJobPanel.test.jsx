@@ -867,17 +867,13 @@ describe("ConfigureJobPanel depth anchoring", () => {
     return calls;
   }
 
-  // sc-24830 review: the toggle is hidden for a full fine-tune and a no-video LTX-2.5 workflow.
-  // Mutation: gate the toggle on targetSupportsDepthAnchoring alone ⇒ red.
-  it("hides the toggle for a full fine-tune and a no-video LTX-2.5 workflow", () => {
-    mountWith({ draft: { ...VALID_DRAFT, networkType: "full" } });
-    expect(toggle()).toBeFalsy();
-
-    mountWith({
-      target: { ...Z_IMAGE, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5" },
-      draft: { ...VALID_DRAFT, ltxWorkflow: "t2a_lora" },
-    });
-    expect(toggle()).toBeFalsy();
+  // Epic 2123 review: the help text names the target's own x0 decoder (`limits.x0Decoder`), not
+  // TAEF1 for every family. Mutation: restore the hard-coded TAEF1 tooltip ⇒ red.
+  it("names the target's x0 decoder in its help text", () => {
+    mountWith({ target: { ...Z_IMAGE, limits: { ...Z_IMAGE.limits, x0Decoder: { label: "TAESDXL tiny decoder", install: true } } } });
+    const help = toggle().closest("label").getAttribute("title");
+    expect(help).toContain("the TAESDXL tiny decoder");
+    expect(help).not.toContain("TAEF1");
   });
 
   it("is off by default and seeds 0.1 when enabled", () => {
@@ -1026,12 +1022,6 @@ describe("ConfigureJobPanel body losses", () => {
     expect(calls).toEqual([["bodyShapeWeight", ""]]);
   });
 
-  // Mutation: offer the toggles without `bodyLossCombinationRefusal` ⇒ the full fine-tune shows them ⇒ red.
-  it("hides every body toggle for a full fine-tune", () => {
-    mountWith({ target: ALL, draft: { ...VALID_DRAFT, networkType: "full" } });
-    expect(toggle("Body proportion loss")).toBeUndefined();
-    expect(toggle("Body shape loss")).toBeUndefined();
-  });
 
   it("outlines an out-of-range alternation period", () => {
     mountWith({ draft: { ...VALID_DRAFT, bodyProportionWeight: "0.1", bodyProportionEvery: "40" } });
@@ -1322,4 +1312,81 @@ describe("ConfigureJobPanel face losses", () => {
     act(() => toggle("Face landmark loss").click());
     expect(calls).toEqual([["faceLandmarkLossWeight", ""]]);
   });
+});
+
+// Epic 2123 feature review: every technique toggle behaves like the noise toggles — visible wherever
+// the target supports the technique, even on a combination the engine refuses (a Mage full base
+// fine-tune, an LTX-2.5 workflow that generates no video). There the refusal names the loss's
+// weight key: the toggle is outlined, the chip row says why, Start is blocked — and unticking the
+// still-clickable toggle unblocks Start. Mutation: gate any toggle on its combination refusal
+// again (it disappears), or attach a refusal to no field (the toggle is not outlined) ⇒ red.
+describe("ConfigureJobPanel technique toggles on a refused combination", () => {
+  const SECTIONS = [
+    ["Depth anchoring", "supportsDepthAnchoring"],
+    ["Body proportion loss", "supportsBodyProportionLoss"],
+    ["Body shape loss", "supportsBodyShapeLoss"],
+    ["Surface normals loss", "supportsNormalLoss"],
+    ["Identity loss", "supportsIdentityLoss"],
+    ["Face landmark loss", "supportsFaceLandmarkLoss"],
+    ["VAE anchor loss", "supportsVaeAnchorLoss"],
+  ];
+  const supports = Object.fromEntries(SECTIONS.map(([, limit]) => [limit, true]));
+  const MAGE = {
+    id: "mage_flow_base_lora",
+    name: "Mage-Flow Base LoRA",
+    baseModel: "mage_flow_base",
+    limits: { networkTypes: ["lora", "lokr", "full"], ...supports },
+  };
+  const LTX25 = {
+    id: "ltx_2_5_video_lora",
+    name: "LTX-2.5 Video LoRA",
+    baseModel: "ltx_2_5",
+    limits: { networkTypes: ["lora"], ltxWorkflows: ["t2v_lora", "t2a_lora"], ...supports },
+  };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+
+  // The screen owns the draft; this harness plays that role so a click flows back through the real
+  // validation rules into the panel, exactly as in the Training Studio.
+  function Harness({ target, initial }) {
+    const [draft, setDraft] = React.useState(initial);
+    return (
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => setDraft((current) => ({ ...current, [name]: value })),
+        })}
+      />
+    );
+  }
+
+  for (const [scenario, target, extra, reason] of [
+    ["a Mage full base fine-tune", MAGE, { networkType: "full" }, "not a full fine-tune"],
+    ["an LTX-2.5 no-video workflow", LTX25, { ltxWorkflow: "t2a_lora" }, "generates none"],
+  ]) {
+    it(`keeps every toggle clickable on ${scenario} and unblocks Start once it is unticked`, () => {
+      for (const [label] of SECTIONS) {
+        mount(<Harness target={target} initial={{ ...VALID_DRAFT, ...extra }} />);
+        expect(submitButton().disabled, `${label}: Start is open before the toggle is ticked`).toBe(false);
+
+        act(() => toggle(label).click());
+        expect(toggle(label).checked, label).toBe(true);
+        expect(toggle(label).getAttribute("aria-invalid"), label).toBe("true");
+        expect(chips().some((chip) => chip.includes(reason)), `${label}: ${chips()}`).toBe(true);
+        expect(submitButton().disabled, `${label}: Start is blocked while refused`).toBe(true);
+
+        act(() => toggle(label).click());
+        expect(toggle(label).checked, label).toBe(false);
+        expect(chips(), label).toEqual([]);
+        expect(submitButton().disabled, `${label}: Start unblocks once unticked`).toBe(false);
+      }
+    });
+  }
 });

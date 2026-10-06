@@ -23,22 +23,26 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
-use sceneworks_core::training::body_losses::{body_loss_settings, BodyLoss};
+use sceneworks_core::training::body_losses::{
+    body_loss_combination_refusal, body_loss_settings, BodyLoss,
+};
 use sceneworks_core::training::depth_anchoring::{
-    depth_anchoring_settings, x0_decoder_for_trainer, DEPTH_ANCHORING_WEIGHT_KEY,
+    depth_anchoring_combination_refusal, depth_anchoring_settings, x0_decoder_for_trainer,
+    DEPTH_ANCHORING_WEIGHT_KEY,
 };
 use sceneworks_core::training::face_losses::{
-    face_landmark_loss_settings, identity_loss_settings, FACE_LANDMARK_LOSS_WEIGHT_KEY,
-    IDENTITY_LOSS_WEIGHT_KEY,
+    face_landmark_loss_settings, face_loss_combination_refusal, identity_loss_settings,
+    FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
 };
 use sceneworks_core::training::latent_perceptual::{
-    latent_loss_settings, latent_lpips_model_for_trainer, LATENT_LPIPS, VAE_ANCHOR,
+    latent_loss_combination_refusal, latent_loss_settings, latent_lpips_model_for_trainer,
+    LATENT_LPIPS, VAE_ANCHOR,
 };
 use sceneworks_core::training::{
-    parse_resolution_buckets, subject_mask_loss_weights, TrainingPlan, GRADIENT_NOISE_ETA_KEY,
-    GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT, GRADIENT_NOISE_GAMMA_KEY,
-    GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY, SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION,
-    WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+    parse_resolution_buckets, subject_mask_loss_weights, technique_value, TrainingPlan,
+    GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY,
+    SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, SubjectMaskLookup,
@@ -828,6 +832,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         ))
     })?;
     let advanced = &plan.config.advanced;
+    let base_model = plan.target.base_model.as_str();
     let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
     let supported = match network_type.as_str() {
         "lora" => descriptor.supports_lora,
@@ -911,6 +916,9 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                  ({DEPTH_ANCHORING_WEIGHT_KEY})."
             )));
         }
+        if let Some(reason) = depth_anchoring_combination_refusal(base_model, &plan.config) {
+            return Err(combination_refused(DEPTH_ANCHORING_WEIGHT_KEY, reason));
+        }
     }
 
     // Epic 2123 body losses (sc-24832): strictly parsed (the API's parser); each enabled loss is
@@ -948,6 +956,9 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                 loss.label()
             )));
         }
+        if let Some(reason) = body_loss_combination_refusal(base_model, &plan.config) {
+            return Err(combination_refused(&key, reason));
+        }
     }
     // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride the
     // same decoded-x0 path as depth anchoring, so they are refused the same way — strictly parsed
@@ -957,17 +968,19 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let landmark = face_landmark_loss_settings(advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-    for (enabled, declared, name, key) in [
+    for (enabled, declared, name, label, key) in [
         (
             identity.is_some(),
             descriptor.techniques.identity_loss,
             "the identity loss",
+            "The identity loss",
             IDENTITY_LOSS_WEIGHT_KEY,
         ),
         (
             landmark.is_some(),
             descriptor.techniques.face_landmark_loss,
             "the face-landmark loss",
+            "The face-landmark loss",
             FACE_LANDMARK_LOSS_WEIGHT_KEY,
         ),
     ] {
@@ -984,12 +997,15 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
                 "Native trainer '{engine_id}' has no x0 decoder for {name} ({key})."
             )));
         }
+        if let Some(reason) = face_loss_combination_refusal(base_model, &plan.config, label) {
+            return Err(combination_refused(key, reason));
+        }
     }
     // Epic 2123 latent-space perceptual losses (sc-24833): strictly parsed (the API's parser),
     // refused for a trainer whose descriptor does not declare the technique (E3), and — VAE anchor
     // — for a family with no cataloged tiny x0 decoder / — E-LatentLPIPS — for a family with no
     // published weights. Installed weights are checked in `apply_latent_perceptual`.
-    preflight_latent_perceptual(advanced, engine_id, &descriptor.techniques)?;
+    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques)?;
 
     // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
     // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
@@ -1488,13 +1504,19 @@ fn perceptual_decoder_dir(
 /// its catalog dependency cannot exist for the trainer's family (the VAE anchor's tiny x0 decoder,
 /// E-LatentLPIPS's family weights).
 fn preflight_latent_perceptual(
-    advanced: &JsonObject,
+    plan: &TrainingPlan,
     engine_id: &str,
     techniques: &gen_core::TrainingTechniques,
 ) -> WorkerResult<()> {
     let parse = |spec| {
-        latent_loss_settings(spec, advanced)
+        latent_loss_settings(spec, &plan.config.advanced)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    };
+    let refused = |spec| {
+        latent_loss_combination_refusal(spec, &plan.target.base_model, &plan.config)
+            .map_or(Ok(()), |reason| {
+                Err(combination_refused(spec.weight_key, reason))
+            })
     };
     if parse(&VAE_ANCHOR)?.is_some() {
         if !techniques.vae_anchor_loss {
@@ -1509,6 +1531,7 @@ fn preflight_latent_perceptual(
                 VAE_ANCHOR.weight_key
             )));
         }
+        refused(&VAE_ANCHOR)?;
     }
     if parse(&LATENT_LPIPS)?.is_some() {
         if !techniques.latent_lpips_loss {
@@ -1524,6 +1547,7 @@ fn preflight_latent_perceptual(
                 LATENT_LPIPS.weight_key
             )));
         }
+        refused(&LATENT_LPIPS)?;
     }
     Ok(())
 }
@@ -1825,15 +1849,24 @@ fn preflight_weight_noise_sigma(advanced: &JsonObject) -> WorkerResult<f64> {
     )
 }
 
-/// Strictly read an optional `advanced[key]` (absent ⇒ `default`): a finite number within the
-/// submit-time bound `0..=max`, else a typed payload error — never a silent default.
+/// The payload error for a decoded-x0 / latent aux loss whose target + config combination the
+/// engine refuses (a full base fine-tune, a no-video LTX-2.5 workflow) — the reason comes from the
+/// same core `*_combination_refusal` helper submit-time validation uses, so a plan that bypassed
+/// the API is refused here before any load with the identical reason.
+fn combination_refused(key: &str, reason: String) -> WorkerError {
+    WorkerError::InvalidPayload(format!("{reason} ({key})"))
+}
+
+/// Strictly read an optional `advanced[key]` (absent or JSON null ⇒ `default`, the epic 2123 null
+/// policy): a finite number within the submit-time bound `0..=max`, else a typed payload error —
+/// never a silent default.
 fn preflight_bounded_f64(
     advanced: &JsonObject,
     key: &str,
     max: f64,
     default: f64,
 ) -> WorkerResult<f64> {
-    let Some(value) = advanced.get(key) else {
+    let Some(value) = technique_value(advanced, key) else {
         return Ok(default);
     };
     value
@@ -4216,6 +4249,106 @@ mod tests {
             }
             other => panic!("a zero subject weight must be refused, got {other:?}"),
         }
+    }
+
+    /// Epic 2123 feature review (E3): the shared dry/real preflight refuses every decoded-x0 aux
+    /// section on the combinations the engine refuses — a Mage full base fine-tune and a no-video
+    /// LTX-2.5 workflow — through the same core `*_combination_refusal` helpers submit-time
+    /// validation uses, so a plan that bypassed the API never reaches a load. The same section on a
+    /// Mage LoRA run is admitted, so the refusal is the combination. Mutation: drop any one
+    /// section's `*_combination_refusal` call from `validate_training_target_config` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_aux_losses_on_engine_refused_combinations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, network: &str, advanced: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+            for (key, entry) in advanced {
+                value["config"]["advanced"][*key] = entry.clone();
+            }
+            parse(value)
+        };
+        let refused =
+            |result: WorkerResult<&'static str>, key: &str, why: &str, case: &str| match result {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains(why) && message.contains(&format!("({key})")),
+                    "{key} {case}: {message}"
+                ),
+                other => panic!("{key} {case}: expected a refusal, got {other:?}"),
+            };
+        // E-LatentLPIPS is absent: no trainer that offers a full fine-tune (Mage) or an LTX-2.5
+        // workflow has E-LatentLPIPS weights, so it is refused earlier as unsupported there.
+        for key in [
+            "depthAnchoringWeight",
+            "bodyProportionWeight",
+            "bodyShapeWeight",
+            "normalWeight",
+            "identityLossWeight",
+            "faceLandmarkLossWeight",
+            "vaeAnchorWeight",
+        ] {
+            let on = (key, json!(0.05));
+            validate_training_target_config(&plan(
+                "mage_flow_lora",
+                "mage_flow_base",
+                "lora",
+                std::slice::from_ref(&on),
+            ))
+            .unwrap_or_else(|error| panic!("{key}: Mage LoRA admits it, got {error:?}"));
+            refused(
+                validate_training_target_config(&plan(
+                    "mage_flow_lora",
+                    "mage_flow_base",
+                    "full",
+                    std::slice::from_ref(&on),
+                )),
+                key,
+                "not a full fine-tune",
+                "mage full",
+            );
+            refused(
+                validate_training_target_config(&plan(
+                    "ltx_mlx_lora",
+                    "ltx_2_5",
+                    "lora",
+                    &[on, ("ltxWorkflow", json!("t2a_lora"))],
+                )),
+                key,
+                "generates none",
+                "ltx-2.5 t2a",
+            );
+        }
+    }
+
+    /// Epic 2123 JSON-null policy: the worker preflight reads a JSON `null` on every technique key as
+    /// absent — exactly what submit-time validation admitted. Mutation: read the noise keys with
+    /// `advanced.get` in `preflight_bounded_f64` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_treats_null_technique_keys_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        for key in sceneworks_core::training::TECHNIQUE_KEYS {
+            value["config"]["advanced"][key] = Value::Null;
+        }
+        validate_training_target_config(&parse(value))
+            .expect("null technique keys mean absent in the worker too");
     }
 
     /// sc-24828: full coverage resolves one mask per image, in plan order.
