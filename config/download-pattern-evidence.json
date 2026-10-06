@@ -6393,6 +6393,20 @@
       ]
     },
     {
+      "key": "ostris/zimage_turbo_training_adapter@654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+      "repo": "ostris/zimage_turbo_training_adapter",
+      "revision": "654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+      "resolvedSha": "654cd1bf8b3589d9442cb1c5e35221879e1af4f3",
+      "servedRepo": "ostris/zimage_turbo_training_adapter",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "zimage_turbo_training_adapter_v1.safetensors",
+        "zimage_turbo_training_adapter_v2.safetensors"
+      ]
+    },
+    {
       "key": "starvector/starvector-1b-im2svg@380ab95d25a8e9ab1dc825debe238b4953ae13b9",
       "repo": "starvector/starvector-1b-im2svg",
       "revision": "380ab95d25a8e9ab1dc825debe238b4953ae13b9",

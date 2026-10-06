@@ -2775,6 +2775,70 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
     }
 }
 
+/// sc-25213 (e): the de-distill training adapter round-trips through the API boundary. The
+/// targets endpoint advertises `supportsTrainingAdapter` on Z-Image-Turbo; the presets' `v2-default`
+/// and both picker versions pass validation (then hit the missing-dataset tripwire); an unknown
+/// version or repo is a field error naming the key, before any dataset lookup.
+#[tokio::test]
+async fn create_training_job_validates_the_training_adapter_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training adapter boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    assert_eq!(
+        target["limits"]["supportsTrainingAdapter"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises training-adapter support"
+    );
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |repo: &str, version: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["trainingAdapterRepo"] = json!(repo);
+        config["advanced"]["trainingAdapterVersion"] = json!(version);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Training adapter",
+                "dryRun": true
+            }),
+        )
+    };
+    let repo = "ostris/zimage_turbo_training_adapter";
+    for version in ["v1", "v2", "v2-default"] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{version}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{version}");
+    }
+    for (repo, version, field) in [
+        (repo, "v9", "trainingAdapterVersion"),
+        ("someone/else", "v2", "trainingAdapterRepo"),
+    ] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repo}/{version}");
+        assert_eq!(error["code"], "training_field_error", "{repo}/{version}");
+        assert_eq!(error["context"]["field"], field, "{repo}/{version}");
+    }
+}
+
 /// sc-24827 (epic 2123 E6): `advanced.gradientNoiseEta` / `gradientNoiseGamma` are validated at
 /// the API boundary with field-level errors — negative, above the shared limit, non-numeric, or
 /// (eta) combined with a full fine-tune — before any dataset lookup. In-range values pass

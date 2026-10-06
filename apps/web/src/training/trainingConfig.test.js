@@ -26,6 +26,7 @@ import {
   latentLossCombinationRefusal,
   depthAnchoringCombinationRefusal,
   auxModelsInstallNote,
+  trainingAdapterModelId,
   depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringModelOptions,
@@ -631,6 +632,55 @@ describe("configValidation — missing control preprocessor", () => {
     expect(
       configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget }),
     ).toEqual(configValidation(draft(), { activeDataset: dataset, selectedTarget: controlTarget, missingControlModels: [] }));
+  });
+});
+
+// sc-25213: the de-distill training adapter — the draft's version maps to the catalog model the
+// worker resolves (the presets' "v2-default" → v2), a missing one gates Start, and the selection
+// round-trips into the job's training snapshot. Mutation: map "v2-default" to v1 ⇒ red.
+describe("de-distill training adapter (sc-25213)", () => {
+  const repo = "ostris/zimage_turbo_training_adapter";
+  it("maps each version to the catalog model the worker loads", () => {
+    const id = (trainingAdapterVersion, trainingAdapterRepo = repo) =>
+      trainingAdapterModelId({ trainingAdapterRepo, trainingAdapterVersion });
+    expect(id("v1")).toBe("zimage_turbo_training_adapter_v1");
+    expect(id("v2")).toBe("zimage_turbo_training_adapter_v2");
+    expect(id("v2-default")).toBe("zimage_turbo_training_adapter_v2");
+    expect(id("")).toBe("zimage_turbo_training_adapter_v2");
+    expect(id("v3")).toBeNull();
+    expect(id("v1", "")).toBeNull();
+    expect(id("v1", "someone/else")).toBeNull();
+  });
+
+  it("blocks Start training while the adapter is not installed", () => {
+    const dataset = { id: "ds_1", items: [{ id: "i1" }] };
+    const draft = configDraftFromTarget(target, dataset, ["auto"]);
+    const adapterIssues = (missingTrainingAdapterModels) =>
+      configValidation(draft, { activeDataset: dataset, selectedTarget: target, missingTrainingAdapterModels }).filter(
+        (entry) => /this run trains with it/.test(entry.message),
+      );
+    const issues = adapterIssues([{ id: "zimage_turbo_training_adapter_v2", name: "Z-Image Turbo Training Adapter v2" }]);
+    expect(issues).toHaveLength(1);
+    expect(issues[0].message).toContain("Z-Image Turbo Training Adapter v2");
+    expect(summarize(issues).surfaced).toHaveLength(1);
+    expect(adapterIssues([])).toEqual([]);
+    expect(adapterIssues(undefined)).toEqual([]);
+  });
+
+  it("round-trips the selection into the job snapshot", () => {
+    const dataset = { id: "ds_1", items: [{ id: "i1" }] };
+    const draft = {
+      ...configDraftFromTarget(target, dataset, ["auto"]),
+      trainingAdapterRepo: repo,
+      trainingAdapterVersion: "v1",
+    };
+    const advanced = trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget: target,
+    }).config.advanced;
+    expect(advanced.trainingAdapterRepo).toBe(repo);
+    expect(advanced.trainingAdapterVersion).toBe("v1");
   });
 });
 

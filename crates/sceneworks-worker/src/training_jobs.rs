@@ -1140,6 +1140,7 @@ fn training_request_from_plan(
     apply_body_losses(settings, plan, &mut config)?;
     apply_face_losses(settings, plan, &mut config)?;
     apply_latent_perceptual(settings, plan, &mut config)?;
+    apply_training_adapter(settings, plan, &mut config)?;
     // The weights were validated by `validate_training_target_config` (same reader), so a
     // malformed value is already refused; this propagates rather than defaulting regardless.
     config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
@@ -1693,6 +1694,31 @@ fn not_installed(
          Models screen.",
         model.label, model.id
     ))
+}
+
+/// The de-distill training adapter (sc-25213): resolve the plan's `trainingAdapterRepo` /
+/// `trainingAdapterVersion` (`v1`, `v2`, or the presets' `v2-default`) to the installed adapter
+/// `.safetensors` and hand the trainer its path (`TrainingConfig::training_adapter`). A missing file
+/// is refused naming the catalog model to install — never a silent bare-base run; nothing is
+/// downloaded mid-job. No adapter keys (the default) leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_training_adapter(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::training_adapter::training_adapter_model;
+    let Some(model) = training_adapter_model(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let dir = installed_aux_model_dir(settings, model, "The de-distill training adapter")?;
+    config.training_adapter = Some(dir.join(model.file));
+    Ok(())
 }
 
 /// Epic 2123 face losses (sc-24831): map the strictly parsed `advanced.identityLoss*` /
@@ -2341,6 +2367,10 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // `apply_latent_perceptual` fills them in when the plan enables them.
         vae_anchor: Default::default(),
         latent_lpips: Default::default(),
+        // The de-distill training adapter (sc-25213) starts off here; `apply_training_adapter`
+        // (which owns the strict parse and the installed-file resolution, and so can fail) fills
+        // it in when the plan names one.
+        training_adapter: None,
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -4634,6 +4664,16 @@ mod tests {
                  descriptor",
                 target.id
             );
+            // sc-25213: the de-distill training adapter flag.
+            assert_eq!(
+                sceneworks_core::training::training_adapter::target_supports_training_adapter(
+                    &target
+                ),
+                descriptor.techniques.training_adapter,
+                "{} ({engine_id}): catalog supportsTrainingAdapter disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
             checked += 1;
         }
         assert!(
@@ -5220,6 +5260,98 @@ mod tests {
         let mut config = map_training_config(&mage.config);
         apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
         assert_eq!(config.perceptual_decoder_dir, None);
+    }
+
+    /// sc-25213 (d): the plan's `trainingAdapterVersion` maps to the right installed adapter file —
+    /// `v1` → `…_v1.safetensors`; `v2`, the presets' `v2-default` and blank → `…_v2.safetensors` —
+    /// handed to the trainer as `training_adapter`; a missing file is refused naming the catalog
+    /// model to install; an unknown version is refused naming the field; no adapter keys leave
+    /// the config untouched. Mutations: map `v2-default` to v1 ⇒ red; resolve the directory without
+    /// the file check ⇒ the missing-file case resolves ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_adapter_version_maps_to_the_installed_file() {
+        use sceneworks_core::training::training_adapter::{
+            ZIMAGE_TURBO_TRAINING_ADAPTER_V1 as V1, ZIMAGE_TURBO_TRAINING_ADAPTER_V2 as V2,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |version: Option<&str>| {
+            let mut value = plan_json(
+                dir.path(),
+                "z_image_lora",
+                "z_image_turbo",
+                "lora",
+                &[&image],
+            );
+            let advanced = &mut value["config"]["advanced"];
+            advanced["trainingAdapterRepo"] = json!("ostris/zimage_turbo_training_adapter");
+            if let Some(version) = version {
+                advanced["trainingAdapterVersion"] = json!(version);
+            }
+            parse(value)
+        };
+        let resolve = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            apply_training_adapter(&settings, plan, &mut config).map(|()| config.training_adapter)
+        };
+
+        // Nothing installed yet: a named refusal, never a bare-base run.
+        match resolve(&plan(Some("v2-default"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(
+                    message.contains(V2.id) && message.contains("not installed"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a not-installed refusal, got {other:?}"),
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let v1 = fake_snapshot(&hub, V1.repo, V1.revision, V1.file).join(V1.file);
+        // Same snapshot dir: v2's file is still missing ⇒ still refused.
+        assert!(resolve(&plan(Some("v2"))).is_err());
+        let v2 = fake_snapshot(&hub, V2.repo, V2.revision, V2.file).join(V2.file);
+        for (version, want) in [
+            (Some("v1"), &v1),
+            (Some("V1"), &v1),
+            (Some("v2"), &v2),
+            (Some("v2-default"), &v2),
+            (Some(""), &v2),
+            (None, &v2),
+        ] {
+            let got = resolve(&plan(version))
+                .unwrap()
+                .expect("an adapter plan sets the path");
+            assert_eq!(canon(&got), canon(want), "{version:?}");
+        }
+
+        match resolve(&plan(Some("v3"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("trainingAdapterVersion"), "{message}")
+            }
+            other => panic!("expected an unknown-version refusal, got {other:?}"),
+        }
+
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        value["config"]["advanced"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("trainingAdapter"));
+        let off = parse(value);
+        assert_eq!(resolve(&off).unwrap(), None);
     }
 
     /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode
@@ -7752,6 +7884,7 @@ mod tests {
             face_analysis_dir: None,
             vae_anchor: Default::default(),
             latent_lpips: Default::default(),
+            training_adapter: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -7880,6 +8013,7 @@ mod tests {
             face_analysis_dir: None,
             vae_anchor: Default::default(),
             latent_lpips: Default::default(),
+            training_adapter: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -8011,6 +8145,7 @@ mod tests {
             face_analysis_dir: None,
             vae_anchor: Default::default(),
             latent_lpips: Default::default(),
+            training_adapter: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {
@@ -8180,6 +8315,7 @@ mod tests {
             face_analysis_dir: None,
             vae_anchor: Default::default(),
             latent_lpips: Default::default(),
+            training_adapter: None,
             subject_mask_loss: None,
         };
         let request = TrainingRequest {

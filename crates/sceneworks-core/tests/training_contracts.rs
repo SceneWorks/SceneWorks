@@ -3675,3 +3675,122 @@ fn null_technique_keys_mean_absent() {
     assert_eq!(parse_resolution_buckets(advanced).unwrap(), None);
     assert_eq!(subject_mask_loss_weights(advanced).unwrap(), None);
 }
+
+/// sc-25213: every preset's de-distill adapter selection (the presets ship `v2-default`) and both
+/// picker versions build a plan that keeps the keys verbatim; an unknown version, an unknown repo,
+/// a non-string value, and a version without a repo are field errors naming the key; and a target
+/// whose trainer does not honor a training adapter refuses one on `trainingAdapterRepo`.
+/// Mutations: drop `training_adapter::validate_support` from the target validator ⇒ red; drop
+/// `supportsTrainingAdapter` from the Z-Image target ⇒ the accept loop goes red.
+#[test]
+fn training_adapter_keys_are_validated_as_field_errors() {
+    use sceneworks_core::training::training_adapter::{
+        training_adapter_model, ZIMAGE_TURBO_TRAINING_ADAPTER_V1, ZIMAGE_TURBO_TRAINING_ADAPTER_V2,
+    };
+    let registry = builtin_training_targets();
+    let zimage = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .unwrap();
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let preset_configs: Vec<TrainingConfig> = presets
+        .presets
+        .iter()
+        .filter(|preset| preset.target_id == "z_image_turbo_lora")
+        .map(|preset| preset.config.clone())
+        .collect();
+    assert!(!preset_configs.is_empty());
+    for config in preset_configs {
+        assert_eq!(config.advanced["trainingAdapterVersion"], "v2-default");
+        assert_eq!(
+            training_adapter_model(&config.advanced).unwrap(),
+            Some(&ZIMAGE_TURBO_TRAINING_ADAPTER_V2)
+        );
+        let plan = build_plan_for_target(zimage, config).expect("preset plan builds");
+        assert_eq!(plan.config.advanced["trainingAdapterVersion"], "v2-default");
+    }
+    let with = |repo: Value, version: Value| {
+        let mut config = zimage.defaults.clone();
+        config.advanced.insert("trainingAdapterRepo".into(), repo);
+        config
+            .advanced
+            .insert("trainingAdapterVersion".into(), version);
+        config
+    };
+    let repo = json!("ostris/zimage_turbo_training_adapter");
+    for (version, model) in [
+        ("v1", &ZIMAGE_TURBO_TRAINING_ADAPTER_V1),
+        ("v2", &ZIMAGE_TURBO_TRAINING_ADAPTER_V2),
+    ] {
+        let config = with(repo.clone(), json!(version));
+        assert_eq!(
+            training_adapter_model(&config.advanced).unwrap(),
+            Some(model)
+        );
+        let plan = build_plan_for_target(zimage, config).unwrap();
+        assert_eq!(plan.config.advanced["trainingAdapterVersion"], version);
+    }
+    let field_of = |result: Result<TrainingPlan, TrainingPlanError>| match result {
+        Err(TrainingPlanError::InvalidField { field, .. }) => field,
+        other => panic!("expected a field error, got {other:?}"),
+    };
+    for (repo, version, field) in [
+        (repo.clone(), json!("v3"), "trainingAdapterVersion"),
+        (repo.clone(), json!(2), "trainingAdapterVersion"),
+        (json!("someone/else"), json!("v2"), "trainingAdapterRepo"),
+        (Value::Null, json!("v1"), "trainingAdapterVersion"),
+    ] {
+        assert_eq!(
+            field_of(build_plan_for_target(
+                zimage,
+                with(repo.clone(), version.clone())
+            )),
+            field,
+            "{repo}/{version}"
+        );
+    }
+    let sdxl = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "sdxl_lora")
+        .unwrap();
+    let mut config = sdxl.defaults.clone();
+    config
+        .advanced
+        .insert("trainingAdapterRepo".into(), repo.clone());
+    assert_eq!(
+        field_of(build_plan_for_target(sdxl, config)),
+        "trainingAdapterRepo"
+    );
+}
+
+/// sc-25213: both de-distill adapter versions are `componentOnly` utility entries in the shipped
+/// catalog at exactly the repo / revision / file the worker resolves, so the Training Studio's
+/// download installs the bytes the trainer loads. Mutation: re-pin or drop one entry ⇒ red.
+#[test]
+fn training_adapters_are_cataloged_at_the_loaded_revision() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use sceneworks_core::training::training_adapter::TRAINING_ADAPTER_MODELS;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .unwrap();
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).unwrap();
+    let models = catalog["models"].as_array().unwrap();
+    for adapter in TRAINING_ADAPTER_MODELS {
+        let entry = models
+            .iter()
+            .find(|m| m["id"] == adapter.id)
+            .unwrap_or_else(|| panic!("{} has no catalog entry", adapter.id));
+        assert_eq!(entry["type"], "utility", "{}", adapter.id);
+        assert_eq!(entry["componentOnly"], true, "{}", adapter.id);
+        let download = &entry["downloads"][0];
+        assert_eq!(download["repo"], adapter.repo, "{}", adapter.id);
+        assert_eq!(download["revision"], adapter.revision, "{}", adapter.id);
+        assert_eq!(download["files"], json!([adapter.file]), "{}", adapter.id);
+    }
+}

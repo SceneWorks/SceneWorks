@@ -304,6 +304,10 @@ pub mod face_losses;
 /// bounds, the shared strict parser, support flags and auxiliary catalog models.
 pub mod latent_perceptual;
 
+/// The de-distill training adapter (sc-25213): keys, the strict version→catalog-model parser, the
+/// support flag and the cataloged adapter files.
+pub mod training_adapter;
+
 /// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
 /// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
 /// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
@@ -1852,7 +1856,10 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             "supportsBodyShapeLoss": true,
             "supportsNormalLoss": true,
             // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
-            "supportsSubjectMaskLoss": true
+            "supportsSubjectMaskLoss": true,
+            // sc-25213: the ostris de-distill training adapter the presets select is honored by
+            // the Z-Image-Turbo trainer on MLX and Candle (pinned by a worker drift test).
+            "supportsTrainingAdapter": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -3553,6 +3560,7 @@ pub fn validate_training_config_for_target(
     body_losses::validate_support(target, config)?;
     face_losses::validate_support(target, config)?;
     latent_perceptual::validate_support(target, config)?;
+    training_adapter::validate_support(target, config)?;
     validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",

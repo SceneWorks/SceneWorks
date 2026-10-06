@@ -308,6 +308,22 @@ export const qualityPresetLabels = {
 // Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
 // worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
 export const trainingAdapterVersionOptions = ["v1", "v2"];
+// The one de-distill adapter repo the worker resolves (sceneworks_core training_adapter).
+export const ZIMAGE_TURBO_TRAINING_ADAPTER_REPO = "ostris/zimage_turbo_training_adapter";
+
+// The catalog model a draft's de-distill adapter selection needs installed (sc-25213), or null
+// when the draft names none. Mirrors the worker's mapping: v1 → the v1 file; v2, the presets'
+// legacy "v2-default" and blank → v2. An unknown repo/version maps to null here — the API
+// refuses it as a field error at submit, so there is nothing to offer for download.
+export function trainingAdapterModelId(configDraft) {
+  const repo = asText(configDraft?.trainingAdapterRepo).trim();
+  if (!repo) return null;
+  if (repo !== ZIMAGE_TURBO_TRAINING_ADAPTER_REPO) return null;
+  const version = asText(configDraft?.trainingAdapterVersion).trim().toLowerCase();
+  if (version === "v1") return "zimage_turbo_training_adapter_v1";
+  if (version === "" || version === "v2" || version === "v2-default") return "zimage_turbo_training_adapter_v2";
+  return null;
+}
 export const trainingAdapterVersionLabels = {
   v1: "v1 — stable (smaller)",
   v2: "v2 — experimental (heavier de-distill)",
@@ -755,6 +771,7 @@ export function configValidation(
     selectedTarget,
     datasetNotReady = false,
     missingControlModels = [],
+    missingTrainingAdapterModels = [],
     subjectMaskReport = null,
   } = {},
 ) {
@@ -883,6 +900,13 @@ export function configValidation(
         `Install ${names.join(" and ")} to render this run's control condition.`,
       ),
     );
+  }
+  // The de-distill training adapter (sc-25213) resolves from the installed library only — a missing
+  // one is refused by the worker, so it gates Start like the preprocessor models above; the panel
+  // renders the download offer.
+  if (missingTrainingAdapterModels.length > 0) {
+    const names = missingTrainingAdapterModels.map((model) => model?.name ?? model?.id).filter(Boolean);
+    issues.push(issue.error(null, `Install ${names.join(" and ")} — this run trains with it.`));
   }
   if (selectedTarget?.baseModel === "ltx_2_5") {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)

@@ -218,6 +218,9 @@ export function ConfigureJobPanel({
   // into `configValidity` by the screen, which is what actually blocks Start training; this only
   // renders the offer. Empty for every LoRA target.
   missingControlModels = [],
+  // The de-distill training adapter this run's selected version needs but doesn't have (sc-25213);
+  // folded into `configValidity` by the screen, rendered here as the download offer.
+  missingTrainingAdapterModels = [],
   controlModelDownloadJobs = [],
   onDownloadModel,
   onOpenModels,
@@ -801,6 +804,17 @@ export function ConfigureJobPanel({
             downloadJobs={controlModelDownloadJobs}
             feature={`${controlType.charAt(0).toUpperCase()}${controlType.slice(1)} ControlNet training`}
             models={missingControlModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
+          <RequiredModelsNotice
+            detail="It is applied to the base only while training, so your LoRA learns the subject instead of fighting the distillation; the run would fail without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature="Z-Image-Turbo LoRA training"
+            models={missingTrainingAdapterModels}
             onCancelJob={onCancelJob}
             onDownload={onDownloadModel}
             onOpenModels={onOpenModels}

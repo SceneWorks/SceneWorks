@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 126,
+    "modelCount": 128,
     "importedFamilyCount": 4,
-    "cellCount": 1028,
+    "cellCount": 1030,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -22,14 +22,14 @@
     "descriptorMlxRuntime": "c26c132b099b43d80de35b22b5eeb93326f6f6c316309f2e9c9d26be819542f5",
     "descriptorPreviewFacts": "419fec5d6fdd9b9556100276231caeed5417588bdccd1e59eb2de44e29783292",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "6315f618432a2a315cdda1b45558c2c9c949d5fb160b7ab1a1a754070ab214ff",
+    "manifest": "f5deb1e964537cf3290c00364a402e91f7e2c7da82deee567d03fd46ad4e3458",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
     "routerCatalog": "a186a712e0745cf9b99cfde5161470d7b533f93529d28531be1ce67585318743",
     "routerGaps": "2d2cc4850415809c97871455b7621cb729958a00fe58cf4c67f73ea691501400",
     "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
     "scheduler": "c4428a547eae0b20f50b703543dd906119bcf60e2ca21acacf5c0e556d225cd5",
-    "trainingCatalog": "306a0f2f6dd3c12cfaeb7122913790450ec2d281e5278bc9d5dda05b6650105e",
+    "trainingCatalog": "3a163f4220e2d6417640deae7f709d24f52dd19885e035ae6a63b8526e399336",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "03bbf480f16325df3198d68e33ef59164be7db5fdbb9d87a189a1bea466b5373",
     "webImageAdvanced": "685edcd46c3b986eec15916c31261ec5b18e527d6c70b76a0fbacff7c9487b8d",
@@ -55,7 +55,7 @@
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "09ec70d48c5c9720e44b3c613301f3d6a95f68dec24cb577ab27b287e8f75a20",
+    "workerTrainingDispatch": "d1b4ef7deae42472aa921fb00a036200c3358c09f0ebb4b86f5c72108287932e",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -7476,6 +7476,40 @@
         "capability": "live_preview",
         "mlx": true,
         "candle": true
+      }
+    },
+    {
+      "id": "zimage_turbo_training_adapter_v1",
+      "family": "zimage_training_adapter",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "zimage_turbo_training_adapter_v2",
+      "family": "zimage_training_adapter",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
       }
     }
   ],
