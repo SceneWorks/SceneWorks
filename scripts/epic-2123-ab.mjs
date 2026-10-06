@@ -2,9 +2,11 @@
 // Real-weight A/B harness for epic 2123 (perceptual character LoRA techniques, sc-2124).
 //
 // A resumable, phase-by-phase driver over the REAL rust-api + native worker: it trains one LoRA
-// per technique row on the same dataset, seed, step count and resolution, renders a fixed prompt
-// grid with each adapter (plus the bare base model), scores the grids with the
-// `lora_eval_harness` instrument, computes every adapter's stable rank and writes a report.
+// per technique row from the target's default CHARACTER PRESET (fetched from the API, every key
+// kept), on the same dataset, seed, step count and resolution, renders a fixed prompt grid with
+// each adapter (plus the bare base model, and optionally every intermediate checkpoint), scores
+// the grids with the `lora_eval_harness` instrument, computes every adapter's stable rank and
+// writes a report.
 //
 // Everything the harness writes lives under --root (default ~/.cache/sceneworks-epic-2123-ab):
 // the API's SCENEWORKS_DATA_DIR / SCENEWORKS_CONFIG_DIR, logs, samples, eval output, the report
@@ -26,7 +28,7 @@
 //   node scripts/epic-2123-ab.mjs --phase masks --confirm-gpu
 //   node scripts/epic-2123-ab.mjs --phase baseline-timing --confirm-gpu
 //   node scripts/epic-2123-ab.mjs --phase train --model zimage --confirm-gpu
-//   node scripts/epic-2123-ab.mjs --phase samples --model zimage --confirm-gpu
+//   node scripts/epic-2123-ab.mjs --phase samples --model zimage --confirm-gpu [--checkpoints]
 //   node scripts/epic-2123-ab.mjs --phase eval --model zimage --confirm-gpu
 //   node scripts/epic-2123-ab.mjs --phase report
 //   node scripts/epic-2123-ab.mjs --phase status
@@ -43,6 +45,7 @@ const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Arguments
 // ---------------------------------------------------------------------------------------------
 
+const CAPTION_MODES = ["trigger", "full"];
 const PHASES = ["setup", "masks", "baseline-timing", "train", "samples", "eval", "report", "status"];
 const GPU_PHASES = new Set(["masks", "baseline-timing", "train", "samples"]);
 
@@ -60,16 +63,25 @@ function parseArgs(argv) {
     confirmGpu: false,
     allowDownloads: false,
     dryRun: false,
-    steps: 400,
-    rank: 16,
-    lr: 1e-4,
+    // null = the preset's own value (steps, rank, learning rate, batch size, resolution).
+    steps: null,
+    rank: null,
+    lr: null,
     seed: 7,
-    batch: 1,
+    batch: null,
     resolution: null,
+    // Preset ids that replace a target's default character preset (matched by targetId).
+    presets: [],
+    // `trigger`: every item's caption is the trigger word alone; `full`: the dataset's .txt text.
+    captions: "trigger",
+    // null = the step count (only the final adapter is written).
+    saveEvery: null,
+    checkpoints: false,
     depthModel: "small",
     rows: null,
     force: false,
-    loraWeight: 1.0,
+    loraWeight: 0.8,
+    genSize: null,
     seeds: [1001, 2002],
     maxWorkerRssGb: Math.floor((os.totalmem() / 2 ** 30) * 0.85),
     pollSeconds: 5,
@@ -102,6 +114,11 @@ function parseArgs(argv) {
       case "--seed": opts.seed = Number(need(i, a)); i += 1; break;
       case "--batch": opts.batch = Number(need(i, a)); i += 1; break;
       case "--resolution": opts.resolution = Number(need(i, a)); i += 1; break;
+      case "--preset": opts.presets = need(i, a).split(",").map((s) => s.trim()).filter(Boolean); i += 1; break;
+      case "--captions": opts.captions = need(i, a); i += 1; break;
+      case "--save-every": opts.saveEvery = Number(need(i, a)); i += 1; break;
+      case "--checkpoints": opts.checkpoints = true; break;
+      case "--gen-size": opts.genSize = Number(need(i, a)); i += 1; break;
       case "--depth-model": opts.depthModel = need(i, a); i += 1; break;
       case "--rows": opts.rows = need(i, a).split(",").map((s) => s.trim()).filter(Boolean); i += 1; break;
       case "--force": opts.force = true; break;
@@ -130,6 +147,14 @@ function parseArgs(argv) {
   if (!["small", "base", "large"].includes(opts.depthModel)) {
     throw new Error("--depth-model must be small, base or large");
   }
+  if (!CAPTION_MODES.includes(opts.captions)) {
+    throw new Error(`--captions must be one of ${CAPTION_MODES.join(", ")}`);
+  }
+  for (const [flag, value] of [["--steps", opts.steps], ["--rank", opts.rank], ["--batch", opts.batch], ["--resolution", opts.resolution], ["--save-every", opts.saveEvery], ["--gen-size", opts.genSize]]) {
+    if (value !== null && !(Number.isInteger(value) && value > 0)) throw new Error(`${flag} must be a positive integer`);
+  }
+  if (opts.lr !== null && !(opts.lr > 0)) throw new Error("--lr must be a positive number");
+  if (!(opts.loraWeight > 0)) throw new Error("--lora-weight must be a positive number");
   return opts;
 }
 
@@ -137,20 +162,16 @@ function parseArgs(argv) {
 // The A/B design
 // ---------------------------------------------------------------------------------------------
 
-// Per base model: the training target, its default A/B resolution (Z-Image's smallest allowed
-// edge is 512; SDXL's target only allows 768/1024, so its A/B runs at 768), the bucket ladder,
-// the family-specific auxiliary models, and the sample render settings. Bucket rows must be
-// resolutions the target trains at (submit-time validation refuses anything else), so the
-// ladder starts at the A/B resolution and climbs through the target's allowed edges with the
-// upstream-style 4:2:1 repeat skew (Z-Image 512/768/1024; SDXL 768/1024 at 2:1).
+// Per base model: the training target, the family-specific auxiliary models, and the sample
+// render settings. The training config itself comes from the target's default character preset
+// (`GET /api/v1/training/presets`), so resolution, steps, rank, learning rate, optimizer,
+// timestep schedule and any training adapter are the app's own, not harness constants.
 const MODELS = {
   zimage: {
     label: "Z-Image-Turbo",
     target: "z_image_turbo_lora",
     baseModel: "z_image_turbo",
     trainTier: "bf16",
-    resolution: 512,
-    buckets: [[512, 4], [768, 2], [1024, 1]],
     x0Decoder: "taef1",
     latentLpips: "elatentlpips_flux",
     gen: { width: 1024, height: 1024, advanced: { steps: 8 } },
@@ -160,8 +181,6 @@ const MODELS = {
     target: "sdxl_lora",
     baseModel: "sdxl",
     trainTier: "bf16",
-    resolution: 768,
-    buckets: [[768, 2], [1024, 1]],
     x0Decoder: "taesdxl",
     latentLpips: "elatentlpips_sdxl",
     gen: { width: 1024, height: 1024, advanced: { steps: 30, guidanceScale: 7.0 } },
@@ -188,8 +207,10 @@ function techniqueRows(modelKey, opts) {
     })),
     {
       id: "resolution_buckets",
-      label: `Resolution buckets ${m.buckets.map(([r]) => r).join("/")} ×${m.buckets.map(([, n]) => n).join(":")}`,
-      advanced: { resolutionBuckets: m.buckets.map(([resolution, repeats]) => ({ resolution, repeats })) },
+      label: "Resolution buckets",
+      // Filled from the target's allowed edges and the run's base resolution (`bucketLadder`).
+      advanced: {},
+      bucketLadder: true,
       limits: ["supportsResolutionBuckets"],
       aux: [],
     },
@@ -248,6 +269,24 @@ const PROMPTS = [
 
 const BASE_AUX = ["sam3_person_segment", "instantid_face_stack"];
 
+// The bucket ladder for a base resolution: every edge the target trains at up to and including
+// the base resolution, smallest first, with the upstream 2^k repeat skew (4:2:1 for three edges,
+// 2:1 for two), so the smallest edge is visited most. At 1024 that is Z-Image 512/768/1024 ×4:2:1
+// and SDXL 768/1024 ×2:1. Submit-time validation refuses an edge the target does not allow, so
+// nothing off the target's list is ever invented. When fewer than two allowed edges sit at or
+// below the base (e.g. a 512 Z-Image run), the ladder climbs from the base instead.
+function bucketLadder(target, baseResolution) {
+  const allowed = [...new Set((target.limits?.resolutions ?? []).map(Number))].filter(Number.isFinite).sort((a, b) => a - b);
+  let edges = allowed.filter((r) => r <= baseResolution);
+  if (edges.length < 2) edges = allowed.filter((r) => r >= baseResolution);
+  if (edges.length < 2) throw new Error(`target ${target.id} allows fewer than two resolutions (${allowed.join(", ")}); no bucket ladder`);
+  return edges.map((resolution, i) => ({ resolution, repeats: 2 ** (edges.length - 1 - i) }));
+}
+
+function ladderLabel(ladder) {
+  return `Resolution buckets ${ladder.map((b) => b.resolution).join("/")} ×${ladder.map((b) => b.repeats).join(":")}`;
+}
+
 function auxModelsFor(modelKey, opts) {
   const set = new Set(BASE_AUX);
   for (const row of techniqueRows(modelKey, opts)) row.aux.forEach((id) => set.add(id));
@@ -272,9 +311,22 @@ function loadState(root) {
     STATE = JSON.parse(fs.readFileSync(STATE_PATH, "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
-    STATE = { version: 1, createdAt: new Date().toISOString(), training: {}, samples: {}, eval: {}, rank: {} };
+    STATE = { version: 2, createdAt: new Date().toISOString(), training: {}, samples: {}, eval: {}, rank: {} };
   }
-  for (const key of ["training", "samples", "eval", "rank"]) STATE[key] ??= {};
+  for (const key of ["training", "samples", "eval", "evalKeys", "rank", "datasets", "checkpointLoras"]) STATE[key] ??= {};
+  // v1 state held one dataset (imported with the full .txt captions) and its subject masks at
+  // the top level. Datasets are now keyed by caption mode, each carrying its own masks.
+  if (STATE.dataset) {
+    STATE.datasets.full ??= { ...STATE.dataset, captionMode: "full", masks: STATE.masks ?? null };
+    delete STATE.dataset;
+    delete STATE.masks;
+  }
+  STATE.version = 2;
+}
+
+// The dataset for the run's caption mode (each mode is its own dataset, side by side).
+function currentDataset() {
+  return STATE.datasets[OPTS.captions] ?? null;
 }
 
 function saveState() {
@@ -637,54 +689,72 @@ async function phaseSetup(opts) {
     log(`project ${STATE.project.id} exists`);
   }
 
-  // Dataset: every <stem>.png with a <stem>.txt caption.
-  if (STATE.dataset) {
-    const existing = await api("GET", `/api/v1/projects/${STATE.project.id}/training/datasets/${STATE.dataset.id}`).catch(
-      () => null,
-    );
-    if (!existing) delete STATE.dataset;
-  }
-  if (!STATE.dataset) {
-    const pngs = fs
-      .readdirSync(opts.dataset)
-      .filter((f) => /\.(png|jpe?g|webp)$/i.test(f))
-      .sort();
-    const items = [];
-    for (const file of pngs) {
-      const stem = file.replace(/\.[^.]+$/, "");
-      const captionPath = path.join(opts.dataset, `${stem}.txt`);
-      if (!fs.existsSync(captionPath)) {
-        log(`  skipping ${file}: no ${stem}.txt caption`);
-        continue;
-      }
-      const bytes = fs.readFileSync(path.join(opts.dataset, file));
-      const form = new FormData();
-      const type = /\.png$/i.test(file) ? "image/png" : /\.webp$/i.test(file) ? "image/webp" : "image/jpeg";
-      form.append("file", new Blob([bytes], { type }), file);
-      const upload = await api("POST", `/api/v1/projects/${STATE.project.id}/training/uploads`, form);
-      items.push({
-        path: upload.file.path,
-        displayName: file,
-        width: upload.file.width,
-        height: upload.file.height,
-        caption: { text: fs.readFileSync(captionPath, "utf8").trim(), triggerWords: [opts.trigger] },
-      });
-    }
-    if (!items.length) throw new Error(`no captioned images in ${opts.dataset}`);
-    const dataset = await api("POST", `/api/v1/projects/${STATE.project.id}/training/datasets`, {
-      name: `${path.basename(opts.dataset)} (${opts.trigger})`,
-      modality: "image",
-      items,
-    });
-    STATE.dataset = { id: dataset.id, itemCount: items.length, source: opts.dataset, trigger: opts.trigger };
-    saveState();
-    log(`imported ${items.length} captioned images as dataset ${dataset.id}`);
-  } else {
-    log(`dataset ${STATE.dataset.id} exists (${STATE.dataset.itemCount} items)`);
-  }
+  await ensureDataset(opts, opts.captions);
 
   // Models: resolve by catalog id against the shared HF cache.
   await resolveModels(opts);
+}
+
+// Import the dataset for one caption mode: every <stem>.png with a <stem>.txt caption. In
+// `trigger` mode each item's caption text is the trigger word alone, so identity can only bind
+// to the trigger (a descriptive caption such as "a blonde woman with wavy hair" would otherwise
+// absorb it); `full` keeps the .txt text. A stored dataset is reused only when its caption mode,
+// source directory and trigger all match and it still exists in the API.
+async function ensureDataset(opts, mode) {
+  const existing = STATE.datasets[mode];
+  if (existing) {
+    const alive = await api("GET", `/api/v1/projects/${STATE.project.id}/training/datasets/${existing.id}`).catch(() => null);
+    const matches = existing.captionMode === mode && existing.source === opts.dataset && existing.trigger === opts.trigger;
+    if (alive && matches) {
+      log(`dataset ${existing.id} exists (${existing.itemCount} items, ${mode} captions)`);
+      return existing;
+    }
+    log(`dataset ${existing.id} (${mode}) is ${alive ? "for a different source/trigger" : "gone"}; re-importing`);
+    delete STATE.datasets[mode];
+  }
+  const pngs = fs
+    .readdirSync(opts.dataset)
+    .filter((f) => /\.(png|jpe?g|webp)$/i.test(f))
+    .sort();
+  const items = [];
+  for (const file of pngs) {
+    const stem = file.replace(/\.[^.]+$/, "");
+    const captionPath = path.join(opts.dataset, `${stem}.txt`);
+    if (!fs.existsSync(captionPath)) {
+      log(`  skipping ${file}: no ${stem}.txt caption`);
+      continue;
+    }
+    const bytes = fs.readFileSync(path.join(opts.dataset, file));
+    const form = new FormData();
+    const type = /\.png$/i.test(file) ? "image/png" : /\.webp$/i.test(file) ? "image/webp" : "image/jpeg";
+    form.append("file", new Blob([bytes], { type }), file);
+    const upload = await api("POST", `/api/v1/projects/${STATE.project.id}/training/uploads`, form);
+    const text = mode === "trigger" ? opts.trigger : fs.readFileSync(captionPath, "utf8").trim();
+    items.push({
+      path: upload.file.path,
+      displayName: file,
+      width: upload.file.width,
+      height: upload.file.height,
+      caption: { text, triggerWords: [opts.trigger] },
+    });
+  }
+  if (!items.length) throw new Error(`no captioned images in ${opts.dataset}`);
+  const dataset = await api("POST", `/api/v1/projects/${STATE.project.id}/training/datasets`, {
+    name: `${path.basename(opts.dataset)} (${opts.trigger}, ${mode} captions)`,
+    modality: "image",
+    items,
+  });
+  STATE.datasets[mode] = {
+    id: dataset.id,
+    captionMode: mode,
+    itemCount: items.length,
+    source: opts.dataset,
+    trigger: opts.trigger,
+    masks: null,
+  };
+  saveState();
+  log(`imported ${items.length} images as dataset ${dataset.id} (${mode} captions)`);
+  return STATE.datasets[mode];
 }
 
 async function resolveModels(opts) {
@@ -764,28 +834,70 @@ async function targetFor(modelKey) {
   return target;
 }
 
-function abResolution(modelKey, opts) {
-  return opts.resolution ?? MODELS[modelKey].resolution;
+let PRESETS = null;
+
+// The app's training presets, exactly as the Studio receives them (`list_training_presets`).
+async function trainingPresets() {
+  if (!PRESETS) {
+    const registry = await api("GET", "/api/v1/training/presets");
+    PRESETS = Array.isArray(registry) ? registry : registry.presets;
+    if (!Array.isArray(PRESETS)) throw new Error("GET /api/v1/training/presets returned no preset list");
+    const unknown = OPTS.presets.filter((id) => !PRESETS.some((p) => p.id === id));
+    if (unknown.length) throw new Error(`--preset ${unknown.join(", ")} not in the API's presets`);
+    const targets = new Set(Object.values(MODELS).map((m) => m.target));
+    const foreign = PRESETS.filter((p) => OPTS.presets.includes(p.id) && !targets.has(p.targetId));
+    if (foreign.length) throw new Error(`--preset ${foreign.map((p) => `${p.id} (${p.targetId})`).join(", ")} is not for ${[...targets].join(" or ")}`);
+  }
+  return PRESETS;
 }
 
-// The identical baseline config every row starts from: the target's own defaults (optimizer,
-// timestep schedule, precision, caching…) with the A/B knobs pinned and in-training sampling off.
-function baseConfig(target, modelKey, opts) {
-  const d = target.defaults;
-  return {
-    rank: opts.rank,
-    alpha: opts.rank,
-    learningRate: opts.lr,
-    steps: opts.steps,
-    batchSize: opts.batch,
-    gradientAccumulation: 1,
-    resolution: abResolution(modelKey, opts),
-    saveEvery: opts.steps,
-    seed: opts.seed,
-    optimizer: d.optimizer,
-    triggerWord: opts.trigger,
-    advanced: { ...d.advanced, sampleEvery: 0, requestedGpu: "auto" },
-  };
+// The preset a model's rows start from: a `--preset` id whose targetId is this model's target,
+// else the target's default character preset (recommendedFor "character", `ui.default`), e.g.
+// `z_image_turbo_lora.character.adamw8bit.balanced` ("Character balanced").
+async function presetFor(modelKey) {
+  const targetId = MODELS[modelKey].target;
+  const presets = (await trainingPresets()).filter((p) => p.targetId === targetId);
+  const chosen = presets.find((p) => OPTS.presets.includes(p.id));
+  if (chosen) return chosen;
+  const character = presets.filter((p) => (p.recommendedFor ?? []).includes("character"));
+  const preset =
+    character.find((p) => p.ui?.default === true) ??
+    [...character].sort((a, b) => (a.ui?.order ?? Infinity) - (b.ui?.order ?? Infinity))[0];
+  if (!preset) throw new Error(`no character preset for target ${targetId}`);
+  return preset;
+}
+
+// The identical baseline config every row starts from: the preset's config with EVERY key kept
+// (optimizer, timestep type/bias, precision, caching, weight decay, `trainingAdapterRepo` /
+// `trainingAdapterVersion`, …). Only these are overridden: the seed, the trigger word,
+// in-training sampling off, `requestedGpu: auto`, `saveEvery` (`--save-every`, default = steps),
+// and whichever of --steps / --rank / --lr / --batch / --resolution was passed explicitly.
+// `--rank` keeps the preset's alpha/rank ratio.
+function baseConfig(preset, opts) {
+  const p = structuredClone(preset.config);
+  const config = { ...p, advanced: { ...(p.advanced ?? {}) } };
+  config.seed = opts.seed;
+  config.triggerWord = opts.trigger;
+  config.advanced.sampleEvery = 0;
+  config.advanced.requestedGpu = "auto";
+  if (opts.steps !== null) config.steps = opts.steps;
+  if (opts.rank !== null) {
+    config.alpha = Math.max(1, Math.round((opts.rank * p.alpha) / p.rank));
+    config.rank = opts.rank;
+  }
+  if (opts.lr !== null) config.learningRate = opts.lr;
+  if (opts.batch !== null) config.batchSize = opts.batch;
+  if (opts.resolution !== null) config.resolution = opts.resolution;
+  config.saveEvery = opts.saveEvery ?? config.steps;
+  return config;
+}
+
+// Everything a model's rows share: the target, the preset and the baseline config built from it.
+async function modelContext(modelKey, opts) {
+  const target = await targetFor(modelKey);
+  const preset = await presetFor(modelKey);
+  const base = baseConfig(preset, opts);
+  return { modelKey, target, preset, base, ladder: bucketLadder(target, base.resolution) };
 }
 
 // Resolve a row against the target's support flags: { advanced } to train, or { skip } with why.
@@ -807,10 +919,46 @@ function resolveRow(row, target) {
   return { advanced, dropped };
 }
 
-function configFor(target, modelKey, opts, rowAdvanced) {
-  const config = baseConfig(target, modelKey, opts);
-  config.advanced = { ...config.advanced, ...rowAdvanced };
+function rowAdvanced(row, ctx, resolved) {
+  return row.bucketLadder ? { ...resolved.advanced, resolutionBuckets: ctx.ladder } : resolved.advanced;
+}
+
+function rowLabel(row, ctx) {
+  return row.bucketLadder ? ladderLabel(ctx.ladder) : row.label;
+}
+
+function configFor(ctx, advanced) {
+  const config = structuredClone(ctx.base);
+  config.advanced = { ...config.advanced, ...advanced };
   return config;
+}
+
+// A row's identity for resume: the submitted config plus the dataset (and so the caption mode)
+// and preset it came from. Rows trained before any of those changed never match, so they are
+// retrained rather than silently reused.
+function rowKey(ctx, config) {
+  const dataset = currentDataset();
+  return configKey({ config, captionMode: OPTS.captions, datasetId: dataset?.id ?? null, presetId: ctx.preset.id, presetVersion: ctx.preset.version });
+}
+
+// The row's provenance, recorded on its training state and shown in the report header.
+function rowProvenance(ctx, config) {
+  return {
+    captionMode: OPTS.captions,
+    datasetId: currentDataset()?.id ?? null,
+    presetId: ctx.preset.id,
+    presetVersion: ctx.preset.version,
+    resolution: config.resolution,
+    resolutionBuckets: config.advanced.resolutionBuckets ?? null,
+    steps: config.steps,
+    rank: config.rank,
+    alpha: config.alpha,
+    learningRate: config.learningRate,
+    optimizer: config.optimizer,
+    saveEvery: config.saveEvery,
+    trainingAdapterRepo: config.advanced.trainingAdapterRepo ?? null,
+    trainingAdapterVersion: config.advanced.trainingAdapterVersion ?? null,
+  };
 }
 
 function configKey(config) {
@@ -829,26 +977,52 @@ function flatKeys(obj, acc = {}) {
 async function submitTraining(modelKey, rowId, config, dryRun) {
   return api("POST", `/api/v1/projects/${STATE.project.id}/training/jobs`, {
     targetId: MODELS[modelKey].target,
-    datasetId: STATE.dataset.id,
+    datasetId: currentDataset().id,
     outputName: `ab-${modelKey}-${rowId}`,
     dryRun,
     config,
   });
 }
 
+// Intermediate checkpoints the trainer wrote next to a row's final adapter. Every native trainer
+// saves `<stem>-step<NNNNNN>.safetensors` in the plan's output dir every `saveEvery` steps (never at
+// the final step, which is the adapter itself) beside `.resume`/`.optim` snapshot siblings, which
+// this pattern excludes. Only the final file is registered as a LoRA, so these are imported
+// through the app's LoRA import route before a sample can reference them.
+function checkpointFiles(rec) {
+  if (!rec?.loraPath) return [];
+  const dir = path.dirname(rec.loraPath);
+  const stem = path.basename(rec.loraPath).replace(/\.safetensors$/, "");
+  const escaped = stem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = new RegExp(`^${escaped}-step(\\d+)\\.safetensors$`);
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return names
+    .map((name) => ({ name, match: pattern.exec(name) }))
+    .filter(({ match }) => match)
+    .map(({ name, match }) => ({ step: Number(match[1]), path: path.join(dir, name) }))
+    .sort((a, b) => a.step - b.step);
+}
+
 // Train one row to completion (or reuse a finished identical run). Returns the state record.
-async function trainRow(modelKey, row, target, opts, { stateKey = modelKey } = {}) {
+async function trainRow(ctx, row, opts, { stateKey = ctx.modelKey } = {}) {
+  const { modelKey, target } = ctx;
   STATE.training[stateKey] ??= {};
   const record = STATE.training[stateKey][row.id] ?? {};
   const resolved = resolveRow(row, target);
   if (resolved.skip) {
-    STATE.training[stateKey][row.id] = { status: "skipped", skipReason: resolved.skip, label: row.label };
+    STATE.training[stateKey][row.id] = { status: "skipped", skipReason: resolved.skip, label: rowLabel(row, ctx) };
     saveState();
     log(`  ${row.id}: SKIPPED (${resolved.skip})`);
     return STATE.training[stateKey][row.id];
   }
-  const config = configFor(target, modelKey, opts, resolved.advanced);
-  const key = configKey(config);
+  const advanced = rowAdvanced(row, ctx, resolved);
+  const config = configFor(ctx, advanced);
+  const key = rowKey(ctx, config);
   if (record.status === "completed" && record.configKey === key && !opts.force) {
     log(`  ${row.id}: already completed (${record.loraId})`);
     return record;
@@ -861,22 +1035,27 @@ async function trainRow(modelKey, row, target, opts, { stateKey = modelKey } = {
     log(`  ${row.id}: reusing the baseline-timing run (${timing.loraId})`);
     return STATE.training[stateKey][row.id];
   }
-  if (row.needsMasks && !STATE.masks?.completed) {
-    throw new Error(`row ${row.id} needs subject masks; run --phase masks --confirm-gpu first`);
+  if (row.needsMasks && !currentDataset()?.masks?.completed) {
+    throw new Error(`row ${row.id} needs subject masks for the ${opts.captions}-caption dataset; run --phase masks --confirm-gpu first`);
   }
   await cancelStale(record.jobId);
-  log(`  ${row.id}: submitting (${row.label})`);
+  const label = rowLabel(row, ctx);
+  log(`  ${row.id}: submitting (${label}; ${ctx.preset.id}, ${config.resolution} px, ${config.steps} steps, ${opts.captions} captions)`);
   const job = await submitTraining(modelKey, row.id, config, false);
   const output = job.payload?.plan?.output ?? {};
+  const entry = job.payload?.manifestEntry ?? {};
   STATE.training[stateKey][row.id] = {
     status: "running",
-    label: row.label,
+    label,
     jobId: job.id,
     configKey: key,
-    advanced: resolved.advanced,
+    ...rowProvenance(ctx, config),
+    advanced,
     droppedTechniques: resolved.dropped,
     loraId: output.loraId,
     loraPath: output.outputDir && output.fileName ? path.join(output.outputDir, output.fileName) : null,
+    family: entry.family ?? target.family ?? null,
+    baseModel: entry.baseModel ?? target.baseModel ?? null,
   };
   saveState();
   const { job: done, steps, losses } = await waitJob(job.id);
@@ -885,9 +1064,13 @@ async function trainRow(modelKey, row, target, opts, { stateKey = modelKey } = {
   rec.error = done.error ?? null;
   rec.wallSeconds = wallSeconds(done);
   rec.secondsPerStep = secondsPerStep(steps);
+  // The loss of the last `Training step N of M (loss …)` message the poller saw. On an
+  // alternating aux-loss row that step may have been an aux-only step, so this is not a
+  // diffusion-loss convergence figure.
   rec.finalLoss = losses.at(-1)?.loss ?? null;
   rec.losses = losses;
   rec.completedAt = done.completedAt ?? null;
+  rec.checkpoints = checkpointFiles(rec);
   saveState();
   if (done.status !== "completed") {
     throw new Error(`training ${row.id} ended ${done.status}: ${done.error ?? done.message}`);
@@ -895,7 +1078,8 @@ async function trainRow(modelKey, row, target, opts, { stateKey = modelKey } = {
   log(
     `  ${row.id}: done in ${rec.wallSeconds?.toFixed(0)} s wall` +
       (rec.secondsPerStep ? `, ${rec.secondsPerStep.toFixed(2)} s/step` : "") +
-      ` -> ${rec.loraPath}`,
+      ` -> ${rec.loraPath}` +
+      (rec.checkpoints.length ? ` (+${rec.checkpoints.length} checkpoints)` : ""),
   );
   return rec;
 }
@@ -906,18 +1090,18 @@ async function trainRow(modelKey, row, target, opts, { stateKey = modelKey } = {
 
 async function phaseMasks() {
   requireSetup();
-  await cancelStale(STATE.masks?.jobId);
-  const job = await api("POST", `/api/v1/projects/${STATE.project.id}/training/datasets/${STATE.dataset.id}/subject-mask-jobs`, {});
-  STATE.masks = { jobId: job.id, completed: false };
+  const dataset = currentDataset();
+  await cancelStale(dataset.masks?.jobId);
+  const route = `/api/v1/projects/${STATE.project.id}/training/datasets/${dataset.id}`;
+  const job = await api("POST", `${route}/subject-mask-jobs`, {});
+  dataset.masks = { jobId: job.id, completed: false };
   saveState();
   const { job: done } = await waitJob(job.id);
-  const masks = await api("GET", `/api/v1/projects/${STATE.project.id}/training/datasets/${STATE.dataset.id}/subject-masks`).catch(
-    () => null,
-  );
-  STATE.masks = { jobId: job.id, completed: done.status === "completed", status: done.status, wallSeconds: wallSeconds(done), masks: summarizeMasks(masks) };
+  const masks = await api("GET", `${route}/subject-masks`).catch(() => null);
+  dataset.masks = { jobId: job.id, completed: done.status === "completed", status: done.status, wallSeconds: wallSeconds(done), masks: summarizeMasks(masks) };
   saveState();
   if (done.status !== "completed") throw new Error(`subject-mask job ended ${done.status}: ${done.error ?? done.message}`);
-  log(`subject masks done (${JSON.stringify(STATE.masks.masks)})`);
+  log(`subject masks done for the ${OPTS.captions}-caption dataset (${JSON.stringify(dataset.masks.masks)})`);
 }
 
 function summarizeMasks(masks) {
@@ -928,18 +1112,18 @@ function summarizeMasks(masks) {
 
 async function phaseBaselineTiming(opts) {
   requireSetup();
-  const target = await targetFor("zimage");
+  const ctx = await modelContext("zimage", opts);
   const row = techniqueRows("zimage", opts).find((r) => r.id === "baseline");
-  const rec = await trainRow("zimage", row, target, opts, { stateKey: "baseline-timing" });
-  log(`baseline timing: ${rec.wallSeconds?.toFixed(0)} s wall, ${rec.secondsPerStep?.toFixed(3) ?? "?"} s/step over ${opts.steps} steps`);
+  const rec = await trainRow(ctx, row, opts, { stateKey: "baseline-timing" });
+  log(`baseline timing: ${rec.wallSeconds?.toFixed(0)} s wall, ${rec.secondsPerStep?.toFixed(3) ?? "?"} s/step over ${rec.steps} steps at ${rec.resolution} px`);
 }
 
 async function phaseTrain(opts, modelKey) {
   requireSetup();
-  const target = await targetFor(modelKey);
+  const ctx = await modelContext(modelKey, opts);
   const rows = selectedRows(modelKey, opts);
-  log(`training ${rows.length} ${MODELS[modelKey].label} rows sequentially`);
-  for (const row of rows) await trainRow(modelKey, row, target, opts);
+  log(`training ${rows.length} ${MODELS[modelKey].label} rows sequentially from ${ctx.preset.id}`);
+  for (const row of rows) await trainRow(ctx, row, opts);
 }
 
 function selectedRows(modelKey, opts) {
@@ -950,6 +1134,11 @@ function selectedRows(modelKey, opts) {
   return rows.filter((r) => opts.rows.includes(r.id));
 }
 
+function genSize(modelKey, opts) {
+  const m = MODELS[modelKey];
+  return opts.genSize ? { width: opts.genSize, height: opts.genSize } : { width: m.gen.width, height: m.gen.height };
+}
+
 function sampleRequest(modelKey, opts, promptText, seed, loraId) {
   const m = MODELS[modelKey];
   return {
@@ -958,11 +1147,16 @@ function sampleRequest(modelKey, opts, promptText, seed, loraId) {
     model: m.baseModel,
     count: 1,
     seed,
-    width: m.gen.width,
-    height: m.gen.height,
+    ...genSize(modelKey, opts),
     loras: loraId ? [{ id: loraId, weight: opts.loraWeight }] : [],
     advanced: { ...m.gen.advanced },
   };
+}
+
+// What a row's samples were rendered from. A change (retrained adapter, other LoRA weight or
+// render size) invalidates the row's existing samples instead of mixing renders in one grid row.
+function renderKey(modelKey, opts, loraId) {
+  return JSON.stringify({ loraId: loraId ?? null, weight: loraId ? opts.loraWeight : null, ...genSize(modelKey, opts), advanced: MODELS[modelKey].gen.advanced });
 }
 
 function imagePathsIn(value, acc = []) {
@@ -976,11 +1170,94 @@ function imagePathsIn(value, acc = []) {
   return acc;
 }
 
+function checkpointRowId(rowId, step) {
+  return `${rowId}@${step}`;
+}
+
+// Register one intermediate checkpoint as a project LoRA through the app's own import route
+// (`POST /api/v1/loras/import`, a local `sourcePath` under the project's loras dir, run by the
+// API's in-process utility worker), so the image API can reference it by id. The id carries the
+// training job, so a retrained row never resolves to an older run's checkpoint.
+async function ensureCheckpointLora(modelKey, rowId, trained, ckpt) {
+  const known = STATE.checkpointLoras[ckpt.path];
+  if (known && known.trainingJobId === trained.jobId && !OPTS.force) {
+    const loras = await api("GET", `/api/v1/loras?projectId=${encodeURIComponent(STATE.project.id)}`);
+    if (loras.some((l) => l.id === known.loraId && l.installState === "installed")) return known.loraId;
+  }
+  let { family, baseModel } = trained;
+  if (!family || !baseModel) {
+    const job = await api("GET", `/api/v1/jobs/${trained.jobId}`);
+    family ??= job.payload?.manifestEntry?.family ?? null;
+    baseModel ??= job.payload?.manifestEntry?.baseModel ?? null;
+  }
+  const loraId = `ab_${modelKey}_${rowId}_${trained.jobId.replace(/^job_/, "").slice(0, 12)}_step${String(ckpt.step).padStart(6, "0")}`;
+  log(`  importing checkpoint ${path.basename(ckpt.path)} as LoRA ${loraId}`);
+  const job = await api("POST", "/api/v1/loras/import", {
+    loraId,
+    name: `ab ${modelKey} ${rowId} @ step ${ckpt.step}`,
+    sourcePath: ckpt.path,
+    scope: "project",
+    projectId: STATE.project.id,
+    family,
+    baseModel,
+    triggerWords: [OPTS.trigger],
+    notes: `epic-2123 A/B intermediate checkpoint of training job ${trained.jobId}`,
+  });
+  const { job: done } = await waitJob(job.id);
+  if (done.status !== "completed") throw new Error(`checkpoint import ${loraId} ended ${done.status}: ${done.error ?? done.message}`);
+  STATE.checkpointLoras[ckpt.path] = { loraId, trainingJobId: trained.jobId, step: ckpt.step, importJobId: job.id };
+  saveState();
+  return loraId;
+}
+
+// Render the fixed prompt grid for one row (or checkpoint sub-row) with one adapter (or none).
+async function renderRow(opts, modelKey, rowId, label, loraId) {
+  const dir = path.join(opts.root, "samples", modelKey, rowId);
+  fs.mkdirSync(dir, { recursive: true });
+  const key = renderKey(modelKey, opts, loraId);
+  let record = STATE.samples[modelKey][rowId];
+  if (record && record.renderKey !== key) {
+    log(`  ${rowId}: render inputs changed (adapter, LoRA weight or size); re-rendering`);
+    record = null;
+  }
+  record = STATE.samples[modelKey][rowId] = record ?? { files: {}, renderKey: key };
+  record.label = label;
+  record.loraId = loraId ?? null;
+  for (const [pid, template] of PROMPTS) {
+    for (const seed of opts.seeds) {
+      const name = `${pid}_s${seed}`;
+      const dest = path.join(dir, `${name}.png`);
+      if (record.files[name] && fs.existsSync(dest) && !opts.force) continue;
+      const promptText = template.replaceAll("{t}", opts.trigger);
+      await cancelStale(record.pendingJobId);
+      const job = await api("POST", "/api/v1/image/jobs", sampleRequest(modelKey, opts, promptText, seed, loraId));
+      record.pendingJobId = job.id;
+      saveState();
+      log(`  ${rowId} ${name}`);
+      const { job: done } = await waitJob(job.id);
+      record.pendingJobId = null;
+      if (done.status !== "completed") throw new Error(`sample ${rowId}/${name} ended ${done.status}: ${done.error ?? done.message}`);
+      // The worker records each written image as an asset fact whose `mediaPath` is relative to
+      // the project directory; fall back to any image-looking path in the result.
+      const writes = done.result?.assetWrites ?? [];
+      const found = writes.find((w) => typeof w?.mediaPath === "string")?.mediaPath ?? imagePathsIn(done.result)[0];
+      if (!found) throw new Error(`sample ${rowId}/${name}: no image path in the job result`);
+      const source = path.isAbsolute(found) ? found : path.join(STATE.project.path, found);
+      fs.copyFileSync(source, dest);
+      record.files[name] = { prompt: promptText, seed, source, jobId: job.id };
+      saveState();
+    }
+  }
+  fs.writeFileSync(
+    path.join(dir, "prompts.json"),
+    `${JSON.stringify(Object.fromEntries(PROMPTS.map(([pid, t]) => [pid, t.replaceAll("{t}", opts.trigger)])), null, 2)}\n`,
+  );
+}
+
 async function phaseSamples(opts, modelKey) {
   requireSetup();
   const rows = [{ id: "base", label: "Base model (no LoRA)" }, ...selectedRows(modelKey, opts)];
   STATE.samples[modelKey] ??= {};
-  const outRoot = path.join(opts.root, "samples", modelKey);
   for (const row of rows) {
     const trained = row.id === "base" ? { status: "completed" } : STATE.training[modelKey]?.[row.id];
     if (!trained || trained.status === "skipped") {
@@ -991,40 +1268,16 @@ async function phaseSamples(opts, modelKey) {
       log(`  ${row.id}: training not completed (${trained.status}); skipping samples`);
       continue;
     }
-    const dir = path.join(outRoot, row.id);
-    fs.mkdirSync(dir, { recursive: true });
-    const record = (STATE.samples[modelKey][row.id] ??= { files: {} });
-    record.label = row.label;
-    record.loraId = trained.loraId ?? null;
-    for (const [pid, template] of PROMPTS) {
-      for (const seed of opts.seeds) {
-        const name = `${pid}_s${seed}`;
-        const dest = path.join(dir, `${name}.png`);
-        if (record.files[name] && fs.existsSync(dest) && !opts.force) continue;
-        const promptText = template.replaceAll("{t}", opts.trigger);
-        await cancelStale(record.pendingJobId);
-        const job = await api("POST", "/api/v1/image/jobs", sampleRequest(modelKey, opts, promptText, seed, trained.loraId));
-        record.pendingJobId = job.id;
-        saveState();
-        log(`  ${row.id} ${name}`);
-        const { job: done } = await waitJob(job.id);
-        record.pendingJobId = null;
-        if (done.status !== "completed") throw new Error(`sample ${row.id}/${name} ended ${done.status}: ${done.error ?? done.message}`);
-        // The worker records each written image as an asset fact whose `mediaPath` is relative to
-        // the project directory; fall back to any image-looking path in the result.
-        const writes = done.result?.assetWrites ?? [];
-        const found = writes.find((w) => typeof w?.mediaPath === "string")?.mediaPath ?? imagePathsIn(done.result)[0];
-        if (!found) throw new Error(`sample ${row.id}/${name}: no image path in the job result`);
-        const source = path.isAbsolute(found) ? found : path.join(STATE.project.path, found);
-        fs.copyFileSync(source, dest);
-        record.files[name] = { prompt: promptText, seed, source, jobId: job.id };
-        saveState();
+    if (opts.checkpoints && row.id !== "base") {
+      const checkpoints = checkpointFiles(trained);
+      if (!checkpoints.length) log(`  ${row.id}: no intermediate checkpoints on disk (trained with saveEvery ${trained.saveEvery ?? "?"})`);
+      for (const ckpt of checkpoints) {
+        const loraId = await ensureCheckpointLora(modelKey, row.id, trained, ckpt);
+        await renderRow(opts, modelKey, checkpointRowId(row.id, ckpt.step), `${trained.label ?? row.label} @ step ${ckpt.step}`, loraId);
       }
     }
-    fs.writeFileSync(
-      path.join(dir, "prompts.json"),
-      `${JSON.stringify(Object.fromEntries(PROMPTS.map(([pid, t]) => [pid, t.replaceAll("{t}", opts.trigger)])), null, 2)}\n`,
-    );
+    const label = row.id === "base" ? row.label : `${trained.label ?? row.label}${trained.steps ? ` @ step ${trained.steps}` : ""}`;
+    await renderRow(opts, modelKey, row.id, label, trained.loraId);
   }
 }
 
@@ -1037,8 +1290,11 @@ async function phaseEval(opts, modelKey) {
   STATE.rank[modelKey] ??= {};
   for (const [rowId, rec] of Object.entries(STATE.training[modelKey] ?? {})) {
     if (rec.status !== "completed" || !rec.loraPath) continue;
-    STATE.rank[modelKey][rowId] = loraStableRank(rec.loraPath);
-    log(`  ${rowId}: stable rank ${STATE.rank[modelKey][rowId].mean.toFixed(3)} over ${STATE.rank[modelKey][rowId].modules} modules`);
+    const files = [[rowId, rec.loraPath], ...checkpointFiles(rec).map((c) => [checkpointRowId(rowId, c.step), c.path])];
+    for (const [id, file] of files) {
+      STATE.rank[modelKey][id] = loraStableRank(file);
+      log(`  ${id}: stable rank ${STATE.rank[modelKey][id].mean.toFixed(3)} over ${STATE.rank[modelKey][id].modules} modules`);
+    }
   }
   saveState();
 
@@ -1051,13 +1307,16 @@ async function phaseEval(opts, modelKey) {
   if (!faceBundle) throw new Error("SceneWorks/instantid-mlx is not in the HF cache (install instantid_face_stack)");
   const env = { ...process.env, ...prebuiltMlxEnv(opts.evalRelease ? "Release" : "Debug") };
   STATE.eval[modelKey] ??= {};
+  STATE.evalKeys[modelKey] ??= {};
   const evalDir = path.join(opts.root, "eval", modelKey);
   fs.mkdirSync(evalDir, { recursive: true });
   for (const [rowId, rec] of Object.entries(STATE.samples[modelKey] ?? {})) {
     const genDir = path.join(opts.root, "samples", modelKey, rowId);
     if (!Object.keys(rec.files ?? {}).length) continue;
     const out = path.join(evalDir, `${rowId}.json`);
-    if (STATE.eval[modelKey][rowId] && fs.existsSync(out) && !opts.force) {
+    // Re-score when the row's samples were re-rendered from different inputs since its last score.
+    const scoredCurrent = STATE.evalKeys[modelKey][rowId] === rec.renderKey;
+    if (STATE.eval[modelKey][rowId] && scoredCurrent && fs.existsSync(out) && !opts.force) {
       log(`  ${rowId}: already scored`);
       continue;
     }
@@ -1070,7 +1329,7 @@ async function phaseEval(opts, modelKey) {
       stdio: "inherit",
       env: {
         ...env,
-        REF_DIR: STATE.dataset.source,
+        REF_DIR: currentDataset()?.source ?? opts.dataset,
         GEN_DIR: genDir,
         PROMPTS_JSON: path.join(genDir, "prompts.json"),
         EVAL_LABEL: `${modelKey}/${rowId}`,
@@ -1081,6 +1340,7 @@ async function phaseEval(opts, modelKey) {
     });
     if (res.status !== 0) throw new Error(`lora_eval_harness failed for ${rowId} (${res.status})`);
     STATE.eval[modelKey][rowId] = JSON.parse(fs.readFileSync(out, "utf8")).aggregates;
+    STATE.evalKeys[modelKey][rowId] = rec.renderKey;
     saveState();
   }
 }
@@ -1341,39 +1601,62 @@ const METRICS = [
   ["face_detect_rate", "Face detect", 2],
 ];
 
+// Report rows for one model: the base model, then per technique row its intermediate-checkpoint
+// sub-rows (`<row>@<step>`, ascending) followed by the row's final adapter. Sub-rows come from
+// whatever was sampled or ranked, so they appear once `samples --checkpoints` or `eval` ran.
+function reportRows(modelKey, opts) {
+  const training = STATE.training[modelKey] ?? {};
+  const sampled = Object.keys(STATE.samples[modelKey] ?? {});
+  const ranked = Object.keys(STATE.rank[modelKey] ?? {});
+  const rows = [{ id: "base", label: "Base model (no LoRA)", parent: null }];
+  for (const row of techniqueRows(modelKey, opts)) {
+    const t = training[row.id];
+    const steps = new Set();
+    for (const id of [...sampled, ...ranked]) {
+      const m = /^(.+)@(\d+)$/.exec(id);
+      if (m && m[1] === row.id) steps.add(Number(m[2]));
+    }
+    for (const step of [...steps].sort((a, b) => a - b)) {
+      rows.push({ id: checkpointRowId(row.id, step), label: `${t?.label ?? row.label} @ step ${step}`, parent: row.id, step });
+    }
+    const final = steps.size && t?.steps ? ` @ step ${t.steps} (final)` : "";
+    rows.push({ id: row.id, label: `${t?.label ?? row.label}${final}`, parent: null, step: t?.steps ?? null });
+  }
+  return rows;
+}
+
 function phaseReport(opts) {
   const reportDir = path.join(opts.root, "report");
   fs.mkdirSync(reportDir, { recursive: true });
+  const dataset = currentDataset();
   const results = {
     generatedAt: new Date().toISOString(),
     settings: {
-      steps: opts.steps,
-      rank: opts.rank,
-      learningRate: opts.lr,
       seed: opts.seed,
-      batchSize: opts.batch,
-      resolution: Object.fromEntries(Object.keys(MODELS).map((k) => [k, abResolution(k, opts)])),
-      trigger: STATE.dataset?.trigger ?? opts.trigger,
-      dataset: STATE.dataset ?? null,
+      captionMode: opts.captions,
+      trigger: dataset?.trigger ?? opts.trigger,
+      dataset: dataset ?? null,
+      datasets: STATE.datasets,
       sampleSeeds: opts.seeds,
       prompts: Object.fromEntries(PROMPTS),
       loraWeight: opts.loraWeight,
+      genSize: Object.fromEntries(Object.keys(MODELS).map((k) => [k, genSize(k, opts)])),
     },
     models: STATE.models ?? null,
-    masks: STATE.masks ?? null,
     baselineTiming: stripLosses(STATE.training["baseline-timing"]?.baseline ?? null),
     grids: {},
   };
   const md = [`# Epic 2123 real-weight A/B`, "", `Generated ${results.generatedAt}.`, ""];
   md.push(
-    `Settings: ${opts.steps} steps, rank ${opts.rank}, lr ${opts.lr}, seed ${opts.seed}, batch ${opts.batch}; ` +
-      `trigger \`${results.settings.trigger}\`; ${PROMPTS.length} prompts × ${opts.seeds.length} seeds per row.`,
+    `Seed ${opts.seed}; trigger \`${results.settings.trigger}\`; ${PROMPTS.length} prompts × ${opts.seeds.length} seeds per row ` +
+      `at LoRA weight ${opts.loraWeight}.`,
     "",
   );
   if (results.baselineTiming) {
+    const t = results.baselineTiming;
     md.push(
-      `Baseline timing (Z-Image, ${abResolution("zimage", opts)} px): ${fmt(results.baselineTiming.wallSeconds, 0)} s wall, ` +
-        `${fmt(results.baselineTiming.secondsPerStep, 3)} s/step.`,
+      `Baseline timing (Z-Image, ${t.resolution ?? "?"} px, ${t.steps ?? "?"} steps): ${fmt(t.wallSeconds, 0)} s wall, ` +
+        `${fmt(t.secondsPerStep, 3)} s/step.`,
       "",
     );
   }
@@ -1381,39 +1664,76 @@ function phaseReport(opts) {
     const training = STATE.training[modelKey] ?? {};
     const samples = STATE.samples[modelKey] ?? {};
     if (!Object.keys(training).length && !Object.keys(samples).length) continue;
-    const rows = [{ id: "base", label: "Base model (no LoRA)" }, ...techniqueRows(modelKey, opts)];
+    const rows = reportRows(modelKey, opts);
+    const evalFor = (id) => {
+      // A score is shown only for the samples it was computed on.
+      const key = STATE.evalKeys?.[modelKey]?.[id];
+      return key === undefined || key === samples[id]?.renderKey ? STATE.eval[modelKey]?.[id] ?? null : null;
+    };
     const table = rows.map((row) => {
-      const t = row.id === "base" ? null : training[row.id] ?? null;
+      const t = row.id === "base" ? null : training[row.parent ?? row.id] ?? null;
       return {
         id: row.id,
-        label: t?.label ?? row.label,
+        label: row.label,
+        checkpointOf: row.parent,
+        step: row.step ?? null,
         status: row.id === "base" ? "n/a" : t?.status ?? "pending",
         skipReason: t?.skipReason ?? null,
         droppedTechniques: t?.droppedTechniques ?? [],
-        wallSeconds: t?.wallSeconds ?? null,
-        secondsPerStep: t?.secondsPerStep ?? null,
-        finalLoss: t?.finalLoss ?? null,
-        loraPath: t?.loraPath ?? null,
+        captionMode: t?.captionMode ?? null,
+        datasetId: t?.datasetId ?? null,
+        presetId: t?.presetId ?? null,
+        resolution: t?.resolution ?? null,
+        resolutionBuckets: t?.resolutionBuckets ?? null,
+        steps: t?.steps ?? null,
+        rank: t?.rank ?? null,
+        alpha: t?.alpha ?? null,
+        learningRate: t?.learningRate ?? null,
+        trainingAdapterVersion: t?.trainingAdapterVersion ?? null,
+        wallSeconds: row.parent ? null : t?.wallSeconds ?? null,
+        secondsPerStep: row.parent ? null : t?.secondsPerStep ?? null,
+        // The last logged `Training step N of M (loss …)`; on an alternating aux-loss row it may
+        // be an aux-only step's loss.
+        finalLoss: row.parent ? null : t?.finalLoss ?? null,
+        loraPath: row.parent ? checkpointFiles(t).find((c) => c.step === row.step)?.path ?? null : t?.loraPath ?? null,
+        loraId: samples[row.id]?.loraId ?? (row.parent ? null : t?.loraId ?? null),
+        sampleRender: samples[row.id]?.renderKey ? JSON.parse(samples[row.id].renderKey) : null,
         stableRank: STATE.rank[modelKey]?.[row.id] ?? null,
-        eval: STATE.eval[modelKey]?.[row.id] ?? null,
+        eval: evalFor(row.id),
       };
     });
     results.grids[modelKey] = table;
     const baseline = table.find((r) => r.id === "baseline");
-    md.push(`## ${MODELS[modelKey].label} (${abResolution(modelKey, opts)} px)`, "");
+    md.push(`## ${MODELS[modelKey].label}`, "");
+    // Header: what each trained row actually ran with.
+    const cfgHead = ["Row", "Captions", "Preset", "Resolution", "Steps", "Rank/alpha", "LR", "Training adapter"];
+    md.push(`| ${cfgHead.join(" | ")} |`, `| ${cfgHead.map(() => "---").join(" | ")} |`);
+    for (const r of table) {
+      if (r.id === "base" || r.checkpointOf || r.status === "skipped" || r.status === "pending") continue;
+      const res = r.resolutionBuckets ? r.resolutionBuckets.map((b) => `${b.resolution}×${b.repeats}`).join("/") : r.resolution ?? "–";
+      md.push(
+        `| ${[r.label, r.captionMode ?? "–", r.presetId ? `\`${r.presetId}\`` : "–", res, r.steps ?? "–", r.rank ? `${r.rank}/${r.alpha}` : "–", r.learningRate ?? "–", r.presetId ? r.trainingAdapterVersion ?? "none" : "–"].join(" | ")} |`,
+      );
+    }
+    md.push("");
     const head = ["Row", "Status", "s/step", "Stable rank", ...METRICS.map(([, label]) => label)];
     md.push(`| ${head.join(" | ")} |`, `| ${head.map(() => "---").join(" | ")} |`);
     for (const r of table) {
       const cells = [
         r.label,
-        r.status === "skipped" ? `skipped: ${r.skipReason}` : r.status,
+        r.status === "skipped" ? `skipped: ${r.skipReason}` : r.checkpointOf ? "checkpoint" : r.status,
         withDelta(r.secondsPerStep, baseline?.secondsPerStep, 2, r.id),
         withDelta(r.stableRank?.mean, baseline?.stableRank?.mean, 2, r.id),
         ...METRICS.map(([key, , digits]) => withDelta(r.eval?.[key], baseline?.eval?.[key], digits, r.id)),
       ];
       md.push(`| ${cells.join(" | ")} |`);
     }
-    md.push("", "Deltas are against the Baseline row. Stable rank = ‖BA‖_F² / ‖BA‖_2², mean over adapter modules.", "");
+    md.push(
+      "",
+      "Deltas are against the Baseline row's final adapter. Stable rank = ‖BA‖_F² / ‖BA‖_2², mean over adapter modules. " +
+        "`row @ step N` rows are intermediate checkpoints of that row's run.",
+      "",
+    );
     const grid = makeGrid(opts, modelKey, rows, reportDir);
     if (grid) md.push(`![${modelKey} grid](${path.basename(grid)})`, "");
   }
@@ -1500,13 +1820,41 @@ function wrap(text, width) {
 // Dry run: setup + every phase with no GPU; validates every row's config.advanced at the API
 // ---------------------------------------------------------------------------------------------
 
+// A tiny PEFT-layout safetensors file, standing in for a trainer checkpoint in the dry run.
+function writeSyntheticAdapter(file) {
+  const tensors = {
+    "selftest.to_q.lora_A.weight": { shape: [2, 4], values: [1, 0, 0, 0, 0, 1, 0, 0] },
+    "selftest.to_q.lora_B.weight": { shape: [4, 2], values: [1, 0, 0, 1, 0, 0, 0, 0] },
+  };
+  const header = {};
+  let offset = 0;
+  const chunks = [];
+  for (const [name, { shape, values }] of Object.entries(tensors)) {
+    const bytes = Buffer.from(Float32Array.from(values).buffer);
+    header[name] = { dtype: "F32", shape, data_offsets: [offset, offset + bytes.length] };
+    offset += bytes.length;
+    chunks.push(bytes);
+  }
+  const h = Buffer.from(JSON.stringify(header));
+  const len = Buffer.alloc(8);
+  len.writeBigUInt64LE(BigInt(h.length));
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, Buffer.concat([len, h, ...chunks]));
+}
+
 async function dryRun(opts) {
-  const findings = { rows: {}, masksRoute: null, samplesRoute: null, stableRankSelfTest: null };
+  const findings = { datasets: {}, rows: {}, baselines: {}, masksRoute: null, samplesRoute: null, checkpointRoute: {}, stableRankSelfTest: null };
   await phaseSetup(opts);
+  // Both caption datasets exist side by side; each is checked to carry the captions its mode means.
+  for (const mode of CAPTION_MODES) {
+    const ds = await ensureDataset(opts, mode);
+    findings.datasets[mode] = { id: ds.id, itemCount: ds.itemCount };
+  }
+  const dataset = currentDataset();
 
   // masks: the route accepts the dataset (the job is canceled; no worker is running).
   try {
-    const job = await api("POST", `/api/v1/projects/${STATE.project.id}/training/datasets/${STATE.dataset.id}/subject-mask-jobs`, {});
+    const job = await api("POST", `/api/v1/projects/${STATE.project.id}/training/datasets/${dataset.id}/subject-mask-jobs`, {});
     await api("POST", `/api/v1/jobs/${job.id}/cancel`, {}).catch(() => {});
     findings.masksRoute = { accepted: true, jobType: job.type };
   } catch (error) {
@@ -1515,29 +1863,44 @@ async function dryRun(opts) {
 
   // baseline-timing + every train row on both models: submitted with dryRun:true so the API runs
   // the full submit-time validation (target limits, every technique parser, plan build).
+  const contexts = {};
   for (const modelKey of Object.keys(MODELS)) {
-    const target = await targetFor(modelKey);
+    const ctx = (contexts[modelKey] = await modelContext(modelKey, opts));
+    findings.baselines[modelKey] = { presetId: ctx.preset.id, presetVersion: ctx.preset.version, bucketLadder: ctx.ladder, config: ctx.base };
     findings.rows[modelKey] = {};
     for (const row of techniqueRows(modelKey, opts)) {
-      const resolved = resolveRow(row, target);
+      const resolved = resolveRow(row, ctx.target);
       if (resolved.skip) {
         findings.rows[modelKey][row.id] = { skipped: resolved.skip };
         continue;
       }
-      const config = configFor(target, modelKey, opts, resolved.advanced);
+      const advanced = rowAdvanced(row, ctx, resolved);
+      const config = configFor(ctx, advanced);
       try {
         const job = await submitTraining(modelKey, row.id, config, true);
         await api("POST", `/api/v1/jobs/${job.id}/cancel`, {}).catch(() => {});
+        const plan = job.payload?.plan ?? {};
+        const planAdvanced = plan.config?.advanced ?? {};
+        // Every preset key and every row key must reach the plan unchanged (the training adapter
+        // and timestep settings included), and the plan's captions must be the caption mode's.
+        const lost = Object.entries(config.advanced).filter(([k, v]) => configKey({ v: planAdvanced[k] ?? null }) !== configKey({ v })).map(([k]) => k);
+        const captions = (plan.dataset?.items ?? []).map((item) => item.caption);
+        const captionsOk =
+          captions.length === dataset.itemCount &&
+          (opts.captions === "trigger" ? captions.every((c) => c === opts.trigger) : captions.every((c) => typeof c === "string" && c !== opts.trigger));
         findings.rows[modelKey][row.id] = {
           accepted: true,
-          advanced: resolved.advanced,
+          advanced,
           dropped: resolved.dropped,
-          planAdvancedEchoed: Object.keys(resolved.advanced).every((k) => k in (job.payload?.plan?.config?.advanced ?? {})),
+          planKeysLost: lost,
+          planCore: ["steps", "resolution", "rank", "alpha", "saveEvery", "seed"].every((k) => plan.config?.[k] === config[k]),
+          captionsOk,
+          captionSample: captions[0] ?? null,
           // The train phase reads the adapter id + path from the submit response's plan.
-          planOutput: Boolean(job.payload?.plan?.output?.loraId && job.payload?.plan?.output?.outputDir),
+          planOutput: Boolean(plan.output?.loraId && plan.output?.outputDir),
         };
       } catch (error) {
-        findings.rows[modelKey][row.id] = { accepted: false, advanced: resolved.advanced, error: error.message };
+        findings.rows[modelKey][row.id] = { accepted: false, advanced, error: error.message };
       }
     }
   }
@@ -1554,6 +1917,28 @@ async function dryRun(opts) {
     }
   }
 
+  // checkpoints: a synthetic `<stem>-step<N>.safetensors` in a project LoRA dir (where the trainer
+  // writes them) goes through discovery, the app's LoRA import route (run by the in-process CPU
+  // utility worker) and an image job that references the imported id.
+  for (const modelKey of Object.keys(MODELS)) {
+    const ctx = contexts[modelKey];
+    const outputDir = path.join(STATE.project.path, "loras", `dryrun_${modelKey}_ckpt`);
+    const stem = `ab-${modelKey}-dryrun`;
+    const fake = { jobId: `job_dryrun${modelKey}`, loraPath: path.join(outputDir, `${stem}.safetensors`), family: ctx.target.family, baseModel: ctx.target.baseModel };
+    writeSyntheticAdapter(path.join(outputDir, `${stem}-step000100.safetensors`));
+    writeSyntheticAdapter(path.join(outputDir, `${stem}-step000100.resume.safetensors`));
+    try {
+      const found = checkpointFiles(fake);
+      if (found.length !== 1 || found[0].step !== 100) throw new Error(`checkpoint discovery found ${JSON.stringify(found)}`);
+      const loraId = await ensureCheckpointLora(modelKey, "dryrun", fake, found[0]);
+      const job = await api("POST", "/api/v1/image/jobs", sampleRequest(modelKey, opts, PROMPTS[0][1].replaceAll("{t}", opts.trigger), opts.seeds[0], loraId));
+      await api("POST", `/api/v1/jobs/${job.id}/cancel`, {}).catch(() => {});
+      findings.checkpointRoute[modelKey] = { accepted: true, loraId, imageJobLoras: job.payload?.loras ?? null };
+    } catch (error) {
+      findings.checkpointRoute[modelKey] = { accepted: false, error: error.message };
+    }
+  }
+
   // eval: the stable-rank math against known answers (CPU).
   const selfDir = path.join(opts.root, "selftest");
   fs.mkdirSync(selfDir, { recursive: true });
@@ -1565,20 +1950,32 @@ async function dryRun(opts) {
   STATE.dryRun = { at: new Date().toISOString(), findings };
   saveState();
   const rowResults = Object.values(findings.rows).flatMap((r) => Object.values(r));
-  const rejected = rowResults.filter((r) => r.accepted === false || (r.accepted && (!r.planAdvancedEchoed || !r.planOutput)));
+  const rejected = rowResults.filter(
+    (r) => r.accepted === false || (r.accepted && (r.planKeysLost.length || !r.planCore || !r.captionsOk || !r.planOutput)),
+  );
   log("dry-run findings:");
+  for (const [modelKey, b] of Object.entries(findings.baselines)) {
+    log(`  ${modelKey} baseline (${b.presetId} v${b.presetVersion}, buckets ${ladderLabel(b.bucketLadder)}):`);
+    console.log(JSON.stringify(b.config, null, 2));
+  }
+  for (const [mode, ds] of Object.entries(findings.datasets)) log(`  dataset ${mode}: ${ds.id} (${ds.itemCount} items)`);
   for (const [modelKey, rows] of Object.entries(findings.rows)) {
     for (const [id, r] of Object.entries(rows)) {
-      log(`  ${modelKey}/${id}: ${r.skipped ? `skipped (${r.skipped})` : r.accepted ? "accepted" : `REJECTED ${r.error}`}`);
+      const problems = r.accepted
+        ? [r.planKeysLost.length && `plan lost ${r.planKeysLost.join(", ")}`, !r.planCore && "plan core mismatch", !r.captionsOk && `captions wrong (${JSON.stringify(r.captionSample)})`, !r.planOutput && "no plan output"].filter(Boolean)
+        : [];
+      log(`  ${modelKey}/${id}: ${r.skipped ? `skipped (${r.skipped})` : r.accepted ? (problems.length ? `PROBLEM ${problems.join("; ")}` : "accepted") : `REJECTED ${r.error}`}`);
     }
   }
   log(`  masks route: ${JSON.stringify(findings.masksRoute)}`);
   log(`  samples route: ${JSON.stringify(findings.samplesRoute)}`);
+  log(`  checkpoint import + sample route: ${JSON.stringify(findings.checkpointRoute)}`);
   log(`  stable-rank self-test: ${findings.stableRankSelfTest.map((t) => `${t.case}=${t.got.toFixed(4)}${t.ok ? "" : " FAIL"}`).join(", ")}`);
   const ok =
     !rejected.length &&
     findings.masksRoute?.accepted &&
     Object.values(findings.samplesRoute).every((r) => r.accepted) &&
+    Object.values(findings.checkpointRoute).every((r) => r.accepted) &&
     findings.stableRankSelfTest.every((t) => t.ok);
   log(ok ? "DRY RUN PASSED" : "DRY RUN FAILED");
   return ok;
@@ -1589,7 +1986,7 @@ async function dryRun(opts) {
 // ---------------------------------------------------------------------------------------------
 
 function requireSetup() {
-  if (!STATE.project || !STATE.dataset) throw new Error("run --phase setup first");
+  if (!STATE.project || !currentDataset()) throw new Error(`run --phase setup first (no ${OPTS.captions}-caption dataset)`);
 }
 
 function printStatus() {
@@ -1597,8 +1994,8 @@ function printStatus() {
     {
       root: OPTS.root,
       project: STATE.project ?? null,
-      dataset: STATE.dataset ?? null,
-      masks: STATE.masks ?? null,
+      captionMode: OPTS.captions,
+      datasets: STATE.datasets,
       training: Object.fromEntries(
         Object.entries(STATE.training).map(([k, rows]) => [k, Object.fromEntries(Object.entries(rows).map(([id, r]) => [id, r.status]))]),
       ),
@@ -1613,7 +2010,8 @@ function printStatus() {
 }
 
 function usage() {
-  console.log(fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n").slice(1, 32).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
+  const lines = fs.readFileSync(fileURLToPath(import.meta.url), "utf8").split("\n");
+  console.log(lines.slice(1, lines.findIndex((l, i) => i > 0 && !l.startsWith("//"))).map((l) => l.replace(/^\/\/ ?/, "")).join("\n"));
 }
 
 async function main() {
