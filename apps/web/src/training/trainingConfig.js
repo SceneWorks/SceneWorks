@@ -153,12 +153,19 @@ export function targetSupportsFaceLandmarkLoss(target) {
 // depth anchoring's: a full base fine-tune trains no adapter step, and an LTX-2.5 workflow with no
 // generated video has nothing to decode.
 export function faceLossCombinationRefusal(target, configDraft, label) {
+  return adapterLossRefusal(target, configDraft, `${label} trains`, `${label} needs a generated video stream`);
+}
+
+// The refusal every decoded-x0 / latent auxiliary loss shares: `adapterOnly` ("X trains") when the
+// draft is a full fine-tune, `video` ("X needs a generated video stream") on an LTX-2.5 workflow that
+// generates no video (skipped when `video` is empty), else null.
+function adapterLossRefusal(target, configDraft, adapterOnly, video) {
   if (isFullFinetuneNetworkType(configDraft?.networkType)) {
-    return `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`;
+    return `${adapterOnly} a LoRA/LoKr adapter only, not a full fine-tune`;
   }
   const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
-    return `${label} needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  if (video && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `${video}; the LTX-2.5 workflow ${workflow} generates none`;
   }
   return null;
 }
@@ -256,28 +263,14 @@ export function targetSupportsBodyLoss(target, loss) {
 // or null — mirrors the API's `body_loss_combination_refusal`: a full base fine-tune trains no
 // adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
 export function bodyLossCombinationRefusal(target, configDraft) {
-  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
-    return "The body losses train a LoRA/LoKr adapter only, not a full fine-tune";
-  }
-  const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
-    return `The body losses need a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
-  }
-  return null;
+  return adapterLossRefusal(target, configDraft, "The body losses train", "The body losses need a generated video stream");
 }
 
 // Why depth anchoring cannot run for this target + draft even though the target advertises it, or
 // null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
 // trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
 export function depthAnchoringCombinationRefusal(target, configDraft) {
-  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
-    return "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune";
-  }
-  const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
-    return `Depth anchoring needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
-  }
-  return null;
+  return adapterLossRefusal(target, configDraft, "Depth anchoring trains", "Depth anchoring needs a generated video stream");
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -605,26 +598,15 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     resolutionBuckets: resolutionBucketsDraft(advanced.resolutionBuckets),
     // Empty weight = depth anchoring off (the default); see depthAnchoringWeightSuggested. The
     // other knobs only matter (and only reach the job) while it is on.
-    depthAnchoringWeight: numericDraft(advanced.depthAnchoringWeight),
+    // Empty weight = that auxiliary loss off (the default); its knobs only reach the job while it is
+    // on. Every loss carries Weight/MinT/MaxT/Every; the extras below are loss-specific.
+    ...auxLossesDraft(advanced),
     depthAnchoringModel: asText(advanced.depthAnchoringModel || depthAnchoringModelOptions[0]),
-    depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
-    depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
-    depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
-    // Empty weight = that body loss off (the default); its knobs only reach the job while it is on.
-    ...bodyLossesDraft(advanced),
-    // Empty weight = the face loss is off (the default); see faceLossWeightSuggested.
-    identityLossWeight: numericDraft(advanced.identityLossWeight),
-    identityLossMinT: numericDraft(advanced.identityLossMinT),
-    identityLossMaxT: numericDraft(advanced.identityLossMaxT),
-    identityLossEvery: numericDraft(advanced.identityLossEvery),
+    bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
+    bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
+    normalRestrictToSubject: advanced.normalRestrictToSubject === true,
     identityLossMinCos: numericDraft(advanced.identityLossMinCos),
     identityLossReference: asText(advanced.identityLossReference || identityLossReferenceOptions[0]),
-    faceLandmarkLossWeight: numericDraft(advanced.faceLandmarkLossWeight),
-    faceLandmarkLossMinT: numericDraft(advanced.faceLandmarkLossMinT),
-    faceLandmarkLossMaxT: numericDraft(advanced.faceLandmarkLossMaxT),
-    faceLandmarkLossEvery: numericDraft(advanced.faceLandmarkLossEvery),
-    // Empty weight = off (the default) for each latent-perceptual loss (sc-24833).
-    ...latentPerceptualDraft(advanced),
     // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
     subjectMaskLoss: advanced.subjectMaskLoss === true,
     subjectMaskBackgroundWeight: numericDraft(
@@ -842,16 +824,7 @@ export function configValidation(
     }
   }
   validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
-  for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
-    issues.push(issue.error(field, message));
-  }
-  for (const [field, message] of bodyLossIssues(configDraft, selectedTarget, subjectMaskReport)) {
-    issues.push(issue.error(field, message));
-  }
-  for (const [field, message] of faceLossIssues(configDraft, selectedTarget)) {
-    issues.push(issue.error(field, message));
-  }
-  for (const [field, message] of latentPerceptualIssues(configDraft, selectedTarget)) {
+  for (const [field, message] of auxLossesIssues(configDraft, selectedTarget, subjectMaskReport)) {
     issues.push(issue.error(field, message));
   }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
@@ -1034,10 +1007,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           repeats: numberFromDraft(row?.repeats),
         }))
       : undefined,
-    ...depthAnchoringSnapshot(configDraft),
-    ...bodyLossSnapshot(configDraft),
-    ...faceLossSnapshot(configDraft),
-    ...latentPerceptualSnapshot(configDraft),
+    ...auxLossesSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
     subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
     subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
@@ -1108,69 +1078,15 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
 
 // Depth anchoring is on whenever the draft carries a weight (empty = off).
 export function depthAnchoringEnabled(configDraft) {
-  return String(configDraft?.depthAnchoringWeight ?? "").trim() !== "";
+  return auxLossOn(configDraft, "depthAnchoring");
 }
 
-// Field issues for the depth-anchoring knobs — the API's bounds (E6): weight in
-// [0, depthAnchoringWeightMax], a known model size, a [0, 1] noise window with min <= max, and a
-// whole alternation period in [1, depthAnchoringEveryMax]. Checked only while enabled.
-export function depthAnchoringIssues(configDraft, selectedTarget) {
-  if (!depthAnchoringEnabled(configDraft)) return [];
-  const issues = [];
-  const weight = numberFromDraft(configDraft.depthAnchoringWeight);
-  if (weight === null || weight < 0 || weight > depthAnchoringWeightMax) {
-    issues.push(["depthAnchoringWeight", `Depth anchoring weight must be between 0 and ${depthAnchoringWeightMax}`]);
-  } else if (weight > 0 && selectedTarget && !targetSupportsDepthAnchoring(selectedTarget)) {
-    // The toggle is hidden for such a target, so this names no input (field null): the value can
-    // only arrive from a carried-over draft, and the API would refuse it anyway.
-    issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
-    return issues;
-  } else if (weight > 0 && selectedTarget) {
-    const refusal = depthAnchoringCombinationRefusal(selectedTarget, configDraft);
-    if (refusal) {
-      issues.push(["depthAnchoringWeight", refusal]);
-      return issues;
-    }
-  }
-  if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
-    issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);
-  }
-  const window = {};
-  for (const field of ["depthAnchoringMinT", "depthAnchoringMaxT"]) {
-    if (!String(configDraft[field] ?? "").trim()) continue;
-    const t = numberFromDraft(configDraft[field]);
-    if (t === null || t < 0 || t > 1) {
-      issues.push([field, "Noise window bounds must be between 0 and 1"]);
-    } else {
-      window[field] = t;
-    }
-  }
-  const minT = window.depthAnchoringMinT ?? 0;
-  const maxT = window.depthAnchoringMaxT ?? 1;
-  if (minT > maxT) {
-    issues.push(["depthAnchoringMaxT", "Noise window max must be at least its min"]);
-  }
-  if (String(configDraft.depthAnchoringEvery ?? "").trim()) {
-    const every = numberFromDraft(configDraft.depthAnchoringEvery);
-    if (every === null || !Number.isInteger(every) || every < 1 || every > depthAnchoringEveryMax) {
-      issues.push(["depthAnchoringEvery", `Alternation period must be a whole number from 1 to ${depthAnchoringEveryMax}`]);
-    }
-  }
-  return issues;
+// An auxiliary loss is on whenever the draft carries its `<prefix>Weight` (empty = off).
+function auxLossOn(configDraft, prefix) {
+  return String(configDraft?.[`${prefix}Weight`] ?? "").trim() !== "";
 }
 
-// The depth-anchoring keys a job snapshot carries: none while off, so a default job's snapshot
-// is unchanged; the weight plus every set knob while on (unset knobs take the API defaults).
-export function depthAnchoringSnapshot(configDraft) {
-  if (!depthAnchoringEnabled(configDraft)) return {};
-  return compactObject({
-    depthAnchoringWeight: numberFromDraft(configDraft.depthAnchoringWeight),
-    depthAnchoringModel: asText(configDraft.depthAnchoringModel).trim(),
-    depthAnchoringMinT: numberFromDraft(configDraft.depthAnchoringMinT),
-    depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
-    depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
-  });
-}
+const auxLossKnobs = ["Weight", "MinT", "MaxT", "Every"];
 
 // Whether the target's trainer on the serving platform honors a latent-perceptual loss — the same
 // mechanism as depth anchoring: the API projects the platform-effective `limits.<supportLimit>`
@@ -1191,166 +1107,91 @@ export function targetSupportsLatentLpipsLoss(target) {
 // it (the API's latent_loss_combination_refusal), or null: no aux loss on a full fine-tune, and the
 // decoded-x0 VAE anchor not on an LTX-2.5 workflow that generates no video.
 export function latentLossCombinationRefusal(target, configDraft, loss) {
-  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
-    return `The ${loss.label} loss trains a LoRA/LoKr adapter only, not a full fine-tune`;
-  }
-  const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (loss.prefix === "vaeAnchor" && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
-    return `The ${loss.label} loss decodes the generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
-  }
-  return null;
+  const subject = `The ${loss.label} loss`;
+  return adapterLossRefusal(
+    target,
+    configDraft,
+    `${subject} trains`,
+    loss.prefix === "vaeAnchor" && `${subject} decodes the generated video stream`,
+  );
 }
 
 // A latent-perceptual loss is on whenever the draft carries its weight (empty = off).
 export function latentLossEnabled(configDraft, loss) {
-  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
-}
-
-// The draft fields of every latent-perceptual loss, read from a target's `advanced` defaults.
-function latentPerceptualDraft(advanced) {
-  const draft = {};
-  for (const loss of latentPerceptualLosses) {
-    for (const knob of ["Weight", "MinT", "MaxT", "Every"]) {
-      draft[`${loss.prefix}${knob}`] = numericDraft(advanced?.[`${loss.prefix}${knob}`]);
-    }
-  }
-  return draft;
-}
-
-// Field issues for the latent-perceptual knobs — the API's bounds (E6): weight in
-// [0, weightMax], a [0, 1] noise window with min <= max, and a whole alternation period in
-// [1, everyMax]. Checked only while a loss is enabled.
-export function latentPerceptualIssues(configDraft, selectedTarget) {
-  const issues = [];
-  for (const loss of latentPerceptualLosses) {
-    if (!latentLossEnabled(configDraft, loss)) continue;
-    const key = (knob) => `${loss.prefix}${knob}`;
-    const weight = numberFromDraft(configDraft[key("Weight")]);
-    if (weight === null || weight < 0 || weight > loss.weightMax) {
-      issues.push([key("Weight"), `${loss.label} weight must be between 0 and ${loss.weightMax}`]);
-      continue;
-    }
-    if (weight > 0 && selectedTarget && !targetSupportsLatentLoss(selectedTarget, loss)) {
-      // The toggle is hidden for such a target, so this names no input (field null): the value can
-      // only arrive from a carried-over draft, and the API would refuse it anyway.
-      issues.push([null, `This target does not support the ${loss.label} loss — clear it or pick a supporting target`]);
-      continue;
-    }
-    if (weight > 0 && selectedTarget) {
-      const refusal = latentLossCombinationRefusal(selectedTarget, configDraft, loss);
-      if (refusal) {
-        issues.push([key("Weight"), refusal]);
-        continue;
-      }
-    }
-    const window = {};
-    for (const knob of ["MinT", "MaxT"]) {
-      if (!String(configDraft[key(knob)] ?? "").trim()) continue;
-      const t = numberFromDraft(configDraft[key(knob)]);
-      if (t === null || t < 0 || t > 1) {
-        issues.push([key(knob), "Noise window bounds must be between 0 and 1"]);
-      } else {
-        window[knob] = t;
-      }
-    }
-    if ((window.MinT ?? 0) > (window.MaxT ?? loss.maxTDefault)) {
-      issues.push([key("MaxT"), "Noise window max must be at least its min"]);
-    }
-    if (String(configDraft[key("Every")] ?? "").trim()) {
-      const every = numberFromDraft(configDraft[key("Every")]);
-      if (every === null || !Number.isInteger(every) || every < 1 || every > loss.everyMax) {
-        issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${loss.everyMax}`]);
-      }
-    }
-  }
-  return issues;
-}
-
-// The latent-perceptual keys a job snapshot carries: none for a loss that is off (a default job's
-// snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
-// defaults).
-export function latentPerceptualSnapshot(configDraft) {
-  const snapshot = {};
-  for (const loss of latentPerceptualLosses) {
-    if (!latentLossEnabled(configDraft, loss)) continue;
-    Object.assign(
-      snapshot,
-      compactObject(
-        Object.fromEntries(
-          ["Weight", "MinT", "MaxT", "Every"].map((knob) => [
-            `${loss.prefix}${knob}`,
-            numberFromDraft(configDraft[`${loss.prefix}${knob}`]),
-          ]),
-        ),
-      ),
-    );
-  }
-  return snapshot;
+  return auxLossOn(configDraft, loss.prefix);
 }
 
 // A face loss is on whenever the draft carries its weight (empty = off).
 export function identityLossEnabled(configDraft) {
-  return String(configDraft?.identityLossWeight ?? "").trim() !== "";
+  return auxLossOn(configDraft, "identityLoss");
 }
 export function faceLandmarkLossEnabled(configDraft) {
-  return String(configDraft?.faceLandmarkLossWeight ?? "").trim() !== "";
+  return auxLossOn(configDraft, "faceLandmarkLoss");
 }
 
-// Shared schedule checks for one face loss (weight / noise window / alternation period), the API's
-// bounds (E6). `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss"). Marks the
-// returned issues `blocked` when the loss cannot run here at all (unsupported target or refused
-// combination), so the caller skips its loss-specific knobs.
-function faceLossScheduleIssues(configDraft, prefix, label, supported, selectedTarget) {
-  const issues = [];
-  const weightKey = `${prefix}Weight`;
-  const weight = numberFromDraft(configDraft[weightKey]);
-  if (weight === null || weight < 0 || weight > faceLossWeightMax) {
-    issues.push([weightKey, `${label} weight must be between 0 and ${faceLossWeightMax}`]);
-  } else if (weight > 0 && !supported) {
-    // The control is hidden for such a target, so this names no input (field null): the value can
-    // only arrive from a carried-over draft, and the API would refuse it anyway.
-    issues.push([null, `This target does not support the ${label.toLowerCase()} — clear it or pick a supporting target`]);
-    issues.blocked = true;
-    return issues;
-  } else if (weight > 0 && selectedTarget) {
-    const refusal = faceLossCombinationRefusal(selectedTarget, configDraft, label);
-    if (refusal) {
-      issues.push([weightKey, refusal]);
-      issues.blocked = true;
-      return issues;
-    }
-  }
-  const window = {};
-  for (const field of [`${prefix}MinT`, `${prefix}MaxT`]) {
-    if (!String(configDraft[field] ?? "").trim()) continue;
-    const t = numberFromDraft(configDraft[field]);
-    if (t === null || t < 0 || t > 1) {
-      issues.push([field, "Noise window bounds must be between 0 and 1"]);
-    } else {
-      window[field] = t;
-    }
-  }
-  if ((window[`${prefix}MinT`] ?? 0) > (window[`${prefix}MaxT`] ?? 1)) {
-    issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
-  }
-  const everyKey = `${prefix}Every`;
-  if (String(configDraft[everyKey] ?? "").trim()) {
-    const every = numberFromDraft(configDraft[everyKey]);
-    if (every === null || !Number.isInteger(every) || every < 1 || every > faceLossEveryMax) {
-      issues.push([everyKey, `Alternation period must be a whole number from 1 to ${faceLossEveryMax}`]);
-    }
-  }
-  return issues;
+// A body loss is on whenever the draft carries its weight (empty = off).
+export function bodyLossEnabled(configDraft, loss) {
+  return auxLossOn(configDraft, loss.prefix);
 }
 
-// Field issues for the face-loss knobs (checked only while each loss is enabled).
-export function faceLossIssues(configDraft, selectedTarget) {
-  const issues = [];
-  if (identityLossEnabled(configDraft)) {
-    const supported = !selectedTarget || targetSupportsIdentityLoss(selectedTarget);
-    const scheduleIssues = faceLossScheduleIssues(configDraft, "identityLoss", "Identity loss", supported, selectedTarget);
-    issues.push(...scheduleIssues);
-    if (!scheduleIssues.blocked) {
+// One spec per decoded-x0 / latent auxiliary loss, in validation order (depth anchoring, the body
+// losses, the face losses, the latent-perceptual losses). `name` heads the weight-range message,
+// `what` the unsupported-target message; `window` is the API's default noise window; `lenient`
+// losses keep checking their other knobs past an out-of-range weight (as the API does for depth
+// anchoring and the face losses); `before`/`after` add loss-specific issues around the shared
+// window/period checks; `extras` adds loss-specific snapshot keys.
+const faceLossSpec = (prefix, name, supported, extra) => ({
+  family: "face",
+  prefix,
+  name,
+  what: `the ${name.toLowerCase()}`,
+  weightMax: faceLossWeightMax,
+  everyMax: faceLossEveryMax,
+  window: [0, 1],
+  lenient: true,
+  supported,
+  refusal: (target, configDraft) => faceLossCombinationRefusal(target, configDraft, name),
+  ...extra,
+});
+
+const auxLossSpecs = [
+  {
+    family: "depth",
+    prefix: "depthAnchoring",
+    name: "Depth anchoring",
+    what: "depth anchoring",
+    weightMax: depthAnchoringWeightMax,
+    everyMax: depthAnchoringEveryMax,
+    window: [0, 1],
+    lenient: true,
+    supported: targetSupportsDepthAnchoring,
+    refusal: depthAnchoringCombinationRefusal,
+    before: (configDraft) =>
+      depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())
+        ? []
+        : [["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]],
+    extras: (configDraft) => ({ depthAnchoringModel: asText(configDraft.depthAnchoringModel).trim() }),
+  },
+  ...bodyLosses.map((loss) => ({
+    family: "body",
+    prefix: loss.prefix,
+    name: `${loss.label} loss`,
+    what: `the ${loss.label.toLowerCase()} loss`,
+    weightMax: bodyLossWeightMax,
+    everyMax: bodyLossEveryMax,
+    window: loss.window,
+    supported: (target) => targetSupportsBodyLoss(target, loss),
+    refusal: bodyLossCombinationRefusal,
+    after: bodyLossExtraIssues,
+    extras: (configDraft) => ({
+      bodyProportion: { bodyProportionIncludeHead: configDraft.bodyProportionIncludeHead ? true : undefined },
+      bodyShape: { bodyShapeMinCos: numberFromDraft(configDraft.bodyShapeMinCos) },
+      normal: { normalRestrictToSubject: configDraft.normalRestrictToSubject ? true : undefined },
+    })[loss.prefix],
+  })),
+  faceLossSpec("identityLoss", "Identity loss", targetSupportsIdentityLoss, {
+    after: (configDraft) => {
+      const issues = [];
       if (String(configDraft.identityLossMinCos ?? "").trim()) {
         const minCos = numberFromDraft(configDraft.identityLossMinCos);
         if (minCos === null || minCos < -1 || minCos > 1) {
@@ -1360,168 +1201,160 @@ export function faceLossIssues(configDraft, selectedTarget) {
       if (!identityLossReferenceOptions.includes(asText(configDraft.identityLossReference).trim())) {
         issues.push(["identityLossReference", `Identity reference must be one of ${identityLossReferenceOptions.join(", ")}`]);
       }
+      return issues;
+    },
+    extras: (configDraft) => ({
+      identityLossMinCos: numberFromDraft(configDraft.identityLossMinCos),
+      identityLossReference: asText(configDraft.identityLossReference).trim(),
+    }),
+  }),
+  faceLossSpec("faceLandmarkLoss", "Face landmark loss", targetSupportsFaceLandmarkLoss),
+  ...latentPerceptualLosses.map((loss) => ({
+    family: "latent",
+    prefix: loss.prefix,
+    name: loss.label,
+    what: `the ${loss.label} loss`,
+    weightMax: loss.weightMax,
+    everyMax: loss.everyMax,
+    window: [0, loss.maxTDefault],
+    supported: (target) => targetSupportsLatentLoss(target, loss),
+    refusal: (target, configDraft) => latentLossCombinationRefusal(target, configDraft, loss),
+  })),
+];
+
+// The draft fields every auxiliary loss shares, read from a target's `advanced` defaults.
+function auxLossesDraft(advanced) {
+  const draft = {};
+  for (const { prefix } of auxLossSpecs) {
+    for (const knob of auxLossKnobs) {
+      draft[prefix + knob] = numericDraft(advanced?.[prefix + knob]);
     }
   }
-  if (faceLandmarkLossEnabled(configDraft)) {
-    const supported = !selectedTarget || targetSupportsFaceLandmarkLoss(selectedTarget);
-    issues.push(...faceLossScheduleIssues(configDraft, "faceLandmarkLoss", "Face landmark loss", supported, selectedTarget));
+  return draft;
+}
+
+// Field issues for one enabled auxiliary loss — the API's bounds (E6): weight in [0, weightMax], a
+// [0, 1] noise window with min <= max, and a whole alternation period in [1, everyMax]. A weight on a
+// target that does not support the loss names no input (field null): the toggle is hidden there, so
+// the value can only arrive from a carried-over draft, and the API refuses it anyway. A refused
+// combination (full fine-tune, no-video LTX-2.5 workflow) names the weight key, like the API: the
+// toggle stays visible on a supporting target, so the user can untick it there.
+function auxLossIssues(configDraft, selectedTarget, spec, subjectMaskReport) {
+  const key = (knob) => spec.prefix + knob;
+  const issues = [];
+  const weight = numberFromDraft(configDraft[key("Weight")]);
+  if (weight === null || weight < 0 || weight > spec.weightMax) {
+    issues.push([key("Weight"), `${spec.name} weight must be between 0 and ${spec.weightMax}`]);
+    if (!spec.lenient) return issues;
+  } else if (weight > 0 && selectedTarget) {
+    if (!spec.supported(selectedTarget)) {
+      return [[null, `This target does not support ${spec.what} — clear it or pick a supporting target`]];
+    }
+    const refusal = spec.refusal(selectedTarget, configDraft);
+    if (refusal) return [[key("Weight"), refusal]];
+  }
+  issues.push(...(spec.before?.(configDraft) ?? []));
+  const bounds = {};
+  for (const knob of ["MinT", "MaxT"]) {
+    if (!String(configDraft[key(knob)] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[key(knob)]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([key(knob), "Noise window bounds must be between 0 and 1"]);
+    } else {
+      bounds[knob] = t;
+    }
+  }
+  if ((bounds.MinT ?? spec.window[0]) > (bounds.MaxT ?? spec.window[1])) {
+    issues.push([key("MaxT"), "Noise window max must be at least its min"]);
+  }
+  if (String(configDraft[key("Every")] ?? "").trim()) {
+    const every = numberFromDraft(configDraft[key("Every")]);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > spec.everyMax) {
+      issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${spec.everyMax}`]);
+    }
+  }
+  issues.push(...(spec.after?.(configDraft, selectedTarget, spec.prefix, subjectMaskReport) ?? []));
+  return issues;
+}
+
+// The body losses' own knobs: the subject-restricted normal loss and the shape loss's cosine gate.
+function bodyLossExtraIssues(configDraft, selectedTarget, prefix, subjectMaskReport) {
+  const issues = [];
+  if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+    if (selectedTarget?.baseModel === "ltx_2_5") {
+      // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
+      // The toggle is hidden there, so a carried-over `true` names no input.
+      issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
+    } else {
+      // Like subject-masked loss: every image needs a non-empty subject mask (the worker refuses
+      // the job otherwise), so incomplete coverage blocks Start (unknown coverage is left to it).
+      const coverage = subjectMaskCoverage(subjectMaskReport);
+      if (coverage && !coverage.complete) {
+        issues.push([
+          "normalRestrictToSubject",
+          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+        ]);
+      }
+    }
+  }
+  if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
+    const c = numberFromDraft(configDraft.bodyShapeMinCos);
+    if (c === null || c < -1 || c > 1) {
+      issues.push(["bodyShapeMinCos", "Shape cosine gate must be between -1 and 1"]);
+    }
   }
   return issues;
 }
 
-// The face-loss keys a job snapshot carries: none while off (a default job's snapshot is
-// unchanged); the weight plus every set knob while on (unset knobs take the API defaults).
-export function faceLossSnapshot(configDraft) {
+// Field issues for every enabled auxiliary loss (of `family` when given), in spec order.
+function auxLossesIssues(configDraft, selectedTarget, subjectMaskReport = null, family = null) {
+  return auxLossSpecs
+    .filter((spec) => (!family || spec.family === family) && auxLossOn(configDraft, spec.prefix))
+    .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec, subjectMaskReport));
+}
+
+// The auxiliary-loss keys a job snapshot carries: none for a loss that is off (a default job's
+// snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
+// defaults).
+function auxLossesSnapshot(configDraft, family = null) {
   const snapshot = {};
-  if (identityLossEnabled(configDraft)) {
-    Object.assign(snapshot, compactObject({
-      identityLossWeight: numberFromDraft(configDraft.identityLossWeight),
-      identityLossMinT: numberFromDraft(configDraft.identityLossMinT),
-      identityLossMaxT: numberFromDraft(configDraft.identityLossMaxT),
-      identityLossEvery: numberFromDraft(configDraft.identityLossEvery),
-      identityLossMinCos: numberFromDraft(configDraft.identityLossMinCos),
-      identityLossReference: asText(configDraft.identityLossReference).trim(),
-    }));
-  }
-  if (faceLandmarkLossEnabled(configDraft)) {
-    Object.assign(snapshot, compactObject({
-      faceLandmarkLossWeight: numberFromDraft(configDraft.faceLandmarkLossWeight),
-      faceLandmarkLossMinT: numberFromDraft(configDraft.faceLandmarkLossMinT),
-      faceLandmarkLossMaxT: numberFromDraft(configDraft.faceLandmarkLossMaxT),
-      faceLandmarkLossEvery: numberFromDraft(configDraft.faceLandmarkLossEvery),
-    }));
+  for (const spec of auxLossSpecs) {
+    if ((family && spec.family !== family) || !auxLossOn(configDraft, spec.prefix)) continue;
+    Object.assign(
+      snapshot,
+      compactObject({
+        ...Object.fromEntries(
+          auxLossKnobs.map((knob) => [spec.prefix + knob, numberFromDraft(configDraft[spec.prefix + knob])]),
+        ),
+        ...spec.extras?.(configDraft),
+      }),
+    );
   }
   return snapshot;
 }
 
-// The body-loss draft fields of a target/preset `advanced` bag (empty weight = off).
-function bodyLossesDraft(advanced) {
-  return {
-    bodyProportionWeight: numericDraft(advanced.bodyProportionWeight),
-    bodyProportionMinT: numericDraft(advanced.bodyProportionMinT),
-    bodyProportionMaxT: numericDraft(advanced.bodyProportionMaxT),
-    bodyProportionEvery: numericDraft(advanced.bodyProportionEvery),
-    bodyShapeWeight: numericDraft(advanced.bodyShapeWeight),
-    bodyShapeMinT: numericDraft(advanced.bodyShapeMinT),
-    bodyShapeMaxT: numericDraft(advanced.bodyShapeMaxT),
-    bodyShapeEvery: numericDraft(advanced.bodyShapeEvery),
-    normalWeight: numericDraft(advanced.normalWeight),
-    normalMinT: numericDraft(advanced.normalMinT),
-    normalMaxT: numericDraft(advanced.normalMaxT),
-    normalEvery: numericDraft(advanced.normalEvery),
-    bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
-    bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
-    normalRestrictToSubject: advanced.normalRestrictToSubject === true,
-  };
+// Per-family views of the shared checks (depth anchoring, body, face, latent-perceptual).
+export function depthAnchoringIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, null, "depth");
 }
-
-// A body loss is on whenever the draft carries its weight (empty = off).
-export function bodyLossEnabled(configDraft, loss) {
-  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
+export function depthAnchoringSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "depth");
 }
-
-// Field issues for the body-loss knobs — the API's bounds (E6), per loss while it is on: weight in
-// [0, bodyLossWeightMax], a [0, 1] noise window with min <= max, a whole alternation period in
-// [1, bodyLossEveryMax]; plus the shape loss's cosine gate in [-1, 1].
 export function bodyLossIssues(configDraft, selectedTarget, subjectMaskReport = null) {
-  const issues = [];
-  for (const loss of bodyLosses) {
-    if (!bodyLossEnabled(configDraft, loss)) continue;
-    const { prefix, window: [minDefault, maxDefault] } = loss;
-    const weight = numberFromDraft(configDraft[`${prefix}Weight`]);
-    if (weight === null || weight < 0 || weight > bodyLossWeightMax) {
-      issues.push([`${prefix}Weight`, `${loss.label} loss weight must be between 0 and ${bodyLossWeightMax}`]);
-      continue;
-    }
-    if (weight > 0 && selectedTarget && !targetSupportsBodyLoss(selectedTarget, loss)) {
-      // The toggle is hidden for such a target, so this names no input: the value can only arrive
-      // from a carried-over draft, and the API refuses it anyway.
-      issues.push([null, `This target does not support the ${loss.label.toLowerCase()} loss — clear it or pick a supporting target`]);
-      continue;
-    }
-    if (weight > 0 && selectedTarget) {
-      // A refused combination (full fine-tune, no-video LTX-2.5 workflow) names the weight key, like
-      // the API: the toggle stays visible on a supporting target, so the user can untick it there.
-      const refusal = bodyLossCombinationRefusal(selectedTarget, configDraft);
-      if (refusal) {
-        issues.push([`${prefix}Weight`, refusal]);
-        continue;
-      }
-    }
-    const bounds = {};
-    for (const suffix of ["MinT", "MaxT"]) {
-      const field = `${prefix}${suffix}`;
-      if (!String(configDraft[field] ?? "").trim()) continue;
-      const t = numberFromDraft(configDraft[field]);
-      if (t === null || t < 0 || t > 1) {
-        issues.push([field, "Noise window bounds must be between 0 and 1"]);
-      } else {
-        bounds[suffix] = t;
-      }
-    }
-    if ((bounds.MinT ?? minDefault) > (bounds.MaxT ?? maxDefault)) {
-      issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
-    }
-    const everyField = `${prefix}Every`;
-    if (String(configDraft[everyField] ?? "").trim()) {
-      const every = numberFromDraft(configDraft[everyField]);
-      if (every === null || !Number.isInteger(every) || every < 1 || every > bodyLossEveryMax) {
-        issues.push([everyField, `Alternation period must be a whole number from 1 to ${bodyLossEveryMax}`]);
-      }
-    }
-    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
-      if (selectedTarget?.baseModel === "ltx_2_5") {
-        // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
-        // The toggle is hidden there, so a carried-over `true` names no input.
-        issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
-      } else {
-        // Like subject-masked loss: every image needs a non-empty subject mask (the worker refuses
-        // the job otherwise), so incomplete coverage blocks Start (unknown coverage is left to it).
-        const coverage = subjectMaskCoverage(subjectMaskReport);
-        if (coverage && !coverage.complete) {
-          issues.push([
-            "normalRestrictToSubject",
-            `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
-          ]);
-        }
-      }
-    }
-    if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
-      const c = numberFromDraft(configDraft.bodyShapeMinCos);
-      if (c === null || c < -1 || c > 1) {
-        issues.push(["bodyShapeMinCos", "Shape cosine gate must be between -1 and 1"]);
-      }
-    }
-  }
-  return issues;
+  return auxLossesIssues(configDraft, selectedTarget, subjectMaskReport, "body");
 }
-
-// The body-loss keys a job snapshot carries: none for a loss that is off (a default job's snapshot
-// is unchanged); its weight plus every set knob while on (unset knobs take the API defaults).
 export function bodyLossSnapshot(configDraft) {
-  const out = {};
-  for (const loss of bodyLosses) {
-    if (!bodyLossEnabled(configDraft, loss)) continue;
-    const { prefix } = loss;
-    Object.assign(
-      out,
-      compactObject({
-        [`${prefix}Weight`]: numberFromDraft(configDraft[`${prefix}Weight`]),
-        [`${prefix}MinT`]: numberFromDraft(configDraft[`${prefix}MinT`]),
-        [`${prefix}MaxT`]: numberFromDraft(configDraft[`${prefix}MaxT`]),
-        [`${prefix}Every`]: numberFromDraft(configDraft[`${prefix}Every`]),
-      }),
-    );
-    if (prefix === "bodyProportion" && configDraft.bodyProportionIncludeHead) {
-      out.bodyProportionIncludeHead = true;
-    }
-    if (prefix === "bodyShape") {
-      const c = numberFromDraft(configDraft.bodyShapeMinCos);
-      if (c !== null) out.bodyShapeMinCos = c;
-    }
-    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
-      out.normalRestrictToSubject = true;
-    }
-  }
-  return out;
+  return auxLossesSnapshot(configDraft, "body");
+}
+export function faceLossIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, null, "face");
+}
+export function faceLossSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "face");
+}
+export function latentPerceptualIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, null, "latent");
+}
+export function latentPerceptualSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "latent");
 }
