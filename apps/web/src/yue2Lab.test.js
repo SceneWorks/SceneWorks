@@ -11,18 +11,22 @@ import {
   installJobStatusLabel,
   isCoverComponentDownload,
   midiNoteLabel,
+  parseYue2Lyrics,
   seedValueProblem,
+  toggleYue2StyleTag,
   stripYue2ExportHeader,
   transcriptionSettingsProblems,
   yue2AbcExport,
   yue2CoverSetup,
   yue2FieldDisabledReason,
+  yue2LyricsText,
   restoreYue2Settings,
   usagePolicyChips,
   yue2ModelIdentity,
   yue2RequestProblems,
   yue2RunExport,
   yue2RunView,
+  yue2StyleTagSet,
   yue2TierRows,
   yue2TranscriptionView,
 } from "./yue2Lab.js";
@@ -627,5 +631,42 @@ describe("YuE2 cover from a recording (sc-23002)", () => {
     expect(midiNoteLabel(60)).toBe("C4 (60)");
     expect(midiNoteLabel(69.5)).toBe("A#4 (69.5)");
     expect(midiNoteLabel(null)).toBe("—");
+  });
+});
+
+describe("YuE2 lyrics sections and style tags", () => {
+  it("parses tagged lyrics into sections and writes them back", () => {
+    const lyrics = "[Intro]\nla la\n\n[verse]\nline one\nline two\n\n[Chorus]\nhook";
+    const sections = parseYue2Lyrics(lyrics);
+    expect(sections).toEqual([
+      { label: "Intro", text: "la la" },
+      { label: "verse", text: "line one\nline two" },
+      { label: "Chorus", text: "hook" },
+    ]);
+    expect(yue2LyricsText(sections)).toBe(lyrics);
+  });
+
+  it("keeps untagged text as an untagged section and starts empty lyrics with verse + chorus", () => {
+    expect(parseYue2Lyrics("just words\n[chorus]\nhook")).toEqual([
+      { label: "", text: "just words" },
+      { label: "chorus", text: "hook" },
+    ]);
+    expect(yue2LyricsText(parseYue2Lyrics("just words"))).toBe("just words");
+    expect(parseYue2Lyrics("  ")).toEqual([
+      { label: "verse", text: "" },
+      { label: "chorus", text: "" },
+    ]);
+  });
+
+  it("drops empty sections from the lyrics it writes", () => {
+    expect(yue2LyricsText([{ label: "verse", text: " a " }, { label: "chorus", text: "" }])).toBe("[verse]\na");
+    expect(yue2LyricsText([{ label: "verse", text: "" }])).toBe("");
+  });
+
+  it("toggles a style tag as one comma-separated item, case-insensitively", () => {
+    expect(toggleYue2StyleTag("", "pop")).toBe("pop");
+    expect(toggleYue2StyleTag("dream pop, airy vocal", "Piano")).toBe("dream pop, airy vocal, Piano");
+    expect(toggleYue2StyleTag("dream pop, Airy Vocal", "airy vocal")).toBe("dream pop");
+    expect([...yue2StyleTagSet("Warm folk, Piano ")]).toEqual(["warm folk", "piano"]);
   });
 });

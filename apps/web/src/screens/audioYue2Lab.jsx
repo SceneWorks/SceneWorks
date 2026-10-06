@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
@@ -24,15 +24,19 @@ import {
   installJobStatusLabel,
   isCoverComponentDownload,
   composeKind,
+  parseYue2Lyrics,
   restoreYue2Settings,
+  toggleYue2StyleTag,
   stripYue2ExportHeader,
   yue2ModelIdentity,
   yue2ModelInstalled,
   yue2PlanRequest,
   yue2ProjectRuns,
   yue2FieldDisabledReason,
+  yue2LyricsText,
   yue2RequestProblems,
   yue2RunView,
+  yue2StyleTagSet,
   yue2TierRows,
 } from "../yue2Lab.js";
 import {
@@ -55,6 +59,7 @@ import {
   Yue2ScoreWorkbench,
 } from "./audioYue2Parts.jsx";
 import { Yue2RecordingCover } from "./audioYue2Recording.jsx";
+import { YueLyricsEditor, YueSuggestedTags } from "./audioYueControls.jsx";
 
 // YuE2 Song Lab (sc-23000, epic 22988) — the Audio Studio's EXPERIMENTAL surface for YuE2.
 //
@@ -137,6 +142,65 @@ function Segmented({ label, value, options, onChange, disabledValues = [] }) {
           {option.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+const COMPUTE_PRECISION_TIP =
+  "Q8/Q4 describe weight storage and quantized matmuls; each quantized matmul briefly uses FP32 input and result tensors before returning to the selected stage precision. This selector governs YuE2 song stages and the VAE, including cached decode; recording transcription runs separately on CPU. Kernels may also use FP32 reductions and audio output formats.";
+
+// Lyrics as section rows (the YuE1 editor) or as raw text for pasting. The persisted value is the
+// lyrics string; the rows are local so an empty row being written survives, and they re-parse only
+// when the string changes from outside (a preset, a restored run).
+function Yue2LyricsField({ value, onChange }) {
+  const [mode, setMode] = useState("sections");
+  const [sections, setSections] = useState(() => parseYue2Lyrics(value));
+  const emitted = useRef(value);
+  useEffect(() => {
+    if (value !== emitted.current) {
+      emitted.current = value;
+      setSections(parseYue2Lyrics(value));
+    }
+  }, [value]);
+  const emit = (text) => {
+    emitted.current = text;
+    onChange(text);
+  };
+  return (
+    <div className="yue2-lyrics">
+      <div className="yue2-inline">
+        <span>Lyrics</span>
+        <Segmented
+          label="Lyrics view"
+          onChange={(next) => {
+            if (next === "sections") setSections(parseYue2Lyrics(value));
+            setMode(next);
+          }}
+          options={[
+            { value: "sections", label: "Sections" },
+            { value: "text", label: "Text" },
+          ]}
+          value={mode}
+        />
+      </div>
+      {mode === "sections" ? (
+        <YueLyricsEditor
+          onChange={(next) => {
+            setSections(next);
+            emit(yue2LyricsText(next));
+          }}
+          placeholder="Lines for this section…"
+          sections={sections}
+        />
+      ) : (
+        <textarea
+          aria-label="Lyrics"
+          onChange={(event) => emit(event.target.value)}
+          placeholder={"[verse]\n…\n\n[chorus]\n…"}
+          rows={8}
+          value={value}
+        />
+      )}
     </div>
   );
 }
@@ -661,14 +725,18 @@ export function Yue2SongLab({ header }) {
                   </select>
                 </label>
                 <label className="settings-field">
-                  Compute precision
+                  <span className="yue2-field-label">
+                    Compute precision
+                    <span aria-label={COMPUTE_PRECISION_TIP} className="yue2-field-tip" role="img" tabIndex={0} title={COMPUTE_PRECISION_TIP}>
+                      <Icon.Info size={13} />
+                    </span>
+                  </span>
                   <select aria-label="Compute precision" disabled={Boolean(why("computePolicy"))} title={why("computePolicy") ?? undefined} onChange={(event) => update({ computePolicy: event.target.value })} value={settings.computePolicy}>
                     <option value="">Choose compute precision</option>
                     <option value="auto">Auto (BF16 model + FP32 VAE on GPU; FP32 on CPU)</option>
                     <option value="bf16">BF16 (model + VAE on GPU)</option>
                     <option value="fp32">FP32 (model + VAE)</option>
                   </select>
-                  <small>Q8/Q4 describe weight storage and quantized matmuls; each quantized matmul briefly uses FP32 input and result tensors before returning to the selected stage precision. This selector governs YuE2 song stages and the VAE, including cached decode; recording transcription runs separately on CPU. Kernels may also use FP32 reductions and audio output formats.</small>
                 </label>
                 <label className="settings-field">
                   Decoder
@@ -771,18 +839,21 @@ export function Yue2SongLab({ header }) {
                     value={restoring ? (planWords?.style ?? "") : settings.style}
                   />
                 </label>
-                {!restoring && sessionOnly.has("style") ? <SessionOnlyText testId="yue2-style-session-only" /> : null}
-                <label>
-                  Lyrics
-                  <textarea
-                    aria-label="Lyrics"
-                    onChange={(event) => update({ lyrics: event.target.value })}
-                    placeholder={"[verse]\n…\n\n[chorus]\n…"}
-                    readOnly={restoring}
-                    rows={6}
-                    value={restoring ? (planWords?.lyrics ?? "") : settings.lyrics}
+                {!restoring ? (
+                  <YueSuggestedTags
+                    chosen={yue2StyleTagSet(settings.style)}
+                    onToggle={(tag) => update({ style: toggleYue2StyleTag(settings.style, tag) })}
                   />
-                </label>
+                ) : null}
+                {!restoring && sessionOnly.has("style") ? <SessionOnlyText testId="yue2-style-session-only" /> : null}
+                {restoring ? (
+                  <label>
+                    Lyrics
+                    <textarea aria-label="Lyrics" readOnly rows={6} value={planWords?.lyrics ?? ""} />
+                  </label>
+                ) : (
+                  <Yue2LyricsField onChange={(lyrics) => update({ lyrics })} value={settings.lyrics} />
+                )}
                 {!restoring && sessionOnly.has("lyrics") ? <SessionOnlyText testId="yue2-lyrics-session-only" /> : null}
                 {restoring ? (
                   <p className="yue2-muted" data-testid="yue2-plan-words">
