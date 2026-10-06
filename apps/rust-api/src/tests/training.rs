@@ -139,9 +139,10 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
     }
 }
 
-/// sc-2125 review: the targets endpoint advertises depth-anchoring support per platform — Z-Image
-/// on the MLX catalog, nothing on the Candle catalog (no Candle trainer declares it yet).
-/// Mutation: drop the depth flag removal from `project_candle_training_limits` ⇒ red.
+/// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
+/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
+/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
     let advertising = |candle: bool| -> Vec<String> {
@@ -154,8 +155,103 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
             .map(|target| target.id.clone())
             .collect()
     };
-    assert_eq!(advertising(false), ["z_image_turbo_lora"]);
-    assert!(advertising(true).is_empty());
+    let mlx = advertising(false);
+    assert_eq!(
+        mlx,
+        advertising(true),
+        "MLX and Candle advertise the same targets"
+    );
+    let all: Vec<String> = crate::training::effective_training_targets_for_candle(false)
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .filter(|id| id != "krea_2_control")
+        .collect();
+    assert_eq!(mlx, all);
+    assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
+    assert!(mlx
+        .iter()
+        .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
+}
+
+/// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
+/// exactly the depth-anchoring targets (the same decoder arms). Mutation: drop a body flag from one
+/// target ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_body_loss_support() {
+    use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+    let ids = |candle: bool, keep: &dyn Fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| keep(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = ids(false, &|t| {
+        sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(t)
+    });
+    for loss in BodyLoss::ALL {
+        let mlx = ids(false, &|t| target_supports(t, loss));
+        assert_eq!(mlx, ids(true, &|t| target_supports(t, loss)), "{loss:?}");
+        assert_eq!(mlx, depth, "{loss:?}");
+    }
+}
+
+/// sc-24831: the targets endpoint advertises the identity and face-landmark losses identically on
+/// both platforms (static flags, sc-24830) — on exactly the targets advertising depth anchoring
+/// (same builder arms + x0 decoder). Mutation: stop deriving the flags from depth ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_face_loss_support() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    use sceneworks_core::training::face_losses::{
+        target_supports_face_landmark_loss, target_supports_identity_loss,
+    };
+    let advertising = |candle: bool, f: fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| f(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = advertising(false, target_supports_depth_anchoring);
+    assert!(depth.iter().any(|id| id == "z_image_turbo_lora"));
+    for candle in [false, true] {
+        assert_eq!(advertising(candle, target_supports_identity_loss), depth);
+        assert_eq!(
+            advertising(candle, target_supports_face_landmark_loss),
+            depth
+        );
+    }
+}
+
+/// sc-24833: the targets endpoint advertises the latent-perceptual losses identically on both
+/// platforms (static per-target flags, sc-24830) — exactly `VAE_ANCHOR_TARGETS` /
+/// `LATENT_LPIPS_TARGETS`. Mutation: drop a target from either table ⇒ red.
+#[test]
+fn platform_effective_training_catalog_advertises_latent_perceptual_support() {
+    use sceneworks_core::training::latent_perceptual::{
+        target_supports, LATENT_LOSSES, LATENT_LPIPS_TARGETS, VAE_ANCHOR_TARGETS,
+    };
+    for (spec, table) in [
+        (LATENT_LOSSES[0], &VAE_ANCHOR_TARGETS[..]),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..]),
+    ] {
+        let mut expected: Vec<String> = table.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        for candle in [false, true] {
+            let mut ids: Vec<String> =
+                crate::training::effective_training_targets_for_candle(candle)
+                    .targets
+                    .iter()
+                    .filter(|target| target_supports(&spec, target))
+                    .map(|target| target.id.clone())
+                    .collect();
+            ids.sort();
+            assert_eq!(ids, expected, "{} (candle {candle})", spec.support_limit);
+        }
+    }
 }
 
 #[test]

@@ -56,11 +56,120 @@ export const depthAnchoringWeightSuggested = 0.1;
 export const depthAnchoringEveryMax = 16;
 export const depthAnchoringEveryDefault = 2;
 export const depthAnchoringModelOptions = ["small", "base", "large"];
+// Latent-space perceptual losses (epic 2123, sc-24833): the VAE anchor (the model's prediction is
+// decoded and re-encoded by a frozen FLUX.2 VAE encoder, matched against the training image's
+// multi-scale features) and E-LatentLPIPS (a learned perceptual metric on the latent itself). Off
+// (empty weight) by default; enabling seeds weight 1 with upstream's window [0, 0.5], added every
+// step. These bounds are the API's (crates/sceneworks-core/src/training/latent_perceptual.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const vaeAnchorWeightMax = 10;
+export const vaeAnchorWeightSuggested = 1;
+export const vaeAnchorMaxTDefault = 0.5;
+export const vaeAnchorEveryDefault = 1;
+export const vaeAnchorEveryMax = 16;
+export const latentLpipsWeightMax = 10;
+export const latentLpipsWeightSuggested = 1;
+export const latentLpipsMaxTDefault = 0.5;
+export const latentLpipsEveryDefault = 1;
+export const latentLpipsEveryMax = 16;
+// One entry per latent-perceptual loss: its `advanced` key prefix, label, support flag and bounds.
+export const latentPerceptualLosses = [
+  {
+    prefix: "vaeAnchor",
+    label: "VAE anchor",
+    supportLimit: "supportsVaeAnchorLoss",
+    weightMax: vaeAnchorWeightMax,
+    weightSuggested: vaeAnchorWeightSuggested,
+    maxTDefault: vaeAnchorMaxTDefault,
+    everyDefault: vaeAnchorEveryDefault,
+    everyMax: vaeAnchorEveryMax,
+  },
+  {
+    prefix: "latentLpips",
+    label: "E-LatentLPIPS",
+    supportLimit: "supportsLatentLpipsLoss",
+    weightMax: latentLpipsWeightMax,
+    weightSuggested: latentLpipsWeightSuggested,
+    maxTDefault: latentLpipsMaxTDefault,
+    everyDefault: latentLpipsEveryDefault,
+    everyMax: latentLpipsEveryMax,
+  },
+];
+// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
+// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
+export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
 export const depthAnchoringModelLabels = {
   small: "Small (fast)",
   base: "Base",
   large: "Large (much smaller weight)",
 };
+// Body losses (epic 2123, sc-24832): three auxiliary losses on the same decoded prediction —
+// ViTPose bone-length proportions, HybrIK SMPL body shape and Sapiens surface normals; images with
+// no detected person are skipped. Each is off (empty weight) by default and has its own weight,
+// noise window and alternation period. These bounds are the API's
+// (crates/sceneworks-core/src/training/body_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const bodyLossWeightMax = 1;
+export const bodyLossWeightSuggested = 0.1;
+export const bodyLossEveryMax = 16;
+export const bodyLossEveryDefault = 2;
+export const bodyShapeMinCosDefault = 0.2;
+// The three losses: the `advanced` key prefix, the target support flag, the default noise window
+// (upstream: proportion [0, 1], shape/normal [0.4, 0.8]) and the UI label.
+export const bodyLosses = [
+  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, 1], label: "Body proportion" },
+  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: [0.4, 0.8], label: "Body shape" },
+  { prefix: "normal", limit: "supportsNormalLoss", window: [0.4, 0.8], label: "Surface normals" },
+];
+
+// Face losses (epic 2123, sc-24831): the ArcFace identity loss pulls the decoded prediction's face
+// toward the training images' identity; the FaceMesh landmark loss keeps the face shape. Off (empty
+// weight) by default; enabling seeds the upstream starting weight. These bounds are the API's
+// (crates/sceneworks-core/src/training/face_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const faceLossWeightMax = 1;
+export const faceLossWeightSuggested = 0.1;
+export const faceLossEveryMax = 16;
+export const faceLossEveryDefault = 2;
+export const identityLossMinCosDefault = 0.2;
+export const identityLossReferenceOptions = ["dataset_average", "per_image"];
+export const identityLossReferenceLabels = {
+  dataset_average: "Average of all images",
+  per_image: "Each image's own face",
+};
+
+// Whether the target's trainer on the serving platform honors the identity / face-landmark loss —
+// the API projects the platform-effective `limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss` (pinned to the trainer descriptors by a worker test).
+export function targetSupportsIdentityLoss(target) {
+  return target?.limits?.supportsIdentityLoss === true;
+}
+export function targetSupportsFaceLandmarkLoss(target) {
+  return target?.limits?.supportsFaceLandmarkLoss === true;
+}
+
+// Why a face loss (`label`) cannot run for this target + draft even though the target advertises
+// it, or null — mirrors the API's `face_loss_combination_refusal` (sc-24831), the same rules as
+// depth anchoring's: a full base fine-tune trains no adapter step, and an LTX-2.5 workflow with no
+// generated video has nothing to decode.
+export function faceLossCombinationRefusal(target, configDraft, label) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `${label} needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the identity / face-landmark control is offered for this target + draft.
+export function identityLossAvailable(target, configDraft) {
+  return targetSupportsIdentityLoss(target) && faceLossCombinationRefusal(target, configDraft, "Identity loss") === null;
+}
+export function faceLandmarkLossAvailable(target, configDraft) {
+  return targetSupportsFaceLandmarkLoss(target) && faceLossCombinationRefusal(target, configDraft, "Face landmark loss") === null;
+}
 
 // Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
 // trainer's per-element loss — background cells by the background weight, subject cells by the
@@ -129,6 +238,51 @@ export function targetSupportsResolutionBuckets(target) {
 // (pinned to the trainer descriptors by a worker test). Absent means unsupported.
 export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// Whether the target's trainer on the serving platform honors the body loss `loss` (an entry of
+// `bodyLosses`) — the platform-effective `limits.<loss.limit>` (pinned to the trainer descriptors
+// and the cataloged weights by a worker test). Absent means unsupported.
+export function targetSupportsBodyLoss(target, loss) {
+  return target?.limits?.[loss.limit] === true;
+}
+
+// Why the body losses cannot run for this target + draft even though the target advertises them,
+// or null — mirrors the API's `body_loss_combination_refusal`: a full base fine-tune trains no
+// adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function bodyLossCombinationRefusal(target, configDraft) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return "The body losses train a LoRA/LoKr adapter only, not a full fine-tune";
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `The body losses need a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the body loss `loss` is offered for this target + draft.
+export function bodyLossAvailable(target, loss, configDraft) {
+  return targetSupportsBodyLoss(target, loss) && bodyLossCombinationRefusal(target, configDraft) === null;
+}
+
+// Why depth anchoring cannot run for this target + draft even though the target advertises it, or
+// null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
+// trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function depthAnchoringCombinationRefusal(target, configDraft) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune";
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `Depth anchoring needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether the depth-anchoring control is offered for this target + draft.
+export function depthAnchoringAvailable(target, configDraft) {
+  return targetSupportsDepthAnchoring(target) && depthAnchoringCombinationRefusal(target, configDraft) === null;
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -461,6 +615,21 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     depthAnchoringMinT: numericDraft(advanced.depthAnchoringMinT),
     depthAnchoringMaxT: numericDraft(advanced.depthAnchoringMaxT),
     depthAnchoringEvery: numericDraft(advanced.depthAnchoringEvery),
+    // Empty weight = that body loss off (the default); its knobs only reach the job while it is on.
+    ...bodyLossesDraft(advanced),
+    // Empty weight = the face loss is off (the default); see faceLossWeightSuggested.
+    identityLossWeight: numericDraft(advanced.identityLossWeight),
+    identityLossMinT: numericDraft(advanced.identityLossMinT),
+    identityLossMaxT: numericDraft(advanced.identityLossMaxT),
+    identityLossEvery: numericDraft(advanced.identityLossEvery),
+    identityLossMinCos: numericDraft(advanced.identityLossMinCos),
+    identityLossReference: asText(advanced.identityLossReference || identityLossReferenceOptions[0]),
+    faceLandmarkLossWeight: numericDraft(advanced.faceLandmarkLossWeight),
+    faceLandmarkLossMinT: numericDraft(advanced.faceLandmarkLossMinT),
+    faceLandmarkLossMaxT: numericDraft(advanced.faceLandmarkLossMaxT),
+    faceLandmarkLossEvery: numericDraft(advanced.faceLandmarkLossEvery),
+    // Empty weight = off (the default) for each latent-perceptual loss (sc-24833).
+    ...latentPerceptualDraft(advanced),
     // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
     subjectMaskLoss: advanced.subjectMaskLoss === true,
     subjectMaskBackgroundWeight: numericDraft(
@@ -681,6 +850,15 @@ export function configValidation(
   for (const [field, message] of depthAnchoringIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
+  for (const [field, message] of bodyLossIssues(configDraft, selectedTarget, subjectMaskReport)) {
+    issues.push(issue.error(field, message));
+  }
+  for (const [field, message] of faceLossIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
+  for (const [field, message] of latentPerceptualIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
   // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
   // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
   // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
@@ -862,6 +1040,9 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
         }))
       : undefined,
     ...depthAnchoringSnapshot(configDraft),
+    ...bodyLossSnapshot(configDraft),
+    ...faceLossSnapshot(configDraft),
+    ...latentPerceptualSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.
     subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
     subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
@@ -949,6 +1130,12 @@ export function depthAnchoringIssues(configDraft, selectedTarget) {
     // only arrive from a carried-over draft, and the API would refuse it anyway.
     issues.push([null, "This target does not support depth anchoring — clear it or pick a supporting target"]);
     return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = depthAnchoringCombinationRefusal(selectedTarget, configDraft);
+    if (refusal) {
+      issues.push(["depthAnchoringWeight", refusal]);
+      return issues;
+    }
   }
   if (!depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())) {
     issues.push(["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]);
@@ -988,4 +1175,362 @@ export function depthAnchoringSnapshot(configDraft) {
     depthAnchoringMaxT: numberFromDraft(configDraft.depthAnchoringMaxT),
     depthAnchoringEvery: numberFromDraft(configDraft.depthAnchoringEvery),
   });
+}
+
+// Whether the target's trainer on the serving platform honors a latent-perceptual loss — the same
+// mechanism as depth anchoring: the API projects the platform-effective `limits.<supportLimit>`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsLatentLoss(target, loss) {
+  return target?.limits?.[loss.supportLimit] === true;
+}
+
+export function targetSupportsVaeAnchorLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[0]);
+}
+
+export function targetSupportsLatentLpipsLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[1]);
+}
+
+// Why a latent-perceptual loss cannot run for this target + draft even though the target advertises
+// it (the API's latent_loss_combination_refusal), or null: no aux loss on a full fine-tune, and the
+// decoded-x0 VAE anchor not on an LTX-2.5 workflow that generates no video.
+export function latentLossCombinationRefusal(target, configDraft, loss) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `The ${loss.label} loss trains a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (loss.prefix === "vaeAnchor" && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `The ${loss.label} loss decodes the generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Whether a latent-perceptual loss's control is offered for this target + draft.
+export function latentLossAvailable(target, configDraft, loss) {
+  return targetSupportsLatentLoss(target, loss) && latentLossCombinationRefusal(target, configDraft, loss) === null;
+}
+
+// A latent-perceptual loss is on whenever the draft carries its weight (empty = off).
+export function latentLossEnabled(configDraft, loss) {
+  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
+}
+
+// The draft fields of every latent-perceptual loss, read from a target's `advanced` defaults.
+function latentPerceptualDraft(advanced) {
+  const draft = {};
+  for (const loss of latentPerceptualLosses) {
+    for (const knob of ["Weight", "MinT", "MaxT", "Every"]) {
+      draft[`${loss.prefix}${knob}`] = numericDraft(advanced?.[`${loss.prefix}${knob}`]);
+    }
+  }
+  return draft;
+}
+
+// Field issues for the latent-perceptual knobs — the API's bounds (E6): weight in
+// [0, weightMax], a [0, 1] noise window with min <= max, and a whole alternation period in
+// [1, everyMax]. Checked only while a loss is enabled.
+export function latentPerceptualIssues(configDraft, selectedTarget) {
+  const issues = [];
+  for (const loss of latentPerceptualLosses) {
+    if (!latentLossEnabled(configDraft, loss)) continue;
+    const key = (knob) => `${loss.prefix}${knob}`;
+    const weight = numberFromDraft(configDraft[key("Weight")]);
+    if (weight === null || weight < 0 || weight > loss.weightMax) {
+      issues.push([key("Weight"), `${loss.label} weight must be between 0 and ${loss.weightMax}`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget && !targetSupportsLatentLoss(selectedTarget, loss)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push([null, `This target does not support the ${loss.label} loss — clear it or pick a supporting target`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget) {
+      const refusal = latentLossCombinationRefusal(selectedTarget, configDraft, loss);
+      if (refusal) {
+        issues.push([key("Weight"), refusal]);
+        continue;
+      }
+    }
+    const window = {};
+    for (const knob of ["MinT", "MaxT"]) {
+      if (!String(configDraft[key(knob)] ?? "").trim()) continue;
+      const t = numberFromDraft(configDraft[key(knob)]);
+      if (t === null || t < 0 || t > 1) {
+        issues.push([key(knob), "Noise window bounds must be between 0 and 1"]);
+      } else {
+        window[knob] = t;
+      }
+    }
+    if ((window.MinT ?? 0) > (window.MaxT ?? loss.maxTDefault)) {
+      issues.push([key("MaxT"), "Noise window max must be at least its min"]);
+    }
+    if (String(configDraft[key("Every")] ?? "").trim()) {
+      const every = numberFromDraft(configDraft[key("Every")]);
+      if (every === null || !Number.isInteger(every) || every < 1 || every > loss.everyMax) {
+        issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${loss.everyMax}`]);
+      }
+    }
+  }
+  return issues;
+}
+
+// The latent-perceptual keys a job snapshot carries: none for a loss that is off (a default job's
+// snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
+// defaults).
+export function latentPerceptualSnapshot(configDraft) {
+  const snapshot = {};
+  for (const loss of latentPerceptualLosses) {
+    if (!latentLossEnabled(configDraft, loss)) continue;
+    Object.assign(
+      snapshot,
+      compactObject(
+        Object.fromEntries(
+          ["Weight", "MinT", "MaxT", "Every"].map((knob) => [
+            `${loss.prefix}${knob}`,
+            numberFromDraft(configDraft[`${loss.prefix}${knob}`]),
+          ]),
+        ),
+      ),
+    );
+  }
+  return snapshot;
+}
+
+// A face loss is on whenever the draft carries its weight (empty = off).
+export function identityLossEnabled(configDraft) {
+  return String(configDraft?.identityLossWeight ?? "").trim() !== "";
+}
+export function faceLandmarkLossEnabled(configDraft) {
+  return String(configDraft?.faceLandmarkLossWeight ?? "").trim() !== "";
+}
+
+// Shared schedule checks for one face loss (weight / noise window / alternation period), the API's
+// bounds (E6). `prefix` is the draft-key prefix ("identityLoss" / "faceLandmarkLoss"). Marks the
+// returned issues `blocked` when the loss cannot run here at all (unsupported target or refused
+// combination), so the caller skips its loss-specific knobs.
+function faceLossScheduleIssues(configDraft, prefix, label, supported, selectedTarget) {
+  const issues = [];
+  const weightKey = `${prefix}Weight`;
+  const weight = numberFromDraft(configDraft[weightKey]);
+  if (weight === null || weight < 0 || weight > faceLossWeightMax) {
+    issues.push([weightKey, `${label} weight must be between 0 and ${faceLossWeightMax}`]);
+  } else if (weight > 0 && !supported) {
+    // The control is hidden for such a target, so this names no input (field null): the value can
+    // only arrive from a carried-over draft, and the API would refuse it anyway.
+    issues.push([null, `This target does not support the ${label.toLowerCase()} — clear it or pick a supporting target`]);
+    issues.blocked = true;
+    return issues;
+  } else if (weight > 0 && selectedTarget) {
+    const refusal = faceLossCombinationRefusal(selectedTarget, configDraft, label);
+    if (refusal) {
+      issues.push([weightKey, refusal]);
+      issues.blocked = true;
+      return issues;
+    }
+  }
+  const window = {};
+  for (const field of [`${prefix}MinT`, `${prefix}MaxT`]) {
+    if (!String(configDraft[field] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[field]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([field, "Noise window bounds must be between 0 and 1"]);
+    } else {
+      window[field] = t;
+    }
+  }
+  if ((window[`${prefix}MinT`] ?? 0) > (window[`${prefix}MaxT`] ?? 1)) {
+    issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
+  }
+  const everyKey = `${prefix}Every`;
+  if (String(configDraft[everyKey] ?? "").trim()) {
+    const every = numberFromDraft(configDraft[everyKey]);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > faceLossEveryMax) {
+      issues.push([everyKey, `Alternation period must be a whole number from 1 to ${faceLossEveryMax}`]);
+    }
+  }
+  return issues;
+}
+
+// Field issues for the face-loss knobs (checked only while each loss is enabled).
+export function faceLossIssues(configDraft, selectedTarget) {
+  const issues = [];
+  if (identityLossEnabled(configDraft)) {
+    const supported = !selectedTarget || targetSupportsIdentityLoss(selectedTarget);
+    const scheduleIssues = faceLossScheduleIssues(configDraft, "identityLoss", "Identity loss", supported, selectedTarget);
+    issues.push(...scheduleIssues);
+    if (!scheduleIssues.blocked) {
+      if (String(configDraft.identityLossMinCos ?? "").trim()) {
+        const minCos = numberFromDraft(configDraft.identityLossMinCos);
+        if (minCos === null || minCos < -1 || minCos > 1) {
+          issues.push(["identityLossMinCos", "Identity gate must be between -1 and 1"]);
+        }
+      }
+      if (!identityLossReferenceOptions.includes(asText(configDraft.identityLossReference).trim())) {
+        issues.push(["identityLossReference", `Identity reference must be one of ${identityLossReferenceOptions.join(", ")}`]);
+      }
+    }
+  }
+  if (faceLandmarkLossEnabled(configDraft)) {
+    const supported = !selectedTarget || targetSupportsFaceLandmarkLoss(selectedTarget);
+    issues.push(...faceLossScheduleIssues(configDraft, "faceLandmarkLoss", "Face landmark loss", supported, selectedTarget));
+  }
+  return issues;
+}
+
+// The face-loss keys a job snapshot carries: none while off (a default job's snapshot is
+// unchanged); the weight plus every set knob while on (unset knobs take the API defaults).
+export function faceLossSnapshot(configDraft) {
+  const snapshot = {};
+  if (identityLossEnabled(configDraft)) {
+    Object.assign(snapshot, compactObject({
+      identityLossWeight: numberFromDraft(configDraft.identityLossWeight),
+      identityLossMinT: numberFromDraft(configDraft.identityLossMinT),
+      identityLossMaxT: numberFromDraft(configDraft.identityLossMaxT),
+      identityLossEvery: numberFromDraft(configDraft.identityLossEvery),
+      identityLossMinCos: numberFromDraft(configDraft.identityLossMinCos),
+      identityLossReference: asText(configDraft.identityLossReference).trim(),
+    }));
+  }
+  if (faceLandmarkLossEnabled(configDraft)) {
+    Object.assign(snapshot, compactObject({
+      faceLandmarkLossWeight: numberFromDraft(configDraft.faceLandmarkLossWeight),
+      faceLandmarkLossMinT: numberFromDraft(configDraft.faceLandmarkLossMinT),
+      faceLandmarkLossMaxT: numberFromDraft(configDraft.faceLandmarkLossMaxT),
+      faceLandmarkLossEvery: numberFromDraft(configDraft.faceLandmarkLossEvery),
+    }));
+  }
+  return snapshot;
+}
+
+// The body-loss draft fields of a target/preset `advanced` bag (empty weight = off).
+function bodyLossesDraft(advanced) {
+  return {
+    bodyProportionWeight: numericDraft(advanced.bodyProportionWeight),
+    bodyProportionMinT: numericDraft(advanced.bodyProportionMinT),
+    bodyProportionMaxT: numericDraft(advanced.bodyProportionMaxT),
+    bodyProportionEvery: numericDraft(advanced.bodyProportionEvery),
+    bodyShapeWeight: numericDraft(advanced.bodyShapeWeight),
+    bodyShapeMinT: numericDraft(advanced.bodyShapeMinT),
+    bodyShapeMaxT: numericDraft(advanced.bodyShapeMaxT),
+    bodyShapeEvery: numericDraft(advanced.bodyShapeEvery),
+    normalWeight: numericDraft(advanced.normalWeight),
+    normalMinT: numericDraft(advanced.normalMinT),
+    normalMaxT: numericDraft(advanced.normalMaxT),
+    normalEvery: numericDraft(advanced.normalEvery),
+    bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
+    bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
+    normalRestrictToSubject: advanced.normalRestrictToSubject === true,
+  };
+}
+
+// A body loss is on whenever the draft carries its weight (empty = off).
+export function bodyLossEnabled(configDraft, loss) {
+  return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
+}
+
+// Field issues for the body-loss knobs — the API's bounds (E6), per loss while it is on: weight in
+// [0, bodyLossWeightMax], a [0, 1] noise window with min <= max, a whole alternation period in
+// [1, bodyLossEveryMax]; plus the shape loss's cosine gate in [-1, 1].
+export function bodyLossIssues(configDraft, selectedTarget, subjectMaskReport = null) {
+  const issues = [];
+  for (const loss of bodyLosses) {
+    if (!bodyLossEnabled(configDraft, loss)) continue;
+    const { prefix, window: [minDefault, maxDefault] } = loss;
+    const weight = numberFromDraft(configDraft[`${prefix}Weight`]);
+    if (weight === null || weight < 0 || weight > bodyLossWeightMax) {
+      issues.push([`${prefix}Weight`, `${loss.label} loss weight must be between 0 and ${bodyLossWeightMax}`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget && !targetSupportsBodyLoss(selectedTarget, loss)) {
+      // The toggle is hidden for such a target, so this names no input: the value can only arrive
+      // from a carried-over draft, and the API refuses it anyway.
+      issues.push([null, `This target does not support the ${loss.label.toLowerCase()} loss — clear it or pick a supporting target`]);
+      continue;
+    }
+    if (weight > 0 && selectedTarget) {
+      const refusal = bodyLossCombinationRefusal(selectedTarget, configDraft);
+      if (refusal) {
+        // The toggle is hidden for this combination too; name no input.
+        issues.push([null, refusal]);
+        continue;
+      }
+    }
+    const bounds = {};
+    for (const suffix of ["MinT", "MaxT"]) {
+      const field = `${prefix}${suffix}`;
+      if (!String(configDraft[field] ?? "").trim()) continue;
+      const t = numberFromDraft(configDraft[field]);
+      if (t === null || t < 0 || t > 1) {
+        issues.push([field, "Noise window bounds must be between 0 and 1"]);
+      } else {
+        bounds[suffix] = t;
+      }
+    }
+    if ((bounds.MinT ?? minDefault) > (bounds.MaxT ?? maxDefault)) {
+      issues.push([`${prefix}MaxT`, "Noise window max must be at least its min"]);
+    }
+    const everyField = `${prefix}Every`;
+    if (String(configDraft[everyField] ?? "").trim()) {
+      const every = numberFromDraft(configDraft[everyField]);
+      if (every === null || !Number.isInteger(every) || every < 1 || every > bodyLossEveryMax) {
+        issues.push([everyField, `Alternation period must be a whole number from 1 to ${bodyLossEveryMax}`]);
+      }
+    }
+    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+      if (selectedTarget?.baseModel === "ltx_2_5") {
+        // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
+        // The toggle is hidden there, so a carried-over `true` names no input.
+        issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
+      } else {
+        // Like subject-masked loss: every image needs a non-empty subject mask (the worker refuses
+        // the job otherwise), so incomplete coverage blocks Start (unknown coverage is left to it).
+        const coverage = subjectMaskCoverage(subjectMaskReport);
+        if (coverage && !coverage.complete) {
+          issues.push([
+            "normalRestrictToSubject",
+            `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
+          ]);
+        }
+      }
+    }
+    if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
+      const c = numberFromDraft(configDraft.bodyShapeMinCos);
+      if (c === null || c < -1 || c > 1) {
+        issues.push(["bodyShapeMinCos", "Shape cosine gate must be between -1 and 1"]);
+      }
+    }
+  }
+  return issues;
+}
+
+// The body-loss keys a job snapshot carries: none for a loss that is off (a default job's snapshot
+// is unchanged); its weight plus every set knob while on (unset knobs take the API defaults).
+export function bodyLossSnapshot(configDraft) {
+  const out = {};
+  for (const loss of bodyLosses) {
+    if (!bodyLossEnabled(configDraft, loss)) continue;
+    const { prefix } = loss;
+    Object.assign(
+      out,
+      compactObject({
+        [`${prefix}Weight`]: numberFromDraft(configDraft[`${prefix}Weight`]),
+        [`${prefix}MinT`]: numberFromDraft(configDraft[`${prefix}MinT`]),
+        [`${prefix}MaxT`]: numberFromDraft(configDraft[`${prefix}MaxT`]),
+        [`${prefix}Every`]: numberFromDraft(configDraft[`${prefix}Every`]),
+      }),
+    );
+    if (prefix === "bodyProportion" && configDraft.bodyProportionIncludeHead) {
+      out.bodyProportionIncludeHead = true;
+    }
+    if (prefix === "bodyShape") {
+      const c = numberFromDraft(configDraft.bodyShapeMinCos);
+      if (c !== null) out.bodyShapeMinCos = c;
+    }
+    if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+      out.normalRestrictToSubject = true;
+    }
+  }
+  return out;
 }

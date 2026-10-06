@@ -867,6 +867,19 @@ describe("ConfigureJobPanel depth anchoring", () => {
     return calls;
   }
 
+  // sc-24830 review: the toggle is hidden for a full fine-tune and a no-video LTX-2.5 workflow.
+  // Mutation: gate the toggle on targetSupportsDepthAnchoring alone ⇒ red.
+  it("hides the toggle for a full fine-tune and a no-video LTX-2.5 workflow", () => {
+    mountWith({ draft: { ...VALID_DRAFT, networkType: "full" } });
+    expect(toggle()).toBeFalsy();
+
+    mountWith({
+      target: { ...Z_IMAGE, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5" },
+      draft: { ...VALID_DRAFT, ltxWorkflow: "t2a_lora" },
+    });
+    expect(toggle()).toBeFalsy();
+  });
+
   it("is off by default and seeds 0.1 when enabled", () => {
     const calls = mountWith();
     expect(toggle()).toBeTruthy();
@@ -904,6 +917,210 @@ describe("ConfigureJobPanel depth anchoring", () => {
       draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small", depthAnchoringEvery: "40" },
     });
     expect(field("Depth every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24832 (epic 2123): each body loss is an off-by-default advanced toggle offered only for a
+// target that advertises it; checking it seeds the suggested weight; its knobs exist only while on.
+describe("ConfigureJobPanel body losses", () => {
+  const PROPORTION_ONLY = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsBodyProportionLoss: true },
+  };
+  const ALL = {
+    ...PROPORTION_ONLY,
+    limits: { supportsBodyProportionLoss: true, supportsBodyShapeLoss: true, supportsNormalLoss: true },
+  };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = PROPORTION_ONLY, draft = VALID_DRAFT, calls = [], report = null, onGenerate } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target, subjectMaskReport: report }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+          subjectMaskReport: report,
+          onGenerateSubjectMasks: onGenerate,
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  // Restricted normals read the subject masks like subject-masked loss: the same coverage readout,
+  // an error on the checkbox while coverage is incomplete, and "Generate subject masks" (shown once
+  // when subject-masked loss is on too). Mutation: drop the restricted-normal affordance ⇒ red.
+  it("offers subject-mask coverage and generation for restricted normals", () => {
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: false }] };
+    const draft = { ...VALID_DRAFT, normalWeight: "0.1", normalRestrictToSubject: true };
+    let generated = 0;
+    mountWith({ target: ALL, draft, report: partial, onGenerate: () => (generated += 1) });
+    expect(field("Normals on the subject only").getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeTruthy();
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain("1 of 2 images");
+    const generate = [...container.querySelectorAll("button")].find((node) =>
+      node.textContent.includes("Generate subject masks"),
+    );
+    act(() => generate.click());
+    expect(generated).toBe(1);
+    expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  it("shows no mask readout for unrestricted normals, and one readout alongside subject-masked loss", () => {
+    const partial = { items: [{ hasMask: false }] };
+    mountWith({ target: ALL, draft: { ...VALID_DRAFT, normalWeight: "0.1" }, report: partial });
+    expect(container.querySelector("[data-testid=subject-mask-coverage]")).toBeNull();
+    mountWith({
+      target: { ...ALL, limits: { ...ALL.limits, supportsSubjectMaskLoss: true } },
+      draft: {
+        ...VALID_DRAFT,
+        normalWeight: "0.1",
+        normalRestrictToSubject: true,
+        subjectMaskLoss: true,
+        subjectMaskBackgroundWeight: "0.1",
+        subjectMaskSubjectWeight: "1",
+      },
+      report: partial,
+    });
+    expect(container.querySelectorAll("[data-testid=subject-mask-coverage]")).toHaveLength(1);
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeNull();
+  });
+
+  // Mutation: render every body toggle regardless of the target flag ⇒ the shape toggle appears ⇒ red.
+  it("offers only the advertised losses, off by default, seeding 0.1 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle("Body proportion loss").checked).toBe(false);
+    expect(toggle("Body shape loss")).toBeUndefined();
+    expect(toggle("Surface normals loss")).toBeUndefined();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body proportion loss").click());
+    expect(calls).toEqual([["bodyProportionWeight", "0.1"]]);
+  });
+
+  it("shows each enabled loss's knobs and clears the weight when disabled", () => {
+    const calls = mountWith({ target: ALL, draft: { ...VALID_DRAFT, bodyShapeWeight: "0.1", normalWeight: "0.2" } });
+    expect(toggle("Body shape loss").checked).toBe(true);
+    expect(field("Body shape weight").value).toBe("0.1");
+    expect(field("Body shape weight").getAttribute("max")).toBe("1");
+    expect(field("Body shape window min").getAttribute("placeholder")).toBe("0.4");
+    expect(field("Body shape every N steps").getAttribute("max")).toBe("16");
+    expect(field("Body shape cosine gate")).toBeTruthy();
+    expect(field("Surface normals weight").value).toBe("0.2");
+    expect(field("Normals on the subject only")).toBeTruthy();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body shape loss").click());
+    expect(calls).toEqual([["bodyShapeWeight", ""]]);
+  });
+
+  // Mutation: offer the toggles without `bodyLossCombinationRefusal` ⇒ the full fine-tune shows them ⇒ red.
+  it("hides every body toggle for a full fine-tune", () => {
+    mountWith({ target: ALL, draft: { ...VALID_DRAFT, networkType: "full" } });
+    expect(toggle("Body proportion loss")).toBeUndefined();
+    expect(toggle("Body shape loss")).toBeUndefined();
+  });
+
+  it("outlines an out-of-range alternation period", () => {
+    mountWith({ draft: { ...VALID_DRAFT, bodyProportionWeight: "0.1", bodyProportionEvery: "40" } });
+    expect(field("Body proportion every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24833 (epic 2123): the VAE anchor and E-LatentLPIPS are off-by-default advanced toggles, offered
+// only for a target whose platform trainer declares them (`limits.supportsVaeAnchorLoss` /
+// `limits.supportsLatentLpipsLoss`). Checking one seeds weight 1; its knobs exist only while it is on,
+// and an invalid knob is outlined.
+describe("ConfigureJobPanel latent-space perceptual losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsVaeAnchorLoss: true, supportsLatentLpipsLoss: true },
+  };
+  const LPIPS_ONLY = { ...Z_IMAGE, limits: { supportsLatentLpipsLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(label) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === `${label} loss`)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds weight 1 when enabled", () => {
+    const calls = mountWith();
+    for (const label of ["VAE anchor", "E-LatentLPIPS"]) {
+      expect(toggle(label)).toBeTruthy();
+      expect(toggle(label).checked).toBe(false);
+      expect(field(`${label} weight`)).toBeUndefined();
+    }
+    act(() => toggle("VAE anchor").click());
+    act(() => toggle("E-LatentLPIPS").click());
+    expect(calls).toEqual([
+      ["vaeAnchorWeight", "1"],
+      ["latentLpipsWeight", "1"],
+    ]);
+  });
+
+  // Mutation: render the toggles without the per-target support filter ⇒ red.
+  it("offers each toggle only where the target declares that loss", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, vaeAnchorWeight: "1", latentLpipsWeight: "1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeUndefined();
+    expect(field("VAE anchor weight")).toBeUndefined();
+    mountWith({ target: LPIPS_ONLY });
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeTruthy();
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, vaeAnchorWeight: "1" } });
+    expect(toggle("VAE anchor").checked).toBe(true);
+    expect(field("VAE anchor weight").value).toBe("1");
+    expect(field("VAE anchor weight").getAttribute("max")).toBe("10");
+    expect(field("VAE anchor window max").getAttribute("placeholder")).toBe("0.5");
+    expect(field("VAE anchor every N steps").getAttribute("max")).toBe("16");
+    expect(field("VAE anchor every N steps").getAttribute("placeholder")).toBe("1");
+    expect(field("E-LatentLPIPS weight")).toBeUndefined();
+    act(() => toggle("VAE anchor").click());
+    expect(calls).toEqual([["vaeAnchorWeight", ""]]);
+  });
+
+  it("outlines an out-of-range knob", () => {
+    mountWith({ draft: { ...VALID_DRAFT, latentLpipsWeight: "1", latentLpipsEvery: "40" } });
+    expect(field("E-LatentLPIPS every N steps").getAttribute("aria-invalid")).toBe("true");
   });
 });
 
@@ -1024,5 +1241,85 @@ describe("ConfigureJobPanel subject-masked loss", () => {
     );
     expect(weightInput("Background weight").getAttribute("aria-invalid")).toBe("true");
     expect(weightInput("Subject weight").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24831 (epic 2123): the identity / face-landmark losses are off-by-default advanced toggles,
+// offered only for a target whose platform trainer declares them (`limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss`). Checking one seeds 0.1; its knobs exist only while it is on.
+describe("ConfigureJobPanel face losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsIdentityLoss: true },
+  };
+  const BOTH = { ...Z_IMAGE, limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("offers the identity loss off by default, seeds 0.1, and hides the landmark loss", () => {
+    const calls = mountWith();
+    expect(toggle("Identity loss").checked).toBe(false);
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    act(() => toggle("Identity loss").click());
+    expect(calls).toEqual([["identityLossWeight", "0.1"]]);
+  });
+
+  // Mutation: render the toggles unconditionally ⇒ red.
+  it("offers no toggle or knobs for a target that supports neither (SDXL)", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, identityLossWeight: "0.1", faceLandmarkLossWeight: "0.1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("Identity loss")).toBeUndefined();
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    expect(field("Face landmark loss weight")).toBeUndefined();
+  });
+
+  it("shows each loss's knobs while enabled and outlines an invalid gate", () => {
+    const calls = mountWith({
+      target: BOTH,
+      draft: {
+        ...VALID_DRAFT,
+        identityLossWeight: "0.1",
+        identityLossReference: "dataset_average",
+        identityLossMinCos: "2",
+        faceLandmarkLossWeight: "0.1",
+      },
+    });
+    expect(toggle("Identity loss").checked).toBe(true);
+    expect(field("Identity loss weight").getAttribute("max")).toBe("1");
+    expect(field("Identity loss every N steps").getAttribute("max")).toBe("16");
+    expect([...field("Identity reference").options].map((o) => o.value)).toEqual(["dataset_average", "per_image"]);
+    expect(field("Identity gate").getAttribute("aria-invalid")).toBe("true");
+    expect(field("Face landmark loss weight").value).toBe("0.1");
+    expect(field("Face landmark loss window max")).toBeTruthy();
+    act(() => toggle("Face landmark loss").click());
+    expect(calls).toEqual([["faceLandmarkLossWeight", ""]]);
   });
 });

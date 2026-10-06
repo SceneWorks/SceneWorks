@@ -82,10 +82,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
         "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -181,9 +188,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -280,9 +295,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -378,9 +401,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -476,9 +507,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -578,9 +617,16 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -679,9 +725,16 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -873,9 +926,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -980,9 +1041,17 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsLatentLpipsLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1077,9 +1146,16 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1164,9 +1240,16 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1297,7 +1380,14 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1394,9 +1484,16 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1494,9 +1591,16 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1593,9 +1697,16 @@
           200,
           4000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {
@@ -1690,9 +1801,16 @@
           200,
           6000
         ],
+        "supportsBodyProportionLoss": true,
+        "supportsBodyShapeLoss": true,
+        "supportsDepthAnchoring": true,
+        "supportsFaceLandmarkLoss": true,
         "supportsGradientNoise": true,
+        "supportsIdentityLoss": true,
+        "supportsNormalLoss": true,
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
+        "supportsVaeAnchorLoss": true,
         "supportsWeightNoise": true
       },
       "ui": {

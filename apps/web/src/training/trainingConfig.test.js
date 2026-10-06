@@ -20,10 +20,27 @@ import {
   targetSupportsGradientNoise,
   trainingConfigSnapshot,
   targetSupportsDepthAnchoring,
+  targetSupportsVaeAnchorLoss,
+  targetSupportsLatentLpipsLoss,
+  latentPerceptualLosses,
+  latentLossAvailable,
+  latentLossCombinationRefusal,
+  depthAnchoringAvailable,
+  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringModelOptions,
   depthAnchoringWeightMax,
   depthAnchoringWeightSuggested,
+  faceLossEveryMax,
+  faceLossWeightMax,
+  faceLossWeightSuggested,
+  identityLossReferenceOptions,
+  targetSupportsFaceLandmarkLoss,
+  targetSupportsIdentityLoss,
+  faceLossCombinationRefusal,
+  faceLossIssues,
+  faceLandmarkLossAvailable,
+  identityLossAvailable,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -32,6 +49,12 @@ import {
   targetSupportsWeightNoise,
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
+  bodyLosses,
+  bodyLossCombinationRefusal,
+  bodyLossEveryMax,
+  bodyLossWeightMax,
+  bodyLossWeightSuggested,
+  targetSupportsBodyLoss,
 } from "./trainingConfig.js";
 
 const ltxWorkflows = [
@@ -1019,6 +1042,32 @@ describe("depth anchoring target support (sc-2125)", () => {
     expect(configValidation({ ...whole, depthAnchoringWeight: "0.1" }, { activeDataset: dataset, selectedTarget: supported })).toEqual([]);
     expect(configValidation({ ...whole, depthAnchoringWeight: "0" }, { activeDataset: dataset, selectedTarget: target })).toEqual([]);
   });
+
+  // sc-24830 review: an advertising target still refuses the combinations the engine refuses — a
+  // full base fine-tune and an LTX-2.5 workflow with no generated video — as a weight issue, and
+  // the control is not offered for them. Mutation: return null from
+  // depthAnchoringCombinationRefusal ⇒ red.
+  it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
+    const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const messages = (draft, selectedTarget) =>
+      configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
+        .filter((entry) => entry.field === "depthAnchoringWeight")
+        .map((entry) => entry.message);
+    expect(messages({ networkType: "full" }, supported)).toEqual([
+      "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
+    ]);
+    expect(depthAnchoringAvailable(supported, { networkType: "full" })).toBe(false);
+    expect(depthAnchoringAvailable(supported, { networkType: "lora" })).toBe(true);
+    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
+    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+      expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
+      expect(depthAnchoringAvailable(ltx, { ltxWorkflow: workflow })).toBe(false);
+      // The same name on a non-LTX-2.5 target is no refusal.
+      expect(depthAnchoringAvailable(supported, { ltxWorkflow: workflow })).toBe(true);
+    }
+    expect(depthAnchoringAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+  });
 });
 
 // sc-24828 (epic 2123): subject-masked loss is off by default, round-trips into the snapshot only
@@ -1127,5 +1176,405 @@ describe("subject-masked loss (sc-24828)", () => {
       missing: 2,
       complete: false,
     });
+  });
+});
+
+// sc-24832 (epic 2123): the three body losses are off by default, each round-trips from the form
+// draft into the job snapshot only while on, every knob is bounded by the API's limits (E6), and a
+// loss the target does not advertise blocks Start.
+describe("body losses (sc-24832)", () => {
+  const allLimits = Object.fromEntries(bodyLosses.map((loss) => [loss.limit, true]));
+  const bodyTarget = { ...target, limits: { ...target.limits, ...allLimits } };
+  const snap = (draft, selectedTarget = bodyTarget) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget,
+    });
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+  };
+  const issuesOn = (draft, field, selectedTarget = bodyTarget) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget }).filter(
+      (entry) => entry.field === field,
+    );
+
+  it("seeds every loss off and leaves a default snapshot without any body key", () => {
+    const draft = configDraftFromTarget(bodyTarget, dataset, ["auto"]);
+    for (const { prefix } of bodyLosses) expect(draft[`${prefix}Weight`]).toBe("");
+    const advanced = snap(draft).config.advanced;
+    for (const key of Object.keys(advanced)) {
+      expect(/^(bodyProportion|bodyShape|normal)/.test(key)).toBe(false);
+    }
+  });
+
+  // Mutation: drop the per-loss `bodyLossEnabled` guard in bodyLossSnapshot ⇒ the off losses'
+  // knobs leak into the snapshot ⇒ red.
+  it("round-trips each enabled loss (and only it) as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(bodyTarget, dataset, ["auto"]),
+      bodyProportionWeight: String(bodyLossWeightSuggested),
+      bodyProportionIncludeHead: true,
+      bodyProportionEvery: "1",
+      bodyShapeMinT: "0.3",
+      normalWeight: "0.2",
+      normalMinT: "0.1",
+      normalMaxT: "0.9",
+      normalRestrictToSubject: true,
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.bodyProportionWeight).toBe(0.1);
+    expect(advanced.bodyProportionIncludeHead).toBe(true);
+    expect(advanced.bodyProportionEvery).toBe(1);
+    expect(advanced.normalWeight).toBe(0.2);
+    expect(advanced.normalMinT).toBe(0.1);
+    expect(advanced.normalMaxT).toBe(0.9);
+    expect(advanced.normalRestrictToSubject).toBe(true);
+    // The shape loss is off: its stray knob never reaches the job.
+    expect(advanced.bodyShapeMinT).toBeUndefined();
+    expect(advanced.bodyShapeWeight).toBeUndefined();
+    const seeded = configDraftFromTarget(
+      { ...target, defaults: { ...target.defaults, advanced: { networkType: "lora", bodyShapeWeight: 0.05, bodyShapeMinCos: 0.4 } } },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.bodyShapeWeight).toBe("0.05");
+    expect(seeded.bodyShapeMinCos).toBe("0.4");
+  });
+
+  it("flags out-of-range knobs on their own fields, only while the loss is on", () => {
+    expect(issuesOn({ bodyShapeEvery: "0" }, "bodyShapeEvery")).toEqual([]);
+    for (const bad of ["-0.1", String(bodyLossWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ normalWeight: bad }, "normalWeight")).toHaveLength(1);
+    }
+    const on = { bodyShapeWeight: "0.1" };
+    expect(issuesOn(on, "bodyShapeWeight")).toEqual([]);
+    expect(issuesOn({ ...on, bodyShapeMinT: "-0.1" }, "bodyShapeMinT")).toHaveLength(1);
+    expect(issuesOn({ ...on, bodyShapeMaxT: "1.5" }, "bodyShapeMaxT")).toHaveLength(1);
+    // The shape window defaults to [0.4, 0.8]: a lone max below the default min is inverted.
+    expect(issuesOn({ ...on, bodyShapeMaxT: "0.3" }, "bodyShapeMaxT")).toHaveLength(1);
+    expect(issuesOn({ ...on, bodyShapeMinCos: "1.5" }, "bodyShapeMinCos")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(bodyLossEveryMax + 1)]) {
+      expect(issuesOn({ ...on, bodyShapeEvery: bad }, "bodyShapeEvery")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, bodyShapeEvery: String(bodyLossEveryMax) }, "bodyShapeEvery")).toEqual([]);
+  });
+
+  // Mutation: drop the `targetSupportsBodyLoss` check in bodyLossIssues ⇒ the carried-over weight
+  // passes ⇒ red.
+  it("blocks a loss the target does not advertise and reads the flag strictly", () => {
+    const proportionOnly = { ...target, limits: { ...target.limits, supportsBodyProportionLoss: true } };
+    const blocking = configValidation({ ...whole, normalWeight: "0.1" }, { activeDataset: dataset, selectedTarget: proportionOnly });
+    expect(blocking.some((entry) => entry.field === null && /normals loss/.test(entry.message))).toBe(true);
+    const fine = configValidation({ ...whole, bodyProportionWeight: "0.1" }, { activeDataset: dataset, selectedTarget: proportionOnly });
+    expect(fine.filter((entry) => /does not support the/.test(entry.message))).toEqual([]);
+    expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: "true" } }, bodyLosses[1])).toBe(false);
+    expect(targetSupportsBodyLoss({ limits: { supportsBodyShapeLoss: true } }, bodyLosses[1])).toBe(true);
+  });
+
+  // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject — a field-less issue,
+  // since the toggle is hidden there. Mutation: drop the LTX-2.5 check in bodyLossIssues ⇒ red.
+  it("flags subject-restricted normals on LTX-2.5 only", () => {
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const draft = { normalWeight: "0.1", normalRestrictToSubject: true, ltxWorkflow: "t2v_lora" };
+    const ltx = configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget: ltx25 });
+    expect(ltx.filter((entry) => entry.field === null && /LTX-2.5 cannot restrict/.test(entry.message))).toHaveLength(1);
+    expect(issuesOn(draft, "normalRestrictToSubject", ltx25)).toEqual([]);
+    expect(issuesOn(draft, "normalRestrictToSubject")).toEqual([]);
+  });
+
+  // Like subject-masked loss, restricted normals need a non-empty subject mask on every image:
+  // incomplete coverage is an error on the toggle; full or unknown coverage is not. Mutation: drop
+  // the coverage check in bodyLossIssues ⇒ red.
+  it("blocks subject-restricted normals on incomplete subject-mask coverage", () => {
+    const draft = { ...whole, normalWeight: "0.1", normalRestrictToSubject: true };
+    const on = (subjectMaskReport) =>
+      configValidation(draft, { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport }).filter(
+        (entry) => entry.field === "normalRestrictToSubject",
+      );
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
+    expect(on(partial).map((entry) => entry.message)).toEqual([
+      "Subject masks are missing for 2 of 3 images — generate subject masks first",
+    ]);
+    expect(on({ items: [{ hasMask: true, empty: false }] })).toEqual([]);
+    expect(on(null)).toEqual([]);
+    // Unrestricted normals never read the masks.
+    expect(
+      configValidation(
+        { ...draft, normalRestrictToSubject: false },
+        { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport: partial },
+      ).filter((entry) => /Subject masks are missing/.test(entry.message)),
+    ).toEqual([]);
+  });
+
+  // Mirrors the API's combination refusals. Mutation: drop the LTX-2.5 workflow check ⇒ red.
+  it("refuses a full fine-tune and a video-less LTX-2.5 workflow", () => {
+    expect(bodyLossCombinationRefusal(bodyTarget, { networkType: "full" })).toMatch(/full fine-tune/);
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "v2a_lora" })).toMatch(/v2a_lora/);
+    expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "t2v_lora" })).toBe(null);
+    const blocked = configValidation(
+      { ...whole, networkType: "full", bodyShapeWeight: "0.1" },
+      { activeDataset: dataset, selectedTarget: bodyTarget },
+    );
+    expect(blocked.some((entry) => entry.field === null && /full fine-tune/.test(entry.message))).toBe(true);
+  });
+
+  it("uses the API's bounds", () => {
+    expect(bodyLossWeightMax).toBe(1);
+    expect(bodyLossEveryMax).toBe(16);
+    expect(bodyLosses.map((loss) => loss.limit)).toEqual([
+      "supportsBodyProportionLoss",
+      "supportsBodyShapeLoss",
+      "supportsNormalLoss",
+    ]);
+  });
+});
+
+// sc-24831 (epic 2123): the face losses are off by default, round-trip from the draft into the job
+// snapshot only while on, are bounded by the API's limits (E6), and follow the target-support
+// mechanism (`limits.supportsIdentityLoss` / `limits.supportsFaceLandmarkLoss`).
+describe("face losses (sc-24831)", () => {
+  const faceTarget = {
+    ...target,
+    limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true },
+  };
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    identityLossReference: "dataset_average",
+  };
+  const snap = (draft, selectedTarget = faceTarget) =>
+    trainingConfigSnapshot({
+      activeDataset: dataset,
+      configDraft: { ...draft, outputName: "Kelsie LoRA" },
+      selectedTarget,
+    });
+  const issuesOn = (draft, field, selectedTarget = faceTarget) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget }).filter(
+      (entry) => entry.field === field,
+    );
+
+  it("seeds off and leaves a default snapshot without any face-loss key", () => {
+    const draft = configDraftFromTarget(faceTarget, dataset, ["auto"]);
+    expect(draft.identityLossWeight).toBe("");
+    expect(draft.faceLandmarkLossWeight).toBe("");
+    expect(draft.identityLossReference).toBe("dataset_average");
+    for (const key of Object.keys(snap(draft).config.advanced)) {
+      expect(key.startsWith("identityLoss") || key.startsWith("faceLandmarkLoss")).toBe(false);
+    }
+  });
+
+  it("round-trips enabled configurations into the snapshot as typed values", () => {
+    const draft = {
+      ...configDraftFromTarget(faceTarget, dataset, ["auto"]),
+      identityLossWeight: String(faceLossWeightSuggested),
+      identityLossMinT: "0.1",
+      identityLossMaxT: "0.9",
+      identityLossEvery: "1",
+      identityLossMinCos: "0.3",
+      identityLossReference: "per_image",
+      faceLandmarkLossWeight: "0.05",
+      faceLandmarkLossEvery: "4",
+    };
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.identityLossWeight).toBe(0.1);
+    expect(advanced.identityLossMinT).toBe(0.1);
+    expect(advanced.identityLossMaxT).toBe(0.9);
+    expect(advanced.identityLossEvery).toBe(1);
+    expect(advanced.identityLossMinCos).toBe(0.3);
+    expect(advanced.identityLossReference).toBe("per_image");
+    expect(advanced.faceLandmarkLossWeight).toBe(0.05);
+    expect(advanced.faceLandmarkLossEvery).toBe(4);
+    const seeded = configDraftFromTarget(
+      {
+        ...target,
+        defaults: {
+          ...target.defaults,
+          advanced: { networkType: "lora", identityLossWeight: 0.2, identityLossReference: "per_image" },
+        },
+      },
+      dataset,
+      ["auto"],
+    );
+    expect(seeded.identityLossWeight).toBe("0.2");
+    expect(seeded.identityLossReference).toBe("per_image");
+  });
+
+  it("uses the API's bounds", () => {
+    expect(faceLossWeightMax).toBe(1);
+    expect(faceLossEveryMax).toBe(16);
+    expect(identityLossReferenceOptions).toEqual(["dataset_average", "per_image"]);
+  });
+
+  // Mutation: drop the identityLossMinCos range check ⇒ the 1.5 case passes ⇒ red.
+  it("flags out-of-range knobs on their own fields, only while enabled", () => {
+    expect(issuesOn({ identityLossEvery: "0" }, "identityLossEvery")).toEqual([]);
+    const on = { identityLossWeight: "0.1" };
+    expect(issuesOn(on, "identityLossWeight")).toEqual([]);
+    for (const bad of ["-0.1", String(faceLossWeightMax + 0.01), "abc"]) {
+      expect(issuesOn({ identityLossWeight: bad }, "identityLossWeight")).toHaveLength(1);
+    }
+    expect(issuesOn({ ...on, identityLossMinCos: "1.5" }, "identityLossMinCos")).toHaveLength(1);
+    expect(issuesOn({ ...on, identityLossMinCos: "-0.5" }, "identityLossMinCos")).toEqual([]);
+    expect(issuesOn({ ...on, identityLossReference: "random" }, "identityLossReference")).toHaveLength(1);
+    expect(issuesOn({ ...on, identityLossMinT: "0.7", identityLossMaxT: "0.3" }, "identityLossMaxT")).toHaveLength(1);
+    for (const bad of ["0", "2.5", String(faceLossEveryMax + 1)]) {
+      expect(issuesOn({ ...on, identityLossEvery: bad }, "identityLossEvery")).toHaveLength(1);
+    }
+    const lm = { faceLandmarkLossWeight: "0.1" };
+    expect(issuesOn(lm, "faceLandmarkLossWeight")).toEqual([]);
+    expect(issuesOn({ ...lm, faceLandmarkLossMaxT: "3" }, "faceLandmarkLossMaxT")).toHaveLength(1);
+  });
+
+  // Mutation: read a truthy (not strictly true) flag as support ⇒ the "true"-string case passes ⇒ red.
+  it("reads only an explicit true flag as support and refuses a carried-over weight elsewhere", () => {
+    expect(targetSupportsIdentityLoss({ limits: { supportsIdentityLoss: true } })).toBe(true);
+    expect(targetSupportsIdentityLoss({ limits: { supportsIdentityLoss: "true" } })).toBe(false);
+    expect(targetSupportsFaceLandmarkLoss({ limits: {} })).toBe(false);
+    const unsupported = configValidation(
+      { ...whole, identityLossWeight: "0.1", faceLandmarkLossWeight: "0.1" },
+      { activeDataset: dataset, selectedTarget: target },
+    ).filter((entry) => entry.field === null);
+    expect(unsupported.map((entry) => entry.message)).toEqual([
+      "This target does not support the identity loss — clear it or pick a supporting target",
+      "This target does not support the face landmark loss — clear it or pick a supporting target",
+    ]);
+  });
+});
+
+// sc-24831: the face losses are refused for the same combinations as depth anchoring (sc-24830) —
+// a full base fine-tune and an LTX-2.5 workflow with no generated video — on the weight field, and
+// their controls are not offered there. Mutation: drop `faceLossCombinationRefusal` from
+// `faceLossScheduleIssues` ⇒ no issue ⇒ red.
+describe("face loss combination refusals (sc-24831)", () => {
+  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const full = { ...target, limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  it("refuses a full fine-tune and a no-video LTX-2.5 workflow, and hides the controls", () => {
+    for (const [key, label] of [["identityLossWeight", "Identity loss"], ["faceLandmarkLossWeight", "Face landmark loss"]]) {
+      const ft = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", networkType: "full" }, full);
+      expect(ft).toEqual([[key, `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]]);
+      const audio = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2a_lora" }, ltx);
+      expect(audio).toEqual([[key, `${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]]);
+      expect(faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
+    }
+    expect(identityLossAvailable(ltx, { ltxWorkflow: "t2a_lora" })).toBe(false);
+    expect(faceLandmarkLossAvailable(ltx, { ltxWorkflow: "t2v_lora" })).toBe(true);
+    expect(identityLossAvailable(full, { networkType: "full" })).toBe(false);
+    expect(faceLossCombinationRefusal({ baseModel: "ltx_2_3" }, { ltxWorkflow: "t2a_lora" }, "Identity loss")).toBeNull();
+  });
+});
+
+// sc-24833: the latent-space perceptual losses follow the S1 target-support mechanism
+// (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`), are off by default, reach
+// the snapshot only when on, and are bounded by the API's bounds (E6).
+describe("latent-space perceptual losses (sc-24833)", () => {
+  const whole = {
+    outputName: "Kelsie LoRA",
+    triggerWord: "kelsie",
+    rank: 8,
+    alpha: 8,
+    learningRate: 0.0001,
+    steps: 1000,
+    resolution: 1024,
+    batchSize: 1,
+    gradientAccumulation: 1,
+    saveEvery: 250,
+    depthAnchoringModel: "small",
+  };
+  const supported = {
+    ...target,
+    limits: { ...target.limits, supportsVaeAnchorLoss: true, supportsLatentLpipsLoss: true },
+  };
+  const validate = (draft, selectedTarget = supported) =>
+    configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget });
+  const snap = (draft) =>
+    trainingConfigSnapshot({ activeDataset: dataset, configDraft: { ...whole, ...draft }, selectedTarget: supported });
+
+  it("reads only an explicit true flag as support, per loss", () => {
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsVaeAnchorLoss: true } })).toBe(true);
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsVaeAnchorLoss: "true" } })).toBe(false);
+    expect(targetSupportsVaeAnchorLoss({ limits: { supportsLatentLpipsLoss: true } })).toBe(false);
+    expect(targetSupportsLatentLpipsLoss({ limits: { supportsLatentLpipsLoss: true } })).toBe(true);
+    expect(targetSupportsLatentLpipsLoss({ limits: {} })).toBe(false);
+    expect(targetSupportsLatentLpipsLoss(null)).toBe(false);
+  });
+
+  it("is off by default: the draft carries empty weights and the snapshot no keys", () => {
+    const draft = configDraftFromTarget(supported, dataset, [], "kelsie");
+    for (const loss of latentPerceptualLosses) {
+      expect(draft[`${loss.prefix}Weight`]).toBe("");
+    }
+    const advanced = snap({}).config.advanced;
+    expect(advanced).toBeTruthy();
+    expect(Object.keys(advanced).filter((k) => /^(vaeAnchor|latentLpips)/.test(k))).toEqual([]);
+  });
+
+  // Mutation: drop latentPerceptualSnapshot from trainingConfigSnapshot ⇒ red.
+  it("carries the weight and every set knob while on", () => {
+    const config = snap({ vaeAnchorWeight: "0.5", vaeAnchorEvery: "2", latentLpipsWeight: "1", latentLpipsMaxT: "0.4" });
+    const advanced = config.config.advanced;
+    expect(advanced.vaeAnchorWeight).toBe(0.5);
+    expect(advanced.vaeAnchorEvery).toBe(2);
+    expect(advanced.vaeAnchorMinT).toBeUndefined();
+    expect(advanced.latentLpipsWeight).toBe(1);
+    expect(advanced.latentLpipsMaxT).toBe(0.4);
+  });
+
+  it("blocks a carried-over weight on a target without support", () => {
+    for (const loss of latentPerceptualLosses) {
+      const issues = validate({ [`${loss.prefix}Weight`]: "1" }, target);
+      expect(issues.map((entry) => entry.message)).toContain(
+        `This target does not support the ${loss.label} loss — clear it or pick a supporting target`,
+      );
+      expect(validate({ [`${loss.prefix}Weight`]: "1" })).toEqual([]);
+      expect(validate({ [`${loss.prefix}Weight`]: "0" }, target)).toEqual([]);
+    }
+  });
+
+  // Mirrors the API's latent_loss_combination_refusal. Mutation: drop the refusal check from
+  // latentPerceptualIssues ⇒ red.
+  it("refuses a full fine-tune and the VAE anchor on a no-video LTX-2.5 workflow", () => {
+    for (const loss of latentPerceptualLosses) {
+      const issues = validate({ [`${loss.prefix}Weight`]: "1", networkType: "full" });
+      expect(issues.map((entry) => entry.field)).toContain(`${loss.prefix}Weight`);
+      expect(latentLossAvailable(supported, { networkType: "full" }, loss)).toBe(false);
+      expect(latentLossAvailable(supported, { networkType: "lora" }, loss)).toBe(true);
+    }
+    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const [vaeAnchor, lpips] = latentPerceptualLosses;
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, vaeAnchor)).toContain("t2a_lora");
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2v_lora" }, vaeAnchor)).toBeNull();
+    expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, lpips)).toBeNull();
+  });
+
+  // Mutation: drop latentPerceptualIssues from configValidation ⇒ red.
+  it("enforces the API bounds as field issues", () => {
+    for (const loss of latentPerceptualLosses) {
+      const fields = (draft) => validate({ [`${loss.prefix}Weight`]: "1", ...draft }).map((entry) => entry.field);
+      expect(fields({ [`${loss.prefix}Weight`]: String(loss.weightMax + 1) })).toContain(`${loss.prefix}Weight`);
+      expect(fields({ [`${loss.prefix}MinT`]: "1.5" })).toContain(`${loss.prefix}MinT`);
+      expect(fields({ [`${loss.prefix}MinT`]: "0.6" })).toContain(`${loss.prefix}MaxT`);
+      expect(fields({ [`${loss.prefix}MinT`]: "0.6", [`${loss.prefix}MaxT`]: "0.9" })).toEqual([]);
+      expect(fields({ [`${loss.prefix}Every`]: String(loss.everyMax + 1) })).toContain(`${loss.prefix}Every`);
+      expect(fields({ [`${loss.prefix}Every`]: "1.5" })).toContain(`${loss.prefix}Every`);
+    }
   });
 });
