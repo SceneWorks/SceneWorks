@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:84b29733a88900c91cb32523006e335adac095cf69c87015995fb7e7a4e2fcf6",
+    "sceneWorksRevision": "source-tree:445a6b5eadfcccb48b5b005735d279bf27fac515f1767f726068f820b38376fb",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "c8c45f312988c22955ed5cb7cb4bae0de3ae891cd1e6ef6fc108739b86e6c3ce"
+        "sha256": "01aecbd873753e334a4d37a4e3835b39a549455b30b21f7267ec1cf8bce698bf"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -25,11 +25,11 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "d990d6069ed9c80822f44ca3c50ca2b066d5686f23cde823979080f112d2b0ba"
+        "sha256": "e5cd6e58f038fe536ec5e77b8a14282ceabd0875fe3dc7b1e0f70a00fc910988"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "26b393f3fb584e85e9875c1045cc50dd10d6a3542e81edc3d3faf2d4507401a3"
+        "sha256": "366f8a17f30527e3e196ca4800b60087739041a2bc4e2b5203c0cfc076f7192a"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "d68a99c4d929c64032c36dfe67b7239c745caa5278911dfe08efb615761dafbf"
+        "sha256": "3f92b83e4fa787a71e5641f07bbb731c32e98221b8f634891dffb50cb8593c81"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "f10b03edbdfd1580a9962aaf4de748fab3faf078a8f6818f0e2009432fe719b7"
+        "sha256": "754113b20610952b1540e6d598955d27b545749e1e7a43ab2f7a25f09506e025"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,7 +81,7 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "a89e01ffc265b9ae765e4a31a5bcb98b990709fdcb5b40d989561dee1fa182c5"
+        "sha256": "674254f50808bc0a2da33ca86ef9512bf083a2935065b9070a62f8ddfe418e88"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",

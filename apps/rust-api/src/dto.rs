@@ -78,6 +78,14 @@ pub(crate) struct PromptRefineRequest {
     /// (default) or `"tags"` (booru/danbooru tags for anime SDXL checkpoints). Forwarded
     /// verbatim; the worker parses it (unknown/absent → prose).
     pub(crate) caption_style: Option<String>,
+    /// Compressed KV cache opt-in for this generation (sc-20682): `"off"` or `"qualified"`.
+    /// Absent leaves the worker's own default (`SCENEWORKS_LLM_KV_COMPRESSION`, off unless set).
+    /// `"qualified"` never forces compression: the engine runs compressed only for a single
+    /// sequence on a model matching one of its two measured architectures (Llama-3.2-3B-Instruct,
+    /// dense Qwen3-1.7B) within that row's context range (`docs/kv-baseline-harness.md`); batched,
+    /// short and other-model requests run dense with a reason, and the job result's
+    /// `generation.kvCache` records what ran.
+    pub(crate) kv_compression: Option<String>,
 }
 
 /// On-demand "compare image to another" likeness request (epic 4406, sc-4415). Scores a CANDIDATE
@@ -416,6 +424,11 @@ pub(crate) struct TimelineExportRequest {
     pub(crate) fps: u32,
     #[serde(default = "default_requested_gpu")]
     pub(crate) requested_gpu: String,
+    /// The export is for a commercial use (sc-22999, epic 22988 E2). An export that places an
+    /// asset whose usage policy refuses commercial use (YuE2 audio) is refused with the pointer
+    /// to the commercially eligible alternative. Absent ⇒ not declared commercial.
+    #[serde(default)]
+    pub(crate) commercial_use: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1323,6 +1336,17 @@ pub(crate) struct AudioJobRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ConditionalComponentsDownloadRequest {
+    #[serde(default = "default_requested_gpu")]
+    pub(crate) requested_gpu: String,
+    /// The caller asserts the user accepted the declaring entry's licence (sc-23002); required when
+    /// the entry carries `requiresLicenseAcknowledgment`, exactly as on the model install.
+    #[serde(default)]
+    pub(crate) license_acknowledged: bool,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ModelDownloadRequest {
     #[serde(default = "default_requested_gpu")]
@@ -1343,6 +1367,12 @@ pub(crate) struct ModelDownloadRequest {
     /// acknowledgment must be affirmatively asserted, never assumed.
     #[serde(default)]
     pub(crate) license_acknowledged: bool,
+    /// The option to install for each co-requisite choice group the model declares (sc-22998),
+    /// e.g. `{"decoder": "legacy"}` for YuE2. A group left out installs its manifest default; an
+    /// unknown group or option is a 400, never replaced by another option. Only model downloads
+    /// read it: the LoRA route that shares this body refuses a non-empty map.
+    #[serde(default)]
+    pub(crate) choices: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -1934,3 +1934,160 @@ def outcome(n):
   const pids = (await readFile(files.pids, "utf8")).trim().split("\n").map(Number);
   pids.forEach(assertGone);
 });
+
+// Real root/sentinel/socket lifecycle, scripted CPU telemetry. Probe outcomes are keyed to
+// protocol events, not timer luck; the final sample cannot accidentally be an earlier tick.
+async function completionRun(scenario, exitStatus = 0) {
+  const files = await fixture();
+  const client = `${files.program}.completion.py`;
+  await writeFile(client, String.raw`import json, os, socket, subprocess, sys, time
+scenario, marker, status = sys.argv[1:]
+if scenario == "wrong_owner":
+    subprocess.run([sys.executable, __file__, "good", marker, status])
+    raise SystemExit(0)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(os.environ["SCENEWORKS_MEMORY_WATCHDOG_SOCKET"])
+f = sock.makefile("rb")
+hello = json.loads(f.readline())
+assert hello["protocol"] == "sceneworks-memory-watchdog-completion-v1"
+assert hello["minInitialMemoryFreeBytes"] is None
+nonce = hello["nonce"]
+if scenario == "premature":
+    sock.sendall(f"DONE {nonce} {'a'*64}\n".encode())
+else:
+    sock.sendall(f"ACK {nonce}\n".encode())
+assert f.readline().decode().strip() == f"GO {nonce}"
+if scenario == "no_done": raise SystemExit(0)
+if scenario.startswith("pre_done"):
+    open(marker, "w").write(str(os.getpid()))
+    time.sleep(60)
+if scenario.startswith("descendant"):
+    child = subprocess.Popen([sys.executable, "-c", "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"])
+    open(marker, "w").write(str(child.pid))
+if scenario == "bad_nonce": nonce = "wrong"
+sock.sendall((f"DONE {nonce} {'a'*64}\n" * (2 if scenario == "duplicate" else 1)).encode())
+while True:
+    line = f.readline().decode().strip()
+    if line == f"BYE {nonce}": break
+    assert line == f"PING {nonce}"
+if scenario == "ack_exit_race":
+    while not os.path.exists(marker): time.sleep(0.001)
+sock.close()
+raise SystemExit(int(status))
+`);
+  const launcher = `${files.program}.completion-guard.py`;
+  await writeFile(launcher, String.raw`import importlib.util, os, signal, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("watchdog", ${JSON.stringify(WATCHDOG)})
+m = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = m
+spec.loader.exec_module(m)
+scenario = ${JSON.stringify(scenario)}
+marker = Path(${JSON.stringify(files.pids)})
+state = {"requested": False, "completed": False}
+original_emit = m.EventChain.emit
+def emit(self, event):
+    original_emit(self, event)
+    if event["event"] == "child_completion_requested": state["requested"] = True
+    if event["event"] == "child_completed": state["completed"] = True
+m.EventChain.emit = emit
+parse_processes = m.DarwinFootprintSampler.parse_processes
+class Sampler:
+    def sample(self, pids, timeout, required=()):
+        if required: state["root"] = required[0]
+        if state["completed"] and scenario == "ack_exit_race" and state["root"] in pids:
+            assert not required, "acknowledged root must no longer be required"
+            root = m.process_identity(state["root"])
+            marker.touch()
+            while root and m.identity_is_live(root): time.sleep(0.001)
+            original_emit(events, {"event": "acknowledged_root_exit_during_probe"})
+            return parse_processes(pids, {"processes": [{"pid": p, "phys_footprint": 1} for p in pids if p != state["root"]]}, required)
+        if state["requested"] and not state["completed"]:
+            if scenario == "final_fault": raise TimeoutError("scripted final probe failed")
+            if scenario == "final_high": return 100
+            if scenario == "final_exit":
+                root = m.process_identity(required[0])
+                os.kill(required[0], signal.SIGKILL)
+                while m.identity_is_live(root): time.sleep(0.001)
+            if scenario == "final_omit_alive":
+                return parse_processes(pids, {"processes": [{"pid": p, "phys_footprint": 1} for p in pids if p not in required]}, required)
+        if scenario.startswith("pre_done") and marker.exists() and required:
+            if scenario == "pre_done_exit_race":
+                root = m.process_identity(required[0])
+                os.kill(required[0], signal.SIGKILL)
+                while m.identity_is_live(root): time.sleep(0.001)
+            raise m.RootTelemetryLost("scripted missing root between census and footprint")
+        if state["completed"] and scenario.startswith("descendant"):
+            if int(marker.read_text()) in pids:
+                original_emit(events, {"event": "descendant_sampled"})
+                if scenario == "descendant_high": return 100
+        return 1
+class HostSampler:
+    def __init__(self, size): pass
+    def sample(self, timeout):
+        if state["requested"] and scenario == "final_host_fault": raise TimeoutError("final host failed")
+        if state["requested"] and scenario == "final_host_low": return m.HostPressure(1, 1, 20)
+        return m.HostPressure(20, 20, 20)
+m.DarwinFootprintSampler = Sampler
+m.DarwinHostPressureSampler = HostSampler
+# No 2x preallocation policy: the 20-byte free observation is below 2*100, above floor 10.
+sys.argv = ["watchdog", "--require-completion-handshake", "--max-footprint-bytes", "100",
+    "--host-memory-bytes", "1000", "--min-memory-free-bytes", "10",
+    "--max-runtime-seconds", "10", "--sample-interval", "0.02", "--telemetry-timeout", "1",
+    "--child-attestation-timeout", "5", "--term-grace", "0.1",
+    "--event-file", ${JSON.stringify(files.events)}, "--", sys.executable,
+    ${JSON.stringify(client)}, scenario, str(marker), ${JSON.stringify(String(exitStatus))}]
+events = m.EventChain(None)
+# Extra diagnostic events use the guard's chain so chain verification remains meaningful.
+def capture_init(self, event_file):
+    global events
+    original_init(self, event_file)
+    if event_file is not None: events = self
+original_init = m.EventChain.__init__
+m.EventChain.__init__ = capture_init
+raise SystemExit(m.guard(m.parse_args()))
+`);
+  let status = 0;
+  try { await execFileAsync("python3", [launcher], { timeout: 60_000, env: withVirtualClock() }); }
+  catch (error) { status = error.code; }
+  const events = (await readFile(files.events, "utf8")).trim().split("\n").map(JSON.parse);
+  return { status, events };
+}
+
+for (const status of [0, 1, 7]) {
+  test(`completion handshake preserves sentinel status ${status} after measured release`, async () => {
+    const result = await completionRun("good", status);
+    assert.equal(result.status, status, JSON.stringify(result.events));
+    const requested = result.events.findIndex((event) => event.event === "child_completion_requested");
+    const sampled = result.events.findIndex((event) => event.phase === "completion_before_release");
+    const measured = result.events.findIndex((event) => event.event === "child_completion_measured");
+    const completed = result.events.findIndex((event) => event.event === "child_completed");
+    assert.ok(requested >= 0 && requested < sampled && sampled < measured && measured < completed);
+    assert.ok(!result.events.some((event) => event.event === "hard_stop"));
+    validateWatchdogEventChain(result.events);
+  });
+}
+for (const scenario of ["bad_nonce", "premature", "duplicate", "wrong_owner", "no_done", "final_fault", "final_host_fault", "final_omit_alive", "final_exit", "final_high", "final_host_low", "pre_done_exit_race", "pre_done_omit_alive"]) {
+  test(`completion fails closed for ${scenario}`, async () => {
+    const { status, events } = await completionRun(scenario);
+    assert.equal(status, 97, JSON.stringify(events));
+    assert.ok(events.some((event) => event.event === "hard_stop"));
+    assert.ok(!events.some((event) => event.event === "child_completed"));
+    if (scenario.startsWith("final_") && !(["final_high", "final_host_low"].includes(scenario))) assert.match(events.find((e) => e.event === "hard_stop").reason, /completion_telemetry_lost/);
+    if (scenario.startsWith("pre_done")) assert.match(events.find((e) => e.event === "hard_stop").reason, /RootTelemetryLost/);
+  });
+}
+for (const scenario of ["descendant_clean", "descendant_high"]) {
+  test(`completion continues descendant monitoring: ${scenario}`, async () => {
+    const { status, events } = await completionRun(scenario, 1);
+    assert.equal(status, scenario === "descendant_high" ? 97 : 1, JSON.stringify(events));
+    assert.ok(events.some((event) => event.event === "child_completed"));
+    assert.ok(events.some((event) => event.event === "descendant_sampled"));
+  });
+}
+
+test("acknowledged root exit between census and footprint preserves actual status", async () => {
+  const { status, events } = await completionRun("ack_exit_race", 7);
+  assert.equal(status, 7, JSON.stringify(events));
+  assert.ok(events.some((e) => e.event === "acknowledged_root_exit_during_probe"));
+});

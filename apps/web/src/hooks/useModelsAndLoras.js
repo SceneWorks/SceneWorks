@@ -343,6 +343,12 @@ export function useModelsAndLoras({
         if (options.variant) {
           body.variant = options.variant;
         }
+        // Co-requisite choice groups (sc-22998 / sc-23000): e.g. YuE2's `{ decoder: "legacy" }`
+        // installs the legacy decoder add-on instead of the manifest default. Sent only when a
+        // caller names one, so every other download's body is unchanged.
+        if (options.choices && typeof options.choices === "object" && Object.keys(options.choices).length) {
+          body.choices = options.choices;
+        }
         // Carry the acknowledgment to the API, which refuses the download without it. Sent only
         // when the model actually requires one, so no other download's body changes shape.
         if (requiresLicenseAcknowledgment(model)) {

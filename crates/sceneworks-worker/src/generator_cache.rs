@@ -9,7 +9,11 @@ use gen_core::{
     OffloadPolicy, PinnedWeightsFile, Precision, Quant, WeightsSource,
 };
 
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 use crate::cache_thread::CacheThread;
 use crate::cache_thread::{self, CacheAccess, CacheJob, Fingerprint, SeamMessages};
 use crate::WorkerResult;
@@ -40,7 +44,11 @@ struct CachedGenerator {
     provider_resident_bytes: u64,
 }
 
-#[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    test
+))]
 type GeneratorCache = CacheThread<LoadIdentity, CachedGenerator>;
 type GeneratorJob = CacheJob<LoadIdentity, CachedGenerator>;
 
@@ -169,6 +177,10 @@ pub(crate) struct LoadIdentity {
     /// companion (for example a File encoder's sibling config or selected tokenizer) is not nested
     /// beneath any `WeightsSource` slot.
     prepared_files: Vec<PinnedWeightsFile>,
+    /// sc-24806: an MLX load released from its declared Sequential policy to eager Resident
+    /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
+    /// still needs the declared Sequential load (or the reverse); the two reload instead.
+    released_resident: bool,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
@@ -342,6 +354,9 @@ impl LoadIdentity {
                 .iter()
                 .map(|(_, pin)| pin.clone())
                 .collect(),
+            released_resident: cfg!(target_os = "macos")
+                && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
+                && spec.offload_policy == OffloadPolicy::Resident,
         })
     }
 }
@@ -600,7 +615,7 @@ pub(crate) fn resolve_gpu_memory_limit(requested: u64, total_unified_bytes: Opti
 /// `OnceLock` both caches the constant hardware property and pins the read to the first application,
 /// while the limit is still MLX's untouched default. `/ 3 * 2` (rather than `* 2 / 3`) makes any
 /// integer rounding go DOWNward, staying at or below the ceiling — which never throws.
-#[cfg(all(target_os = "macos", not(test)))]
+#[cfg(target_os = "macos")]
 pub(crate) fn device_wired_ceiling_bytes() -> usize {
     static CEILING: OnceLock<usize> = OnceLock::new();
     *CEILING.get_or_init(|| mlx_rs::memory::get_memory_limit() / 3 * 2)
@@ -761,6 +776,45 @@ pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
             write_gpu_telemetry(&config_dir);
         }
     });
+}
+
+/// The MLX soft memory limit this worker applied (configured or derived default), or `None` when it
+/// left MLX on its own default. Every request-scoped guard only ever LOWERS it
+/// ([`apply_request_gpu_memory_limit`]), so it upper-bounds the free memory a provider measures at
+/// decode time (`limit − active`) -- the budget a budget-planned VAE decode tiles against.
+#[cfg(all(target_os = "macos", not(test)))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    match EFFECTIVE_GPU_MEMORY_LIMIT.load(std::sync::atomic::Ordering::SeqCst) {
+        0 => None,
+        limit => Some(limit),
+    }
+}
+
+/// Off macOS no MLX limit is ever applied.
+#[cfg(all(not(target_os = "macos"), not(test)))]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_APPLIED_MLX_MEMORY_LIMIT: std::cell::Cell<Option<u64>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Tests never apply an MLX limit (see [`apply_gpu_memory_limit`]); a test that exercises a
+/// consumer of the applied limit sets it for its own thread with
+/// [`set_test_applied_mlx_memory_limit`].
+#[cfg(test)]
+pub(crate) fn applied_mlx_memory_limit_bytes() -> Option<u64> {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(std::cell::Cell::get)
+}
+
+/// Set (or clear) the applied MLX limit [`applied_mlx_memory_limit_bytes`] reports on this test
+/// thread.
+#[cfg(test)]
+pub(crate) fn set_test_applied_mlx_memory_limit(limit: Option<u64>) {
+    TEST_APPLIED_MLX_MEMORY_LIMIT.with(|cell| cell.set(limit));
 }
 
 #[cfg(any(not(target_os = "macos"), test))]
@@ -1453,15 +1507,52 @@ where
 /// bespoke lane's subsequent `start_gen_stream` load — the same single-in-flight assumption base.rs's
 /// reclaim already relies on. (Idle-timeout eviction only ever *evicts*, never loads, so it cannot
 /// re-occupy the pool either.)
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+///
+/// On macOS it is YuE2's admission lever too (sc-23001): YuE2 runs on candle-Metal beside the MLX
+/// generator the cache keeps warm for 300 s after an image job, in the same unified working set, so a
+/// render that fits only without that generator evicts it first (the release clears the MLX cache).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
     evict_cached_generator_on(generator_worker()).await
+}
+
+/// The bytes the cached generator's own cold load added (its `provider_resident_bytes`), or `None`
+/// when nothing is cached — what evicting it gives back to the unified working set (sc-23001).
+#[cfg(target_os = "macos")]
+pub(crate) async fn cached_generator_resident_bytes() -> WorkerResult<Option<u64>> {
+    cached_generator_resident_bytes_on(generator_worker()).await
+}
+
+#[cfg(target_os = "macos")]
+async fn cached_generator_resident_bytes_on(
+    worker: &mpsc::Sender<GeneratorJob>,
+) -> WorkerResult<Option<u64>> {
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<u64>>();
+    let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _ = reply_tx.send(
+            cache
+                .resident_model()
+                .map(|cached| cached.provider_resident_bytes),
+        );
+    });
+    worker
+        .send(job)
+        .map_err(|_| crate::WorkerError::Engine("MLX generator cache worker stopped".to_owned()))?;
+    reply_rx.await.map_err(|_| {
+        crate::WorkerError::Engine("MLX generator cache worker dropped the job result".to_owned())
+    })
 }
 
 /// [`evict_cached_generator`] against a caller-supplied cache-worker sender — the seam a unit test drives
 /// its own seeded [`GeneratorCache`] worker through (the production entry point uses the process-global
 /// [`generator_worker`]).
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
@@ -1704,6 +1795,21 @@ mod tests {
             LoadIdentity::from_load_spec("z_image_turbo", &base),
             LoadIdentity::from_load_spec("z_image_turbo", &declared_refused),
             "a declaration refusal must not force a weights reload",
+        );
+        // sc-24806: an MLX load released from its declared Sequential policy cannot stage, so it
+        // must not warm-serve the declared Sequential load of the same weights, nor the reverse.
+        let released = base.clone().with_eligible_load_shape_declaration();
+        let declared_sequential = staged_deferred
+            .clone()
+            .with_applied_load_shape_declaration();
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released)
+                != LoadIdentity::from_load_spec("z_image_turbo", &declared_sequential),
+            cfg!(target_os = "macos"),
+        );
+        assert_eq!(
+            LoadIdentity::from_load_spec("z_image_turbo", &released),
+            LoadIdentity::from_load_spec("z_image_turbo", &released.clone()),
         );
         assert_ne!(
             ExecutionPolicy::from_load_spec(&base),
@@ -4152,8 +4258,61 @@ mod tests {
     // resident generator and report `true`, (2) leave the slot empty, and (3) no-op with `false` when
     // the slot is already empty — so a lane that evicts on an already-cold worker neither errors nor
     // lies about having freed pages. Drives a locally-seeded worker through the `_on` seam rather than
-    // the process-global cache. Candle-gated to match the primitive.
-    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    // the process-global cache. Gated to match the primitive (CUDA, and macOS for YuE2, sc-23001).
+    /// sc-23001: the YuE2 Metal admission reads what the cached MLX generator's own load holds and
+    /// evicts it on macOS: a resident entry reports its `provider_resident_bytes`, an evict frees it,
+    /// an empty slot reports `None`. Mutation: report the external baseline instead, or skip the evict.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn the_cached_generator_reports_its_own_bytes_and_evicts_on_macos() {
+        let (tx, rx) = mpsc::channel::<GeneratorJob>();
+        let worker = thread::spawn(move || {
+            run_generator_cache_worker(rx, None);
+        });
+        let (seed_tx, seed_rx) = mpsc::channel();
+        tx.send(Box::new(move |cache: &mut GeneratorCache| {
+            seed_stub_entry(cache);
+            if let Some(entry) = cache.resident_model() {
+                assert_eq!(entry.provider_resident_bytes, 0);
+            }
+            // Re-install with a known attribution.
+            cache.install(
+                stub_cache_key(),
+                CachedGenerator {
+                    generator: Box::new(StubGenerator {
+                        descriptor: stub_descriptor(),
+                        contract: None,
+                    }),
+                    loaded_policy: ExecutionPolicy {
+                        offload_policy: OffloadPolicy::Resident,
+                        load_shape: LoadShape::EagerMaterialization,
+                        load_shape_declaration_result: LoadShapeDeclarationResult::NotEvaluated,
+                    },
+                    external_committed_bytes: 7,
+                    reclaimable_weight_bytes: 0,
+                    provider_resident_bytes: 6 << 30,
+                },
+            );
+            seed_tx.send(()).expect("ack cache seed");
+        }))
+        .expect("seed cache entry");
+        seed_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cache seed ack");
+        assert_eq!(
+            cached_generator_resident_bytes_on(&tx).await.unwrap(),
+            Some(6 << 30)
+        );
+        assert!(evict_cached_generator_on(&tx).await.unwrap());
+        assert_eq!(cached_generator_resident_bytes_on(&tx).await.unwrap(), None);
+        drop(tx);
+        worker.join().expect("cache worker exits");
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
     #[tokio::test]
     async fn evict_cached_generator_frees_the_resident_slot_and_no_ops_when_empty() {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();

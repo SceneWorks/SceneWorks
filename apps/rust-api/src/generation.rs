@@ -2650,6 +2650,9 @@ pub(crate) async fn create_audio_job(
             "Model {model_id} is not an audio model (type: \"audio\" required)"
         )));
     }
+    // sc-22999: a symbolic-plan song model (YuE2) is submitted through its own route, which owns
+    // its eligibility (licence acknowledgment, commercial-use refusal) and source resolution.
+    crate::yue2_jobs::refuse_symbolic_song_on_audio_route(&model_id, &model_manifest_entry)?;
     // Segmented-song / ICL / tier fields vs the model's declared capabilities (sc-19384): an ICL
     // mode on a non-`_icl` checkpoint (or a missing one on an `_icl` checkpoint) is a validation
     // error here, not a failed job.

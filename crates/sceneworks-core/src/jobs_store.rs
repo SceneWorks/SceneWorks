@@ -401,7 +401,7 @@ pub struct PlatformReachabilitySweepStats {
 /// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
 /// backfills every older row before workers can claim it, keeping policy changes
 /// out of the latency-sensitive claim transaction.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 1;
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 2;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -1982,6 +1982,8 @@ impl JobsStore {
         let job = self.get_job_on_connection(&transaction, job_id)?;
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
+        crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
@@ -5009,6 +5011,14 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
         // to any worker advertising `image_segment` instead of a capability of their own.
         JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
+        // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
+        // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
+        // may claim it. `audio_generate` is advertised exactly when that lane is linked
+        // (`inference_runtime::audio()`); the utility worker of a server build without the lane
+        // (the Docker image) therefore leaves it queued for the GPU worker instead of failing it.
+        JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
+            WorkerCapability::AudioGenerate.as_str()
+        }
         _ => job.job_type.as_str(),
     }
 }

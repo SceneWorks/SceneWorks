@@ -69,6 +69,7 @@ crates/media/candle-gen/candle-gen-sensenova
 crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-wan
 crates/media/candle-gen/candle-gen-z-image
+crates/media/candle-gen/vendor/candle-core
 crates/media/candle-gen/vendor/candle-kernels
 crates/media/mlx-gen
 crates/media/mlx-gen/mlx-gen-anima

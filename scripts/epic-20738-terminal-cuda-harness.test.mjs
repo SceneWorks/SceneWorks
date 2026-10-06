@@ -209,11 +209,12 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // Re-pinned by sc-24832 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
   // re-recorded when the catalog gained epic 2123's training auxiliaries — the depth-anchoring keys
   // (sc-2125), the sc-24830 tiny decoders, the sc-24831 FaceMesh-v2 re-host, the sc-24833 FLUX.2
-  // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts (131 keys). The Illustrious file censuses below are
+  // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
+  // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys). The Illustrious file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "ddcac908172ad790289057ff7f5af81fc7ec5980ff23d3620db7df19c2ff8db9");
+    "2173afb9ee5c26afe850e858142aee048a4e87a5302d6eace0a96fd23bb1f365");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

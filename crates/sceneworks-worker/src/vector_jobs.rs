@@ -368,6 +368,13 @@ pub(crate) trait MultimodalVectorProviderAdapter: Send + Sync {
     fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
         None
     }
+
+    /// The KV cache of the provider's last decode, whichever way it ended (sc-20682, sc-20688):
+    /// what [`collect_svg_source`] records as the job's `llm_kv_cache` event. `None` for a
+    /// provider that runs no native LLM decode.
+    fn kv_cache_record(&self) -> Option<crate::llm_kv_cache::KvCacheRecord> {
+        None
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -396,6 +403,7 @@ struct NativeStarVectorProvider {
     inference_provider_id: &'static str,
     weights_dir: PathBuf,
     terminal_outcome: Arc<Mutex<Option<TerminalProviderOutcome>>>,
+    kv_cache: Arc<Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>>,
 }
 
 impl NativeStarVectorProvider {
@@ -460,6 +468,7 @@ impl NativeStarVectorProvider {
             inference_provider_id,
             weights_dir,
             terminal_outcome: Arc::new(Mutex::new(None)),
+            kv_cache: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -501,6 +510,7 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
             self.inference_provider_id
         );
         let started = Instant::now();
+        let kv_cache = self.kv_cache.clone();
         let generation = mirror_vector_cancel(cancel, text_cancel, || {
             tokio::runtime::Handle::current().block_on(crate::refine_model_cache::with_cached_refiner(
                 spec,
@@ -523,32 +533,9 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
                             "text provider {expected_provider_id} exposes the wrong StarVector tier"
                         )));
                     }
-                    // sc-24029: StarVector decodes on the same resident `TextLlm` with the same
-                    // per-token-growing KV cache. `Progress` is the decode's per-token event, so
-                    // counting its arrivals bounds the cache the same way, and this callback is used
-                    // because it is the only hook interleaved with the decode — NOT because the
-                    // allocator is thread-local. It is not: MLX's freed-buffer cache is
-                    // PROCESS-GLOBAL (inference `crates/llm/mlx-llm/src/starvector_8b.rs` declines to
-                    // clear it in `unload` for exactly that reason), so up to once per 16 streamed
-                    // token events — plus once at decode end — this clear also discards buffers a
-                    // CONCURRENT image render had cached, forcing that render to re-allocate. The
-                    // terminal clear fires when this job closure returns.
-                    let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
-                    let mut events = Vec::new();
-                    let output = provider
-                        .generate_svg(&typed_request, &mut |event| {
-                            if let StarVectorStreamEvent::Progress { generated_tokens } = &event {
-                                cache_bound.note_event();
-                                // Only counters leave this private source boundary. A watch channel
-                                // stores one value even if decode outruns the async publisher.
-                                record_vector_token_progress(
-                                    &progress, *generated_tokens, typed_request.text_request.max_new_tokens,
-                                );
-                            } else {
-                                events.push(event);
-                            }
-                        })
-                        .map_err(classify_starvector_error)?;
+                    let (output, events) = decode_native_starvector(
+                        provider, &typed_request, &progress, backend, &kv_cache,
+                    )?;
                     let terminal = TerminalProviderOutcome {
                         finish_reason: terminal_finish_reason(output.finish_reason),
                         generated_tokens: output.generated_tokens,
@@ -578,6 +565,59 @@ impl MultimodalVectorProviderAdapter for NativeStarVectorProvider {
     fn terminal_outcome(&self) -> Option<TerminalProviderOutcome> {
         self.terminal_outcome.lock().ok()?.clone()
     }
+
+    fn kv_cache_record(&self) -> Option<crate::llm_kv_cache::KvCacheRecord> {
+        self.kv_cache.lock().ok()?.clone()
+    }
+}
+
+/// Decode one SVG on the typed StarVector `provider`, publishing its token progress, and keep the
+/// decode's KV-cache record in `kv_cache` whichever way it ends — completed, or refused, canceled
+/// or failed by the engine (sc-20682, sc-20688).
+fn decode_native_starvector(
+    provider: &dyn gen_core::core_llm::StarVectorProvider,
+    typed_request: &StarVectorRequest,
+    progress: &tokio::sync::watch::Sender<u32>,
+    backend: &'static str,
+    kv_cache: &Mutex<Option<crate::llm_kv_cache::KvCacheRecord>>,
+) -> WorkerResult<(StarVectorOutput, Vec<StarVectorStreamEvent>)> {
+    // sc-24029: StarVector decodes on the same resident `TextLlm` with the same
+    // per-token-growing KV cache. `Progress` is the decode's per-token event, so
+    // counting its arrivals bounds the cache the same way, and this callback is used
+    // because it is the only hook interleaved with the decode — NOT because the
+    // allocator is thread-local. It is not: MLX's freed-buffer cache is
+    // PROCESS-GLOBAL (inference `crates/llm/mlx-llm/src/starvector_8b.rs` declines to
+    // clear it in `unload` for exactly that reason), so up to once per 16 streamed
+    // token events — plus once at decode end — this clear also discards buffers a
+    // CONCURRENT image render had cached, forcing that render to re-allocate. The
+    // terminal clear fires when this function returns.
+    let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
+    let mut events = Vec::new();
+    let generation = provider.generate_svg(typed_request, &mut |event| {
+        if let StarVectorStreamEvent::Progress { generated_tokens } = &event {
+            cache_bound.note_event();
+            // Only counters leave this private source boundary. A watch channel
+            // stores one value even if decode outruns the async publisher.
+            record_vector_token_progress(
+                progress,
+                *generated_tokens,
+                typed_request.text_request.max_new_tokens,
+            );
+        } else {
+            events.push(event);
+        }
+    });
+    let record = crate::llm_kv_cache::KvCacheRecord::of(
+        backend,
+        typed_request.text_request.kv_compression,
+        &generation,
+        |output| output.kv_cache.as_ref(),
+    );
+    *kv_cache.lock().map_err(|_| {
+        WorkerError::Engine("StarVector KV-cache record lock poisoned".to_owned())
+    })? = Some(record);
+    let output = generation.map_err(classify_starvector_error)?;
+    Ok((output, events))
 }
 
 const fn terminal_finish_reason(reason: StarVectorFinishReason) -> &'static str {
@@ -706,6 +746,8 @@ fn native_starvector_request(
         max_new_tokens: request.detail_budget.max_new_tokens,
         seed: request.sampling.seed,
         cancel,
+        // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it).
+        kv_compression: crate::llm_kv_cache::worker_default_policy(),
         ..TextLlmRequest::default()
     };
     Ok(StarVectorRequest::new(
@@ -922,6 +964,7 @@ fn vector_token_progress(count: u32, maximum: u32) -> ProgressRequest {
 }
 
 fn collect_svg_source(
+    job_id: &str,
     provider: &dyn MultimodalVectorProviderAdapter,
     request: &VectorProviderRequest,
     cancel: &gen_core::CancelFlag,
@@ -970,7 +1013,7 @@ fn collect_svg_source(
         .map_err(|_| WorkerError::InvalidPayload("maxSvgBytes does not fit usize".to_owned()))?;
     let mut source = String::new();
     let mut previous_source_index = None;
-    provider.generate_svg(request, cancel, progress, &mut |fragment, index| {
+    let generated = provider.generate_svg(request, cancel, progress, &mut |fragment, index| {
         if cancel.is_cancelled() {
             return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
         }
@@ -997,7 +1040,14 @@ fn collect_svg_source(
         }
         source.push_str(fragment);
         Ok(())
-    })?;
+    });
+    // sc-20682 / sc-20688: the decode's KV cache, as the job's `llm_kv_cache` telemetry event,
+    // whichever way the decode ended — published, rejected at a terminal limit, refused at memory
+    // admission, canceled or failed.
+    if let Some(record) = provider.kv_cache_record() {
+        record.emit(job_id);
+    }
+    generated?;
     if cancel.is_cancelled() {
         return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
     }
@@ -1157,8 +1207,10 @@ pub(crate) async fn run_vector_job_with_provider(
     let blocking_provider = provider.clone();
     let blocking_request = request.clone();
     let (progress_tx, progress_rx) = tokio::sync::watch::channel(0);
+    let blocking_job_id = job.id.clone();
     let task = tokio::task::spawn_blocking(move || {
         collect_svg_source(
+            &blocking_job_id,
             blocking_provider.as_ref(),
             &blocking_request,
             &blocking_cancel,
@@ -5678,6 +5730,7 @@ mod tests {
                 generated_tokens,
                 generated_bytes,
                 finish_reason,
+                // Fused compressed KV report (inference epic sc-20669): the fakes ran no cache.
                 kv_cache: None,
             },
             events,
@@ -5764,11 +5817,177 @@ mod tests {
         }
     }
 
+    /// A typed StarVector provider whose decode either completes with a dense KV report or is
+    /// refused by the engine's memory admission.
+    struct StubStarVector {
+        refuse: bool,
+    }
+
+    impl gen_core::core_llm::TextLlm for StubStarVector {
+        fn descriptor(&self) -> &gen_core::core_llm::TextLlmDescriptor {
+            crate::llm_kv_cache::test_support::RefusingLlm.descriptor()
+        }
+
+        fn validate(&self, _req: &TextLlmRequest) -> gen_core::core_llm::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _req: &TextLlmRequest,
+            _on_event: &mut dyn FnMut(gen_core::core_llm::StreamEvent),
+        ) -> gen_core::core_llm::Result<gen_core::core_llm::TextLlmOutput> {
+            unreachable!("StarVector decodes through generate_svg")
+        }
+    }
+
+    impl gen_core::core_llm::StarVectorProvider for StubStarVector {
+        fn starvector_descriptor(&self) -> &gen_core::core_llm::StarVectorDescriptor {
+            unreachable!("the decode never reads the descriptor")
+        }
+
+        fn generate_svg(
+            &self,
+            request: &StarVectorRequest,
+            on_event: &mut dyn FnMut(StarVectorStreamEvent),
+        ) -> gen_core::core_llm::Result<StarVectorOutput> {
+            if self.refuse {
+                return Err(crate::llm_kv_cache::test_support::refusal());
+            }
+            on_event(StarVectorStreamEvent::Progress {
+                generated_tokens: 1,
+            });
+            Ok(StarVectorOutput {
+                svg: Some("<svg/>".to_owned()),
+                generated_tokens: 1,
+                generated_bytes: 6,
+                finish_reason: StarVectorFinishReason::CompleteRoot,
+                kv_cache: Some(gen_core::core_llm::KvCacheReport::without_table_family(
+                    request.text_request.kv_compression,
+                )),
+            })
+        }
+    }
+
+    fn starvector_request(policy: gen_core::core_llm::KvCompressionPolicy) -> StarVectorRequest {
+        StarVectorRequest::new(
+            TextLlmRequest {
+                kv_compression: policy,
+                max_new_tokens: 8,
+                ..TextLlmRequest::default()
+            },
+            4_096,
+            Duration::from_secs(1),
+        )
+    }
+
+    /// sc-20682 / sc-20688: the native decode keeps its KV-cache record whichever way it ends —
+    /// the engine's report when it completes, the requested policy and the refusal when the
+    /// engine refuses it at memory admission.
+    #[test]
+    fn the_native_decode_records_its_kv_cache_on_success_and_refusal() {
+        use gen_core::core_llm::KvCompressionPolicy;
+        let slot = Mutex::new(None);
+        let (progress, _) = tokio::sync::watch::channel(0);
+        let request = starvector_request(KvCompressionPolicy::Qualified);
+        decode_native_starvector(
+            &StubStarVector { refuse: false },
+            &request,
+            &progress,
+            "mlx",
+            &slot,
+        )
+        .expect("completed decode");
+        let completed = slot.lock().unwrap().clone().expect("completed record");
+        assert_eq!(completed.outcome(), "completed");
+        assert_eq!(completed.block()["fallbackReason"], "unqualified_model");
+        assert_eq!(completed.block()["policy"], "qualified");
+        assert_eq!(
+            completed.event("job-9"),
+            json!({ "jobId": "job-9", "engine": "mlx", "kvCache": completed.block() })
+        );
+
+        let error = decode_native_starvector(
+            &StubStarVector { refuse: true },
+            &request,
+            &progress,
+            "mlx",
+            &slot,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, WorkerError::Engine(message) if message.contains("native StarVector generation failed")),
+            "{error:?}"
+        );
+        let refused = slot.lock().unwrap().clone().expect("refused record");
+        assert_eq!(refused.outcome(), "refused");
+        assert_eq!(refused.block()["policy"], "qualified");
+        assert_eq!(refused.block()["reason"], "request_resource_exhausted");
+    }
+
+    /// A vector adapter whose decode the engine refused: it fails, and reports the refusal's
+    /// KV-cache record.
+    struct RefusedVectorProvider;
+
+    impl MultimodalVectorProviderAdapter for RefusedVectorProvider {
+        fn provider_id(&self) -> &str {
+            "starvector"
+        }
+
+        fn supports_mode(&self, mode: VectorMode) -> bool {
+            mode == VectorMode::TextToSvg
+        }
+
+        fn generate_svg(
+            &self,
+            _request: &VectorProviderRequest,
+            _cancel: &gen_core::CancelFlag,
+            _progress: tokio::sync::watch::Sender<u32>,
+            _on_source: &mut dyn FnMut(&str, u32) -> WorkerResult<()>,
+        ) -> WorkerResult<()> {
+            Err(classify_starvector_error(
+                crate::llm_kv_cache::test_support::refusal(),
+            ))
+        }
+
+        fn kv_cache_record(&self) -> Option<crate::llm_kv_cache::KvCacheRecord> {
+            Some(crate::llm_kv_cache::KvCacheRecord::of(
+                "mlx",
+                gen_core::core_llm::KvCompressionPolicy::Qualified,
+                &Err::<StarVectorOutput, _>(crate::llm_kv_cache::test_support::refusal()),
+                |output| output.kv_cache.as_ref(),
+            ))
+        }
+    }
+
+    /// sc-20688: a vector job whose decode the engine refused still emits its `llm_kv_cache`
+    /// event, with the requested policy, the outcome and the refusal.
+    #[test]
+    fn a_refused_vector_decode_records_its_kv_cache_event() {
+        let request = vector_request(VectorMode::TextToSvg, "a compact mark");
+        let job_id = "vector-refused";
+        let result = collect_svg_source(
+            job_id,
+            &RefusedVectorProvider,
+            &request,
+            &gen_core::CancelFlag::new(),
+            tokio::sync::watch::channel(0).0,
+        );
+        assert!(matches!(result, Err(WorkerError::Engine(_))));
+        let events = crate::llm_kv_cache::test_support::events_for(job_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["engine"], "mlx");
+        assert_eq!(events[0]["kvCache"]["policy"], "qualified");
+        assert_eq!(events[0]["kvCache"]["outcome"], "refused");
+        assert_eq!(events[0]["kvCache"]["reason"], "request_resource_exhausted");
+    }
+
     #[test]
     fn native_hidden_token_source_gaps_reach_product_collection() {
         let request = vector_request(VectorMode::TextToSvg, "a compact mark");
         let (progress, observed) = tokio::sync::watch::channel(0);
         let collected = collect_svg_source(
+            "vector-hidden-gaps",
             &NativeSourceSequence([0, 2, 3]),
             &request,
             &gen_core::CancelFlag::new(),
@@ -5788,6 +6007,7 @@ mod tests {
         let request = vector_request(VectorMode::TextToSvg, "a compact mark");
         for indices in [[0, 0, 3], [0, 3, 2], [1, 2, 3]] {
             let result = collect_svg_source(
+                "vector-index-rejects",
                 &NativeSourceSequence(indices),
                 &request,
                 &gen_core::CancelFlag::new(),
@@ -6050,7 +6270,7 @@ mod tests {
 
         let cancelled = TerminalProviderOutcome {
             finish_reason: "cancelled",
-            ..terminal
+            ..terminal.clone()
         };
         assert!(terminal_generation_limit_result(
             &cancelled,
@@ -6123,6 +6343,7 @@ mod tests {
         let request = vector_request(VectorMode::TextToSvg, "a compact mark");
         let cancel = gen_core::CancelFlag::new();
         let output = collect_svg_source(
+            "vector-canceled",
             &CancelingProvider,
             &request,
             &cancel,
