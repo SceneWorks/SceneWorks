@@ -1,0 +1,18 @@
+Perceptual LoRA Toolkit body-loss source provenance
+
+Reference source: BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual
+Exact fork revision: 6e01a6e3a75dab3d4567fe885e148df9161daba7
+Upstream MIT license: Copyright (c) 2024 Ostris, LLC; exact grant accompanies this notice.
+
+SceneWorks implements the referenced body-loss architectures and formulas natively in Rust:
+toolkit/body_id.py -> ViTPose+ keypoints, visibility and bone-length proportions;
+toolkit/body_shape.py -> HybrIK ResNet-34 beta-shape head and person-crop comparison;
+toolkit/normal_id.py -> Sapiens normal encoder/decoder and normal comparison.
+The Candle and MLX implementations use their native tensor/autograd operations. Their documented
+adaptations include a shared reference-time ViTPose person gate, subject-mask geometry alignment,
+and decoded-clean-x0 reference tensors. The AB source/reference producer records these differences.
+
+This entry covers source provenance and the MIT source grant only. Optional model checkpoints
+retain their own provider terms. No permission to redistribute model weights is asserted here.
+The upstream THIRD_PARTY_NOTICES.md separately identifies an Apache-2.0 Rose optimizer, which is
+not implemented or linked by these four crates; this body-source entry does not cover Rose.

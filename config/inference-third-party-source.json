@@ -1034,6 +1034,28 @@
       "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
       "disposition": "first-party-original",
       "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "ai-toolkit-perceptual-source",
+      "evidence": "Native Candle implementation of the ViTPose+ proportion, HybrIK beta-shape and Sapiens normal architectures and comparison formulas identified by gen-core/src/train/body.rs and docs/migration/body-losses-reference/manifest.json as ai-toolkit-perceptual fork 6e01a6e3a75dab3d4567fe885e148df9161daba7 (toolkit/body_id.py,body_shape.py,normal_id.py). This is an upstream-derived architecture/formula port, not first-party-original. The newly mapped ai-toolkit-perceptual-source About component retains the exact fork MIT license, Copyright (c) 2024 Ostris, LLC, and source provenance. This classification covers these native source implementations only; it makes no claim about optional ViTPose+,HybrIK,Sapiens checkpoint terms or redistribution. AB scanner has no marker-bearing file in this crate, so classification is explicit rather than inferred from absence of markers. Final-pin implementation must preserve the component and notice wiring and verify the source has not changed from the inspected AB blobs."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored Candle TrainingConfig-to-PerceptualPath builder: typed decoder selection, loss-arm registration, config validation, optional-model loader calls, memory-footprint aggregation and scheduling orchestration. Its only production source is src/lib.rs. The model architectures and loss formulas execute in the separate core/depth/face/body crates it calls, not here. The upstream-gating comment describes the behavior used to enable a delegated face scorer, not copied upstream source or content. No embedded third-party source/data was found. This seam classification does not replace the source or model terms of its dependencies."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "ai-toolkit-perceptual-source",
+      "evidence": "Native MLX implementation of the ViTPose+ proportion, HybrIK beta-shape and Sapiens normal architectures and comparison formulas identified by gen-core/src/train/body.rs and docs/migration/body-losses-reference/manifest.json as ai-toolkit-perceptual fork 6e01a6e3a75dab3d4567fe885e148df9161daba7 (toolkit/body_id.py,body_shape.py,normal_id.py). This is an upstream-derived architecture/formula port, not first-party-original. The newly mapped ai-toolkit-perceptual-source About component retains the exact fork MIT license, Copyright (c) 2024 Ostris, LLC, and source provenance. This classification covers these native source implementations only; it makes no claim about optional ViTPose+,HybrIK,Sapiens checkpoint terms or redistribution. AB scanner has no marker-bearing file in this crate, so classification is explicit rather than inferred from absence of markers. Final-pin implementation must preserve the component and notice wiring and verify the source has not changed from the inspected AB blobs."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored MLX TrainingConfig-to-PerceptualPath builder: typed decoder selection, loss-arm registration, config validation, optional-model loader calls, memory-footprint aggregation and scheduling orchestration. Its only production source is src/lib.rs. The model architectures and loss formulas execute in the separate core/depth/face/body crates it calls, not here. The upstream-gating comment describes the behavior used to enable a delegated face scorer, not copied upstream source or content. No embedded third-party source/data was found. This seam classification does not replace the source or model terms of its dependencies."
     }
   ]
 }
