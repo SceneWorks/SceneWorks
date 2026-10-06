@@ -1017,7 +1017,7 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
 /// base. Keep the product target id, base id, and worker kernel in the key, and allow the value to be
 /// backend-local because inference deliberately registers the future LTX-2.5 trainer under different
 /// MLX and Candle ids.
-fn expected_backend_local_trainer_id(
+pub(crate) fn expected_backend_local_trainer_id(
     target: &crate::training::TrainingTarget,
     backend: &str,
 ) -> Result<&'static str, String> {
@@ -3939,6 +3939,25 @@ mod tests {
             expected_backend_local_trainer_id(&ltx_2_5, "candle").unwrap(),
             "ltx_2_5_distilled"
         );
+    }
+
+    /// Epic 2123: the training catalog projects `limits.x0Decoder` from a target's MLX trainer
+    /// identity only, which is right on Candle too only while both identities map to the same x0
+    /// decoder. Mutation: map `ltx_2_5_distilled` to another decoder in `x0_decoder_for_trainer` ⇒
+    /// red.
+    #[test]
+    fn mlx_and_candle_trainer_identities_share_each_targets_x0_decoder() {
+        use crate::training::depth_anchoring::x0_decoder_for_trainer;
+        for target in crate::training::builtin_training_targets().targets {
+            let mlx = expected_backend_local_trainer_id(&target, "mlx").unwrap();
+            let candle = expected_backend_local_trainer_id(&target, "candle").unwrap();
+            assert_eq!(
+                x0_decoder_for_trainer(mlx),
+                x0_decoder_for_trainer(candle),
+                "{}: {mlx} (MLX) vs {candle} (Candle)",
+                target.id
+            );
+        }
     }
 
     #[test]

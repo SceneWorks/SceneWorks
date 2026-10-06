@@ -582,6 +582,8 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
         error["detail"],
         "Caption mode must be one of default, subjectOnly, or triggerOnly."
     );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "mode");
 
     // subjectOnly owns its prompt; a caller prompt alongside it is refused, not ignored.
     let (status, error) = request(
@@ -596,6 +598,8 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
         error["detail"],
         "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty."
     );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "mode");
 
     // An absent mode is `default`, and a default job carries the captioner's model source.
     let (status, default_job) = request(app.clone(), "POST", &jobs_url, json!({})).await;
@@ -631,6 +635,8 @@ async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
         error["detail"],
         "Caption mode triggerOnly needs trigger words on every image; 1 image(s) have none."
     );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "triggerWords");
 
     // Scoped to the image that has trigger words it queues — with no model source, since the
     // worker loads no captioner for it.
@@ -729,6 +735,8 @@ async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_valida
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "mode", "{error}");
     assert!(
         error["detail"]
             .as_str()
@@ -821,6 +829,8 @@ async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_valida
         let (status, error) = request(app.clone(), "POST", &jobs_url, body).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
         assert_eq!(error["detail"], detail);
+        assert_eq!(error["code"], "training_field_error", "{detail}");
+        assert_eq!(error["context"]["field"], "triggerWords", "{detail}");
     }
     // The boundary values are accepted.
     let sixteen = (0..16).map(|index| format!("w{index}")).collect::<Vec<_>>();
@@ -854,6 +864,8 @@ async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_valida
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "mode", "{error}");
     assert!(
         error["detail"]
             .as_str()
@@ -6200,5 +6212,187 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
             .iter()
             .any(|model| model["catalogScope"] == json!("user")),
         "a torn checkpoint must not register a user model"
+    );
+}
+
+/// Epic 2123 feature review (E6): every decoded-x0 / latent aux section's submit-time refusal
+/// reaches the HTTP route as a `training_field_error` naming that section's weight key — out of
+/// range, a full fine-tune on Mage, and a no-video LTX-2.5 workflow — while the same weight on a
+/// supporting LoRA config passes validation (and then hits the missing-dataset tripwire), so each
+/// refusal below is the combination, not the value. Mutation: attach any section's refusal to a
+/// different field (or drop its `*_combination_refusal` check) ⇒ red.
+#[tokio::test]
+async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Aux field errors" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = |id: &str| {
+        registry["targets"]
+            .as_array()
+            .expect("target list")
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))
+            .clone()
+    };
+    let (z_image, mage, ltx25) = (
+        target("z_image_turbo_lora"),
+        target("mage_flow_base_lora"),
+        target("ltx_2_5_video_lora"),
+    );
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |target: &Value, extra: Value| {
+        let mut config = target["defaults"].clone();
+        for (key, value) in extra.as_object().expect("extra advanced keys") {
+            config["advanced"][key] = value.clone();
+        }
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": target["id"],
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Aux",
+                "dryRun": true
+            }),
+        )
+    };
+    // (weight key, Mage and LTX-2.5 advertise it). E-LatentLPIPS has no Mage / LTX weights, so its
+    // combination cases would be support refusals; it is covered by the out-of-range case.
+    for (key, advertised_on_mage_and_ltx) in [
+        ("depthAnchoringWeight", true),
+        ("bodyProportionWeight", true),
+        ("bodyShapeWeight", true),
+        ("normalWeight", true),
+        ("identityLossWeight", true),
+        ("faceLandmarkLossWeight", true),
+        ("vaeAnchorWeight", true),
+        ("latentLpipsWeight", false),
+    ] {
+        let (status, error) = submit(&z_image, json!({ key: 1000.0 })).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key} out of range: {error}"
+        );
+        assert_eq!(error["code"], "training_field_error", "{key}: {error}");
+        assert_eq!(error["context"]["field"], key, "{key}: {error}");
+
+        let (status, error) = submit(&z_image, json!({ key: 0.01 })).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key} in range: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{key}");
+
+        if !advertised_on_mage_and_ltx {
+            continue;
+        }
+        for (case, target, extra) in [
+            (
+                "mage full",
+                &mage,
+                json!({ key: 0.01, "networkType": "full" }),
+            ),
+            (
+                "ltx-2.5 t2a",
+                &ltx25,
+                json!({ key: 0.01, "ltxWorkflow": "t2a_lora" }),
+            ),
+        ] {
+            let (status, error) = submit(target, extra).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key} {case}: {error}");
+            assert_eq!(
+                error["code"], "training_field_error",
+                "{key} {case}: {error}"
+            );
+            assert_eq!(error["context"]["field"], key, "{key} {case}: {error}");
+        }
+    }
+}
+
+/// Epic 2123 JSON-null policy: an explicit `null` on every technique key means absent — the job
+/// passes validation exactly as if the keys were omitted (and then hits the missing-dataset
+/// tripwire). Mutation: read any one key with `advanced.get` instead of `technique_value` ⇒ that key
+/// becomes a type error and this goes red.
+#[tokio::test]
+async fn create_training_job_treats_null_technique_keys_as_absent() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Null technique keys" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let mut config = target["defaults"].clone();
+    for key in sceneworks_core::training::TECHNIQUE_KEYS {
+        config["advanced"][key] = Value::Null;
+    }
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": "z_image_turbo_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Nulls",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["detail"], "Training dataset not found");
+}
+
+/// sc-24829 (epic 2123 E6): the caption dialog's trigger-word limits are the API's. The web
+/// constant lives in `apps/web/src/training/joyCaptionPrompts.js`; read it so the two cannot drift.
+/// Mutation: change either side's number ⇒ red.
+#[test]
+fn web_caption_trigger_word_limits_match_the_api() {
+    let source = include_str!("../../../web/src/training/joyCaptionPrompts.js");
+    let prefix = "export const captionTriggerWordLimits = ";
+    let line = source
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .expect("captionTriggerWordLimits is exported by joyCaptionPrompts.js");
+    let read = |name: &str| -> usize {
+        let start = line
+            .find(&format!("{name}: "))
+            .unwrap_or_else(|| panic!("{name} missing from {line}"))
+            + name.len()
+            + 2;
+        line[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(
+        read("maxWords"),
+        crate::training::TRAINING_CAPTION_TRIGGER_WORDS_MAX
+    );
+    assert_eq!(
+        read("maxLength"),
+        crate::training::TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS
     );
 }

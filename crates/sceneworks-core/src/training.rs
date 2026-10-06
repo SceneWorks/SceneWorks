@@ -68,6 +68,64 @@ pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
 /// [`WEIGHT_NOISE_SUPPORT_LIMIT`].
 pub const GRADIENT_NOISE_SUPPORT_LIMIT: &str = "supportsGradientNoise";
 
+/// Epic 2123 JSON-null policy: an explicit JSON `null` on any technique key of `advanced` (weight
+/// and gradient noise, resolution buckets, subject-masked loss, and the depth / body / face /
+/// latent-perceptual losses) means exactly what an absent key means — off, or the knob's default.
+/// Every technique parser (submit-time validation and the worker's preflight alike) reads its keys
+/// through this one accessor, so the policy cannot differ between keys or between API and worker.
+pub fn technique_value<'a>(advanced: &'a JsonObject, key: &str) -> Option<&'a Value> {
+    advanced.get(key).filter(|value| !value.is_null())
+}
+
+/// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
+pub const TECHNIQUE_KEYS: [&str; 45] = [
+    WEIGHT_NOISE_SIGMA_KEY,
+    GRADIENT_NOISE_ETA_KEY,
+    GRADIENT_NOISE_GAMMA_KEY,
+    RESOLUTION_BUCKETS_KEY,
+    SUBJECT_MASK_LOSS_KEY,
+    SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
+    SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
+    depth_anchoring::DEPTH_ANCHORING_WEIGHT_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MODEL_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MIN_T_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MAX_T_KEY,
+    depth_anchoring::DEPTH_ANCHORING_EVERY_KEY,
+    "bodyProportionWeight",
+    "bodyProportionMinT",
+    "bodyProportionMaxT",
+    "bodyProportionEvery",
+    body_losses::BODY_PROPORTION_INCLUDE_HEAD_KEY,
+    "bodyShapeWeight",
+    "bodyShapeMinT",
+    "bodyShapeMaxT",
+    "bodyShapeEvery",
+    body_losses::BODY_SHAPE_MIN_COS_KEY,
+    "normalWeight",
+    "normalMinT",
+    "normalMaxT",
+    "normalEvery",
+    body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY,
+    face_losses::IDENTITY_LOSS_WEIGHT_KEY,
+    face_losses::IDENTITY_LOSS_MIN_T_KEY,
+    face_losses::IDENTITY_LOSS_MAX_T_KEY,
+    face_losses::IDENTITY_LOSS_EVERY_KEY,
+    face_losses::IDENTITY_LOSS_MIN_COS_KEY,
+    face_losses::IDENTITY_LOSS_REFERENCE_KEY,
+    face_losses::FACE_LANDMARK_LOSS_WEIGHT_KEY,
+    face_losses::FACE_LANDMARK_LOSS_MIN_T_KEY,
+    face_losses::FACE_LANDMARK_LOSS_MAX_T_KEY,
+    face_losses::FACE_LANDMARK_LOSS_EVERY_KEY,
+    latent_perceptual::VAE_ANCHOR.weight_key,
+    latent_perceptual::VAE_ANCHOR.min_t_key,
+    latent_perceptual::VAE_ANCHOR.max_t_key,
+    latent_perceptual::VAE_ANCHOR.every_key,
+    latent_perceptual::LATENT_LPIPS.weight_key,
+    latent_perceptual::LATENT_LPIPS.min_t_key,
+    latent_perceptual::LATENT_LPIPS.max_t_key,
+    latent_perceptual::LATENT_LPIPS.every_key,
+];
+
 fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
     target.limits.get(flag).and_then(Value::as_bool) == Some(true)
 }
@@ -133,7 +191,7 @@ pub struct ResolutionBucketSpec {
 pub fn parse_resolution_buckets(
     advanced: &serde_json::Map<String, Value>,
 ) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
-    let Some(value) = advanced.get(RESOLUTION_BUCKETS_KEY) else {
+    let Some(value) = technique_value(advanced, RESOLUTION_BUCKETS_KEY) else {
         return Ok(None);
     };
     let rows = value.as_array().ok_or_else(|| {
@@ -799,6 +857,19 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             target.limits.insert(
                 RESOLUTION_BUCKETS_SUPPORT_LIMIT.to_owned(),
                 Value::Bool(true),
+            );
+        }
+        // Epic 2123: the x0 decoder the decoded-x0 losses use, from the one trainer-keyed mapping
+        // the worker loads it by. Every builtin target has a trainer identity contract (pinned by
+        // the routing matrix tests), and the MLX and Candle trainers of a target share a latent
+        // family, so the MLX identity names the decoder on both platforms (a contract test pins
+        // that too).
+        let trainer = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx")
+            .unwrap_or_else(|error| panic!("builtin training target: {error}"));
+        if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
+            target.limits.insert(
+                depth_anchoring::X0_DECODER_LIMIT.to_owned(),
+                depth_anchoring::x0_decoder_limit(decoder),
             );
         }
     }
@@ -3773,8 +3844,8 @@ pub fn subject_mask_loss_weights(
         field: field.to_owned(),
         message,
     };
-    let enabled = match advanced.get(SUBJECT_MASK_LOSS_KEY) {
-        None | Some(Value::Null) => false,
+    let enabled = match technique_value(advanced, SUBJECT_MASK_LOSS_KEY) {
+        None => false,
         Some(Value::Bool(on)) => *on,
         Some(_) => {
             return Err(field_error(
@@ -3784,7 +3855,7 @@ pub fn subject_mask_loss_weights(
         }
     };
     let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
-        let Some(value) = advanced.get(key).filter(|value| !value.is_null()) else {
+        let Some(value) = technique_value(advanced, key) else {
             return Ok(default);
         };
         let weight = value
@@ -3919,9 +3990,7 @@ fn validate_technique_support(
             "gradient noise",
         ),
     ] {
-        let value = config
-            .advanced
-            .get(key)
+        let value = technique_value(&config.advanced, key)
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
         if value > 0.0 && !supported {
@@ -3942,7 +4011,7 @@ fn validate_technique_support(
 /// a full base fine-tune — weight noise perturbs adapter factors only (E5). Each failure is a
 /// [`TrainingPlanError::InvalidField`] naming the field.
 fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
-    let Some(value) = config.advanced.get(WEIGHT_NOISE_SIGMA_KEY) else {
+    let Some(value) = technique_value(&config.advanced, WEIGHT_NOISE_SIGMA_KEY) else {
         return Ok(());
     };
     let field_error = |message: String| TrainingPlanError::InvalidField {
@@ -3974,7 +4043,7 @@ fn advanced_bounded_number(
     key: &str,
     max: f64,
 ) -> Result<Option<f64>, TrainingPlanError> {
-    let Some(value) = config.advanced.get(key) else {
+    let Some(value) = technique_value(&config.advanced, key) else {
         return Ok(None);
     };
     let field_error = |message: String| TrainingPlanError::InvalidField {

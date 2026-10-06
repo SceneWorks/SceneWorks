@@ -35,7 +35,8 @@ import {
   weightNoiseSigmaMax,
   weightNoiseSigmaSuggested,
   depthAnchoringEnabled,
-  depthAnchoringAvailable,
+  targetSupportsDepthAnchoring,
+  auxModelsInstallNote,
   depthAnchoringEveryDefault,
   depthAnchoringEveryMax,
   depthAnchoringModelLabels,
@@ -44,7 +45,7 @@ import {
   depthAnchoringWeightSuggested,
   latentLossEnabled,
   latentPerceptualLosses,
-  latentLossAvailable,
+  targetSupportsLatentLoss,
   bodyLosses,
   bodyLossEnabled,
   bodyLossEveryDefault,
@@ -52,7 +53,7 @@ import {
   bodyLossWeightMax,
   bodyLossWeightSuggested,
   bodyShapeMinCosDefault,
-  bodyLossAvailable,
+  targetSupportsBodyLoss,
   faceLandmarkLossEnabled,
   faceLossEveryDefault,
   faceLossEveryMax,
@@ -62,8 +63,8 @@ import {
   identityLossMinCosDefault,
   identityLossReferenceLabels,
   identityLossReferenceOptions,
-  faceLandmarkLossAvailable,
-  identityLossAvailable,
+  targetSupportsFaceLandmarkLoss,
+  targetSupportsIdentityLoss,
 } from "../../training/trainingConfig.js";
 
 // The weight / noise window / alternation knobs of one decoded-x0 face loss (sc-24831), shown
@@ -249,26 +250,33 @@ export function ConfigureJobPanel({
     );
   // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
   // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
-  // A full fine-tune or an LTX-2.5 workflow with no generated video hides it too (sc-24830).
-  const depthAnchoringSupported = depthAnchoringAvailable(selectedTarget, configDraft);
+  // Like the noise toggles, every decoded-x0 / latent loss toggle is gated on target support only:
+  // on a combination the engine refuses (a full fine-tune, an LTX-2.5 workflow with no generated
+  // video) the toggle stays visible and outlined, and the refusal — attached to its weight key, like
+  // the API — blocks Start from the chip row until the user unticks it (epic 2123 review).
+  const depthAnchoringSupported = targetSupportsDepthAnchoring(selectedTarget);
   const depthAnchoringOn = depthAnchoringEnabled(configDraft);
   // Body losses (sc-24832): each is offered only where the target's trainer on this platform
   // declares it and its weights are cataloged (`limits.supportsBodyProportionLoss` / …ShapeLoss /
   // …NormalLoss); on whenever the draft carries its weight, knobs shown while on.
-  const supportedBodyLosses = bodyLosses.filter((loss) => bodyLossAvailable(selectedTarget, loss, configDraft));
+  const supportedBodyLosses = bodyLosses.filter((loss) => targetSupportsBodyLoss(selectedTarget, loss));
+  // The frozen models each body loss loads besides the x0 decoder (its help text's install note).
+  const bodyLossModels = {
+    bodyProportion: ["ViTPose+ Base"],
+    bodyShape: ["ViTPose+ Base", "HybrIK ResNet-34"],
+    normal: ["ViTPose+ Base", "Sapiens Normal 0.3B"],
+  };
   // The face losses (sc-24831) follow the same target-support mechanism
   // (`limits.supportsIdentityLoss` / `limits.supportsFaceLandmarkLoss`).
-  // A full fine-tune or an LTX-2.5 workflow with no generated video hides them too.
-  const identityLossSupported = identityLossAvailable(selectedTarget, configDraft);
+  const identityLossSupported = targetSupportsIdentityLoss(selectedTarget);
   const identityLossOn = identityLossEnabled(configDraft);
-  const faceLandmarkLossSupported = faceLandmarkLossAvailable(selectedTarget, configDraft);
+  const faceLandmarkLossSupported = targetSupportsFaceLandmarkLoss(selectedTarget);
   const faceLandmarkLossOn = faceLandmarkLossEnabled(configDraft);
   // The latent-space perceptual losses (sc-24833) follow the same mechanism, one per entry of
   // `latentPerceptualLosses` (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`).
-  const latentLosses = latentPerceptualLosses.filter((loss) => latentLossAvailable(selectedTarget, configDraft, loss));
+  const latentLosses = latentPerceptualLosses.filter((loss) => targetSupportsLatentLoss(selectedTarget, loss));
   const latentLossHelp = {
-    vaeAnchor:
-      "Match the training image at several scales: the model's prediction is decoded and a frozen FLUX.2 VAE encoder compares its features with the training image's. Needs the tiny decoder and the FLUX.2 VAE installed. Off by default.",
+    vaeAnchor: `Match the training image at several scales: the model's prediction is decoded and a frozen FLUX.2 VAE encoder compares its features with the training image's. ${auxModelsInstallNote(selectedTarget, ["the FLUX.2 VAE"])} Off by default.`,
     latentLpips:
       "A learned perceptual similarity measured directly on the latent (E-LatentLPIPS) between the model's prediction and the training image. Needs the E-LatentLPIPS weights for this model family installed. Off by default.",
   };
@@ -811,7 +819,7 @@ export function ConfigureJobPanel({
                       {...invalidProps(configValidity, "depthAnchoringWeight")}
                     />
                   </label>
-                  <label title="Which Depth Anything V2 model judges the depth. Install it from the Models screen first (along with the TAEF1 tiny decoder).">
+                  <label title={`Which Depth Anything V2 model judges the depth. ${auxModelsInstallNote(selectedTarget, ["the chosen Depth Anything V2 model"])}`}>
                     Depth model
                     <select
                       onChange={(event) => updateConfigDraft("depthAnchoringModel", event.target.value)}
@@ -1236,7 +1244,7 @@ export function ConfigureJobPanel({
               {depthAnchoringSupported ? (
                 <label
                   className="training-checkbox-field"
-                  title="Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. Needs the TAEF1 and Depth Anything V2 models installed. Off by default."
+                  title={`Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. ${auxModelsInstallNote(selectedTarget, ["a Depth Anything V2 model"])} Off by default.`}
                 >
                   <input
                     checked={depthAnchoringOn}
@@ -1247,6 +1255,7 @@ export function ConfigureJobPanel({
                       )
                     }
                     type="checkbox"
+                    {...invalidProps(configValidity, "depthAnchoringWeight")}
                   />
                   Depth anchoring
                 </label>
@@ -1255,7 +1264,7 @@ export function ConfigureJobPanel({
                 <label
                   className="training-checkbox-field"
                   key={loss.prefix}
-                  title={`${loss.label} loss: the model's prediction is decoded and compared to the training image by a frozen body model; images with no person are skipped. Needs the ViTPose+ model installed. Off by default.`}
+                  title={`${loss.label} loss: the model's prediction is decoded and compared to the training image by a frozen body model; images with no person are skipped. ${auxModelsInstallNote(selectedTarget, bodyLossModels[loss.prefix])} Off by default.`}
                 >
                   <input
                     checked={bodyLossEnabled(configDraft, loss)}
@@ -1263,6 +1272,7 @@ export function ConfigureJobPanel({
                       updateConfigDraft(`${loss.prefix}Weight`, event.target.checked ? String(bodyLossWeightSuggested) : "")
                     }
                     type="checkbox"
+                    {...invalidProps(configValidity, `${loss.prefix}Weight`)}
                   />
                   {loss.label} loss
                 </label>
@@ -1270,7 +1280,7 @@ export function ConfigureJobPanel({
               {identityLossSupported ? (
                 <label
                   className="training-checkbox-field"
-                  title="Keep the character's face: the model's prediction is decoded and a frozen face recognizer (ArcFace) compares the face to the training images'. Images without a detectable face are skipped. Needs the TAEF1 decoder and the InstantID face analysis stack installed. Off by default."
+                  title={`Keep the character's face: the model's prediction is decoded and a frozen face recognizer (ArcFace) compares the face to the training images'. Images without a detectable face are skipped. ${auxModelsInstallNote(selectedTarget, ["the InstantID face analysis stack"])} Off by default.`}
                 >
                   <input
                     checked={identityLossOn}
@@ -1281,6 +1291,7 @@ export function ConfigureJobPanel({
                       )
                     }
                     type="checkbox"
+                    {...invalidProps(configValidity, "identityLossWeight")}
                   />
                   Identity loss
                 </label>
@@ -1288,7 +1299,7 @@ export function ConfigureJobPanel({
               {faceLandmarkLossSupported ? (
                 <label
                   className="training-checkbox-field"
-                  title="Keep the character's face shape: a frozen face-mesh model compares the predicted face's landmarks (jaw, lips, eyes, nose) to the training image's. Needs the TAEF1 decoder, the InstantID face analysis stack and MediaPipe FaceMesh v2 installed. Off by default."
+                  title={`Keep the character's face shape: a frozen face-mesh model compares the predicted face's landmarks (jaw, lips, eyes, nose) to the training image's. ${auxModelsInstallNote(selectedTarget, ["the InstantID face analysis stack", "MediaPipe FaceMesh v2"])} Off by default.`}
                 >
                   <input
                     checked={faceLandmarkLossOn}
@@ -1299,6 +1310,7 @@ export function ConfigureJobPanel({
                       )
                     }
                     type="checkbox"
+                    {...invalidProps(configValidity, "faceLandmarkLossWeight")}
                   />
                   Face landmark loss
                 </label>
@@ -1314,6 +1326,7 @@ export function ConfigureJobPanel({
                       )
                     }
                     type="checkbox"
+                    {...invalidProps(configValidity, `${loss.prefix}Weight`)}
                   />
                   {loss.label} loss
                 </label>

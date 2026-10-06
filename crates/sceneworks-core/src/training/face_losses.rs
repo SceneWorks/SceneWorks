@@ -18,7 +18,7 @@
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;
-use super::{TrainingConfig, TrainingPlanError, TrainingTarget};
+use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};
 use crate::contracts::JsonObject;
 
 /// `advanced` key of the identity-loss weight. Absent or `0` is off.
@@ -145,7 +145,7 @@ fn bounded(
     (lo, hi): (f64, f64),
     default: f64,
 ) -> Result<f64, TrainingPlanError> {
-    match advanced.get(key) {
+    match technique_value(advanced, key) {
         None => Ok(default),
         Some(value) => value
             .as_f64()
@@ -174,7 +174,7 @@ fn schedule(
             format!("{max_key} ({max_t}) must be at least {min_key} ({min_t})."),
         ));
     }
-    let every = match advanced.get(every_key) {
+    let every = match technique_value(advanced, every_key) {
         None => FACE_LOSS_EVERY_DEFAULT,
         Some(value) => value
             .as_u64()
@@ -217,7 +217,7 @@ pub fn identity_loss_settings(
         (-1.0, 1.0),
         IDENTITY_LOSS_MIN_COS_DEFAULT,
     )?;
-    let reference = match advanced.get(IDENTITY_LOSS_REFERENCE_KEY) {
+    let reference = match technique_value(advanced, IDENTITY_LOSS_REFERENCE_KEY) {
         None => IDENTITY_LOSS_REFERENCES[0],
         Some(value) => value
             .as_str()
@@ -279,7 +279,9 @@ pub(super) fn validate_support(
                 ),
             ));
         }
-        if let Some(reason) = face_loss_combination_refusal(target, config, "The identity loss") {
+        if let Some(reason) =
+            face_loss_combination_refusal(&target.base_model, config, "The identity loss")
+        {
             return Err(field_error(IDENTITY_LOSS_WEIGHT_KEY, reason));
         }
     }
@@ -295,7 +297,7 @@ pub(super) fn validate_support(
             ));
         }
         if let Some(reason) =
-            face_loss_combination_refusal(target, config, "The face-landmark loss")
+            face_loss_combination_refusal(&target.base_model, config, "The face-landmark loss")
         {
             return Err(field_error(FACE_LANDMARK_LOSS_WEIGHT_KEY, reason));
         }
@@ -303,13 +305,13 @@ pub(super) fn validate_support(
     Ok(())
 }
 
-/// Why a face loss (`label`) cannot run for this target + config combination even though the target
+/// Why a face loss (`label`) cannot run for a `base_model` target + config even though the target
 /// advertises it, or `None` — the same refusals the engine raises for every decoded-x0 loss and
 /// [`super::depth_anchoring::depth_anchoring_combination_refusal`] mirrors for depth: a full base
 /// fine-tune (aux losses train through the adapter step only), or an LTX-2.5 workflow that generates
 /// no video ([`super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS`]).
 pub fn face_loss_combination_refusal(
-    target: &TrainingTarget,
+    base_model: &str,
     config: &TrainingConfig,
     label: &str,
 ) -> Option<String> {
@@ -318,7 +320,7 @@ pub fn face_loss_combination_refusal(
             "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
         ));
     }
-    if target.base_model == "ltx_2_5" {
+    if base_model == "ltx_2_5" {
         let workflow = config
             .advanced
             .get("ltxWorkflow")

@@ -163,14 +163,6 @@ export function faceLossCombinationRefusal(target, configDraft, label) {
   return null;
 }
 
-// Whether the identity / face-landmark control is offered for this target + draft.
-export function identityLossAvailable(target, configDraft) {
-  return targetSupportsIdentityLoss(target) && faceLossCombinationRefusal(target, configDraft, "Identity loss") === null;
-}
-export function faceLandmarkLossAvailable(target, configDraft) {
-  return targetSupportsFaceLandmarkLoss(target) && faceLossCombinationRefusal(target, configDraft, "Face landmark loss") === null;
-}
-
 // Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
 // trainer's per-element loss — background cells by the background weight, subject cells by the
 // subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
@@ -240,6 +232,19 @@ export function targetSupportsDepthAnchoring(target) {
   return target?.limits?.supportsDepthAnchoring === true;
 }
 
+// The install note of a decoded-x0 loss's help text: the target's x0 decoder (the API's
+// `limits.x0Decoder`, projected from the same trainer-keyed mapping the worker loads it by) followed
+// by the loss's own frozen models. A cataloged tiny decoder is one more model to install; a trainer
+// that decodes through its base model's own VAE needs nothing extra, which the note says instead.
+export function auxModelsInstallNote(target, models) {
+  const decoder = target?.limits?.x0Decoder;
+  const label = typeof decoder?.label === "string" ? decoder.label : null;
+  const needs = label && decoder.install ? [`the ${label}`, ...models] : models;
+  const list = needs.length > 1 ? `${needs.slice(0, -1).join(", ")} and ${needs.at(-1)}` : needs[0];
+  const decodedWith = label && !decoder.install ? ` The prediction is decoded through ${label}.` : "";
+  return `Needs ${list} installed.${decodedWith}`;
+}
+
 // Whether the target's trainer on the serving platform honors the body loss `loss` (an entry of
 // `bodyLosses`) — the platform-effective `limits.<loss.limit>` (pinned to the trainer descriptors
 // and the cataloged weights by a worker test). Absent means unsupported.
@@ -261,11 +266,6 @@ export function bodyLossCombinationRefusal(target, configDraft) {
   return null;
 }
 
-// Whether the body loss `loss` is offered for this target + draft.
-export function bodyLossAvailable(target, loss, configDraft) {
-  return targetSupportsBodyLoss(target, loss) && bodyLossCombinationRefusal(target, configDraft) === null;
-}
-
 // Why depth anchoring cannot run for this target + draft even though the target advertises it, or
 // null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
 // trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
@@ -278,11 +278,6 @@ export function depthAnchoringCombinationRefusal(target, configDraft) {
     return `Depth anchoring needs a generated video stream; the LTX-2.5 workflow ${workflow} generates none`;
   }
   return null;
-}
-
-// Whether the depth-anchoring control is offered for this target + draft.
-export function depthAnchoringAvailable(target, configDraft) {
-  return targetSupportsDepthAnchoring(target) && depthAnchoringCombinationRefusal(target, configDraft) === null;
 }
 
 // Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
@@ -1206,11 +1201,6 @@ export function latentLossCombinationRefusal(target, configDraft, loss) {
   return null;
 }
 
-// Whether a latent-perceptual loss's control is offered for this target + draft.
-export function latentLossAvailable(target, configDraft, loss) {
-  return targetSupportsLatentLoss(target, loss) && latentLossCombinationRefusal(target, configDraft, loss) === null;
-}
-
 // A latent-perceptual loss is on whenever the draft carries its weight (empty = off).
 export function latentLossEnabled(configDraft, loss) {
   return String(configDraft?.[`${loss.prefix}Weight`] ?? "").trim() !== "";
@@ -1450,10 +1440,11 @@ export function bodyLossIssues(configDraft, selectedTarget, subjectMaskReport = 
       continue;
     }
     if (weight > 0 && selectedTarget) {
+      // A refused combination (full fine-tune, no-video LTX-2.5 workflow) names the weight key, like
+      // the API: the toggle stays visible on a supporting target, so the user can untick it there.
       const refusal = bodyLossCombinationRefusal(selectedTarget, configDraft);
       if (refusal) {
-        // The toggle is hidden for this combination too; name no input.
-        issues.push([null, refusal]);
+        issues.push([`${prefix}Weight`, refusal]);
         continue;
       }
     }

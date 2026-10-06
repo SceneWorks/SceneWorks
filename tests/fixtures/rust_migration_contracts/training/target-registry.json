@@ -93,7 +93,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEF1 tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an image LoRA for the Z-Image-Turbo base model.",
@@ -199,7 +203,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESDXL tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an image LoRA for Stable Diffusion XL. The generic SDXL-UNet trainer and the shared foundation for SDXL-family models.",
@@ -306,7 +314,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESDXL tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an anime image LoRA for Illustrious-XL v1.0 (Danbooru-tag SDXL finetune). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Supports high-res 1536 training.",
@@ -412,7 +424,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESDXL tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an anime image LoRA for Illustrious-XL v2.0 (the more stable v2.0-STABLE snapshot). Shares the SDXL UNet trainer, so the output is an sdxl-family LoRA. Trains at 768/1024 (v2.0 duplicates the subject in larger frames).",
@@ -518,7 +534,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESDXL tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an image LoRA for Kolors (Kwai-Kolors). Runs the SDXL-UNet trainer with the Kolors pipeline + ChatGLM3 text encoder, on CUDA and Apple Silicon.",
@@ -627,7 +647,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEF2 tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an image LoRA for Microsoft Lens (gpt-oss text encoder + FLUX.2 VAE). Trains on the non-distilled base and applies to Lens-Turbo.",
@@ -735,7 +759,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEW2.1 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -937,7 +965,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESD3 tiny decoder"
+        }
       },
       "ui": {
         "backend": "native",
@@ -1052,7 +1084,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAESD3 tiny decoder"
+        }
       },
       "ui": {
         "backend": "native",
@@ -1156,7 +1192,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEW2.1 tiny decoder"
+        }
       },
       "ui": {
         "description": "Train an anime image LoRA for the Anima base model (Cosmos-Predict2 DiT + text conditioner).",
@@ -1250,7 +1290,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAELTX2.3 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -1388,7 +1432,11 @@
         "supportsIdentityLoss": true,
         "supportsNormalLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAELTX2.3 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "video",
@@ -1494,7 +1542,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEW2.2 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -1601,7 +1653,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEW2.1 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -1707,7 +1763,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": true,
+          "label": "TAEW2.1 tiny decoder"
+        }
       },
       "ui": {
         "datasetModality": "image",
@@ -1811,7 +1871,11 @@
         "supportsResolutionBuckets": true,
         "supportsSubjectMaskLoss": true,
         "supportsVaeAnchorLoss": true,
-        "supportsWeightNoise": true
+        "supportsWeightNoise": true,
+        "x0Decoder": {
+          "install": false,
+          "label": "the base model's own VAE"
+        }
       },
       "ui": {
         "datasetModality": "image",

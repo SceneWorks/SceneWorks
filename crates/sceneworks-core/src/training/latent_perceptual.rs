@@ -19,7 +19,7 @@
 use serde_json::Value;
 
 use super::depth_anchoring::AuxTrainingModel;
-use super::{TrainingConfig, TrainingPlanError, TrainingTarget};
+use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};
 use crate::contracts::JsonObject;
 
 /// One latent-perceptual technique's product contract.
@@ -129,14 +129,14 @@ pub(super) fn insert_limits(target: &mut TrainingTarget) {
     }
 }
 
-/// Why `spec` cannot run for this target + config combination even though the target advertises
+/// Why `spec` cannot run for a `base_model` target + config even though the target advertises
 /// it, or `None` — mirroring the engine's typed refusals: a full base fine-tune (aux losses train
 /// through the adapter step only), and — for the decoded-x0 VAE anchor — an LTX-2.5 workflow that
 /// generates no video (no x0 video latent to decode;
 /// [`super::depth_anchoring::DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS`]).
 pub fn latent_loss_combination_refusal(
     spec: &LatentLossSpec,
-    target: &TrainingTarget,
+    base_model: &str,
     config: &TrainingConfig,
 ) -> Option<String> {
     let label = capitalized(spec.label);
@@ -145,7 +145,7 @@ pub fn latent_loss_combination_refusal(
             "{label} trains a LoRA/LoKr adapter only, not a full fine-tune."
         ));
     }
-    if spec.weight_key == VAE_ANCHOR.weight_key && target.base_model == "ltx_2_5" {
+    if spec.weight_key == VAE_ANCHOR.weight_key && base_model == "ltx_2_5" {
         let workflow = config
             .advanced
             .get("ltxWorkflow")
@@ -241,7 +241,7 @@ fn field_error(field: &str, message: String) -> TrainingPlanError {
 }
 
 fn unit_interval(advanced: &JsonObject, key: &str, default: f64) -> Result<f64, TrainingPlanError> {
-    match advanced.get(key) {
+    match technique_value(advanced, key) {
         None => Ok(default),
         Some(value) => value
             .as_f64()
@@ -257,7 +257,7 @@ pub fn latent_loss_settings(
     spec: &LatentLossSpec,
     advanced: &JsonObject,
 ) -> Result<Option<LatentLossSettings>, TrainingPlanError> {
-    let weight = match advanced.get(spec.weight_key) {
+    let weight = match technique_value(advanced, spec.weight_key) {
         None => 0.0,
         Some(value) => value
             .as_f64()
@@ -283,7 +283,7 @@ pub fn latent_loss_settings(
             ),
         ));
     }
-    let every = match advanced.get(spec.every_key) {
+    let every = match technique_value(advanced, spec.every_key) {
         None => LATENT_LOSS_EVERY_DEFAULT,
         Some(value) => value
             .as_u64()
@@ -346,7 +346,8 @@ pub(super) fn validate_support(
             ));
         }
         if latent_loss_settings(spec, &config.advanced)?.is_some() {
-            if let Some(reason) = latent_loss_combination_refusal(spec, target, config) {
+            if let Some(reason) = latent_loss_combination_refusal(spec, &target.base_model, config)
+            {
                 return Err(field_error(spec.weight_key, reason));
             }
         }

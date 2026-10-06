@@ -6,7 +6,7 @@
 
 use serde_json::Value;
 
-use super::{TrainingConfig, TrainingPlanError, TrainingTarget};
+use super::{technique_value, TrainingConfig, TrainingPlanError, TrainingTarget};
 use crate::contracts::JsonObject;
 
 /// `advanced` key of the depth-anchoring loss weight. Absent or `0` is off.
@@ -65,11 +65,11 @@ pub const DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS: [&str; 6] = [
     "a2a_ic_lora",
 ];
 
-/// Why depth anchoring cannot run for this target + config combination even though the target
+/// Why depth anchoring cannot run for a `base_model` target + config even though the target
 /// advertises it, or `None`: a full base fine-tune (the engine trains aux losses through the adapter
 /// step only), or an LTX-2.5 workflow that generates no video. Mirrors the engine's typed refusals.
 pub fn depth_anchoring_combination_refusal(
-    target: &TrainingTarget,
+    base_model: &str,
     config: &TrainingConfig,
 ) -> Option<String> {
     if super::config_is_full_finetune(config) {
@@ -77,7 +77,7 @@ pub fn depth_anchoring_combination_refusal(
             "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune.".to_owned(),
         );
     }
-    if target.base_model == "ltx_2_5" {
+    if base_model == "ltx_2_5" {
         let workflow = config
             .advanced
             .get("ltxWorkflow")
@@ -115,7 +115,7 @@ pub(super) fn validate_support(
             ),
         ));
     }
-    if let Some(reason) = depth_anchoring_combination_refusal(target, config) {
+    if let Some(reason) = depth_anchoring_combination_refusal(&target.base_model, config) {
         return Err(field_error(DEPTH_ANCHORING_WEIGHT_KEY, reason));
     }
     Ok(())
@@ -279,6 +279,26 @@ pub fn x0_decoder_for_trainer(trainer_id: &str) -> Option<X0DecoderSource> {
     })
 }
 
+/// Target `limits` key naming the x0 decoder the target's decoded-x0 perceptual losses (depth
+/// anchoring, body and face losses, VAE anchor) decode through: `{ "label": <decoder>, "install":
+/// <bool> }` — `install` is `true` for a cataloged tiny decoder the user installs from the Models
+/// screen, `false` when the trainer decodes through its base model's own VAE. Absent for a target
+/// with no x0 decoder. Derived from [`x0_decoder_for_trainer`] (via the target's trainer identity),
+/// never written by hand, so the web form's help text names the decoder the worker really loads.
+pub const X0_DECODER_LIMIT: &str = "x0Decoder";
+
+/// The [`X0_DECODER_LIMIT`] value for an x0 decoder source.
+pub fn x0_decoder_limit(source: X0DecoderSource) -> Value {
+    match source {
+        X0DecoderSource::Catalog(model) => {
+            serde_json::json!({ "label": model.label, "install": true })
+        }
+        X0DecoderSource::BaseModelVae => {
+            serde_json::json!({ "label": "the base model's own VAE", "install": false })
+        }
+    }
+}
+
 /// A validated, **enabled** depth-anchoring request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DepthAnchoringSettings {
@@ -298,7 +318,7 @@ fn field_error(field: &str, message: String) -> TrainingPlanError {
 }
 
 fn unit_interval(advanced: &JsonObject, key: &str, default: f64) -> Result<f64, TrainingPlanError> {
-    match advanced.get(key) {
+    match technique_value(advanced, key) {
         None => Ok(default),
         Some(value) => value
             .as_f64()
@@ -313,7 +333,7 @@ fn unit_interval(advanced: &JsonObject, key: &str, default: f64) -> Result<f64, 
 pub fn depth_anchoring_settings(
     advanced: &JsonObject,
 ) -> Result<Option<DepthAnchoringSettings>, TrainingPlanError> {
-    let weight = match advanced.get(DEPTH_ANCHORING_WEIGHT_KEY) {
+    let weight = match technique_value(advanced, DEPTH_ANCHORING_WEIGHT_KEY) {
         None => 0.0,
         Some(value) => value
             .as_f64()
@@ -328,7 +348,7 @@ pub fn depth_anchoring_settings(
                 )
             })?,
     };
-    let model = match advanced.get(DEPTH_ANCHORING_MODEL_KEY) {
+    let model = match technique_value(advanced, DEPTH_ANCHORING_MODEL_KEY) {
         None => DEPTH_ANCHORING_MODELS[0],
         Some(value) => value
             .as_str()
@@ -355,7 +375,7 @@ pub fn depth_anchoring_settings(
             ),
         ));
     }
-    let every = match advanced.get(DEPTH_ANCHORING_EVERY_KEY) {
+    let every = match technique_value(advanced, DEPTH_ANCHORING_EVERY_KEY) {
         None => DEPTH_ANCHORING_EVERY_DEFAULT,
         Some(value) => value
             .as_u64()
