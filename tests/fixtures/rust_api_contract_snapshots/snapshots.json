@@ -4430,6 +4430,46 @@
             "variant": "bf16"
           },
           {
+            "coRequisite": true,
+            "estimatedSizeBytes": 7146182696,
+            "files": [
+              "transformer/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 7146182696,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+            "required": "soft",
+            "revision": "ec4d2cb062b548996b179d493fdd05340de702a1"
+          },
+          {
+            "coRequisite": true,
+            "estimatedSizeBytes": 11886274274,
+            "files": [
+              "q4/t5_encoder.safetensors",
+              "q4/vae.safetensors",
+              "q4/tokenizer.json"
+            ],
+            "footprint": {
+              "diskSizeBytes": 11886274274,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "required": "soft",
+            "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7"
+          },
+          {
             "default": true,
             "estimatedSizeBytes": 17338835457,
             "files": [

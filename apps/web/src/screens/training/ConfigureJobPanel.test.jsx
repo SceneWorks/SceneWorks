@@ -1318,9 +1318,12 @@ describe("ConfigureJobPanel face losses", () => {
 // the target supports the technique, even on a combination the engine refuses (a Mage full base
 // fine-tune, an LTX-2.5 workflow that generates no video). There the refusal names the loss's
 // weight key: the toggle is outlined, the chip row says why, Start is blocked — and unticking the
-// still-clickable toggle unblocks Start. Mutation: gate any toggle on its combination refusal
-// again (it disappears), or attach a refusal to no field (the toggle is not outlined) ⇒ red.
+// still-clickable toggle unblocks Start. E-LatentLPIPS decodes nothing, so only the full fine-tune
+// refuses it; on the no-video LTX-2.5 workflow it must stay accepted. Mutation: gate any toggle on
+// its combination refusal again (it disappears), attach a refusal to no field (the toggle is not
+// outlined), or drop the full fine-tune refusal for E-LatentLPIPS ⇒ red.
 describe("ConfigureJobPanel technique toggles on a refused combination", () => {
+  // Sections refused by every scenario below.
   const SECTIONS = [
     ["Depth anchoring", "supportsDepthAnchoring"],
     ["Body proportion loss", "supportsBodyProportionLoss"],
@@ -1330,7 +1333,9 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
     ["Face landmark loss", "supportsFaceLandmarkLoss"],
     ["VAE anchor loss", "supportsVaeAnchorLoss"],
   ];
-  const supports = Object.fromEntries(SECTIONS.map(([, limit]) => [limit, true]));
+  // E-LatentLPIPS: refused only by the full fine-tune (it decodes no video stream).
+  const LPIPS = ["E-LatentLPIPS loss", "supportsLatentLpipsLoss"];
+  const supports = Object.fromEntries([...SECTIONS, LPIPS].map(([, limit]) => [limit, true]));
   const MAGE = {
     id: "mage_flow_base_lora",
     name: "Mage-Flow Base LoRA",
@@ -1367,12 +1372,12 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
     );
   }
 
-  for (const [scenario, target, extra, reason] of [
-    ["a Mage full base fine-tune", MAGE, { networkType: "full" }, "not a full fine-tune"],
-    ["an LTX-2.5 no-video workflow", LTX25, { ltxWorkflow: "t2a_lora" }, "generates none"],
+  for (const [scenario, target, extra, reason, refused] of [
+    ["a Mage full base fine-tune", MAGE, { networkType: "full" }, "not a full fine-tune", [...SECTIONS, LPIPS]],
+    ["an LTX-2.5 no-video workflow", LTX25, { ltxWorkflow: "t2a_lora" }, "generates none", SECTIONS],
   ]) {
     it(`keeps every toggle clickable on ${scenario} and unblocks Start once it is unticked`, () => {
-      for (const [label] of SECTIONS) {
+      for (const [label] of refused) {
         mount(<Harness target={target} initial={{ ...VALID_DRAFT, ...extra }} />);
         expect(submitButton().disabled, `${label}: Start is open before the toggle is ticked`).toBe(false);
 
@@ -1388,5 +1393,15 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
         expect(submitButton().disabled, `${label}: Start unblocks once unticked`).toBe(false);
       }
     });
+
   }
+
+  it("accepts E-LatentLPIPS on an LTX-2.5 no-video workflow (it decodes no video stream)", () => {
+    mount(<Harness target={LTX25} initial={{ ...VALID_DRAFT, ltxWorkflow: "t2a_lora" }} />);
+    act(() => toggle(LPIPS[0]).click());
+    expect(toggle(LPIPS[0]).checked).toBe(true);
+    expect(toggle(LPIPS[0]).getAttribute("aria-invalid")).not.toBe("true");
+    expect(chips()).toEqual([]);
+    expect(submitButton().disabled).toBe(false);
+  });
 });

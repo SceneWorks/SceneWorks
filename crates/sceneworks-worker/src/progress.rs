@@ -289,6 +289,13 @@ pub(crate) async fn mark_job_canceled(
 /// un-interruptible op finishes, instead of appearing frozen until it flips terminal (the image
 /// upscale path, sc-8928). Its error is treated exactly like a heartbeat POST failure: bounded-join
 /// teardown, then propagate. Pass [`no_cancel_ack`] when there's nothing extra to post.
+///
+/// A cancel first observed after the task has already resolved did not cancel anything: the
+/// task's result is returned as if the cancel had arrived just after this function returned — the
+/// case every caller's own later cancel checks already handle (sc-22999). A cancel observed while
+/// the task is still running trips its flag; if the task then returns `Ok` anyway (it had passed
+/// its last cancel checkpoint) the finished work is discarded and the job posts `Canceled`. A task
+/// whose `Ok` is a committed side effect uses [`run_blocking_with_heartbeat_keeping_ok`] instead.
 #[cfg_attr(
     all(not(target_os = "macos"), not(feature = "backend-candle")),
     allow(dead_code)
@@ -303,6 +310,73 @@ pub(crate) async fn run_blocking_with_heartbeat<R, F, Fut>(
     task_label: &'static str,
     on_cancel_acknowledged: Option<F>,
     task: tokio::task::JoinHandle<WorkerResult<R>>,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
+{
+    heartbeat_until_resolved(
+        api,
+        settings,
+        job_id,
+        cancel,
+        cancel_message,
+        task_label,
+        on_cancel_acknowledged,
+        task,
+        false,
+    )
+    .await
+}
+
+/// [`run_blocking_with_heartbeat`] for a task whose `Ok` is a committed side effect: the YuE2
+/// engine publishes its run directory before it returns `Ok` (sc-22999). A cancel observed while
+/// the task runs still trips its flag, and a task that honors it still ends the job `Canceled`;
+/// but a task that returns `Ok` (it had passed its last cancel checkpoint and published) has its
+/// result returned instead of discarded — discarding it would end the job canceled with a
+/// published run no job owns.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_blocking_with_heartbeat_keeping_ok<R, F, Fut>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel: Option<gen_core::CancelFlag>,
+    cancel_message: &str,
+    task_label: &'static str,
+    on_cancel_acknowledged: Option<F>,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
+{
+    heartbeat_until_resolved(
+        api,
+        settings,
+        job_id,
+        cancel,
+        cancel_message,
+        task_label,
+        on_cancel_acknowledged,
+        task,
+        true,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn heartbeat_until_resolved<R, F, Fut>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel: Option<gen_core::CancelFlag>,
+    cancel_message: &str,
+    task_label: &'static str,
+    on_cancel_acknowledged: Option<F>,
+    task: tokio::task::JoinHandle<WorkerResult<R>>,
+    keep_ok_after_cancel: bool,
 ) -> WorkerResult<R>
 where
     R: Send + 'static,
@@ -339,7 +413,7 @@ where
                     return Err(WorkerError::Canceled(message));
                 }
                 let value = value?;
-                if canceled {
+                if canceled && !keep_ok_after_cancel {
                     mark_job_canceled(api, job_id, cancel_message).await?;
                     return Err(WorkerError::Canceled(cancel_message.to_owned()));
                 }
@@ -359,6 +433,12 @@ where
                     // poll (a local flag read) so a quit trips the blocking task's engine cancel at the
                     // next heartbeat tick instead of winding down only at the loop grace window.
                     if !canceled && (shutdown_requested() || cancel_requested_peek(api, job_id).await) {
+                        // sc-22999: the task can resolve while this arm awaits its heartbeat POST and
+                        // cancel peek. A cancel observed after that raced a finished task: leave the
+                        // flag and `canceled` alone so the next iteration returns its result.
+                        if guard.handle_mut().is_finished() {
+                            continue;
+                        }
                         flag.cancel();
                         canceled = true;
                         // Fire the one-shot cancel-acknowledged hook (e.g. post an intermediate

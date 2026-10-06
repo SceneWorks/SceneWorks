@@ -5,6 +5,7 @@ import {
   AudioClock,
   AudioDownloadButton,
   AudioPlayButton,
+  AudioTruncatedBadge,
   AudioWaveform,
   LoadedAudioElement,
   WAVEFORM_BARS,
@@ -53,7 +54,7 @@ export function SimpleTakeCard({ run, asset, index, loaded, playing, progress, o
         <span className="su-take__duration">{formatClock(duration)}</span>
       </div>
       <strong className="su-take__title">
-        Take {index + 1} · {audioTakeTitle(run?.job, asset)}
+        Take {index + 1} · {audioTakeTitle(run?.job, asset)} <AudioTruncatedBadge asset={asset} />
       </strong>
       <span className="su-take__meta">
         {run?.modeLabel} · {run?.modelName}
@@ -75,11 +76,14 @@ export function SimpleAudioDeck({ run, asset, takeIndex, player, breakpoint, onR
     <>
       <AudioDownloadButton
         asset={asset}
+        job={run?.job ?? null}
         className={phone ? "su-deck__wide-action" : "su-deck__action"}
         iconSize={15}
         label="Download"
       />
-      {onRunAgain && run?.job ? (
+      {/* A run that cannot be replayed (a YuE2 song, a voice clone, a removed model) offers no
+          Run again — the generic route would refuse it. */}
+      {onRunAgain && run?.job && run?.replayable ? (
         <button
           className={phone ? "su-deck__wide-action" : "su-deck__action"}
           onClick={() => onRunAgain(run.job)}
@@ -100,6 +104,7 @@ export function SimpleAudioDeck({ run, asset, takeIndex, player, breakpoint, onR
           {takeIndex >= 0 ? <span className="audio-mode-chip__extra">Take {takeIndex + 1}</span> : null}
         </span>
         <strong className="su-deck__title">{audioTakeTitle(run?.job, asset)}</strong>
+        <AudioTruncatedBadge asset={asset} />
         <button aria-label="Close player" className="su-deck__close" onClick={player.unload} type="button">
           <Icon.Close size={16} />
         </button>

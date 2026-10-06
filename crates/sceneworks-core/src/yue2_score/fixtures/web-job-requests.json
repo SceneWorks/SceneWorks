@@ -1,0 +1,393 @@
+{
+  "fieldKinds": {
+    "style": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover"
+    ],
+    "lyrics": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover"
+    ],
+    "seed": [
+      "create",
+      "plan",
+      "cover"
+    ],
+    "cfgScale": [
+      "create",
+      "plan",
+      "cover"
+    ],
+    "steps": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
+    "planning": [
+      "create",
+      "plan"
+    ],
+    "score": [
+      "create",
+      "plan"
+    ],
+    "scoreSampling": [
+      "create",
+      "plan"
+    ],
+    "semanticSampling": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
+    "decoder": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
+    "tier": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
+    "precision": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
+    "computePolicy": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
+    "arMode": [
+      "create",
+      "plan",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
+    "offloadPolicy": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
+    "memory.acoustic": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion"
+    ],
+    "memory.decode": [
+      "create",
+      "fromPlan",
+      "cover",
+      "renderVersion",
+      "decode"
+    ],
+    "planJobId": [
+      "fromPlan"
+    ],
+    "sourceJobId": [
+      "decode"
+    ],
+    "versionId": [
+      "renderVersion"
+    ],
+    "cover": [
+      "cover"
+    ],
+    "sourceAudioAssetId": [
+      "transcribe"
+    ],
+    "transcription": [
+      "transcribe"
+    ],
+    "count": [
+      "create",
+      "plan",
+      "cover"
+    ]
+  },
+  "bodies": [
+    {
+      "kind": "create",
+      "style": "dream pop, airy female vocal",
+      "lyrics": "[verse]\nhello",
+      "seed": 42,
+      "cfgScale": 1.5,
+      "steps": 32,
+      "planning": "melody",
+      "scoreSampling": {
+        "temperature": 0.9,
+        "topP": 0.95,
+        "topK": 40,
+        "repetitionPenalty": 1.1,
+        "penaltyWindow": 32,
+        "minTokens": 64,
+        "maxTokens": 2048
+      },
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "count": 3,
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "create",
+      "style": "dream pop, airy female vocal",
+      "lyrics": "[verse]\nhello",
+      "seed": 42,
+      "cfgScale": 1.5,
+      "steps": 32,
+      "planning": "full",
+      "score": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|",
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "count": 3,
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "plan",
+      "style": "dream pop, airy female vocal",
+      "lyrics": "[verse]\nhello",
+      "seed": 42,
+      "cfgScale": 1.5,
+      "planning": "melody",
+      "scoreSampling": {
+        "temperature": 0.9,
+        "topP": 0.95,
+        "topK": 40,
+        "repetitionPenalty": 1.1,
+        "penaltyWindow": 32,
+        "minTokens": 64,
+        "maxTokens": 2048
+      },
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "count": 3,
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "fromPlan",
+      "style": "folk",
+      "lyrics": "[verse]\nplanned",
+      "steps": 32,
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "planJobId": "job_plan",
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "cover",
+      "style": "dream pop, airy female vocal",
+      "lyrics": "[verse]\nhello",
+      "seed": 42,
+      "cfgScale": 1.5,
+      "steps": 32,
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "cover": {
+        "versionId": "ver_1",
+        "mode": "melody",
+        "keep": "vocal",
+        "translatedFrom": "[verse]\nhola"
+      },
+      "count": 3,
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "cover",
+      "style": "dream pop, airy female vocal",
+      "lyrics": "[verse]\nhello",
+      "seed": 42,
+      "cfgScale": 1.5,
+      "steps": 32,
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "cover": {
+        "score": "X:1\nT:\nM:4/4\nL:1/16\nQ:1/4=88\nV: Vocal clef=treble name=\"Vocal Melody\" snm=\"Vocal\"\nV: Ins clef=treble name=\"Ins Melody\" snm=\"Inst.\"\nK:C\n% verse\nV: Vocal\n\"C\"E2G2A2G2E2D2C4|\"G\"D2E2G2E2D2C2D4|\"Am\"E2G2A2c2B2A2G4|\"F\"F2E2D2E2G2E2C4|\nV: Ins\nZ4|\n% chorus\nV: Vocal\n\"C\"G2A2c2B2A2G2E4|\"F\"F2A2G2E2D2E2G4|\"G\"A2c2B2A2G2E2D4|\"C\"E2G2A2G2E2D2C4|\nV: Ins\nZ4|",
+        "mode": "full",
+        "translatedFrom": "[verse]\nhola"
+      },
+      "count": 3,
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "renderVersion",
+      "steps": 32,
+      "semanticSampling": {
+        "temperature": 1,
+        "topP": 0.9,
+        "topK": 50,
+        "repetitionPenalty": 1.2,
+        "penaltyWindow": 16,
+        "minTokens": 300,
+        "maxTokens": 8000
+      },
+      "decoder": "legacy",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "offloadPolicy": "sequential",
+      "versionId": "ver_1",
+      "memory": {
+        "stageResidency": true,
+        "chunkAttention": true,
+        "attentionChunkSize": 393216,
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "decode",
+      "decoder": "standard",
+      "tier": "q8",
+      "computePolicy": "fp32",
+      "sourceJobId": "job_src",
+      "memory": {
+        "tileVaeDecode": true,
+        "decodeTileEdge": 256
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "create",
+      "lyrics": "la la",
+      "planning": "full",
+      "computePolicy": "auto",
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "transcribe",
+      "sourceAudioAssetId": "asset_take",
+      "transcription": {
+        "maxSeconds": 90,
+        "overlapSeconds": 150,
+        "lookaheadSeconds": 50
+      },
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "transcribe",
+      "sourceAudioAssetId": "asset_take",
+      "requestedGpu": "auto"
+    },
+    {
+      "kind": "create",
+      "lyrics": "[verse]\nhello",
+      "planning": "full",
+      "tier": "bf16",
+      "computePolicy": "auto",
+      "arMode": "experimentalFp8",
+      "requestedGpu": "0"
+    }
+  ]
+}

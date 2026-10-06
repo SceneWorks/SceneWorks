@@ -22,6 +22,9 @@ use runtime_cuda as platform_runtime;
 #[cfg(target_os = "macos")]
 use runtime_macos as platform_runtime;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) use platform_runtime::audio_providers;
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -193,6 +196,64 @@ pub(crate) fn audio_descriptor(id: &str) -> Option<gen_core::ModelDescriptor> {
         .generators()
         .map(|registration| (registration.descriptor)())
         .find(|descriptor| descriptor.id == id)
+}
+
+/// `candle_audio_yue2`'s public API beyond the registry (sc-22999): run verification, the run layout
+/// constants. Present exactly when this build links the audio lane.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) use platform_runtime::audio_providers::candle_audio_yue2;
+
+/// Verify a published YuE2 run directory — every artifact's size and SHA-256, and, when
+/// `expected` is given, its recorded run identity — with the engine's own `verify_run`. Returns
+/// its `result.json`. Errors on a build with no audio lane (nothing there could read the run).
+pub(crate) fn verify_yue2_run(
+    dir: &std::path::Path,
+    expected: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        candle_audio_yue2::run::verify_run(dir, expected).map_err(|error| error.to_string())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = (dir, expected);
+        Err("no audio lane is linked in this runtime build; a YuE2 run cannot be verified".into())
+    }
+}
+
+/// Prepare an audio model snapshot through the audio lane's snapshot preparer (sc-22999: YuE2's
+/// locally derived `q8` / `q4` tiers). Errors on a build with no audio lane.
+pub(crate) fn prepare_audio_snapshot(
+    spec: &gen_core::core_llm::PrepareSpec,
+) -> Result<gen_core::core_llm::PrepareReport, String> {
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    {
+        catalog()
+            .audio_preparers()
+            .ok_or_else(|| "this runtime bundle declares no audio lane preparer".to_owned())?
+            .prepare_snapshot(spec)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )))]
+    {
+        let _ = spec;
+        Err("no audio lane is linked in this runtime build; the tier cannot be derived".into())
+    }
 }
 
 /// Load an audio [`AudioTransform`] by id from the runtime's candle audio registry — the
