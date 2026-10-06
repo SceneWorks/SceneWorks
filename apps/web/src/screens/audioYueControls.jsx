@@ -16,7 +16,11 @@ import {
 // editor's surfaces (.script-segment*) and the shared .preset-chip pill so both themes hold.
 
 /** Section-labelled lyrics editor: one row per song section, each a [label | text | remove] row. */
-export function YueLyricsEditor({ sections, onChange }) {
+export function YueLyricsEditor({
+  sections,
+  onChange,
+  placeholder = "Four or so lines fill one ~30 s section…",
+}) {
   const update = (index, patch) =>
     onChange(sections.map((section, i) => (i === index ? { ...section, ...patch } : section)));
   const remove = (index) => onChange(sections.length > 1 ? sections.filter((_, i) => i !== index) : sections);
@@ -47,7 +51,7 @@ export function YueLyricsEditor({ sections, onChange }) {
             >
               {labels.map((label) => (
                 <option key={label} value={label}>
-                  [{label}]
+                  {label ? `[${label}]` : "(no tag)"}
                 </option>
               ))}
             </select>
@@ -56,7 +60,7 @@ export function YueLyricsEditor({ sections, onChange }) {
                 aria-label={`Section ${index + 1} lyrics`}
                 className="script-segment-text"
                 onChange={(event) => update(index, { text: event.target.value })}
-                placeholder="Four or so lines fill one ~30 s section…"
+                placeholder={placeholder}
                 rows={3}
                 value={section.text ?? ""}
               />
@@ -89,9 +93,7 @@ export function YueLyricsEditor({ sections, onChange }) {
  */
 export function YueGenreTags({ tags, onChange }) {
   const [draft, setDraft] = useState("");
-  const [category, setCategory] = useState(YUE_TAG_CATEGORIES[0].id);
   const everySuggestion = useMemo(() => allYueTagSuggestions(), []);
-  const suggestions = useMemo(() => yueTagSuggestions(category), [category]);
   const chosen = new Set(tags.map((tag) => tag.toLowerCase()));
 
   const commitDraft = () => {
@@ -149,39 +151,51 @@ export function YueGenreTags({ tags, onChange }) {
           <option key={tag} value={tag} />
         ))}
       </datalist>
-      <details className="yue-genre-tags__suggested">
-        <summary>Suggested tags</summary>
-        <div className="preset-chips" role="group" aria-label="Tag category">
-          {YUE_TAG_CATEGORIES.map((item) => (
-            <button
-              aria-pressed={item.id === category}
-              className={item.id === category ? "preset-chip active" : "preset-chip"}
-              key={item.id}
-              onClick={() => setCategory(item.id)}
-              type="button"
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-        <div className="preset-chips yue-genre-tags__suggestions" data-testid="yue-tag-suggestions">
-          {suggestions.map((tag) => (
-            <button
-              aria-pressed={chosen.has(tag.toLowerCase())}
-              className={chosen.has(tag.toLowerCase()) ? "preset-chip active" : "preset-chip"}
-              key={tag}
-              onClick={() => toggle(tag)}
-              type="button"
-            >
-              {tag}
-            </button>
-          ))}
-        </div>
-        <span className="field-hint" role="note">
-          Suggestions: YuE&apos;s published top-200 tags (M-A-P / HKUST, Apache-2.0).
-        </span>
-      </details>
+      <YueSuggestedTags chosen={chosen} onToggle={toggle} />
     </div>
+  );
+}
+
+/**
+ * The default-COLLAPSED "Suggested tags" browser: upstream's five categories, each tag a toggle.
+ * `chosen` is the lower-cased set of selected tags. Shared by YuE's genre tags and YuE2's style.
+ */
+export function YueSuggestedTags({ chosen, onToggle }) {
+  const [category, setCategory] = useState(YUE_TAG_CATEGORIES[0].id);
+  const suggestions = useMemo(() => yueTagSuggestions(category), [category]);
+  return (
+    <details className="yue-genre-tags__suggested">
+      <summary>Suggested tags</summary>
+      <div className="preset-chips" role="group" aria-label="Tag category">
+        {YUE_TAG_CATEGORIES.map((item) => (
+          <button
+            aria-pressed={item.id === category}
+            className={item.id === category ? "preset-chip active" : "preset-chip"}
+            key={item.id}
+            onClick={() => setCategory(item.id)}
+            type="button"
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+      <div className="preset-chips yue-genre-tags__suggestions" data-testid="yue-tag-suggestions">
+        {suggestions.map((tag) => (
+          <button
+            aria-pressed={chosen.has(tag.toLowerCase())}
+            className={chosen.has(tag.toLowerCase()) ? "preset-chip active" : "preset-chip"}
+            key={tag}
+            onClick={() => onToggle(tag)}
+            type="button"
+          >
+            {tag}
+          </button>
+        ))}
+      </div>
+      <span className="field-hint" role="note">
+        Suggestions: YuE&apos;s published top-200 tags (M-A-P / HKUST, Apache-2.0).
+      </span>
+    </details>
   );
 }
 
