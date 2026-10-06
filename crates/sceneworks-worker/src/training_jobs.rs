@@ -1162,6 +1162,33 @@ fn training_request_from_plan(
     })
 }
 
+/// Map a trainer `validate` failure to a worker error class by WHAT failed, not by which call hit
+/// it. Every trainer loads its base lazily (MLX `LazyTrainer`, sc-2124; candle, sc-7817), so a
+/// base-load failure — a backend/device error, a missing tensor, an I/O error — can surface from
+/// `validate` (custom `lora_target_modules` validate on the loaded base) as well as from `train`,
+/// and it is an engine failure (`Engine`, as `train` maps it), never a rejected plan. Only the
+/// plan-refusal variants (`Unsupported`, `GeometryRefused`, and the floors' contextual `Msg`) are
+/// `InvalidPayload`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::Unsupported(_)
+        | gen_core::Error::GeometryRefused { .. }
+        | gen_core::Error::Msg(_) => {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        }
+        gen_core::Error::Backend(_)
+        | gen_core::Error::MissingTensor(_)
+        | gen_core::Error::Io(_) => {
+            WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+        }
+        gen_core::Error::Canceled => WorkerError::Engine(format!("training failed: {error}")),
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1339,8 +1366,8 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
 /// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
 /// the engine's typed [`gen_core::DepthAnchoringConfig`] and resolve the two auxiliary checkpoints
 /// it loads — the trainer family's x0 decoder (its cataloged tiny decoder, e.g. TAEF1 for Z-Image,
-/// TAESDXL for SDXL, TAEW2.1 for Wan/Krea/Anima — or, for a family with none, the base model the
-/// trainer already loads, whose own VAE decodes; sc-24830) and the selected Depth-Anything-V2 —
+/// TAESDXL for SDXL, TAEW2.1 for Wan/Krea/Anima — or, for a family with none, no directory: the
+/// trainer decodes through its own base-model VAE; sc-24830) and the selected Depth-Anything-V2 —
 /// from the installed model library. A missing checkpoint is refused, naming the catalog model to
 /// install; nothing is downloaded mid-job. Off (the default) leaves the config untouched, so a
 /// legacy plan maps exactly as before.
@@ -1370,12 +1397,7 @@ fn apply_depth_anchoring(
     let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
         WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
     })?;
-    config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
-        settings,
-        plan,
-        engine_id,
-        "Depth anchoring",
-    )?);
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, "Depth anchoring")?;
     config.depth_anchoring = gen_core::DepthAnchoringConfig {
         schedule: gen_core::AuxLossSchedule {
             weight: depth.weight as f32,
@@ -1424,8 +1446,7 @@ fn apply_body_losses(
                 plan.target.kernel, plan.target.base_model
             ))
         })?;
-    config.perceptual_decoder_dir =
-        Some(perceptual_decoder_dir(settings, plan, engine_id, PURPOSE)?);
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, PURPOSE)?;
     let schedule = |loss: BodyLoss| {
         body.schedule(loss)
             .map(|s| gen_core::AuxLossSchedule {
@@ -1468,18 +1489,19 @@ fn apply_body_losses(
 
 /// The x0 decoder directory every decoded-x0 perceptual loss (depth anchoring, the identity and
 /// face-landmark losses, the body losses) hands the trainer as `perceptual_decoder_dir` — ONE resolution for all of
-/// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `technique`
-/// labels the refusal.
+/// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `None` for
+/// a trainer that decodes through its own base-model VAE ([`X0DecoderSource::BaseModelVae`],
+/// Mage-Flow): its descriptor declares `techniques.builtin_x0_decoder`, so the engine floor does not
+/// ask for a directory and the trainer never reads one. `technique` labels the refusal.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn perceptual_decoder_dir(
     settings: &Settings,
-    plan: &TrainingPlan,
     engine_id: &str,
     technique: &str,
-) -> WorkerResult<PathBuf> {
+) -> WorkerResult<Option<PathBuf>> {
     use sceneworks_core::training::depth_anchoring::X0DecoderSource;
     let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
         WorkerError::InvalidPayload(format!(
@@ -1488,14 +1510,12 @@ fn perceptual_decoder_dir(
         ))
     })?;
     match decoder {
-        X0DecoderSource::Catalog(model) => installed_aux_model_dir(settings, model, technique),
-        // The trainer decodes through its own VAE, resolved from the base model it loads; the
-        // shared engine floor still wants the decoder location named, so name the base snapshot.
-        X0DecoderSource::BaseModelVae => resolve_app_managed_model_dir(
-            settings,
-            &plan.target.base_model_path,
-            "Training baseModelPath",
-        ),
+        X0DecoderSource::Catalog(model) => {
+            installed_aux_model_dir(settings, model, technique).map(Some)
+        }
+        // The trainer decodes through its own VAE (from the base model it loads), so there is no
+        // decoder directory to hand it.
+        X0DecoderSource::BaseModelVae => Ok(None),
     }
 }
 
@@ -1595,13 +1615,9 @@ fn apply_latent_perceptual(
     };
     if let Some(va) = &vae_anchor {
         // The same decoder resolution as every decoded-x0 loss (a shared field): a cataloged tiny
-        // decoder, or the trainer's own VAE from the base model it loads.
-        config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
-            settings,
-            plan,
-            engine_id,
-            "The VAE anchor loss",
-        )?);
+        // decoder, or none for a trainer that decodes through its own VAE.
+        config.perceptual_decoder_dir =
+            perceptual_decoder_dir(settings, engine_id, "The VAE anchor loss")?;
         let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             FLUX2_VAE_MODEL.repo,
@@ -1726,9 +1742,7 @@ fn apply_face_losses(
         t_max: s.max_t as f32,
         every_n: s.every,
     };
-    config.perceptual_decoder_dir = Some(perceptual_decoder_dir(
-        settings, plan, engine_id, technique,
-    )?);
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, technique)?;
     config.face_analysis_dir = Some(installed_aux_model_dir(
         settings,
         &FACE_STACK_SCRFD,
@@ -2703,9 +2717,13 @@ pub(crate) async fn run_training_execution(
             // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
             // against it (sc-5148), so f32 training must load at Fp32; the cast-based MLX trainers
             // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
-            // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
-            // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
-            // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
+            // them — the default bf16 path is byte-identical to before. Every trainer is lazy: the
+            // candle trainers build the frozen base inside `train()` at the request's `train_dtype`
+            // (sc-7817), and the MLX trainers (`mlx_gen::train::lazy::LazyTrainer`, sc-2124) keep
+            // this spec and load the base on first need — in `train()`, or in `validate()` when
+            // custom `lora_target_modules` need the loaded model. So `load_trainer` below reads no
+            // weights, and a base-load failure surfaces from `validate`/`train` instead (see
+            // `trainer_validate_error`).
             let load_precision = if request
                 .config
                 .train_dtype
@@ -2731,11 +2749,9 @@ pub(crate) async fn run_training_execution(
                     .map_err(|error| {
                         WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
                     })?;
-                trainer.validate(&request).map_err(|error| {
-                    WorkerError::InvalidPayload(format!(
-                        "{engine_id} trainer rejected the plan: {error}"
-                    ))
-                })?;
+                trainer
+                    .validate(&request)
+                    .map_err(|error| trainer_validate_error(engine_id, error))?;
                 // If the consumer loop has returned early (a POST failure / 409 dropped `rx`), the
                 // channel is closed. Detect that here and trip the engine cancel flag so the trainer
                 // bails at its next cooperative check instead of silently running to completion on a
@@ -3542,6 +3558,46 @@ mod tests {
     // per-MODULE lock is distinct from `video_jobs`' and `image_jobs`' in exactly the same way, and
     // those modules write `HF_HUB_CACHE` too (sc-12380).
     use crate::test_env::EnvVars;
+
+    /// A lazily loaded base can fail from `validate`: those load-class errors are `Engine`, while
+    /// the plan-refusal variants stay `InvalidPayload`. Mutation: map `Backend | MissingTensor |
+    /// Io` back to `InvalidPayload` (the pre-lazy mapping) ⇒ the first loop fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn trainer_validate_error_maps_load_failures_to_engine() {
+        let load_failures = [
+            gen_core::Error::backend(std::io::Error::other("metal device lost")),
+            gen_core::Error::MissingTensor("transformer.blocks.0.attn.q.weight".to_owned()),
+            gen_core::Error::Io(std::io::Error::other("no such file")),
+        ];
+        for error in load_failures {
+            let mapped = trainer_validate_error("z_image_turbo", error);
+            assert!(
+                matches!(&mapped, WorkerError::Engine(message) if message.contains("trainer load failed")),
+                "{mapped:?}"
+            );
+        }
+        let refusals = [
+            gen_core::Error::Unsupported("weight noise".to_owned()),
+            gen_core::Error::Msg("lora_rank must be at least 1".to_owned()),
+            gen_core::Error::GeometryRefused {
+                reason: "too large".to_owned(),
+                requested_width: 4096,
+                requested_height: 4096,
+                alternative: None,
+            },
+        ];
+        for error in refusals {
+            let mapped = trainer_validate_error("z_image_turbo", error);
+            assert!(
+                matches!(&mapped, WorkerError::InvalidPayload(message) if message.contains("rejected the plan")),
+                "{mapped:?}"
+            );
+        }
+    }
 
     /// sc-9989/sc-13870: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, on both
     /// native backends, and only from the
@@ -5108,8 +5164,8 @@ mod tests {
 
     /// sc-24830: each family's depth-anchoring plan hands the trainer ITS x0 decoder — the
     /// installed snapshot of the family's tiny decoder at the pinned revision (a decoder file in a
-    /// repo subdirectory included), or, for Mage-Flow (no tiny decoder), the base model snapshot
-    /// whose own VAE the trainer decodes through. A missing decoder is refused naming it.
+    /// repo subdirectory included), or, for Mage-Flow (no tiny decoder, decodes through its own
+    /// VAE), no directory at all. A missing decoder is refused naming it.
     /// Mutation: map every trainer to TAEF1 in `x0_decoder_for_trainer` ⇒ red.
     #[cfg(any(
         target_os = "macos",
@@ -5159,21 +5215,45 @@ mod tests {
                 "{kernel}"
             );
         }
-        // Mage-Flow decodes through its own VAE: the decoder location is the base snapshot.
-        std::fs::create_dir_all(dir.path().join("models").join("base-missing")).unwrap();
+        // Mage-Flow decodes through its own VAE (`builtin_x0_decoder`): no decoder directory.
         let mage = plan("mage_flow_lora", "mage_flow_base");
         let mut config = map_training_config(&mage.config);
         apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
-        assert_eq!(
-            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
-            canon(
-                &resolve_app_managed_model_dir(
-                    &settings,
-                    &mage.target.base_model_path,
-                    "Training baseModelPath"
-                )
-                .unwrap()
-            )
+        assert_eq!(config.perceptual_decoder_dir, None);
+    }
+
+    /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode
+    /// through their own VAE: `x0_decoder_for_trainer(id) == BaseModelVae` exactly when the
+    /// active platform's descriptor declares `techniques.builtin_x0_decoder`. Mutation: map
+    /// `mage_flow_base` to a cataloged decoder (or drop `BaseModelVae`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn base_model_vae_decoder_matches_builtin_x0_decoder_descriptors() {
+        use sceneworks_core::training::depth_anchoring::X0DecoderSource;
+        let descriptors: Vec<_> = crate::inference_runtime::media()
+            .trainers()
+            .map(|registration| (registration.descriptor)())
+            .collect();
+        assert!(
+            !descriptors.is_empty(),
+            "no trainers registered on this platform"
+        );
+        let mut builtin = 0;
+        for descriptor in descriptors {
+            let id = descriptor.id;
+            let base_vae = x0_decoder_for_trainer(id) == Some(X0DecoderSource::BaseModelVae);
+            assert_eq!(
+                base_vae, descriptor.techniques.builtin_x0_decoder,
+                "{id}: x0_decoder_for_trainer BaseModelVae vs descriptor builtin_x0_decoder"
+            );
+            builtin += usize::from(base_vae);
+        }
+        assert!(
+            builtin > 0,
+            "no trainer declares builtin_x0_decoder on this platform"
         );
     }
 

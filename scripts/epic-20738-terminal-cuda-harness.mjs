@@ -182,11 +182,12 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // (`node scripts/check-download-patterns.mjs --write`) when the catalog gained epic 2123's
 // training-time auxiliary models — TAEF1, the three Depth-Anything-V2 sizes, the sc-24830 tiny
 // decoders, the sc-24831 MediaPipe FaceMesh-v2 re-host, the sc-24833 FLUX.2 VAE / E-LatentLPIPS
-// weights, ViTPose+ base and the HybrIK / Sapiens re-hosts (131 repo@revision keys incl. the two
-// frozen importer authorities; sc-19383 left 117).
+// weights, ViTPose+ base and the HybrIK / Sapiens re-hosts; the epic's final main sync (sc-2124) adds
+// main's YuE1 re-hosts, YuE2's three upstream m-a-p repos and the Wan-VACE base/transformer entries
+// (135 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "ddcac908172ad790289057ff7f5af81fc7ec5980ff23d3620db7df19c2ff8db9";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "2173afb9ee5c26afe850e858142aee048a4e87a5302d6eace0a96fd23bb1f365";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

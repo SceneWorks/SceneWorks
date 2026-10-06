@@ -6219,8 +6219,10 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
 /// reaches the HTTP route as a `training_field_error` naming that section's weight key — out of
 /// range, a full fine-tune on Mage, and a no-video LTX-2.5 workflow — while the same weight on a
 /// supporting LoRA config passes validation (and then hits the missing-dataset tripwire), so each
-/// refusal below is the combination, not the value. Mutation: attach any section's refusal to a
-/// different field (or drop its `*_combination_refusal` check) ⇒ red.
+/// refusal below is the combination, not the value. E-LatentLPIPS, which Mage and LTX-2.5 do not
+/// advertise, gets its support refusal there and its full fine-tune refusal on Z-Image. Mutation:
+/// attach any section's refusal to a different field, drop its `*_combination_refusal` check, or
+/// skip the full fine-tune refusal for E-LatentLPIPS ⇒ red.
 #[tokio::test]
 async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -6267,8 +6269,9 @@ async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
             }),
         )
     };
-    // (weight key, Mage and LTX-2.5 advertise it). E-LatentLPIPS has no Mage / LTX weights, so its
-    // combination cases would be support refusals; it is covered by the out-of-range case.
+    // (weight key, Mage and LTX-2.5 advertise it). E-LatentLPIPS has no Mage / LTX weights: there
+    // every case is its support refusal, and the one combination it can hit — a full fine-tune — is
+    // asked on a target that does advertise it (below the loop).
     for (key, advertised_on_mage_and_ltx) in [
         ("depthAnchoringWeight", true),
         ("bodyProportionWeight", true),
@@ -6292,9 +6295,8 @@ async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
         assert_eq!(status, StatusCode::NOT_FOUND, "{key} in range: {error}");
         assert_eq!(error["detail"], "Training dataset not found", "{key}");
 
-        if !advertised_on_mage_and_ltx {
-            continue;
-        }
+        // Not advertised on Mage / LTX-2.5, the same cases are E-LatentLPIPS's support refusal
+        // (still a field error on its weight key).
         for (case, target, extra) in [
             (
                 "mage full",
@@ -6314,8 +6316,38 @@ async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
                 "{key} {case}: {error}"
             );
             assert_eq!(error["context"]["field"], key, "{key} {case}: {error}");
+            let detail = error["detail"].as_str().unwrap_or_default();
+            let expected = if advertised_on_mage_and_ltx {
+                if case == "mage full" {
+                    "not a full fine-tune"
+                } else {
+                    "generates none"
+                }
+            } else {
+                "does not support"
+            };
+            assert!(detail.contains(expected), "{key} {case}: {error}");
         }
     }
+    // E-LatentLPIPS's combination refusal (a full fine-tune) on a target that advertises it.
+    let (status, error) = submit(
+        &z_image,
+        json!({ "latentLpipsWeight": 0.01, "networkType": "full" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "latentLpipsWeight full: {error}"
+    );
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "latentLpipsWeight", "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("not a full fine-tune")),
+        "{error}"
+    );
 }
 
 /// Epic 2123 JSON-null policy: an explicit `null` on every technique key means absent — the job
