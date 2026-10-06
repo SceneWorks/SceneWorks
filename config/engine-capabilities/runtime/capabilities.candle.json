@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "9fc6852369736a3c85926bc024718b3344008c42",
+    "inferenceRevision": "438951950f47045becb2cd5164fe316d6238a585",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -2248,10 +2248,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "kolors",
@@ -2264,10 +2271,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": true
       },
       {
         "id": "krea_2_raw",
@@ -2280,10 +2294,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "krea_2_control",
@@ -2299,7 +2320,14 @@
         "supports_depth_anchoring": false,
         "supports_gradient_noise": false,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": false
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "lens",
@@ -2312,10 +2340,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "ltx_2_3",
@@ -2328,10 +2363,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "ltx_2_5_distilled",
@@ -2344,10 +2386,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": false,
-        "supports_subject_mask_loss": false
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "mage_flow_base",
@@ -2360,10 +2409,17 @@
         "supports_full_finetune": true,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "qwen_image_2_1",
@@ -2376,10 +2432,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 10,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "sd3_5_large",
@@ -2392,10 +2455,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": true
       },
       {
         "id": "sd3_5_medium",
@@ -2408,10 +2478,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": true
       },
       {
         "id": "sdxl",
@@ -2424,10 +2501,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": true
       },
       {
         "id": "wan2_2_t2v_14b",
@@ -2440,10 +2524,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "wan2_2_i2v_14b",
@@ -2456,10 +2547,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "wan2_2_ti2v_5b",
@@ -2472,10 +2570,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false
       },
       {
         "id": "z_image_turbo",
@@ -2488,10 +2593,17 @@
         "supports_full_finetune": false,
         "max_reference_images": 0,
         "supports_weight_noise": true,
-        "supports_depth_anchoring": false,
+        "supports_depth_anchoring": true,
         "supports_gradient_noise": true,
         "supports_resolution_buckets": true,
-        "supports_subject_mask_loss": true
+        "supports_subject_mask_loss": true,
+        "supports_identity_loss": true,
+        "supports_face_landmark_loss": true,
+        "supports_body_proportion_loss": true,
+        "supports_body_shape_loss": true,
+        "supports_normal_loss": true,
+        "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": true
       }
     ],
     "captioner_ids": [
