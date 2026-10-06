@@ -77,6 +77,19 @@ describe("DownloadButton — the without-workflow copy (sc-15953)", () => {
     expect(buttons(container)).toHaveLength(2);
   });
 
+  // sc-22988 E2: the Simple download of a YuE2 take keeps the licence mark, never its style text.
+  it("downloads a YuE2 take under its licence-marked name", async () => {
+    await render({
+      id: "asset_song",
+      displayName: "dream pop, airy female vocal",
+      relativePath: "assets/audios/gs/asset_song.wav",
+      file: { path: "assets/audios/gs/asset_song.wav", mimeType: "audio/wav" },
+      extra: { yue2: { kind: "create" }, usagePolicy: { nonCommercial: true } },
+    });
+    // Mutation that reds this: `download={asset.displayName ?? ""}` on the anchor.
+    expect(container.querySelector("a").getAttribute("download")).toBe("yue2-song-asset_song-noncommercial.wav");
+  });
+
   it("names the control exactly as every other surface does", async () => {
     await render(pngAsset());
     const label = buttons(container)[1].getAttribute("aria-label");

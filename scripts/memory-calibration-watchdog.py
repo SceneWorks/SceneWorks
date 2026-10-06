@@ -39,6 +39,7 @@ import os
 import secrets
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -553,6 +554,7 @@ class SyntheticHostPressureSampler:
 class OwnedGroup:
     # Bypass-constructed instances (tests build the group with `__new__`) read the class default.
     root = None
+    completion_acknowledged = False
 
     def __init__(
             self, command: list[str], spawn_delay: float = 0.0,
@@ -651,7 +653,8 @@ class OwnedGroup:
         The root is the guarded command itself. Every other group member is a descendant it may
         spawn and reap at will, so only the root's disappearance from a sample it was enumerated
         for is telemetry loss. Resolved once and then held by exact identity; before the sentinel
-        has spawned it, and after it exits, the required set is empty.
+        has spawned it, and after it exits, the required set is empty. Completion-only callers
+        may release this requirement after the final successful sample has been acknowledged.
         """
         if self.root is None:
             anchors = {item.pid for item in self.anchors}
@@ -660,7 +663,8 @@ class OwnedGroup:
                 if identity.pid not in anchors and parents.get(identity.pid) == self.leader.pid:
                     self.root = identity
                     break
-        return [self.root.pid] if self.root is not None and self.root in live else []
+        return ([self.root.pid] if not self.completion_acknowledged
+                and self.root is not None and self.root in live else [])
 
     def terminate(self, grace: float) -> None:
         if hasattr(self, "control") and not self.released:
@@ -820,7 +824,7 @@ def guard(args: argparse.Namespace) -> int:
     attestation_stream = None
     attestation_directory = None
     attestation_path = None
-    if args.require_child_attestation:
+    if args.require_child_attestation or args.require_completion_handshake:
         try:
             # Darwin's sockaddr_un path is capped at 104 bytes. The caller may
             # put TMPDIR on a deliberately long external-volume path for large
@@ -886,6 +890,7 @@ def guard(args: argparse.Namespace) -> int:
     attestation_nonce = None
     attestation_buffer = bytearray()
     child_reported_done = False
+    completion_evidence_digest = None
     completion_released = False
     telemetry_faults = 0
     # Monotonic time of the FIRST failure of the current unrecovered fault run: the wall-clock
@@ -905,7 +910,7 @@ def guard(args: argparse.Namespace) -> int:
     provider_phase_sequence = 0
 
     def process_attestation_lines() -> str | None:
-        nonlocal attestation_buffer, child_reported_done
+        nonlocal attestation_buffer, child_reported_done, completion_evidence_digest
         nonlocal provider_phase, provider_phase_sequence
         while b"\n" in attestation_buffer:
             line, remainder = bytes(attestation_buffer).split(b"\n", 1)
@@ -957,6 +962,13 @@ def guard(args: argparse.Namespace) -> int:
                     if attestation_stream is not None:
                         attestation_stream.setblocking(False)
                 continue
+            if args.require_completion_handshake:
+                if (len(fields) != 3 or fields[:2] != ["DONE", str(attestation_nonce)]
+                        or len(fields[2]) != 64
+                        or any(c not in "0123456789abcdef" for c in fields[2])):
+                    return "child_returned_invalid_completion_attestation"
+                completion_evidence_digest = fields[2]
+                fields = fields[:2]
             if fields == ["DONE", str(attestation_nonce)]:
                 if child_reported_done:
                     return "child_returned_duplicate_completion_attestation"
@@ -966,6 +978,9 @@ def guard(args: argparse.Namespace) -> int:
                         f"observed_{provider_phase_sequence}"
                     )
                 child_reported_done = True
+                if args.require_completion_handshake:
+                    events.emit({"event": "child_completion_requested",
+                                 "evidenceSha256": completion_evidence_digest})
                 continue
             return "child_returned_invalid_completion_attestation"
         if len(attestation_buffer) > 4096:
@@ -1161,7 +1176,9 @@ def guard(args: argparse.Namespace) -> int:
             nonce = secrets.token_hex(32)
             attestation_nonce = nonce
             attestation = {
-                "protocol": "sceneworks-memory-watchdog-v1",
+                "protocol": ("sceneworks-memory-watchdog-completion-v1"
+                             if args.require_completion_handshake
+                             else "sceneworks-memory-watchdog-v1"),
                 "nonce": nonce,
                 "maxFootprintBytes": args.max_footprint_bytes,
                 "maxRuntimeSeconds": args.max_runtime_seconds,
@@ -1256,6 +1273,17 @@ def guard(args: argparse.Namespace) -> int:
                 while attestation_stream is None and hard_stop is None:
                     try:
                         attestation_stream, _ = attestation_listener.accept()
+                        if args.require_completion_handshake:
+                            # Authenticate the socket owner, not a caller-supplied PID. The
+                            # rendezvous is private; only the exact guarded root may complete it.
+                            group.root_pids(group.refresh())
+                            if sys.platform == "darwin":
+                                peer_pid = attestation_stream.getsockopt(0, 2)  # LOCAL_PEERPID
+                            else:
+                                peer_pid = struct.unpack("3i", attestation_stream.getsockopt(
+                                    socket.SOL_SOCKET, socket.SO_PEERCRED, 12))[0]
+                            if group.root is None or peer_pid != group.root.pid:
+                                raise RuntimeError("completion channel is not owned by guarded root")
                         break
                     except BlockingIOError:
                         pass
@@ -1348,11 +1376,19 @@ def guard(args: argparse.Namespace) -> int:
                 break
             # An empty view can only come from a census that SUCCEEDED: a tolerated census failure
             # returns the previous view, which is never empty while the group exists.
+            if (args.require_completion_handshake and not completion_released
+                    and group.root is not None and group.root not in live):
+                hard_stop = "child_exited_without_acknowledged_completion"
+                break
             if not live:
-                if attestation_stream is not None and not child_reported_done:
+                if (attestation_stream is not None and not child_reported_done
+                        or args.require_completion_handshake and not completion_released):
                     hard_stop = "child_exited_without_completion_attestation"
                     break
-                return status if status is not None else 0
+                if status is None:
+                    pause_runtime()
+                    continue
+                return status
             if status is not None:
                 # The census preceded poll; normal sentinel cleanup may have completed between
                 # those observations. Refresh before treating a positive status as a failure — and
@@ -1365,7 +1401,8 @@ def guard(args: argparse.Namespace) -> int:
                     pause_runtime()
                     continue
                 if not view:
-                    if attestation_stream is not None and not child_reported_done:
+                    if (attestation_stream is not None and not child_reported_done
+                            or args.require_completion_handshake and not completion_released):
                         hard_stop = "child_exited_without_completion_attestation"
                         break
                     return status
@@ -1392,7 +1429,8 @@ def guard(args: argparse.Namespace) -> int:
                 if args.require_provider_phases and provider_phase is None:
                     CLOCK.sleep(min(args.sample_interval, bounded_telemetry_timeout()))
                     continue
-            if attestation_stream is not None and child_reported_done and not completion_released:
+            if (attestation_stream is not None and child_reported_done and not completion_released
+                    and not args.require_completion_handshake):
                 attestation_stream.setblocking(True)
                 attestation_stream.settimeout(args.telemetry_timeout)
                 attestation_stream.sendall(f"BYE {attestation_nonce}\n".encode())
@@ -1401,6 +1439,41 @@ def guard(args: argparse.Namespace) -> int:
                     "event": "child_completed", "providerPhase": provider_phase,
                 })
                 attestation_stream.setblocking(False)
+            if args.require_completion_handshake and child_reported_done and not completion_released:
+                # DONE is a request, never success. The root blocks until this fresh group +
+                # host observation is durably committed and all ceilings pass. Any final-probe
+                # failure is fail-closed, even if an ordinary tick would tolerate it.
+                try:
+                    if group.root is None or not identity_is_live(group.root):
+                        raise RootTelemetryLost("completion root exited before final sample")
+                    _, footprint, pressure, _ = observe_group(
+                        group, sampler, host_sampler, bounded_telemetry_timeout())
+                    if not identity_is_live(group.root):
+                        raise RootTelemetryLost("completion root exited during final sample")
+                    if pressure is None:
+                        raise RuntimeError("completion requires host pressure")
+                except MonitorSignal:
+                    raise
+                except Exception as error:
+                    hard_stop = f"completion_telemetry_lost:{type(error).__name__}:{error}"
+                    break
+                record_good_sample(footprint, pressure)
+                hard_stop = check_observation(footprint, pressure)
+                if runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline:
+                    hard_stop = f"runtime_at_or_above_{args.max_runtime_seconds}s"
+                emit_sample(footprint, pressure, "completion_before_release")
+                if hard_stop is not None:
+                    break
+                events.emit({"event": "child_completion_measured",
+                             "rootIdentity": identity_json(group.root),
+                             "evidenceSha256": completion_evidence_digest})
+                attestation_stream.settimeout(args.telemetry_timeout)
+                attestation_stream.sendall(f"BYE {attestation_nonce}\n".encode())
+                completion_released = True
+                group.completion_acknowledged = True
+                events.emit({"event": "child_completed", "providerPhase": provider_phase})
+                attestation_stream.setblocking(False)
+                continue
             try:
                 _, footprint, pressure, _ = observe_group(
                     group, sampler, host_sampler, bounded_telemetry_timeout(),
@@ -1408,6 +1481,11 @@ def guard(args: argparse.Namespace) -> int:
             except MonitorSignal:
                 raise
             except Exception as error:  # fail closed on timeout, parse failure, or source loss
+                # A recheck cannot excuse an unacknowledged missing root: an erroneous
+                # omission while alive followed by exit would otherwise become success.
+                if isinstance(error, RootTelemetryLost):
+                    hard_stop = f"telemetry_lost:{type(error).__name__}:{error}"
+                    break
                 failed_at_or_after_deadline = (
                     runtime_deadline is not None and CLOCK.monotonic() >= runtime_deadline
                 )
@@ -1416,6 +1494,9 @@ def guard(args: argparse.Namespace) -> int:
                 # which is what a bare `refresh()` raising inside this handler used to produce.
                 view, view_known, census_lost = observe_census("runtime")
                 if view_known and not view and group.child.poll() is not None:
+                    if args.require_completion_handshake and not completion_released:
+                        hard_stop = "child_exited_without_acknowledged_completion"
+                        break
                     return group.child.returncode
                 if failed_at_or_after_deadline:
                     hard_stop = (
@@ -1466,7 +1547,7 @@ def guard(args: argparse.Namespace) -> int:
                     hard_stop = process_attestation_lines()
                 if hard_stop is not None:
                     break
-                if child_reported_done and not completion_released:
+                if child_reported_done and not completion_released and not args.require_completion_handshake:
                     attestation_stream.setblocking(True)
                     attestation_stream.settimeout(args.telemetry_timeout)
                     attestation_stream.sendall(f"BYE {attestation_nonce}\n".encode())
@@ -1543,6 +1624,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--host-pressure-file", type=Path, help=argparse.SUPPRESS)
     parser.add_argument("--allow-synthetic-telemetry", action="store_true")
     parser.add_argument("--require-child-attestation", action="store_true")
+    parser.add_argument("--require-completion-handshake", action="store_true",
+                        help="require a nonce-bound final sample before releasing the root")
     parser.add_argument("--require-provider-phases", action="store_true")
     parser.add_argument("--provider-phase-profile", choices=tuple(PROVIDER_PHASE_PROFILES))
     parser.add_argument("--synthetic-spawn-delay", type=float, default=0.0, help=argparse.SUPPRESS)
@@ -1574,6 +1657,11 @@ def parse_args() -> argparse.Namespace:
             parser.error("host pressure byte values must be positive")
     if args.synthetic_spawn_delay < 0:
         parser.error("--synthetic-spawn-delay must be non-negative")
+    if args.require_completion_handshake and args.require_child_attestation:
+        parser.error("completion handshake and preallocation child attestation are separate modes")
+    if args.require_completion_handshake and (
+            args.max_runtime_seconds is None or not all(value is not None for value in pressure_values)):
+        parser.error("completion handshake requires runtime and complete host-pressure bounds")
     if args.require_child_attestation and (
             args.max_runtime_seconds is None or not all(value is not None for value in pressure_values)):
         parser.error("child attestation requires runtime and complete host-pressure bounds")

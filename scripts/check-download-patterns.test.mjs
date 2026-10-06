@@ -181,6 +181,7 @@ test("the committed evidence grades the real catalog clean", async () => {
 // eight SceneWorks re-host keys and retires the integer: the assertion is now the set shape.
 // SC-21306 adds two exact historical rows for the audited artifact importer; they are not manifest
 // claims and are guarded separately against absence, identity drift, and file-census drift.
+// SC-22998 (YuE2, epic 22988) adds three upstream m-a-p keys under the same set-shape assertion.
 test("every current and both frozen legacy download keys use immutable commit SHAs", async () => {
   const { claims, evidence } = await realInputs();
   const immutableRevision = /^[0-9a-f]{40}$/u;
@@ -200,6 +201,10 @@ test("every current and both frozen legacy download keys use immutable commit SH
     keys.size + FROZEN_LEGACY_EVIDENCE_AUTHORITIES.length,
     "the evidence census must be the current claims plus the two frozen importer authorities",
   );
+  const recorded = new Set(evidence.repos.map(({ key }) => key));
+  for (const key of keys) {
+    assert.ok(recorded.has(key), `${key} is a current claim with no recorded listing`);
+  }
   for (const claim of claims) {
     assert.match(
       claim.revision ?? "",

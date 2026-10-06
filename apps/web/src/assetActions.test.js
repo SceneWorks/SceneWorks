@@ -53,6 +53,24 @@ describe("suggestedFilename (sc-8727)", () => {
     expect(suggestedFilename(IMAGE_ASSET)).toBe("Mira.png");
   });
 
+  // sc-22988 E2: the library "Save As…" of a YuE2 take keeps the licence mark, never its style text.
+  it("suggests the licence-marked name for a YuE2 take", async () => {
+    const { suggestedFilename } = await importBrowser();
+    const take = {
+      id: "asset_song",
+      displayName: "dream pop, airy female vocal",
+      file: { path: "assets/audios/gs/asset_song.wav", mimeType: "audio/wav" },
+      recipe: { model: "yue2" },
+      extra: { yue2: { kind: "create" }, usagePolicy: { nonCommercial: true } },
+    };
+    // Mutation that reds this: dropping the `yue2AssetFilename` branch of `suggestedFilename`.
+    expect(suggestedFilename(take)).toBe("yue2-song-asset_song-noncommercial.wav");
+    // A recipe alone identifies the take too.
+    expect(suggestedFilename({ ...take, extra: { usagePolicy: { nonCommercial: true } } })).toBe(
+      "yue2-song-asset_song-noncommercial.wav",
+    );
+  });
+
   it("appends the source-path extension for a video asset", async () => {
     const { suggestedFilename } = await importBrowser();
     expect(suggestedFilename(VIDEO_ASSET)).toBe("Clip.mp4");

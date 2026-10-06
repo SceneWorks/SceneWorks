@@ -13,6 +13,7 @@
 // Content-agnostic: works identically for image and video assets.
 import { isDesktop, tauriInvoke } from "./runtime.js";
 import { assetUrl } from "./components/assetMedia.jsx";
+import { yue2AssetFilename } from "./yue2Policy.js";
 
 // Map the common asset MIME types to a file extension, for when the source path
 // carries no extension we can reuse. Kept small and explicit rather than pulling a
@@ -63,6 +64,11 @@ function assetExtension(asset) {
 // format). Falls back to the asset id, then a generic "asset", so we never suggest an
 // empty name.
 export function suggestedFilename(asset) {
+  // A YuE2 take saves under its licence-marked name, never its style text (E2).
+  const yue2 = yue2AssetFilename(asset);
+  if (yue2) {
+    return yue2;
+  }
   const base = String(asset?.displayName ?? asset?.id ?? "asset").trim() || "asset";
   const ext = assetExtension(asset);
   if (!ext) {
