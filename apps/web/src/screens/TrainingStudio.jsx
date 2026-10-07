@@ -52,6 +52,7 @@ import {
   qualityTiersForPreset,
   rangeOptions,
   samplePromptsFromTrigger,
+  trainingAdapterModelId,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
 } from "../training/trainingConfig.js";
@@ -779,16 +780,31 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
   }, [models, selectedTarget?.outputKind, controlType]);
+  // The de-distill training adapter the selected version needs (sc-25213). The worker resolves it
+  // from the installed library only, so a missing one gates Start and the panel offers the download.
+  const trainingAdapterId = showTrainingAdapter ? trainingAdapterModelId(configDraft) : null;
+  const missingTrainingAdapterModels = useMemo(
+    () => (trainingAdapterId ? missingRequiredModels(models, [trainingAdapterId]) : []),
+    [models, trainingAdapterId],
+  );
   const configContext = useMemo(
     () => ({
       activeDataset,
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      missingTrainingAdapterModels,
       // Subject-masked loss (sc-24828) needs a mask on every image; incomplete coverage gates Start.
       subjectMaskReport: subjectMasks,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, subjectMasks],
+    [
+      activeDataset,
+      selectedTarget,
+      readinessBlocksTraining,
+      missingControlModels,
+      missingTrainingAdapterModels,
+      subjectMasks,
+    ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -2210,6 +2226,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
+                  missingTrainingAdapterModels={missingTrainingAdapterModels}
                   controlModelDownloadJobs={trainingDownloadJobs}
                   onDownloadModel={createModelDownloadJob}
                   onOpenModels={() => setActiveView("Models")}

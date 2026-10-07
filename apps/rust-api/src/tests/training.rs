@@ -2775,6 +2775,172 @@ async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_erro
     }
 }
 
+/// sc-25213 (e): the de-distill training adapter round-trips through the API boundary. The
+/// targets endpoint advertises `supportsTrainingAdapter` on Z-Image-Turbo; the presets' `v2-default`
+/// and both picker versions pass validation (then hit the missing-dataset tripwire); an unknown
+/// version or repo is a field error naming the key, before any dataset lookup.
+#[tokio::test]
+async fn create_training_job_validates_the_training_adapter_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training adapter boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    assert_eq!(
+        target["limits"]["supportsTrainingAdapter"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises training-adapter support"
+    );
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |repo: &str, version: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["trainingAdapterRepo"] = json!(repo);
+        config["advanced"]["trainingAdapterVersion"] = json!(version);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Training adapter",
+                "dryRun": true
+            }),
+        )
+    };
+    let repo = "ostris/zimage_turbo_training_adapter";
+    for version in ["v1", "v2", "v2-default"] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{version}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{version}");
+    }
+    for (repo, version, field) in [
+        (repo, "v9", "trainingAdapterVersion"),
+        ("someone/else", "v2", "trainingAdapterRepo"),
+    ] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repo}/{version}");
+        assert_eq!(error["code"], "training_field_error", "{repo}/{version}");
+        assert_eq!(error["context"]["field"], field, "{repo}/{version}");
+    }
+}
+
+/// sc-25213 (finding 5): a REAL run whose selected de-distill adapter is not installed is refused at
+/// submit with a field error on `trainingAdapterVersion` (the worker's own check stays as defence in
+/// depth); installing exactly that version's file clears it, and installing only the OTHER version
+/// does not. Mutation: drop the API install check ⇒ the first submit queues ⇒ red.
+#[tokio::test]
+async fn real_run_refuses_an_uninstalled_training_adapter_with_a_field_error() {
+    use sceneworks_core::training::training_adapter::{
+        ZIMAGE_TURBO_TRAINING_ADAPTER_V1 as V1, ZIMAGE_TURBO_TRAINING_ADAPTER_V2 as V2,
+    };
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    seed_installed_base_model(&settings.data_dir);
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Adapter install gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Aurora set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let mut config = target["defaults"].clone();
+    config["advanced"]["trainingAdapterRepo"] = json!("ostris/zimage_turbo_training_adapter");
+    config["advanced"]["trainingAdapterVersion"] = json!("v2-default");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = || {
+        request(
+            app.clone(),
+            "POST",
+            &jobs_path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": false
+            }),
+        )
+    };
+    let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
+    let install = |model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel| {
+        let snapshot = hub
+            .join(format!("models--{}", model.repo.replace('/', "--")))
+            .join("snapshots")
+            .join(model.revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join(model.file), b"weights").unwrap();
+    };
+
+    let refused = |status: StatusCode, error: &Value| {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(error["code"], "training_field_error", "{error}");
+        assert_eq!(
+            error["context"]["field"], "trainingAdapterVersion",
+            "{error}"
+        );
+        assert!(error["detail"].as_str().unwrap().contains(V2.id), "{error}");
+    };
+    let (status, error) = submit().await;
+    refused(status, &error);
+    // Only v1 installed: the plan's v2 is still missing.
+    install(&V1);
+    let (status, error) = submit().await;
+    refused(status, &error);
+    install(&V2);
+    let (status, job) = submit().await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["plan"]["config"]["advanced"]["trainingAdapterVersion"],
+        "v2-default"
+    );
+}
+
 /// sc-24827 (epic 2123 E6): `advanced.gradientNoiseEta` / `gradientNoiseGamma` are validated at
 /// the API boundary with field-level errors — negative, above the shared limit, non-numeric, or
 /// (eta) combined with a full fine-tune — before any dataset lookup. In-range values pass

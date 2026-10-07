@@ -97,7 +97,8 @@
         "x0Decoder": {
           "install": true,
           "label": "TAEF1 tiny decoder"
-        }
+        },
+        "supportsTrainingAdapter": true
       },
       "ui": {
         "description": "Train an image LoRA for the Z-Image-Turbo base model.",

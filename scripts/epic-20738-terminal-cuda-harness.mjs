@@ -187,7 +187,7 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // (135 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "2173afb9ee5c26afe850e858142aee048a4e87a5302d6eace0a96fd23bb1f365";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "d5234f090c9612d8f423bcc01f5b4af7a4375f7b52a5399ee984ab7a67f3dc79";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

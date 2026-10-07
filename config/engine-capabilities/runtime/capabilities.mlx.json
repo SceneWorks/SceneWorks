@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "ab3564bfbd5a1b77308655a84c2205f641a14d25",
+    "inferenceRevision": "d5c30733a0c21dbc8f5f3f748e66a96b2bf909bc",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -2833,7 +2833,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "anima_aesthetic",
@@ -2856,7 +2857,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "anima_turbo",
@@ -2879,7 +2881,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "kolors",
@@ -2902,7 +2905,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": true
+        "supports_latent_lpips_loss": true,
+        "supports_training_adapter": false
       },
       {
         "id": "krea_2_raw",
@@ -2925,7 +2929,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "lens",
@@ -2948,7 +2953,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "ltx_2_3",
@@ -2971,7 +2977,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "ltx_2_5",
@@ -2994,7 +3001,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "mage_flow_base",
@@ -3017,7 +3025,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "qwen_image_2_1",
@@ -3040,7 +3049,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "sd3_5_large",
@@ -3063,7 +3073,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": true
+        "supports_latent_lpips_loss": true,
+        "supports_training_adapter": false
       },
       {
         "id": "sd3_5_medium",
@@ -3086,7 +3097,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": true
+        "supports_latent_lpips_loss": true,
+        "supports_training_adapter": false
       },
       {
         "id": "sdxl",
@@ -3109,7 +3121,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": true
+        "supports_latent_lpips_loss": true,
+        "supports_training_adapter": false
       },
       {
         "id": "wan2_2_t2v_14b",
@@ -3132,7 +3145,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "wan2_2_i2v_14b",
@@ -3155,7 +3169,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "wan2_2_ti2v_5b",
@@ -3178,7 +3193,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": false
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
       },
       {
         "id": "z_image_turbo",
@@ -3201,7 +3217,8 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
-        "supports_latent_lpips_loss": true
+        "supports_latent_lpips_loss": true,
+        "supports_training_adapter": true
       }
     ],
     "captioner_ids": [

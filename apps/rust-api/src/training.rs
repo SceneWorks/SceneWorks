@@ -1990,6 +1990,25 @@ pub(crate) async fn create_training_job(
         if let Some(message) = training_disk_space_error(&output_dir) {
             return Err(ApiError::bad_request(message));
         }
+        // sc-25213: the de-distill training adapter the plan selects resolves from the installed
+        // library only (the worker refuses a missing one too) — refuse it here as a field error on
+        // the version the user picked, instead of queueing a job that fails at the worker.
+        if let Some(adapter) = sceneworks_core::training::training_adapter::training_adapter_model(
+            &payload.config.advanced,
+        )
+        .map_err(training_plan_error_to_api_error)?
+        {
+            if sceneworks_worker::installed_aux_training_model_dir(&data_dir, adapter).is_none() {
+                return Err(training_field_error(
+                    sceneworks_core::training::training_adapter::TRAINING_ADAPTER_VERSION_KEY,
+                    format!(
+                        "The de-distill training adapter '{}' ({}) is not installed. Install it \
+                         from the Models screen.",
+                        adapter.label, adapter.id
+                    ),
+                ));
+            }
+        }
         // A FULL base fine-tune (sc-14056) trains every DiT weight, so it holds the full-precision
         // master weights + optimizer state + (without gradient checkpointing, sc-14989) the whole
         // retained backward graph — an envelope far larger than a frozen-base LoRA run, and one that at
