@@ -264,7 +264,9 @@ const PROMPTS = [
   ["evening_dress", "photo of {t} in a black evening dress on a marble staircase, three-quarter view"],
   ["beach", "photo of {t} laughing on a beach at sunset, wearing a denim shirt, wind in her hair"],
   ["kitchen", "photo of {t} cooking in a kitchen, wearing an apron over a striped t-shirt, seen from above"],
-  ["yoga", "photo of {t} doing a yoga pose in a sunlit studio, wearing athletic clothes, full body"],
+  // Full body with the face toward the camera (replaced a yoga pose that hid the face, so it
+  // could not show likeness).
+  ["party", "photo of {t} dancing at a rooftop party, wearing a sequin dress, full body, facing the camera"],
 ];
 
 const BASE_AUX = ["sam3_person_segment", "instantid_face_stack"];
