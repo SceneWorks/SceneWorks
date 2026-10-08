@@ -253,6 +253,21 @@ function techniqueRows(modelKey, opts) {
       optionalLimits: { supportsVaeAnchorLoss: ["vaeAnchorWeight"], supportsLatentLpipsLoss: ["latentLpipsWeight"] },
       aux: [m.x0Decoder, "flux2_vae", m.latentLpips],
     },
+    {
+      // The two batch-1 winners together: do their gains stack before both become defaults?
+      id: "mask_identity",
+      label: "Subject mask (bg 0.1) + identity (0.05) + face landmark (0.05)",
+      advanced: {
+        subjectMaskLoss: true,
+        subjectMaskBackgroundWeight: 0.1,
+        subjectMaskSubjectWeight: 1.0,
+        identityLossWeight: 0.05,
+        faceLandmarkLossWeight: 0.05,
+      },
+      limits: ["supportsSubjectMaskLoss", "supportsIdentityLoss", "supportsFaceLandmarkLoss"],
+      aux: [m.x0Decoder, "instantid_face_stack", "mp_facemesh_v2"],
+      needsMasks: true,
+    },
   ];
 }
 
@@ -1336,8 +1351,20 @@ async function phaseEval(opts, modelKey) {
     const genDir = path.join(opts.root, "samples", modelKey, rowId);
     if (!Object.keys(rec.files ?? {}).length) continue;
     const out = path.join(evalDir, `${rowId}.json`);
-    // Re-score when the row's samples were re-rendered from different inputs since its last score.
-    const scoredCurrent = STATE.evalKeys[modelKey][rowId] === rec.renderKey;
+    // Score only the current prompt × seed grid: a row folder can still hold images of a prompt
+    // that has since been dropped (rendered by an earlier run), and the instrument scores every
+    // image in GEN_DIR. Move those aside rather than delete them.
+    const wanted = new Set(PROMPTS.flatMap(([pid]) => opts.seeds.map((seed) => `${pid}_s${seed}.png`)));
+    for (const file of fs.readdirSync(genDir)) {
+      if (!/\.(png|jpe?g|webp)$/i.test(file) || wanted.has(file)) continue;
+      fs.mkdirSync(path.join(genDir, "_stale"), { recursive: true });
+      fs.renameSync(path.join(genDir, file), path.join(genDir, "_stale", file));
+      log(`  ${rowId}: moved stale ${file} (not in the current prompt grid) to _stale/`);
+    }
+    // Re-score when the row's samples were re-rendered from different inputs, or the prompt grid
+    // changed, since its last score.
+    const evalKey = `${rec.renderKey}|${[...wanted].sort().join(",")}`;
+    const scoredCurrent = STATE.evalKeys[modelKey][rowId] === evalKey;
     if (STATE.eval[modelKey][rowId] && scoredCurrent && fs.existsSync(out) && !opts.force) {
       log(`  ${rowId}: already scored`);
       continue;
@@ -1362,7 +1389,7 @@ async function phaseEval(opts, modelKey) {
     });
     if (res.status !== 0) throw new Error(`lora_eval_harness failed for ${rowId} (${res.status})`);
     STATE.eval[modelKey][rowId] = JSON.parse(fs.readFileSync(out, "utf8")).aggregates;
-    STATE.evalKeys[modelKey][rowId] = rec.renderKey;
+    STATE.evalKeys[modelKey][rowId] = evalKey;
     saveState();
   }
 }
