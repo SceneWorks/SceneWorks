@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { installJobStatusLabel } from "../yue2Policy.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
@@ -323,9 +324,15 @@ function ModelTierDownloadPanel({
   // In-flight download job per tier, keyed by the job payload's `variant` (sc-8508 records it).
   const activeJobByTier = new Map();
   for (const job of downloadJobs) {
-    const tier = job.payload?.variant;
-    if (tier && !terminalStatuses.has(job.status)) {
-      activeJobByTier.set(tier, job);
+    if (terminalStatuses.has(job.status)) {
+      continue;
+    }
+    // A derived-tier install (sc-22999) is queued as a download of the ORIGINAL (`variant`) that
+    // carries the tier it derives (`localDerivation.variant`): it occupies both rows.
+    for (const tier of [job.payload?.localDerivation?.variant, job.payload?.variant]) {
+      if (tier && !activeJobByTier.has(tier)) {
+        activeJobByTier.set(tier, job);
+      }
     }
   }
   // Selection defaults to the suggested tier (if it isn't already installed). Recomputed only on
@@ -403,6 +410,12 @@ function ModelTierDownloadPanel({
           // download with the reason, so offering the checkbox would be an invitation to an error.
           const pendingArtifact =
             variant.pendingArtifact === true || variant.installState === "pending";
+          // sc-22998 / sc-22999: a tier DERIVED on this machine from another tier's original (YuE2
+          // q8 / q4). It has no artifact of its own, but it IS installable: its download fetches (or
+          // re-verifies) the original and the worker derives the tier locally. So it stays
+          // selectable, labelled for what installing it actually does.
+          const derivationPending =
+            variant.derivationPending === true || variant.installState === "derivationPending";
           // Whether the PER-TIER delete can reclaim this tier on its own. The API refuses a tier with
           // no `files` scope ("delete the whole model instead"), because a whole-repo row IS the model
           // rather than a slice of it. Before sc-24112 every variant row carried a glob and this was
@@ -428,7 +441,12 @@ function ModelTierDownloadPanel({
                 <input
                   type="checkbox"
                   checked={checked}
-                  disabled={installed || pendingArtifact || Boolean(activeJob) || licenseAckRequired}
+                  disabled={
+                    installed ||
+                    pendingArtifact ||
+                    Boolean(activeJob) ||
+                    licenseAckRequired
+                  }
                   onChange={() => toggle(tier)}
                 />
                 <span className="model-tier-label">
@@ -463,11 +481,13 @@ function ModelTierDownloadPanel({
                 title={incomplete ? incompleteHint : undefined}
               >
                 {activeJob
-                  ? activeJob.status
+                  ? installJobStatusLabel(activeJob)
                   : installed
                     ? "installed"
                     : pendingArtifact
                       ? "not published yet"
+                      : derivationPending
+                        ? "derived on this machine"
                       : incomplete
                         ? "incomplete"
                         : "not installed"}

@@ -2084,8 +2084,8 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
 /// is served rather than refused.
 ///
 /// **That agreement is not a merge, and the distinction is the whole point of this test.** Nothing
-/// anywhere reads "the supported quants of `qwen_image_2_1`". `ModelCaps::candle_quant` is the
-/// Candle column and only the Candle column; the MLX lane's tier surface is the manifest's own
+/// anywhere reads "the supported quants of `qwen_image_2_1`". The Candle quant+adapter column is
+/// specific to Candle; the MLX lane's tier surface is the manifest's own
 /// `mlx` block; the catalog's `variant` rows are the INSTALL axis, which is a third thing again. A
 /// future revision that narrows one provider must be expressible by changing one of them, and the
 /// assertions below are written so that it is.
@@ -2199,7 +2199,7 @@ fn qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them() {
         "the MLX block declares the lane's default tier, not its tier set"
     );
     // The candle lane has NO manifest tier key at all, and must not grow one: its tier surface is
-    // the routing catalog's `candle_quant` column. A `candle.quantize` here would be a second,
+    // the routing catalog's quant+adapter column. A `candle.quantize` here would be a second,
     // silently-diverging declaration of the same fact.
     let candle = entry
         .get("candle")
@@ -5623,5 +5623,41 @@ fn a_plan_backed_entry_under_a_builtin_model_id_is_refused_by_the_mlx_lane() {
     assert!(video_request_is_candle_eligible(
         &JobType::VideoGenerate,
         &plan_backed
+    ));
+}
+
+/// sc-22999: a YuE2 derived-tier install (`model_download` carrying `localDerivation`) is claimed
+/// only by a worker that links the audio lane (advertises `audio_generate`) — never by the utility
+/// worker of a build without it (the Docker "neither" image), which cannot run the preparer. An
+/// ordinary download still goes to the utility worker. Mutation that reds this: dropping the
+/// `localDerivation` arm of `required_capability`.
+#[test]
+fn a_derivation_download_needs_the_audio_lane_and_an_ordinary_one_does_not() {
+    let job = |payload: Value| -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job_derive", "type": "model_download", "status": "queued", "payload": payload,
+            "result": {}, "requestedGpu": "auto", "progress": 0, "stage": "queued", "message": "",
+            "attempts": 1, "cancelRequested": false, "createdAt": "2026-09-26T00:00:00Z",
+            "updatedAt": "2026-09-26T00:00:00Z",
+        }))
+        .expect("valid JobSnapshot")
+    };
+    let derive = job(json!({"modelId": "yue2", "localDerivation": {"variant": "q8"}}));
+    let plain = job(json!({"modelId": "yue2"}));
+    // The utility worker of a server build without the audio lane.
+    let utility: &[&str] = &["cpu", "model_download", "model_import", "model_convert"];
+    // A GPU worker that links the audio lane (candle off-Mac, mlx on the Mac).
+    let audio_lane: &[&str] = &["gpu", "image_generate", "audio_generate", "candle"];
+    assert!(!worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(audio_lane, "idle"),
+        &derive
+    ));
+    assert!(worker_supports_job(
+        &gpu_worker_with_status(utility, "idle"),
+        &plain
     ));
 }

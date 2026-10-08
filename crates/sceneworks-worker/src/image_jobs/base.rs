@@ -5389,16 +5389,12 @@ pub(super) fn mlx_load_quant_for_resolved_artifact(
     engine_id: &str,
     quant: Option<Quant>,
 ) -> Option<Quant> {
+    // FLUX.2 Klein's packed-tier rule is the MLX provider crate's product decision (`product_load`).
     if matches!(
         engine_id,
-        "krea_2_raw"
-            | "krea_2_turbo"
-            | "krea_2_edit"
-            | "krea_2_turbo_edit"
-            | "flux2_klein_9b"
-            | "flux2_klein_9b_edit"
-            | "flux2_klein_9b_kv_edit"
-    ) {
+        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
+    ) || runtime_macos::providers::flux2::product_load::loads_packed_tier_unquantized(engine_id)
+    {
         None
     } else {
         quant

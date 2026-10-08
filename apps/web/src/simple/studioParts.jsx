@@ -3,6 +3,7 @@ import { Icon } from "../components/Icons.jsx";
 import { AssetThumbnail, assetDisplayUrl, assetUrl } from "../components/assetMedia.jsx";
 import { assetCanCarryWorkflow, stripWorkflowUrl } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { yue2AssetFilename } from "../yue2Policy.js";
 import { resolveJobResultAssets } from "../jobResultAssets.js";
 import { terminalStatuses } from "../constants.js";
 import { STYLE_GROUPS } from "../data/styleCatalog.js";
@@ -349,11 +350,13 @@ export function DownloadButton({ asset, className = "su-result-action su-result-
   // On the FORMAT, not on whether this particular file has a chunk: answering that needs the bytes,
   // and the answer is the same either way — a PNG with no chunk downloads as a plain copy.
   const canStrip = Boolean(href) && assetCanCarryWorkflow(asset);
+  // A YuE2 take downloads under its licence-marked name, never its style text (E2).
+  const filename = yue2AssetFilename(asset) ?? asset.displayName ?? "";
   return (
     <>
       <a
         aria-hidden="true"
-        download={asset.displayName ?? ""}
+        download={filename}
         href={href}
         ref={anchorRef}
         style={{ display: "none" }}
@@ -377,7 +380,7 @@ export function DownloadButton({ asset, className = "su-result-action su-result-
         <>
           <a
             aria-hidden="true"
-            download={asset.displayName ?? ""}
+            download={filename}
             href={stripWorkflowUrl(href)}
             ref={strippedRef}
             style={{ display: "none" }}

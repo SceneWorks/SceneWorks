@@ -550,6 +550,29 @@ fn audio_model_repo(entry: &Value) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A symbolic-plan song model (YuE2) only runs as a YuE2 job — its contract, eligibility check and
+/// run directory come with the `yue2` block. A generic audio job naming one (a replayed payload, a
+/// hand-built job) is refused before anything loads. Judged on both the linked provider's
+/// descriptor and the manifest entry the job carries.
+fn refuse_symbolic_song_without_block(request: &AudioRequest) -> WorkerResult<()> {
+    let declared = request
+        .model_manifest_entry
+        .get("audio")
+        .and_then(|audio| audio.get("supportsSymbolicSong"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let linked = crate::inference_runtime::audio_descriptor(&request.model)
+        .is_some_and(|descriptor| descriptor.capabilities.supports_symbolic_song);
+    if declared || linked {
+        return Err(WorkerError::InvalidPayload(format!(
+            "{} is a symbolic-plan song model; it runs only as a YuE2 job (POST \
+             /api/v1/projects/:project_id/yue2/jobs), not as a generic audio job.",
+            request.model
+        )));
+    }
+    Ok(())
+}
+
 fn audio_preflight(request: &AudioRequest) -> WorkerResult<()> {
     if request.project_id.is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -959,6 +982,10 @@ pub(crate) async fn run_audio_generate_job(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    // YuE2 (sc-22999): its own contract, eligibility, run directory and provenance.
+    if crate::yue2_jobs::is_yue2_job(&job.payload) {
+        return crate::yue2_jobs::run_yue2_job(api, settings, job).await;
+    }
     run_audio_generate_job_using(api, settings, job, crate::inference_runtime::load_audio).await
 }
 
@@ -976,6 +1003,7 @@ async fn run_audio_generate_job_using(
         + 'static,
 ) -> WorkerResult<()> {
     let request = AudioRequest::from_payload(&job.payload);
+    refuse_symbolic_song_without_block(&request)?;
     audio_preflight(&request)?;
     // YuE whole-render memory admission (sc-19386): refuse a render that cannot fit before the
     // project, weights, reference clip or source track is touched. It prices the tier THIS job will
@@ -1605,9 +1633,37 @@ async fn run_audio_synthesis_with(
             components.insert("sft_cover".to_string(), source);
         }
     }
+    let req = GenerationRequest {
+        prompt,
+        negative_prompt,
+        seed,
+        steps,
+        guidance,
+        audio: Some(AudioParams {
+            voice,
+            language,
+            target_duration,
+            bpm,
+            musical_key,
+            lyrics,
+            script,
+            segments,
+            max_new_tokens_per_segment,
+            repetition_penalty,
+            reference_region,
+            output_limiter,
+            ..Default::default()
+        }),
+        // The request's one conditioning: an extend/edit source band
+        // (Conditioning::AudioEdit) or an ICL reference (Conditioning::ReferenceAudio);
+        // empty for plain generation.
+        conditioning: conditioning.into_iter().collect(),
+        // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
+        cancel: cancel.clone(),
+        ..Default::default()
+    };
     let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
-        let cancel = cancel.clone();
         tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
@@ -1620,35 +1676,6 @@ async fn run_audio_synthesis_with(
             }
             let generator = load_generator(&model_id, &spec)
                 .map_err(|error| crate::classify_engine_error("audio model load failed", error))?;
-            let req = GenerationRequest {
-                prompt,
-                negative_prompt,
-                seed,
-                steps,
-                guidance,
-                audio: Some(AudioParams {
-                    voice,
-                    language,
-                    target_duration,
-                    bpm,
-                    musical_key,
-                    lyrics,
-                    script,
-                    segments,
-                    max_new_tokens_per_segment,
-                    repetition_penalty,
-                    reference_region,
-                    output_limiter,
-                    ..Default::default()
-                }),
-                // The request's one conditioning: an extend/edit source band
-                // (Conditioning::AudioEdit) or an ICL reference (Conditioning::ReferenceAudio);
-                // empty for plain generation.
-                conditioning: conditioning.into_iter().collect(),
-                // The shared, watcher-tripped flag (sc-13469) — NOT a fresh `CancelFlag::new()`.
-                cancel,
-                ..Default::default()
-            };
             // Engine progress and streamed chunks fold into one latest update (sc-19384). Publishing
             // never blocks and never fails — synthesis must not depend on the progress sink.
             let fold = std::cell::RefCell::new(SynthesisProgress::new());
@@ -2528,6 +2555,113 @@ mod tests {
             }
         }
         base.as_object().cloned().unwrap()
+    }
+
+    /// sc-22998: the builtin `yue2` catalog entry is the LINKED engine's `yue2` provider — same id,
+    /// family, advertised audio capabilities, and every component its descriptor requires is one
+    /// the entry provisions under the same `componentId`. Read from the registry the audio job loads
+    /// through, not from a copy of its constants. Mutation that reds this: rename the entry's `vae`
+    /// componentId, drop `supportsSymbolicSong`, or change `sampleRates`.
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn yue2_catalog_entry_matches_the_linked_engine_descriptor() {
+        let (_, contents) = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc is embedded");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(contents))
+                .expect("builtin manifest parses");
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "yue2")
+            .expect("yue2 is in the builtin catalog")
+            .clone();
+        let descriptor = crate::inference_runtime::audio_descriptor("yue2")
+            .expect("the linked audio lane registers the yue2 provider");
+        assert_eq!(descriptor.id, "yue2");
+        assert_eq!(entry["family"], descriptor.family);
+        let audio = &entry["audio"];
+        let caps = &descriptor.capabilities;
+        assert_eq!(audio["sampleRates"], json!(caps.audio_sample_rates));
+        for (key, advertised) in [
+            ("supportsGuidance", caps.supports_guidance),
+            ("supportsNegativePrompt", caps.supports_negative_prompt),
+            ("supportsMultiSpeaker", caps.supports_multi_speaker),
+            ("supportsSymbolicSong", caps.supports_symbolic_song),
+            ("supportsAudioArtifacts", caps.supports_audio_artifacts),
+        ] {
+            // Audio polarity: an absent key means false.
+            assert_eq!(
+                audio.get(key).and_then(Value::as_bool).unwrap_or(false),
+                advertised,
+                "audio.{key}"
+            );
+        }
+        let provisioned = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row.get("componentId").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        for required in descriptor.required_components {
+            assert!(
+                provisioned.contains(required),
+                "descriptor requires `{required}`, the catalog provisions {provisioned:?}"
+            );
+        }
+        // sc-22999 (deferred from sc-22998 until the descriptor advertised its tiers): every tier
+        // the catalog offers is one the linked provider accepts — the unquantized `bf16` original
+        // (`quantize: None`) or an advertised `supported_quants` entry. Mutation that reds this: add
+        // a `q6` / `nvfp4` row to the manifest, or drop `Q8` from the provider's SUPPORTED_QUANTS.
+        let accepted: Vec<String> = std::iter::once("bf16".to_owned())
+            .chain(
+                caps.supported_quants
+                    .iter()
+                    .map(|quant| format!("{quant:?}").to_ascii_lowercase()),
+            )
+            .collect();
+        let variants: Vec<&str> = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|row| row.get("coRequisite").and_then(Value::as_bool) != Some(true))
+            .filter_map(|row| row.get("variant").and_then(Value::as_str))
+            .collect();
+        assert!(!variants.is_empty(), "the catalog offers at least one tier");
+        for variant in &variants {
+            assert!(
+                accepted.iter().any(|a| a == variant),
+                "catalog tier `{variant}` is not one the provider accepts ({accepted:?})"
+            );
+        }
+        assert!(
+            ["q8", "q4"].iter().all(|q| accepted.iter().any(|a| a == q)),
+            "the provider advertises the derived tiers the catalog declares: {accepted:?}"
+        );
+        // YuE1's six generators are separate providers; `yue2` is never one of their aliases. The
+        // pin links candle-audio-yue, so each must resolve (an absent one is a failure, not a skip),
+        // and each ships beside `yue2` as its own builtin catalog entry in its own family.
+        for language in ["en", "zh", "jp_kr"] {
+            for mode in ["cot", "icl"] {
+                let yue1 = format!("yue_{language}_{mode}");
+                let v1 = crate::inference_runtime::audio_descriptor(&yue1)
+                    .unwrap_or_else(|| panic!("the linked audio lane registers YuE1 `{yue1}`"));
+                assert_eq!(v1.id, yue1);
+                assert_ne!(v1.id, descriptor.id, "{yue1}");
+                assert_ne!(v1.family, descriptor.family, "{yue1}");
+                let v1_entry = manifest["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|model| model["id"] == yue1.as_str())
+                    .unwrap_or_else(|| panic!("YuE1 `{yue1}` is in the builtin catalog"));
+                assert_eq!(v1_entry["family"], v1.family, "{yue1}");
+                assert_ne!(v1_entry["family"], entry["family"], "{yue1}");
+            }
+        }
     }
 
     #[test]

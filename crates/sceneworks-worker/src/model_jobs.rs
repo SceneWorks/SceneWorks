@@ -273,6 +273,23 @@ pub(crate) async fn run_model_download_job(
         return Ok(());
     }
 
+    // A locally derived tier (sc-22999, YuE2 q8 / q4): the original just fetched (or re-verified)
+    // is converted on this machine by the audio lane's preparer and verified against the pins.
+    if job
+        .payload
+        .contains_key(crate::local_derivation::PAYLOAD_KEY)
+    {
+        let original = repo_dir.join("snapshots").join(&snapshot_revision);
+        crate::local_derivation::derive_local_tier(
+            api,
+            settings,
+            job,
+            &original,
+            crate::inference_runtime::prepare_audio_snapshot,
+        )
+        .await?;
+    }
+
     complete_hf_cache_download(
         api,
         job,

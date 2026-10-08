@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LicensesScreen } from "./LicensesScreen.jsx";
 import { bundledLicenses } from "../data/bundledLicenses.js";
 
+function bundledNoticePath(url) {
+  return decodeURIComponent(String(url).replace(/^\/@fs/, "").split("?")[0])
+    .replace(/^\/(?=[A-Za-z]:\/)/, "");
+}
+
 // The corpus is imported from apps/desktop/licenses/ at build time, so these tests
 // assert against the real bundled notices rather than a mock.
 describe("LicensesScreen", () => {
@@ -14,7 +19,7 @@ describe("LicensesScreen", () => {
 
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn(async (url) => {
-      const path = decodeURIComponent(String(url).replace(/^\/@fs/, "").split("?")[0]);
+      const path = bundledNoticePath(url);
       return { ok: true, status: 200, text: async () => readFileSync(path, "utf8") };
     }));
     container = document.createElement("div");
@@ -33,6 +38,14 @@ describe("LicensesScreen", () => {
       root.render(<LicensesScreen />);
     });
   }
+
+  it("normalizes Vite Windows drive paths while preserving POSIX absolute paths", () => {
+    expect(bundledNoticePath("/@fs/C:/repo/licenses/Qwen%20Research.txt?import&raw"))
+      .toBe("C:/repo/licenses/Qwen Research.txt");
+    expect(bundledNoticePath("/@fs/home/user/licenses/Qwen%20Research.txt?import&raw"))
+      .toBe("/home/user/licenses/Qwen Research.txt");
+    expect(bundledNoticePath("/home/user/licenses/notice.txt")).toBe("/home/user/licenses/notice.txt");
+  });
 
   it("lists every bundled component", async () => {
     await render();
@@ -200,6 +213,26 @@ describe("LicensesScreen", () => {
     expect(container.querySelector(".licenses-text").textContent).toContain(
       "GNU GENERAL PUBLIC LICENSE",
     );
+  });
+
+  it("attributes both conditional cover weights and the native port under distinct noncommercial notices", async () => {
+    await render();
+    const expected = [
+      ["SheetSage2 weights", "m-a-p/SheetSage2"],
+      ["MERT-v2-FullSong weights", "m-a-p/MERT-v2-FullSong"],
+      ["Native SheetSage2 and MERT-v2-FullSong transcription port", "candle-audio-sheetsage2"],
+    ];
+    for (const [name, provenance] of expected) {
+      const item = [...container.querySelectorAll(".licenses-item")].find((button) => button.textContent.includes(name));
+      expect(item, name).toBeTruthy();
+      await act(async () => item.click());
+      expect(container.querySelector(".licenses-facts").textContent).toContain("CC-BY-NC-4.0");
+      expect(container.querySelector(".licenses-usage").textContent).toContain("noncommercial");
+      const notice = container.querySelector(".licenses-text").textContent;
+      expect(notice).toContain("Attribution-NonCommercial 4.0 International Public License");
+      expect(notice).toContain(provenance);
+    }
+    expect(bundledLicenses.filter((entry) => entry.models.includes("yue2")).map((entry) => entry.id)).toEqual(["yue2"]);
   });
 
   it("reports a bundled-text load failure and offers a retry", async () => {

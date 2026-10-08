@@ -1759,48 +1759,6 @@ fn audio_mux_args(
     ]
 }
 
-/// Write f32 PCM to a canonical 16-bit WAV. Signals already within `[-1, 1]` retain their original
-/// amplitude; only over-range input is peak-normalized to prevent clipping. `pub(crate)` so the
-/// pure-audio job path reuses it (sc-13404).
-pub(crate) fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
-    let peak = audio
-        .samples
-        .iter()
-        .fold(0.0f32, |max, &sample| max.max(sample.abs()));
-    let scale = i16::MAX as f32 / peak.max(1.0);
-    let mut pcm = Vec::with_capacity(audio.samples.len() * 2);
-    for &sample in &audio.samples {
-        let value = (sample * scale)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        pcm.extend_from_slice(&value.to_le_bytes());
-    }
-
-    let channels = audio.channels.max(1);
-    let bits_per_sample = 16u16;
-    let block_align = channels * bits_per_sample / 8;
-    let byte_rate = audio.sample_rate * block_align as u32;
-    let data_len = pcm.len() as u32;
-
-    let mut buffer = Vec::with_capacity(44 + pcm.len());
-    buffer.extend_from_slice(b"RIFF");
-    buffer.extend_from_slice(&(36 + data_len).to_le_bytes());
-    buffer.extend_from_slice(b"WAVE");
-    buffer.extend_from_slice(b"fmt ");
-    buffer.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    buffer.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
-    buffer.extend_from_slice(&channels.to_le_bytes());
-    buffer.extend_from_slice(&audio.sample_rate.to_le_bytes());
-    buffer.extend_from_slice(&byte_rate.to_le_bytes());
-    buffer.extend_from_slice(&block_align.to_le_bytes());
-    buffer.extend_from_slice(&bits_per_sample.to_le_bytes());
-    buffer.extend_from_slice(b"data");
-    buffer.extend_from_slice(&data_len.to_le_bytes());
-    buffer.extend_from_slice(&pcm);
-    std::fs::write(path, buffer)?;
-    Ok(())
-}
-
 /// Best-effort `+faststart` remux (moov atom to the front so WKWebView can start
 /// playback without a tail byte-range seek). A missing/failing ffmpeg leaves the
 /// original untouched — the API's byte-range support is the load-bearing guarantee.
@@ -2116,6 +2074,8 @@ fn video_progress(
 // a self-contained media pipeline — the property
 // `video_jobs_remains_split_into_real_engine_modules` bounds, and which sc-18650's ffmpeg
 // normalization would otherwise have pushed past its line budget.
+mod wav;
+pub(crate) use wav::{write_wav_pcm16, write_wav_pcm16_with_info};
 pub(crate) mod reference_audio;
 pub(crate) use reference_audio::resolve_reference_audio_conditioning;
 pub(crate) mod seedvr2;
@@ -2494,5 +2454,6 @@ where
 // `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
 // the ONE place that turns "no ffmpeg on this lane" into an assert when the lane declared one
 // (sc-19549). A second copy of that predicate is a second way for a lane to silently skip.
+
 #[cfg(test)]
 pub(crate) mod tests;

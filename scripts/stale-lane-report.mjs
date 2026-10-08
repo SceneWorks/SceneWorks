@@ -84,7 +84,32 @@ export const SOURCE_PATHS = Object.freeze({
   mlxAdapter: "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
   candleAdapter: "crates/sceneworks-memory-adapter/src/bin/candle.rs",
   controlWeights: "crates/sceneworks-core/src/control_weights.rs",
+  yue2ProfilePlan: "config/yue2-memory-profile-plan.json",
 });
+
+/**
+ * Provenance for the PROFILE-HARNESS partition (sc-23001), printed like {@link MARGIN_SOURCE}.
+ */
+export const PROFILE_HARNESS_SOURCE =
+  "`lane` of a dedicated audio-lane profile plan (config/yue2-memory-profile-plan.json) — a model with" +
+  " no image five-rung contract, captured by its own harness (the plan's `harness`), not by an adapter arm";
+
+/**
+ * Lanes a dedicated profile harness captures, `lane -> harness` (sc-23001). YuE2 is declared in the
+ * closure table (so its records carry the same currency term) but it has no five-rung contract, so no
+ * adapter arm can or should serve it; reporting it "uncapturable" would send a reader to adapter work
+ * that is not owed. Read from the plan itself, never a hand list.
+ */
+export function profileHarnessLanes(plans) {
+  const lanes = new Map();
+  for (const plan of plans) {
+    if (typeof plan?.lane !== "string" || typeof plan?.harness !== "string") {
+      throw new Error("a profile-harness plan must name its `lane` and `harness`");
+    }
+    lanes.set(plan.lane, plan.harness);
+  }
+  return lanes;
+}
 
 /**
  * Provenance for the OVERLAY-PROVIDER partition (sc-22738), printed like {@link MARGIN_SOURCE}.
@@ -878,6 +903,7 @@ export function buildStaleLaneReport({
   plan,
   adapterSources,
   controlWeightsSource,
+  profileHarnessPlans = [],
   meta = {},
 }) {
   if (typeof adapterSources?.mlx !== "string" || typeof adapterSources?.candle !== "string") {
@@ -896,6 +922,8 @@ export function buildStaleLaneReport({
     mlx: adapterCapturableProviders(adapterSources.mlx, SOURCE_PATHS.mlxAdapter),
     candle: adapterCapturableProviders(adapterSources.candle, SOURCE_PATHS.candleAdapter),
   };
+  // sc-23001: lanes a dedicated profile harness captures (YuE2). Capturable, but not by an arm.
+  const harnesses = profileHarnessLanes(profileHarnessPlans);
   const planCoverage = planLaneCoverage(plan ?? { providers: [] });
   const flagshipCoverage = recommendedMlxT2iLanes(manifest).map((entry) => {
     const declared = liveDigests.has(entry.lane);
@@ -1019,8 +1047,13 @@ export function buildStaleLaneReport({
   // unchanged and it still appears in those partitions, exactly as any other declared lane does.
   const isOverlayLane = (lane) => overlayProviders.has(lane.provider);
   const overlayProviderLanes = [...lanes, ...undeclaredLanes].filter(isOverlayLane);
+  // sc-23001: a lane a dedicated profile harness captures is not waiting on adapter work either;
+  // it is listed with its harness under its own heading (its `capturable` stays the ADAPTER fact).
+  const profileLanes = [...lanes, ...undeclaredLanes]
+    .filter((lane) => harnesses.has(lane.lane))
+    .map((lane) => ({ ...lane, harness: harnesses.get(lane.lane) }));
   const uncapturable = [...lanes, ...undeclaredLanes].filter(
-    (lane) => !lane.capturable && !isOverlayLane(lane),
+    (lane) => !lane.capturable && !isOverlayLane(lane) && !harnesses.has(lane.lane),
   );
   return {
     generatedAgainst: {
@@ -1036,6 +1069,8 @@ export function buildStaleLaneReport({
       overlayProviderSource: OVERLAY_PROVIDER_SOURCE,
       overlayProviders: [...overlayProviders],
       overlayProviderLanes: overlayProviderLanes.map((lane) => lane.lane),
+      profileHarnessSource: PROFILE_HARNESS_SOURCE,
+      profileHarnessLanes: profileLanes.map((lane) => lane.lane),
     },
     flagshipApparatusCoverage: {
       source:
@@ -1050,6 +1085,7 @@ export function buildStaleLaneReport({
       unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured").length,
       uncapturableLanes: uncapturable.length,
       overlayProviderLanes: overlayProviderLanes.length,
+      profileHarnessLanes: profileLanes.length,
       undeclaredLanes: undeclaredLanes.length,
       staleBindings: lanes.reduce((sum, lane) => sum + lane.bindings.stale, 0),
       staleRecords: lanes.reduce((sum, lane) => sum + lane.records.stale, 0),
@@ -1059,6 +1095,7 @@ export function buildStaleLaneReport({
     unmeasuredLanes: lanes.filter((lane) => lane.status === "unmeasured"),
     uncapturableLanes: uncapturable,
     overlayProviderLanes,
+    profileHarnessLanes: profileLanes,
     undeclaredLanes,
   };
 }
@@ -1073,6 +1110,7 @@ export async function loadSources(root = ROOT) {
     mlxAdapter,
     candleAdapter,
     controlWeightsSource,
+    yue2ProfilePlanBody,
   ] = await Promise.all(
       Object.values(SOURCE_PATHS).map((relative) => readFile(path.join(root, relative), "utf8")),
     );
@@ -1090,6 +1128,7 @@ export async function loadSources(root = ROOT) {
     plan: JSON.parse(planBody),
     adapterSources: { mlx: mlxAdapter, candle: candleAdapter },
     controlWeightsSource,
+    profileHarnessPlans: [JSON.parse(yue2ProfilePlanBody)],
     meta: { inferenceRevision: closures.inferenceRevision, digestVersion: closures.digestVersion },
   };
 }
@@ -1217,6 +1256,23 @@ export function formatReport(report) {
       );
     }
     out.push(`  source: ${report.capturability.overlayProviderSource}`);
+  }
+  if (report.profileHarnessLanes?.length) {
+    out.push("");
+    out.push(
+      "CAPTURED BY A DEDICATED PROFILE HARNESS — not uncapturable. These audio-lane models have no image",
+    );
+    out.push(
+      "five-rung contract, so no adapter arm serves them; their own harness captures and grades them",
+    );
+    out.push("against the same per-(backend, provider) closure digest:");
+    for (const lane of report.profileHarnessLanes) {
+      out.push(
+        `  ${lane.lane}  declared=${lane.declared ? "yes" : "NO"}  harness=${lane.harness}  ` +
+          `status=${lane.status === "uncapturable" ? "pending harness capture" : lane.status}`,
+      );
+    }
+    out.push(`  source: ${report.capturability.profileHarnessSource}`);
   }
   if (report.undeclaredLanes.some((lane) => lane.capturable)) {
     out.push("");

@@ -743,9 +743,10 @@ describe("FilmWorkspace", () => {
     });
 
     await renderWorkspace();
-    await act(async () => {
-      await new Promise((resolve) => window.setTimeout(resolve, 100));
-      await Promise.resolve();
+    await vi.waitFor(async () => {
+      await act(async () => { await Promise.resolve(); });
+      expect(container.querySelector('input[aria-label="Planning connection label"]')?.value)
+        .toBe("LAN planner");
     });
     expect(container.querySelector('select[aria-label="Planning provider"]').value).toBe("openai_compatible");
     expect(container.textContent).toContain("Destination: http://planner.local:8080/v1");

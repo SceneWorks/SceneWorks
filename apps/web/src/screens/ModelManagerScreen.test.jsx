@@ -1991,6 +1991,35 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     expect(rowFor("bf16").querySelector(".status-badge").textContent).toBe("installed");
   });
 
+  // sc-22999 / sc-23000: a locally DERIVED tier (YuE2 q8 / q4, `derivationPending`) IS installable —
+  // its download fetches the original and the worker derives the tier — so, unlike an unpublished
+  // artifact, its row stays selectable and its download is queued for exactly that tier.
+  it("offers a derivation-pending tier for install, labelled as derived here", async () => {
+    const base = matrixModel({ installed: ["bf16"] });
+    const model = {
+      ...base,
+      variants: base.variants.map((variant) =>
+        variant.variant === "bf16"
+          ? variant
+          : { ...variant, installState: "derivationPending", derivationPending: true },
+      ),
+    };
+    await render([model]);
+    const q4 = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    expect(q4.querySelector(".status-badge").textContent).toBe("derived on this machine");
+    const box = q4.querySelector("input");
+    expect(box.disabled).toBe(false);
+    if (!box.checked) {
+      await click(box);
+    }
+    const download = [...container.querySelectorAll("button")].find((button) =>
+      button.textContent.startsWith("Download Q4"),
+    );
+    expect(download?.disabled).toBe(false);
+    await click(download);
+    expect(createModelDownloadJob).toHaveBeenCalledWith(expect.objectContaining({ id: "z_image_turbo" }), { variant: "q4" });
+  });
+
   // sc-24112: the per-tier delete is offered only for a tier the API can actually reclaim ALONE.
   // A whole-repo tier (`files: []` — `qwen_image_2_1`'s bf16 IS the upstream snapshot) is the model
   // rather than a slice of it, and `DELETE /models/:id/variants/:variant` refuses it with "delete
