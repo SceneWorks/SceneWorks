@@ -1028,6 +1028,93 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
 });
 
+test("macos-mlx routes an explicit Mac2 final PR and merge push without changing manual routing", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const naxWorker = workflow.slice(workflow.indexOf("  nax-worker:"));
+  const expression = naxWorker.match(/^ {4}runs-on: \$\{\{ (.+) \}\}$/m)?.[1];
+  assert.ok(expression, "nax-worker must expose one evaluable runs-on expression");
+
+  const evaluate = (candidate, github, inputs = {}) =>
+    Function(
+      "github",
+      "inputs",
+      "fromJSON",
+      "startsWith",
+      `return (${candidate});`,
+    )(
+      github,
+      inputs,
+      JSON.parse,
+      (value, prefix) => String(value).toLowerCase().startsWith(String(prefix).toLowerCase()),
+    );
+  const event = (eventName, payload = {}) => ({
+    event_name: eventName,
+    event: {
+      pull_request: { title: "", ...payload.pull_request },
+      head_commit: { message: "", ...payload.head_commit },
+    },
+  });
+  const generic = ["self-hosted", "macOS", "ARM64", "nax"];
+  const mac2 = ["self-hosted", "macOS", "ARM64", "rw-mage"];
+  const weights = ["self-hosted", "macOS", "ARM64", "nax", "weights"];
+
+  const validate = (candidate) => {
+    assert.deepEqual(
+      evaluate(candidate, event("pull_request", { pull_request: { title: "[Mac2] sc-24107" } })),
+      mac2,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("push", { head_commit: { message: "[Mac2] sc-24107: merge" } })),
+      mac2,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("pull_request", { pull_request: { title: "sc-24107" } })),
+      generic,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("push", { head_commit: { message: "Merge pull request" } })),
+      generic,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("workflow_dispatch"), { run_memory_calibration: true }),
+      weights,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("workflow_dispatch"), { run_five_rung_reference: true }),
+      weights,
+    );
+    assert.deepEqual(evaluate(candidate, event("workflow_dispatch")), generic);
+  };
+  assert.doesNotThrow(() => validate(expression));
+
+  for (const [name, mutant] of [
+    [
+      "PR title opt-in removed",
+      expression.replace("startsWith(github.event.pull_request.title, '[Mac2]')", "false"),
+    ],
+    [
+      "merge subject opt-in removed",
+      expression.replace("startsWith(github.event.head_commit.message, '[Mac2]')", "false"),
+    ],
+    [
+      "Mac2 target weakened to generic nax",
+      expression.replace(
+        '["self-hosted","macOS","ARM64","rw-mage"]',
+        '["self-hosted","macOS","ARM64","nax"]',
+      ),
+    ],
+    [
+      "manual calibration rerouted to Mac2",
+      expression.replace(
+        '["self-hosted","macOS","ARM64","nax","weights"]',
+        '["self-hosted","macOS","ARM64","rw-mage"]',
+      ),
+    ],
+  ]) {
+    assert.throws(() => validate(mutant), undefined, `${name} must be killed by the routing cases`);
+  }
+});
+
 test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
