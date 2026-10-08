@@ -933,6 +933,7 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
+                subject_mask_path: None,
                 model_options: prepared_inputs.resolve_model_options(
                     settings,
                     &plan.dataset.root_path,
@@ -1570,6 +1571,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
         gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         full_finetune,
+        // Current inference accepts an optional adapter path for resumed/continued training.
+        // SceneWorks creates a fresh adapter for this route, so preserve that contract explicitly.
+        training_adapter: None,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
         // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
@@ -1615,6 +1619,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+        // New optional inference techniques remain disabled until SceneWorks exposes and validates
+        // their product inputs. Every established field above stays explicitly mapped.
+        ..Default::default()
     }
 }
 
@@ -5438,12 +5445,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5552,12 +5561,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5675,6 +5686,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5824,12 +5836,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -6015,6 +6029,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -6256,6 +6271,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
