@@ -34,6 +34,9 @@ jobs:
       QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}
       QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
       QWEN_APP_RUNNER_TARGET: ${{ inputs.runner_target }}
+      # Rust 1.97.1's bundled LLVM predates rust-lang/rust#158410's Mach-O
+      # string-table alignment fix; keep this release producer unstripped.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
