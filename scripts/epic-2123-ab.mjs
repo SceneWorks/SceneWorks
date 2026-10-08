@@ -253,6 +253,21 @@ function techniqueRows(modelKey, opts) {
       optionalLimits: { supportsVaeAnchorLoss: ["vaeAnchorWeight"], supportsLatentLpipsLoss: ["latentLpipsWeight"] },
       aux: [m.x0Decoder, "flux2_vae", m.latentLpips],
     },
+    {
+      // The two batch-1 winners together: do their gains stack before both become defaults?
+      id: "mask_identity",
+      label: "Subject mask (bg 0.1) + identity (0.05) + face landmark (0.05)",
+      advanced: {
+        subjectMaskLoss: true,
+        subjectMaskBackgroundWeight: 0.1,
+        subjectMaskSubjectWeight: 1.0,
+        identityLossWeight: 0.05,
+        faceLandmarkLossWeight: 0.05,
+      },
+      limits: ["supportsSubjectMaskLoss", "supportsIdentityLoss", "supportsFaceLandmarkLoss"],
+      aux: [m.x0Decoder, "instantid_face_stack", "mp_facemesh_v2"],
+      needsMasks: true,
+    },
   ];
 }
 
