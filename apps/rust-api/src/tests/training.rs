@@ -3942,6 +3942,123 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
     assert!(message.contains("packed q4"), "{message}");
 }
 
+/// #2953: a real LTX-2.3 install straddles two bundle snapshots whenever the pin moves — Hugging Face
+/// keeps each filtered download under the revision it was fetched at, so `q4/` (and the `gemma/`
+/// co-requisite) stay in the revision they came from while any later fetch materializes the bumped one.
+/// Generation resolves a tier across both revisions (`ltx_bundle_subdir_across_revisions`, sc-18853) and
+/// the trainer resolves Gemma across sibling snapshots (`bundled_ltx_gemma_dir`, sc-14377), so the submit
+/// gate must not be the one component that insists on a single snapshot: doing so rejected a trainable
+/// install with "installed for generation, but training needs the packed q4 tier". The recorded base path
+/// must name the snapshot that actually holds the tier, since the worker loads it verbatim.
+#[test]
+fn ltx_training_accepts_a_q4_tier_split_across_bundle_revisions() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("LTX training target");
+    let repo = target.base_model_repo.as_deref().expect("turnkey repo");
+    let repo_root = huggingface_repo_cache_path(&data_dir, repo).expect("repo cache path");
+
+    let seed_q4 = |snapshot: &std::path::Path| {
+        let q4 = snapshot.join("q4");
+        std::fs::create_dir_all(&q4).expect("q4 tier");
+        for file in [
+            "quantize_config.json",
+            "transformer.safetensors",
+            "connector.safetensors",
+            "vae_decoder.safetensors",
+            "vae_encoder.safetensors",
+        ] {
+            std::fs::write(q4.join(file), "x").expect("q4 training component");
+        }
+        q4
+    };
+    let seed_gemma = |snapshot: &std::path::Path| {
+        let gemma = snapshot.join("gemma");
+        std::fs::create_dir_all(&gemma).expect("Gemma co-requisite");
+        std::fs::write(gemma.join("config.json"), r#"{"model_type":"gemma3_text"}"#)
+            .expect("Gemma config");
+        std::fs::write(gemma.join("tokenizer.json"), r#"{"model":{"type":"BPE"}}"#)
+            .expect("Gemma tokenizer");
+        std::fs::write(
+            gemma.join("model.safetensors.index.json"),
+            r#"{"weight_map":{"model.embed_tokens.weight":"model-00001-of-00001.safetensors"}}"#,
+        )
+        .expect("Gemma shard index");
+        write_test_safetensors_with_keys(
+            &gemma.join("model-00001-of-00001.safetensors"),
+            &["model.embed_tokens.weight".to_owned()],
+        );
+        gemma
+    };
+
+    // The revision the q4 tier + Gemma were fetched at, before the pin moved.
+    let pre_bump = repo_root.join("snapshots").join("ltx-q4-pre-bump");
+    let q4 = seed_q4(&pre_bump);
+    let pre_bump_gemma = seed_gemma(&pre_bump);
+
+    // The bumped pin: `refs/main` names it and it is materialized, so it fronts the ranked snapshot
+    // list — yet it carries only the dense tier a later on-demand fetch pulled, never the packed one.
+    let bumped = repo_root.join("snapshots").join("ltx-q4-bumped");
+    let bf16 = bumped.join("bf16");
+    std::fs::create_dir_all(&bf16).expect("bf16 tier");
+    for file in ["config.json", "transformer.safetensors"] {
+        std::fs::write(bf16.join(file), "x").expect("bf16 component");
+    }
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs");
+    std::fs::write(repo_root.join("refs").join("main"), "ltx-q4-bumped").expect("refs/main");
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready,
+        "a q4 tier in a sibling bundle revision must not read as an uninstalled training tier"
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        q4.display().to_string(),
+        "the recorded base path must name the snapshot that holds the packed tier"
+    );
+
+    // Gemma alone in the other revision is the same legitimate split — the trainer's own text-encoder
+    // resolver scans siblings for it (sc-14377), so the gate must too.
+    std::fs::remove_dir_all(&pre_bump_gemma).expect("drop the co-located Gemma");
+    seed_gemma(&bumped);
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready,
+        "a Gemma co-requisite in a sibling revision must still satisfy the gate"
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        q4.display().to_string()
+    );
+
+    // Still strict: with no packed tier anywhere in the cache the run is refused, and the refusal
+    // reports the installed-but-not-trainable case rather than a bare "not installed".
+    std::fs::remove_dir_all(&q4).expect("drop the only q4 tier");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
+    );
+
+    // And a torn Gemma is not papered over by the sibling scan either.
+    seed_q4(&pre_bump);
+    std::fs::remove_file(
+        bumped
+            .join("gemma")
+            .join("model-00001-of-00001.safetensors"),
+    )
+    .expect("tear the only Gemma");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::TrainingTierMissing
+    );
+}
+
 #[test]
 fn ltx25_training_resolves_and_requires_the_nested_dev_q4_tier() {
     let _env = isolate_hf_cache();

@@ -310,6 +310,14 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await settle();
   }
   const lab = () => container.querySelector('[data-testid="yue2-song-lab"]');
+  // Lyrics default to the section editor; whole-string lyrics go through its Text view.
+  async function typeLyrics(value) {
+    const lyricsView = byLabel(lab(), "Lyrics view");
+    if (lyricsView && byLabel(lab(), "Lyrics").tagName !== "TEXTAREA") {
+      await click(buttonWithText(lyricsView, "Text"));
+    }
+    await typeText(byLabel(lab(), "Lyrics"), value);
+  }
 
   async function openEnabledLab(ctx = context(), routerOptions = { ack: true }) {
     apiFetchMock.mockImplementation(router(routerOptions));
@@ -408,7 +416,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     ({ container, root } = mountRoot());
     seedLab({ optIn: true, lyrics: "restored lyrics", style: "lofi", tier: "q8", advancedOpen: false });
     await render(context());
-    expect(byLabel(lab(), "Lyrics").value).toBe("restored lyrics");
+    // Untagged saved lyrics stay one untagged section — the editor adds no tag of its own.
+    expect(byLabel(lab(), "Section 1 label").value).toBe("");
+    expect(byLabel(lab(), "Section 1 lyrics").value).toBe("restored lyrics");
     expect(byLabel(lab(), "Style").value).toBe("lofi");
     expect(byLabel(lab(), "Weight tier").value).toBe("q8");
     await click(buttonStarting(lab(), "Advanced"));
@@ -421,7 +431,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("writes the lab settings to the server preferences", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[chorus]\nremember me");
+    await typeLyrics("[chorus]\nremember me");
     await wait(500);
     const map = persistMock.mock.calls.at(-1)?.[0]?.advancedStudio;
     expect(map?.project_1?.yue2lab?.lyrics).toBe("[chorus]\nremember me");
@@ -429,9 +439,38 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(map?.project_1?.audio?.songLab).toBe(true);
   });
 
+  it("writes lyrics as sections and toggles suggested tags into the style", async () => {
+    await openEnabledLab();
+    await typeText(byLabel(lab(), "Section 1 lyrics"), "hello there");
+    await choose(byLabel(lab(), "Section 1 label"), "intro");
+    await click(lab().querySelector('[data-testid="yue-add-section"]'));
+    await typeText(byLabel(lab(), "Section 3 lyrics"), "bridge words");
+    await choose(byLabel(lab(), "Section 3 label"), "bridge");
+    // Section 2 (the starter chorus) is still empty, so it is not sent.
+    await click(buttonWithText(byLabel(lab(), "Lyrics view"), "Text"));
+    expect(byLabel(lab(), "Lyrics").value).toBe("[intro]\nhello there\n\n[bridge]\nbridge words");
+
+    await typeText(byLabel(lab(), "Style"), "dream pop");
+    const suggestions = () => lab().querySelector('[data-testid="yue-tag-suggestions"]');
+    const firstTag = suggestions().querySelector("button");
+    const tag = firstTag.textContent;
+    await click(firstTag);
+    expect(byLabel(lab(), "Style").value).toBe(`dream pop, ${tag}`);
+    expect(suggestions().querySelector("button").getAttribute("aria-pressed")).toBe("true");
+    await click(suggestions().querySelector("button"));
+    expect(byLabel(lab(), "Style").value).toBe("dream pop");
+  });
+
+  it("keeps the compute precision explanation in a hover tip, not inline text", async () => {
+    await openEnabledLab();
+    const field = byLabel(lab(), "Compute precision").closest("label");
+    expect(field.querySelector("small")).toBeNull();
+    expect(field.querySelector(".yue2-field-tip").getAttribute("title")).toContain("Q8/Q4 describe weight storage");
+  });
+
   it("requires an explicit supported GPU for the experimental FP8 AR control and persists the choice", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await choose(byLabel(lab(), "Weight tier"), "bf16");
     await click(buttonStarting(lab(), "Advanced"));
     await choose(byLabel(lab(), "AR mode"), "experimentalFp8");
@@ -475,7 +514,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await openEnabledLab();
     expect(lab().querySelector(".advanced-section.open")).toBeNull(); // collapsed by default
     await typeText(byLabel(lab(), "Style"), "dream pop, airy vocal");
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Melody only"));
     await type(byLabel(lab(), "Takes"), "3");
     await setEveryAdvancedControl();
@@ -503,7 +542,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("sends a plan-only request with only the fields a plan reads", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(lab().querySelector('[data-testid="yue2-compose"] input[type="checkbox"]'));
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Plan the score"));
@@ -523,7 +562,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("plans from a supplied ABC score after previewing it", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Supply an ABC score"));
     // A supplied score cannot be planned with planning off.
     expect(buttonWithText(lab(), "Off (no score)").disabled).toBe(true);
@@ -573,7 +612,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     };
     await openEnabledLab(context({ jobs: [plan] }));
     await typeText(byLabel(lab(), "Style"), "metal");
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nnew words");
+    await typeLyrics("[verse]\nnew words");
     await click(buttonWithText(lab(), "Restore a saved plan"));
     await choose(byLabel(lab(), "Saved plan"), "job_plan");
     expect(byLabel(lab(), "Lyrics").readOnly).toBe(true);
@@ -663,7 +702,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lastJobBody()).toMatchObject({ kind: "transcribe", sourceAudioAssetId: "asset_take" });
     await click(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-melody"]'), "Use for the cover"));
     expect(byLabel(lab(), "Cover score version").value).toBe("ver_take");
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nnew words");
+    await typeLyrics("[verse]\nnew words");
     await typeText(byLabel(lab(), "Style"), "acoustic");
     expect(buttonWithText(lab(), "Generate cover").disabled).toBe(true);
     expect(lab().querySelector('[data-testid="yue2-transcription-review-confirmation"]').textContent).toContain("warnings and octave evidence");
@@ -797,7 +836,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("covers a reviewed score version with every cover control", async () => {
     await openEnabledLab();
     await click(buttonWithText(lab(), "Cover"));
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await typeText(byLabel(lab(), "Style"), "acoustic");
     await choose(byLabel(lab(), "Cover score version"), "ver_1");
     await click(buttonWithText(lab(), "Review score"));
@@ -831,7 +870,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("covers a pasted reviewed ABC score", async () => {
     await openEnabledLab();
     await click(buttonWithText(lab(), "Cover"));
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Paste ABC"));
     await typeText(byLabel(lab(), "Cover ABC score"), "X:1\nK:C\nC4|");
     await click(buttonWithText(lab(), "Generate cover"));
@@ -1192,7 +1231,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
         return undefined;
       },
     });
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Generate song"));
     await settle();
     const error = lab().querySelector('[data-testid="yue2-submit-error"]');
@@ -1290,7 +1329,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(install, "Derive q8 here"));
     expect(ctx.createModelDownloadJob).toHaveBeenCalledWith(entry, { variant: "q8", choices: undefined });
     // Nothing can run until it is installed.
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
   });
   // ---- fix pass: E2 downloads, seeds, disabled controls, ack mirror, badges, drafts ------------
@@ -1323,7 +1362,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("strips the export header when an exported score is pasted back in", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Supply an ABC score"));
     await typeText(
       byLabel(lab(), "Supplied ABC score"),
@@ -1336,7 +1375,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("sends a seed of 2^53 - 1 exactly and refuses a larger one", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonStarting(lab(), "Advanced"));
     await type(byLabel(lab(), "Seed"), "9007199254740991");
     await click(buttonWithText(lab(), "Generate song"));
@@ -1355,7 +1394,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
 
   it("refuses an import seed beyond 2^53 - 1 with a sentence, sending nothing", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Scores"));
     await settle();
     await click(buttonStarting(lab(), "Import ABC"));
@@ -1426,7 +1465,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     });
     expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBe("true");
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Generate song"));
     await settle();
     expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBeNull();
@@ -1467,10 +1506,10 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   // Lyrics and drafts are capped in the durable copy too; over their budget they say so, like a score.
   it("marks lyrics and score drafts too large to restore as session-only", async () => {
     await openEnabledLab();
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nshort");
+    await typeLyrics("[verse]\nshort");
     expect(lab().querySelector('[data-testid="yue2-lyrics-session-only"]')).toBeNull();
     // Mutation that reds this: dropping the lyrics note (or `sessionOnlyFields` reporting nothing).
-    await typeText(byLabel(lab(), "Lyrics"), `[verse]\n${"la ".repeat(6000)}`);
+    await typeLyrics(`[verse]\n${"la ".repeat(6000)}`);
     expect(lab().querySelector('[data-testid="yue2-lyrics-session-only"]').textContent).toContain(
       "Kept for this session only",
     );
@@ -1511,7 +1550,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     seedStudioSettingsFromServer({ default: { audio: { songLab: true }, yue2lab: ENABLED_SETTINGS } });
     apiFetchMock.mockImplementation(router({ ack: true }));
     await render(context({ activeProject: null }));
-    await typeText(byLabel(lab(), "Lyrics"), "[verse]\nhello");
+    await typeLyrics("[verse]\nhello");
     expect(buttonWithText(lab(), "Generate song").disabled).toBe(true);
     expect(lab().querySelector('[data-testid="yue2-compose"]').textContent).toContain("Open or create a workspace first.");
   });

@@ -109,6 +109,65 @@ export function emptySampling() {
   return Object.fromEntries(SAMPLING_FIELDS.map((field) => [field.key, ""]));
 }
 
+// Lyrics ⇄ section rows for the section editor. The persisted value stays the lyrics STRING the
+// job sends; a `[label]` line on its own starts a section, and text before the first one is an
+// untagged section (label ""), so any string the user typed or a preset saved survives the editor.
+const SECTION_HEADER = /^\s*\[([^\]\n]+)\]\s*$/;
+
+export function parseYue2Lyrics(lyrics) {
+  const text = String(lyrics ?? "");
+  if (!text.trim()) {
+    return [
+      { label: "verse", text: "" },
+      { label: "chorus", text: "" },
+    ];
+  }
+  const sections = [];
+  let current = { label: "", lines: [] };
+  for (const line of text.split("\n")) {
+    const header = SECTION_HEADER.exec(line);
+    if (header) {
+      sections.push(current);
+      current = { label: header[1].trim(), lines: [] };
+    } else {
+      current.lines.push(line);
+    }
+  }
+  sections.push(current);
+  return sections
+    .map(({ label, lines }) => ({ label, text: lines.join("\n").trim() }))
+    .filter((section, index) => index > 0 || section.text);
+}
+
+// The lyrics string for section rows: `[label]\n<text>` (an untagged row is its bare text), a blank
+// line between sections, empty sections dropped — the YuE1 editor's shape (`yueLyricsForSubmit`).
+export function yue2LyricsText(sections) {
+  return (Array.isArray(sections) ? sections : [])
+    .map((section) => ({ label: String(section?.label ?? "").trim(), text: String(section?.text ?? "").trim() }))
+    .filter((section) => section.text)
+    .map((section) => (section.label ? `[${section.label}]\n${section.text}` : section.text))
+    .join("\n\n");
+}
+
+// Style tags: the style stays free text (the guide's "short phrase or sentence"); a suggested tag
+// toggles one comma-separated item of it, matched case-insensitively.
+function styleItems(style) {
+  return String(style ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function yue2StyleTagSet(style) {
+  return new Set(styleItems(style).map((item) => item.toLowerCase()));
+}
+
+export function toggleYue2StyleTag(style, tag) {
+  const items = styleItems(style);
+  const kept = items.filter((item) => item.toLowerCase() !== tag.toLowerCase());
+  return (kept.length === items.length ? [...items, tag] : kept).join(", ");
+}
+
 // The lab's settings, as persisted (server-side, through the studio-settings seam). Every value is
 // the control's own raw value; "" means "not set — the model default applies".
 export function defaultYue2Settings() {
