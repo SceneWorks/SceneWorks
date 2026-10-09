@@ -3801,4 +3801,63 @@ mod base_model_gating_tests {
             error.detail
         );
     }
+
+    /// A version-explicit 2.1 stamp cannot override tensor depth that only the 60-block 2512
+    /// architecture owns. This stays a positive 2512 detection so automatic import and manual
+    /// family assignment both reject the contradiction instead of accepting a claimed 2.1 family.
+    #[test]
+    fn qwen_2_1_stamp_with_2512_depth_is_refused_before_manual_assignment() {
+        let models = shipped_qwen_models();
+        for key in [
+            "transformer.transformer_blocks.32.attn.to_q.lora_A.weight",
+            "lora_unet_transformer_blocks_59_attn_to_out_0.lora_down.weight",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                r#"{"ss_base_model_version":"qwen_image_2_1"}"#,
+                &[key.to_owned()],
+            );
+            let lora = json!({
+                "id": "contradictory_depth",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": ["qwen-image-2-1"],
+            });
+
+            let header = validate_lora_safetensors_header("contradictory_depth", &lora)
+                .unwrap()
+                .expect("header is readable");
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+
+            let assignment = resolve_lora_family_assignment(
+                "contradictory_depth",
+                &lora,
+                "qwen-image-2-1",
+                &models,
+            )
+            .expect_err("detected 2512 depth cannot be manually assigned to 2.1");
+            assert_eq!(assignment.code, Some("lora_family_detected"));
+            assert!(
+                assignment.detail.contains("qwen-image"),
+                "{}",
+                assignment.detail
+            );
+
+            let load = validate_lora_specs_for_model(
+                &models,
+                &[],
+                "qwen_image_2_1",
+                &[lora],
+                true,
+                "LoRA",
+            )
+            .expect_err("a 2512-depth adapter must not load on Qwen-Image 2.1");
+            assert!(
+                load.detail.contains("qwen-image") && load.detail.contains("qwen-image-2-1"),
+                "{}",
+                load.detail
+            );
+        }
+    }
 }

@@ -1209,9 +1209,11 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
 ///
 /// * metadata `qwen-image` + any 2.1-only key ([`is_qwen_image_2_1_key`]) → `qwen-image-2-1`. Those
 ///   modules do not exist on the 2512 DiT, so the label cannot be right.
-/// * metadata `qwen-image-2-1` + any 2512-only key ([`is_qwen_image_2512_key`]) → `None`. Keys and
-///   label contradict each other and neither is trusted over the other; the user picks, which is
-///   strictly better than a confident cross-version label (a wrong family hard-rejects the import).
+/// * metadata `qwen-image-2-1` + 2512-only evidence ([`keys_evidence_qwen_image_2512`]) →
+///   `qwen-image`. A 2.1 model has exactly 32 blocks, so either a 2512-only module or block 32..59
+///   makes the 2.1 label impossible. Keeping this a detected family is load-bearing: the API must
+///   reject the contradictory file instead of treating it as unresolved and allowing a manual 2.1
+///   assignment to bypass inspection.
 ///
 /// * the bare generic `qwen_image` stamp (no version in it) + no 2512-only evidence (no 2512-only
 ///   module, no block index `>= 32`) → `None`. The stamp cannot tell the two apart and neither can
@@ -1235,7 +1237,7 @@ fn reconcile_qwen_metadata_with_keys(stamp: MetadataFamily, keys: &[String]) -> 
         // unresolved and the user declares the family, instead of a confident 2512 label that
         // hard-rejects a genuine 2.1 adapter from its own model.
         "qwen-image" if generic_qwen_label && !keys_evidence_qwen_image_2512(keys) => None,
-        "qwen-image-2-1" if keys.iter().any(|key| is_qwen_image_2512_key(key)) => None,
+        "qwen-image-2-1" if keys_evidence_qwen_image_2512(keys) => Some("qwen-image".to_owned()),
         _ => Some(family),
     }
 }
@@ -4249,7 +4251,8 @@ mod tests {
                 "{key:?}"
             );
         }
-        // A 2.1 label on 2512-only modules: contradiction → unresolved, never a confident label.
+        // A 2.1 label on 2512-only modules is contradicted by the architecture and resolves to
+        // 2512. The API needs that positive detection to refuse a manual 2.1 assignment.
         for key in [
             "transformer_blocks.0.attn.add_q_proj.lora_A.weight",
             "transformer_blocks.0.img_mlp.net.0.proj.lora_A.weight",
@@ -4262,10 +4265,35 @@ mod tests {
                     "qwen_image_2_1",
                     &["transformer_blocks.0.attn.to_q.lora_A.weight", key]
                 )),
-                None,
+                Some("qwen-image".to_owned()),
                 "{key:?}"
             );
         }
+        // Depth is equally decisive: 2.1 has blocks 0..31, while 2512 owns 32..59. Cover both
+        // diffusers dotted and kohya/LyCORIS flattened spellings, including sparse exports.
+        for key in [
+            "transformer.transformer_blocks.32.attn.to_q.lora_A.weight",
+            "transformer_blocks.59.attn.to_out.0.lora_A.weight",
+            "lora_unet_transformer_blocks_32_attn_to_q.lora_down.weight",
+            "lycoris_transformer_blocks_59_attn_to_out_0.lokr_w1",
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    "qwen_image_2_1",
+                    &["transformer_blocks.0.attn.to_q.lora_A.weight", key]
+                )),
+                Some("qwen-image".to_owned()),
+                "explicit 2.1 stamp must lose to impossible depth in {key:?}"
+            );
+        }
+        assert_eq!(
+            detect_lora_family(&header(
+                "qwen_image_2_1",
+                &["transformer.transformer_blocks.31.attn.to_q.lora_A.weight"]
+            )),
+            Some("qwen-image-2-1".to_owned()),
+            "the last valid 2.1 block must keep the explicit 2.1 family"
+        );
         // No architecture-exclusive key (attention only): a version-explicit label stands; the
         // generic `qwen_image` stamp does not (see the sc-24163 test below).
         let attention = ["transformer_blocks.0.attn.to_q.lora_A.weight"];
