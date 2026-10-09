@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { inflateSync } from "node:zlib";
-import { assertCompleted, assertDenseSnapshotLayout, assertHardwareIdentity, assertImmutableRevisions, assertPins, assertPlan, assertResume, assertRunnerIdentity, assertWorker, BASE_REVISION, LICENSE_URL, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
+import { assertCompleted, assertDenseSnapshotLayout, assertHardwareIdentity, assertImmutableRevisions, assertOwnedCacheEnv, assertPins, assertPlan, assertResume, assertRunnerIdentity, assertWorker, BASE_REVISION, LICENSE_URL, buildChildEnv, runLifecycle, syntheticPng, trainingBody } from "./qwen-image-2-1-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), hash = "b".repeat(64), workerId = "owned-qwen-worker";
 const read = (file) => readFileSync(new URL(`../${file}`, import.meta.url), "utf8");
@@ -249,4 +249,21 @@ test("system profiler failure records its concrete query error before build", as
     assert.ok(path.resolve(temporary).startsWith(path.resolve(tmpdir()) + path.sep));
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test("owned child environment replaces a poisoned ambient Xet cache", () => {
+  const owned = { state: "/runner/temp/state", weights: "/Users/MTrefry/sceneworks-rw-weights", hub: "/Users/MTrefry/sceneworks-rw-weights/hub", xet: "/Users/MTrefry/sceneworks-rw-weights/xet", workerId: "worker", url: "http://127.0.0.1:17921" };
+  const child = buildChildEnv({ HOME: "/Users/MTrefry", HF_XET_CACHE: "/Volumes/shared-hf/xet", HF_HUB_CACHE: "/Volumes/shared-hf/hub", SCENEWORKS_DATA_DIR: "/poisoned" }, owned);
+  assertOwnedCacheEnv(child, owned);
+  assert.equal(child.HF_XET_CACHE, owned.xet);
+  assert.equal(child.HF_HUB_CACHE, owned.hub);
+  assert.equal(child.HF_HOME, owned.weights);
+  assert.equal(child.SCENEWORKS_DATA_DIR, path.join(owned.state, "data"));
+});
+
+test("removing the explicit Xet assignment kills the owned-cache guard", () => {
+  const owned = { state: "/runner/temp/state", weights: "/Users/MTrefry/sceneworks-rw-weights", hub: "/Users/MTrefry/sceneworks-rw-weights/hub", xet: "/Users/MTrefry/sceneworks-rw-weights/xet", workerId: "worker", url: "http://127.0.0.1:17921" };
+  const mutant = buildChildEnv({ HF_XET_CACHE: "/Volumes/shared-hf/xet" }, owned);
+  delete mutant.HF_XET_CACHE;
+  assert.throws(() => assertOwnedCacheEnv(mutant, owned), /task-owned Hugging Face hub and Xet caches/);
 });

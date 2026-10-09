@@ -16,6 +16,17 @@ export const BASE_REVISION = "790c92633540aa0cb11d9abf19eb46d861714758";
 export const LICENSE_URL = `https://huggingface.co/Qwen/Qwen-Image-2.1/blob/${BASE_REVISION}/LICENSE`;
 const SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
+
+export function buildChildEnv(env, { state, weights, hub, xet, workerId, url }) {
+  const childEnv = { ...env };
+  for (const key of Object.keys(childEnv)) if (key.startsWith("SCENEWORKS_") || /TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key) || ["HF_ENDPOINT", "HF_XET_CACHE", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "CARGO_TARGET_DIR"].includes(key)) delete childEnv[key];
+  Object.assign(childEnv, { SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "17921", SCENEWORKS_API_URL: url, SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_POLL_SECONDS: "1", SCENEWORKS_HEARTBEAT_SECONDS: "2", SCENEWORKS_BACKEND_MLX_ENABLED: "true", SCENEWORKS_BACKEND_CANDLE_ENABLED: "false", SCENEWORKS_MLX_REQUIRED: "1", SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce", HF_HOME: weights, HF_HUB_CACHE: hub, HUGGINGFACE_HUB_CACHE: hub, HF_XET_CACHE: xet, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" });
+  return childEnv;
+}
+
+export function assertOwnedCacheEnv(childEnv, { weights, hub, xet }) {
+  requireFact(childEnv.HF_HOME === weights && childEnv.HF_HUB_CACHE === hub && childEnv.HUGGINGFACE_HUB_CACHE === hub && childEnv.HF_XET_CACHE === xet, "owned API and worker must use the task-owned Hugging Face hub and Xet caches");
+}
 const requireFact = (value, message) => assert.ok(value, message);
 
 export function assertRunnerIdentity(target, runnerName) {
@@ -213,8 +224,8 @@ export async function runLifecycle(env = process.env, runtime = {}) {
     const manifests = await Promise.all(["Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"].map((file) => readFile(path.join(root, file), "utf8")));
     assertPins(manifests, await readFile(path.join(root, "Cargo.lock"), "utf8"), env.QWEN_APP_INFERENCE_SHA);
     if (runtime.preflightOnly) { receipt.status = "passed"; return receipt; }
-    const home = await realpath(env.HOME), weights = path.join(home, "sceneworks-rw-weights"), hub = path.join(weights, "hub"), repo = path.join(hub, "models--Qwen--Qwen-Image-2.1"), snapshots = path.join(repo, "snapshots"), base = path.join(snapshots, BASE_REVISION);
-    for (const directory of [weights, hub, repo, snapshots, base]) await physicalDirectory(directory);
+    const home = await realpath(env.HOME), weights = path.join(home, "sceneworks-rw-weights"), hub = path.join(weights, "hub"), xet = path.join(weights, "xet"), repo = path.join(hub, "models--Qwen--Qwen-Image-2.1"), snapshots = path.join(repo, "snapshots"), base = path.join(snapshots, BASE_REVISION);
+    for (const directory of [weights, hub, xet, repo, snapshots, base]) await physicalDirectory(directory);
     requireFact((await readdir(snapshots)).every((name) => name === BASE_REVISION), "dense repo must contain only the frozen snapshot");
     await assertDenseSnapshotLayout(base);
     receipt.snapshot_files = await snapshotInventory(base, hub);
@@ -222,10 +233,9 @@ export async function runLifecycle(env = process.env, runtime = {}) {
     const workerId = `qwen-app-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`, url = "http://127.0.0.1:17921";
     // Exclusive bind fails if another app already owns this port; never attach to it.
     const socket = createServer(); await new Promise((resolve, reject) => { socket.once("error", reject); socket.listen({ host: "127.0.0.1", port: 17921, exclusive: true }, resolve); }); await new Promise((resolve) => socket.close(resolve));
-    const childEnv = { ...env };
-    for (const key of Object.keys(childEnv)) if (key.startsWith("SCENEWORKS_") || /TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key) || ["HF_ENDPOINT", "TRANSFORMERS_CACHE", "HF_DATASETS_CACHE", "CARGO_TARGET_DIR"].includes(key)) delete childEnv[key];
-    Object.assign(childEnv, { SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: "17921", SCENEWORKS_API_URL: url, SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_WORKER_CHILD: "1", SCENEWORKS_GPU_ID: "mlx", SCENEWORKS_POLL_SECONDS: "1", SCENEWORKS_HEARTBEAT_SECONDS: "2", SCENEWORKS_BACKEND_MLX_ENABLED: "true", SCENEWORKS_BACKEND_CANDLE_ENABLED: "false", SCENEWORKS_MLX_REQUIRED: "1", SCENEWORKS_MLX_UNSUPPORTED_MODE: "enforce", HF_HOME: weights, HF_HUB_CACHE: hub, HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" });
-    Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId });
+    const childEnv = buildChildEnv(env, { state, weights, hub, xet, workerId, url });
+    assertOwnedCacheEnv(childEnv, { weights, hub, xet });
+    Object.assign(receipt.identity, { base_revision: BASE_REVISION, base_snapshot: base, worker_id: workerId, hf_home: weights, hf_hub_cache: hub, hf_xet_cache: xet });
     await save();
     await checkedCommand("cargo", ["build", "--release", "--locked", "-p", "sceneworks-rust-api"], { ...env, CARGO_TARGET_DIR: path.join(root, "target") }, "build");
     requireFact(await git("status", "--porcelain") === "", "build changed the pinned checkout");
@@ -241,7 +251,7 @@ export async function runLifecycle(env = process.env, runtime = {}) {
     // Capture the production volume binding in the isolated config, then read it back.
     const relocation = await must("POST", "/api/v1/model-library/relocate", { path: weights }), libraryProbe = await must("GET", "/api/v1/model-library");
     requireFact(relocation.adopted === true && relocation.hfHome === weights && relocation.libraryRoot === hub && libraryProbe.available === true && libraryProbe.probeStatus === "available" && libraryProbe.configuredLibraryPath === hub && libraryProbe.expectedLibrary?.configuredPath === hub, "product must bind exactly the persistent task-owned model library");
-    receipt.model_library = { hf_home: weights, library_root: hub, adopted: relocation.adopted, probe_status: libraryProbe.probeStatus };
+    receipt.model_library = { hf_home: weights, library_root: hub, xet_cache: childEnv.HF_XET_CACHE, adopted: relocation.adopted, probe_status: libraryProbe.probeStatus };
     const project = await must("POST", "/api/v1/projects", { name: "sc-24163 public synthetic MLX lifecycle" }); receipt.project_id = project.id;
     const upload = async (name, data) => { await writeFile(path.join(evidence, name), data); const form = new FormData(); form.append("file", new Blob([data], { type: "image/png" }), name); return (await must("POST", `/api/v1/projects/${project.id}/assets`, form)).id; };
     const source = await upload("source.png", syntheticPng()), target = await upload("target.png", syntheticPng(true));
