@@ -29,11 +29,12 @@
 //   node scripts/epic-2123-ab.mjs --phase baseline-timing --confirm-gpu
 //   node scripts/epic-2123-ab.mjs --phase train --model zimage --confirm-gpu
 //   node scripts/epic-2123-ab.mjs --phase samples --model zimage --confirm-gpu [--checkpoints]
-//   node scripts/epic-2123-ab.mjs --phase eval --model zimage --confirm-gpu
+//   node scripts/epic-2123-ab.mjs --phase eval --model zimage --confirm-gpu [--face-r50 <path> | --no-face-r50]
 //   node scripts/epic-2123-ab.mjs --phase report
 //   node scripts/epic-2123-ab.mjs --phase status
 
 import { spawn, spawnSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -88,6 +89,10 @@ function parseArgs(argv) {
     hfHome: null,
     evalRelease: false,
     allowDebugBuild: false,
+    // The independent identity network (w600k_r50, sc-2124). null = the default path under the
+    // root if that file exists, else the metric is skipped; `--no-face-r50` forces it off.
+    faceR50: null,
+    noFaceR50: false,
   };
   const need = (i, flag) => {
     if (i + 1 >= argv.length) throw new Error(`${flag} needs a value`);
@@ -128,6 +133,8 @@ function parseArgs(argv) {
       case "--poll-seconds": opts.pollSeconds = Number(need(i, a)); i += 1; break;
       case "--hf-home": opts.hfHome = path.resolve(need(i, a)); i += 1; break;
       case "--eval-release": opts.evalRelease = true; break;
+      case "--face-r50": opts.faceR50 = path.resolve(need(i, a)); i += 1; break;
+      case "--no-face-r50": opts.noFaceR50 = true; break;
       case "--allow-debug-build": opts.allowDebugBuild = true; break;
       case "--stable-rank": opts.stableRank = need(i, a); i += 1; break;
       case "-h":
@@ -155,6 +162,9 @@ function parseArgs(argv) {
   }
   if (opts.lr !== null && !(opts.lr > 0)) throw new Error("--lr must be a positive number");
   if (!(opts.loraWeight > 0)) throw new Error("--lora-weight must be a positive number");
+  if (opts.faceR50 && opts.noFaceR50) throw new Error("--face-r50 and --no-face-r50 are mutually exclusive");
+  // Resolved against the real root here, before a dry run re-roots opts.root.
+  opts.faceR50Default = path.join(opts.root, "models", "w600k_r50", "arcface_w600k_r50.safetensors");
   return opts;
 }
 
@@ -1343,6 +1353,12 @@ async function phaseEval(opts, modelKey) {
   const faceBundle = hfSnapshot("SceneWorks/instantid-mlx");
   if (!faceBundle) throw new Error("SceneWorks/instantid-mlx is not in the HF cache (install instantid_face_stack)");
   const env = { ...process.env, ...prebuiltMlxEnv(opts.evalRelease ? "Release" : "Debug") };
+  // The independent identity metric: set FACE_R50_WEIGHTS only for a resolved file, and clear any
+  // inherited value otherwise, so whether the metric is scored is decided here alone.
+  const faceR50 = resolveFaceR50(opts);
+  delete env.FACE_R50_WEIGHTS;
+  if (faceR50) env.FACE_R50_WEIGHTS = faceR50.path;
+  log(faceR50 ? `w600k_r50 identity metric: ${faceR50.path} (sha256 ${faceR50.sha256.slice(0, 12)})` : "w600k_r50 identity metric: off");
   STATE.eval[modelKey] ??= {};
   STATE.evalKeys[modelKey] ??= {};
   const evalDir = path.join(opts.root, "eval", modelKey);
@@ -1363,7 +1379,8 @@ async function phaseEval(opts, modelKey) {
     }
     // Re-score when the row's samples were re-rendered from different inputs, or the prompt grid
     // changed, since its last score.
-    const evalKey = `${rec.renderKey}|${[...wanted].sort().join(",")}`;
+    // Re-score too when the independent identity network is switched on, off or swapped.
+    const evalKey = `${rec.renderKey}|${[...wanted].sort().join(",")}${faceR50 ? `|r50=${faceR50.sha256}` : ""}`;
     const scoredCurrent = STATE.evalKeys[modelKey][rowId] === evalKey;
     if (STATE.eval[modelKey][rowId] && scoredCurrent && fs.existsSync(out) && !opts.force) {
       log(`  ${rowId}: already scored`);
@@ -1392,6 +1409,19 @@ async function phaseEval(opts, modelKey) {
     STATE.evalKeys[modelKey][rowId] = evalKey;
     saveState();
   }
+}
+
+// The w600k_r50 weights for the independent identity metric, or null when it is off. An explicit
+// `--face-r50` path must exist; the default path is used only when present.
+function resolveFaceR50(opts) {
+  if (opts.noFaceR50) return null;
+  const file = opts.faceR50 ?? opts.faceR50Default;
+  if (!fs.existsSync(file)) {
+    if (opts.faceR50) throw new Error(`--face-r50 ${file} does not exist`);
+    return null;
+  }
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  return { path: file, sha256 };
 }
 
 function hfHubDir() {
@@ -1643,6 +1673,8 @@ function stableRankSelfTest(dir) {
 
 const METRICS = [
   ["identity_cosine_mean", "ArcFace likeness", 3],
+  // Independent face-recognition network (w600k_r50) that no training technique optimises.
+  ["identity_r50_cosine_mean", "R50 likeness", 3],
   ["prompt_adherence_mean", "CLIP adherence", 3],
   ["same_prompt_spread", "Same-prompt spread", 3],
   ["output_spread", "Output spread", 3],
@@ -1715,9 +1747,12 @@ function phaseReport(opts) {
     if (!Object.keys(training).length && !Object.keys(samples).length) continue;
     const rows = reportRows(modelKey, opts);
     const evalFor = (id) => {
-      // A score is shown only for the samples it was computed on.
+      // A score is shown only for the samples it was computed on. The eval key is the render key
+      // followed by `|`-separated grid (and identity-network) parts.
       const key = STATE.evalKeys?.[modelKey]?.[id];
-      return key === undefined || key === samples[id]?.renderKey ? STATE.eval[modelKey]?.[id] ?? null : null;
+      const renderKey = samples[id]?.renderKey;
+      const current = key === undefined || (renderKey !== undefined && (key === renderKey || key.startsWith(`${renderKey}|`)));
+      return current ? STATE.eval[modelKey]?.[id] ?? null : null;
     };
     const table = rows.map((row) => {
       const t = row.id === "base" ? null : training[row.parent ?? row.id] ?? null;

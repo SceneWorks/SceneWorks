@@ -81,6 +81,18 @@ A job left running by an interrupted run is canceled before its row is resubmitt
    whose samples were re-rendered since its last score is re-scored. That test is `#[ignore]` and loads
    CLIP ViT-L/14 and SCRFD/ArcFace on MLX. It reports ArcFace likeness, CLIP prompt adherence,
    same-prompt and overall spread, sharpness, and face-detect rate.
+
+   ArcFace likeness uses glintr100, the network the identity-loss technique optimises, so
+   identity rows can game it. When the converted InsightFace buffalo_l `w600k_r50` weights
+   exist, eval also reports **R50 likeness** (`identity_r50_cosine_mean`/`_std`). It uses the
+   same SCRFD detection and alignment, embeds with w600k_r50 (iresnet50, WebFace600K), and takes
+   the cosine to a w600k_r50 reference centroid. No training technique uses that network. The
+   default path is `<root>/models/w600k_r50/arcface_w600k_r50.safetensors`; the harness passes
+   it as `FACE_R50_WEIGHTS`. Switching the metric on, off or to other weights re-scores every
+   row. To produce the file, download `w600k_r50.onnx` (sha256 `4c06341c…619e43`, e.g.
+   `public-data/insightface` `models/buffalo_l/w600k_r50.onnx` on Hugging Face) and convert it
+   with inference's `crates/media/mlx-gen/tools/convert_glintr100.py`
+   (`ARCFACE_ONNX=<onnx> ARCFACE_LAYERS=3,4,14,3`).
 7. **`report`** (CPU). Writes `results.json`, a markdown report and one sample grid PNG per model.
    Each model section opens with a header table giving every trained row's caption mode, preset
    id, resolution (or bucket ladder), steps, rank/alpha, learning rate and training-adapter
@@ -268,6 +280,8 @@ Useful flags:
   render. `--gen-size` sets a square width and height; the default is 1024 for both models.
 - `--port` sets the API port (default 8766).
 - `--eval-release` builds the eval test in release.
+- `--face-r50 <path>` scores R50 likeness with that w600k_r50 safetensors (it must exist);
+  `--no-face-r50` turns the metric off even when the default file exists.
 
 ## Caveats
 
