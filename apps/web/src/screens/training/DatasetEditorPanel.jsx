@@ -376,11 +376,6 @@ export function DatasetEditorPanel({
                 className={showEditPairs ? "secondary-action strong" : "secondary-action"}
                 disabled={hasEditPairs}
                 onClick={() => setEditPairsMode?.(!editPairsMode)}
-                title={
-                  hasEditPairs
-                    ? "This dataset has edit pairs — remove every reference to turn edit pairs off"
-                    : `Train an edit adapter: each image is an edit target, its caption the instruction, with 1-${referenceCap} ordered reference images`
-                }
                 type="button"
               >
                 <Icon.Sliders size={14} />
@@ -572,7 +567,7 @@ export function DatasetEditorPanel({
                       onChange={(event) => updateCaption(asset.id, event.target.value)}
                       placeholder={
                         showEditPairs
-                          ? "Edit instruction — e.g. put the hat from image 2 on the person in image 1"
+                          ? "Edit instruction"
                           : "Describe this image…"
                       }
                       rows={3}
@@ -639,7 +634,7 @@ export function DatasetEditorPanel({
           confirmLabel="Add"
           eyebrow="Reference"
           fileAccept="image/*"
-          fileHint="Drag reference images here, or"
+          fileHint="Drop files, or"
           importing={importingAssets}
           // Never offer the item's own image or a reference it already has.
           memberIds={[referencePickerFor.selectionId, ...(referenceDraftById[referencePickerFor.selectionId] ?? [])]}

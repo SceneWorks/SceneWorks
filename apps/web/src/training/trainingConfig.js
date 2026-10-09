@@ -464,7 +464,7 @@ export function configValidation(
   // an unacknowledged real run as the backstop. field is null: the fix is the checkbox in the notice.
   const license = trainingTargetLicense(selectedTarget);
   if (license && !licenseAcknowledged) {
-    issues.push(issue.error(null, `Accept the ${license.name} notice to start training.`));
+    issues.push(issue.error(null, `Accept ${license.name} to train.`));
   }
   if (!activeDataset?.id) {
     issues.push(issue.requirement("dataset", "Select a saved dataset"));

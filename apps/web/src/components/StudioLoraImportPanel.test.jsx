@@ -97,14 +97,14 @@ describe("StudioLoraImportPanel", () => {
     const fileInput = container.querySelector('input[type="file"]');
     await act(async () => setFileInput(fileInput, [new File(["x"], "mystery.safetensors")]));
     await click(button(container, "Queue import"));
-    expect(container.textContent).toContain("Family unresolved");
+    expect(container.textContent).toContain("Choose family");
     expect(container.textContent).toContain("Choose family");
 
     await click(button(container, "URL"));
     await act(async () => setInput(labelled(container, "Source URL"), "https://example.test/mystery.safetensors"));
     await click(button(container, "Queue import"));
     expect(container.textContent).toContain("LoRA import queued for mystery.");
-    expect(container.textContent).not.toContain("Family unresolved");
+    expect(container.textContent).not.toContain("Choose family under LoRAs");
   });
 
   it("cannot submit an empty source, or a project import with no project open", async () => {

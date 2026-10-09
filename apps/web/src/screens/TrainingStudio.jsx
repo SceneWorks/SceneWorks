@@ -1466,15 +1466,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
   function setItemReferences(selectionId, referenceIds) {
     setDatasetMessage("");
-    setReferenceDraftById((current) => {
-      const next = { ...current };
-      if (referenceIds?.length) {
-        next[selectionId] = [...referenceIds];
-      } else {
-        delete next[selectionId];
-      }
-      return next;
-    });
+    setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
   }
 
   // Append picked references to an item, never past the reference cap — the picker cannot hand
@@ -1487,7 +1479,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setItemReferences(selectionId, next);
     if (dropped > 0) {
       setDatasetMessage(
-        `Only ${datasetReferenceLimit} reference images fit one edit item; ${dropped} not added.`,
+        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
       );
     }
   }

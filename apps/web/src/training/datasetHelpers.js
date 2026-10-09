@@ -300,11 +300,9 @@ export function datasetReferenceAssets(dataset, projectId, catalogAssets = []) {
 
 // Whether two ordered reference drafts differ for any of the given selection ids.
 export function referenceDraftsDiffer(current = {}, saved = {}, selectionIds = []) {
-  return selectionIds.some((id) => {
-    const left = current[id] ?? [];
-    const right = saved[id] ?? [];
-    return left.length !== right.length || left.some((value, index) => value !== right[index]);
-  });
+  return selectionIds.some(
+    (id) => JSON.stringify(current[id] ?? []) !== JSON.stringify(saved[id] ?? []),
+  );
 }
 
 // How many ordered references one edit-pair item may carry for a training target, or 0 when the
@@ -355,49 +353,56 @@ export function editPairDatasetIssues(dataset, target, cap) {
   if (!target || !items.length) return [];
   const label = target.ui?.label ?? target.name ?? target.id;
   const name = (item) => item?.displayName || item?.id || "an item";
-  const count = (item) => (Array.isArray(item?.references) ? item.references.length : 0);
+  const count = (item) => item?.references?.length ?? 0;
   if (!cap) {
     const editItem = items.find((item) => count(item) > 0);
     return editItem
       ? [
           issue.error(
             "target",
-            `This dataset has edit pairs (reference images on “${name(editItem)}”), but ${label} trains on captioned images only. Pick an edit training target.`,
+            `${label} rejects references on “${name(editItem)}”.`,
           ),
         ]
       : [];
   }
   const issues = [];
-  const bare = items.find((item) => count(item) === 0);
+  let bare;
+  let over;
+  let both;
+  let blank;
+  for (const item of items) {
+    const references = count(item);
+    if (!references) bare ??= item;
+    if (references > cap) over ??= item;
+    if (references && item?.controlImagePath) both ??= item;
+    if (references && !captionText(item)) blank ??= item;
+  }
   if (bare) {
     issues.push(
       issue.error(
         "dataset",
-        `${label} trains on edit pairs: every item needs at least one reference image (“${name(bare)}” has none).`,
+        `“${name(bare)}” needs a ${label} reference.`,
       ),
     );
   }
-  const over = items.find((item) => count(item) > cap);
   if (over) {
     issues.push(
       issue.error(
         "dataset",
-        `“${name(over)}” has ${count(over)} reference images; ${label} accepts at most ${cap} per edit.`,
+        `“${name(over)}” exceeds ${label}'s limit of ${cap}.`,
       ),
     );
   }
-  const both = items.find((item) => count(item) > 0 && item?.controlImagePath);
   if (both) {
     issues.push(
       issue.error(
         "dataset",
-        `“${name(both)}” has both reference images (an edit pair) and a control image (a control pair); an item is one or the other.`,
+        `“${name(both)}” mixes reference and control inputs.`,
       ),
     );
   }
-  const blank = items.find((item) => count(item) > 0 && !captionText(item));
   if (blank) {
-    issues.push(issue.error("dataset", `“${name(blank)}” needs an edit instruction (its caption).`));
+    issues.push(issue.error("dataset", `“${name(blank)}” needs instructions.`));
   }
   return issues;
 }

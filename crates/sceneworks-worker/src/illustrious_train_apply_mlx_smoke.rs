@@ -74,6 +74,7 @@ fn write_synthetic_dataset(dir: &Path, n: u32, res: u32, trigger: &str) -> Vec<T
                 image_path: path,
                 caption: caption.clone(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }

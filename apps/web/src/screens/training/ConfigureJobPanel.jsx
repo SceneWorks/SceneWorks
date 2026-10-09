@@ -396,10 +396,6 @@ export function ConfigureJobPanel({
 
           {targetLicense ? (
             <div className="model-gated-notice training-license-notice" role="note" aria-label="Base model licence">
-              <p className="inline-warning">
-                <strong>{targetLicense.name}.</strong> Read and accept this licence before training: an
-                adapter trained from {selectedTarget.ui?.label ?? selectedTarget.name} inherits its restrictions.
-              </p>
               {targetLicense.notice ? <p className="model-license-terms">{targetLicense.notice}</p> : null}
               {safeExternalUrl(targetLicense.url) ? (
                 <div className="model-gated-actions">
@@ -414,7 +410,7 @@ export function ConfigureJobPanel({
                   onChange={(event) => onLicenseAcknowledgedChange?.(event.target.checked)}
                   type="checkbox"
                 />
-                <span>I have read and accept this licence for the adapters I train.</span>
+                <span>Accept {targetLicense.name}; adapters inherit it.</span>
               </label>
             </div>
           ) : null}

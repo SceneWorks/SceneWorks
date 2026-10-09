@@ -590,7 +590,7 @@ describe("ConfigureJobPanel base-licence notice", () => {
       notice.compareDocumentPosition(submitButton()) & Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(submitButton().disabled).toBe(true);
-    expect(chips()).toContain("Accept the Qwen RESEARCH LICENSE AGREEMENT notice to start training.");
+    expect(chips()).toContain("Accept Qwen RESEARCH LICENSE AGREEMENT to train.");
 
     const checkbox = notice.querySelector("input[type=checkbox]");
     expect(checkbox.checked).toBe(false);

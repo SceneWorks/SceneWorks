@@ -5680,6 +5680,7 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {

@@ -1880,7 +1880,7 @@ export function ModelManagerScreen() {
           <small>{[lora.scope, unusable ? "unrecognized format" : lora.family ?? "compatible", ...declared].filter(Boolean).join(" | ")}</small>
         </span>
         {unusable ? (
-          <span className="status-badge warning" title="This file's architecture family couldn't be identified, so it can't be applied to any model until you choose its family.">
+          <span className="status-badge warning">
             unusable
           </span>
         ) : (
@@ -1934,7 +1934,7 @@ export function ModelManagerScreen() {
                   onChange={(event) => setLoraEditDraft((current) => ({ ...current, family: event.target.value }))}
                   value={loraEditDraft.family}
                 >
-                  <option value="">Choose the model family this LoRA was trained for</option>
+                  <option value="">Choose family</option>
                   {families.map((family) => (
                     <option key={family} value={family}>
                       {family}

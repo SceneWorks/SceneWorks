@@ -3,6 +3,14 @@ import React from "react";
 import { AssetThumbnail } from "../../components/assetMedia.jsx";
 import { moveReference, referenceOrdinalLabel } from "../../imageReferenceLimits.js";
 
+function referenceButton(label, disabled, onClick, glyph) {
+  return (
+    <button aria-label={label} className="training-edit-ref-move" disabled={disabled} onClick={onClick} type="button">
+      {glyph}
+    </button>
+  );
+}
+
 // The ordered reference rail of one instruction-edit training item (sc-24161, epic 24107).
 //
 // An edit pair is the item image (the edit TARGET the adapter learns to produce) + its caption
@@ -21,10 +29,10 @@ export function EditReferenceRail({
 }) {
   const atCap = referenceIds.length >= cap;
   return (
-    <div className="training-edit-refs" aria-label={`Reference images for ${itemName}`}>
+    <div className="training-edit-refs" aria-label={`References for ${itemName}`}>
       <div className="training-edit-refs-head">
         <span className="training-edit-refs-title">References</span>
-        <span className="training-edit-refs-count" title="Ordered: the instruction names them by position">
+        <span className="training-edit-refs-count">
           {referenceIds.length} / {cap}
         </span>
       </div>
@@ -37,47 +45,23 @@ export function EditReferenceRail({
               <span className="training-edit-ref-thumb">
                 {asset ? <AssetThumbnail asset={asset} /> : <span aria-hidden="true">?</span>}
               </span>
-              <span className="training-edit-ref-ordinal" title="References are sent in this order">
+              <span className="training-edit-ref-ordinal">
                 {ordinal}
               </span>
               <span className="training-edit-ref-actions">
-                <button
-                  aria-label={`Move ${ordinal} of ${itemName} earlier`}
-                  className="training-edit-ref-move"
-                  disabled={index === 0}
-                  onClick={() => onChange(moveReference(referenceIds, index, index - 1))}
-                  type="button"
-                >
-                  ‹
-                </button>
-                <button
-                  aria-label={`Move ${ordinal} of ${itemName} later`}
-                  className="training-edit-ref-move"
-                  disabled={index === referenceIds.length - 1}
-                  onClick={() => onChange(moveReference(referenceIds, index, index + 1))}
-                  type="button"
-                >
-                  ›
-                </button>
-                <button
-                  aria-label={`Remove ${ordinal} of ${itemName}`}
-                  className="training-edit-ref-move"
-                  onClick={() => onChange(referenceIds.filter((other) => other !== id))}
-                  type="button"
-                >
-                  ✕
-                </button>
+                {referenceButton(`Move ${ordinal} earlier`, index === 0, () => onChange(moveReference(referenceIds, index, index - 1)), "‹")}
+                {referenceButton(`Move ${ordinal} later`, index === referenceIds.length - 1, () => onChange(moveReference(referenceIds, index, index + 1)), "›")}
+                {referenceButton(`Remove ${ordinal}`, false, () => onChange(referenceIds.filter((other) => other !== id)), "✕")}
               </span>
             </li>
           );
         })}
       </ol>
       <button
-        aria-label={`Add reference images to ${itemName}`}
+        aria-label={`Add references to ${itemName}`}
         className="secondary-action"
         disabled={atCap}
         onClick={onAdd}
-        title={atCap ? `At most ${cap} reference images per edit` : "Add the image(s) this edit starts from"}
         type="button"
       >
         + Reference

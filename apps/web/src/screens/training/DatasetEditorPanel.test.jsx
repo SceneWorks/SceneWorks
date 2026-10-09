@@ -253,15 +253,15 @@ describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
     );
     expect(ordinals()).toEqual(["Image 1", "Image 2", "Image 3"]);
     expect(container.textContent).toContain("3 / 10");
-    expect(button("Move Image 1 of target.png earlier").disabled).toBe(true);
+    expect(button("Move Image 1 earlier").disabled).toBe(true);
 
-    await act(async () => button("Move Image 1 of target.png later").click());
+    await act(async () => button("Move Image 1 later").click());
     expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-b", "ref-a", "ref-c"]);
 
-    await act(async () => button("Move Image 3 of target.png earlier").click());
+    await act(async () => button("Move Image 3 earlier").click());
     expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-b", "ref-c", "ref-a"]);
 
-    await act(async () => button("Remove Image 1 of target.png").click());
+    await act(async () => button("Remove Image 1").click());
     expect(onReferencesChange).toHaveBeenLastCalledWith("target", ["ref-c", "ref-a"]);
     expect(ordinals()).toEqual(["Image 1", "Image 2"]);
     // The caption is the instruction once the item is an edit pair.
@@ -274,11 +274,11 @@ describe("DatasetEditorPanel edit-pair references (sc-24161)", () => {
     await act(async () =>
       root.render(<Harness initial={{ target: ["ref-a", "ref-b", "ref-c"] }} referenceCap={3} />),
     );
-    expect(button("Add reference images to target.png").disabled).toBe(true);
+    expect(button("Add references to target.png").disabled).toBe(true);
     expect(container.textContent).toContain("3 / 3");
 
     await act(async () => root.render(<Harness initial={{ target: ["ref-a"] }} key="one-reference" referenceCap={3} />));
-    expect(button("Add reference images to target.png").disabled).toBe(false);
+    expect(button("Add references to target.png").disabled).toBe(false);
   });
 
   it("hides every edit-pair affordance when no trainable target takes references", async () => {

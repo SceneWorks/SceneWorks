@@ -932,7 +932,7 @@ describe("SceneWorks app shell", () => {
     });
 
     await act(async () => {
-      document.body.querySelector('[aria-label="Add reference images to target.png"]').click();
+      document.body.querySelector('[aria-label="Add references to target.png"]').click();
     });
     const referenceInput = document.body.querySelector(".dataset-add-dropzone input[type=file]");
     await act(async () => {

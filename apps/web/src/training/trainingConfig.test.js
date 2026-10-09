@@ -44,7 +44,7 @@ describe("trainingTargetLicense", () => {
 
   it("holds Start until a licence-bound target's notice is accepted", () => {
     const licensed = { id: "q", ui: { license: "Qwen RESEARCH LICENSE AGREEMENT", requiresLicenseAcknowledgment: true } };
-    const message = "Accept the Qwen RESEARCH LICENSE AGREEMENT notice to start training.";
+    const message = "Accept Qwen RESEARCH LICENSE AGREEMENT to train.";
     const messages = (ack) =>
       configValidation({}, { selectedTarget: licensed, licenseAcknowledged: ack }).map((entry) => entry.message);
     expect(messages(false)).toContain(message);
@@ -651,8 +651,8 @@ describe("configValidation edit-pair dataset shape", () => {
     );
 
   it("refuses more references than the model's cap and accepts up to it", () => {
-    expect(messages(3).some((message) => message.includes("at most 2"))).toBe(true);
+    expect(messages(3).some((message) => message.includes("limit of 2"))).toBe(true);
     expect(messages(2).some((message) => message.includes("reference"))).toBe(false);
-    expect(messages(0).some((message) => message.includes("at least one reference image"))).toBe(true);
+    expect(messages(0).some((message) => message.includes("needs a"))).toBe(true);
   });
 });

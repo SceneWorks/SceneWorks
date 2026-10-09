@@ -264,10 +264,10 @@ describe("edit-pair dataset helpers (sc-24161)", () => {
     const messages = (dataset, target, cap) => editPairDatasetIssues(dataset, target, cap).map((entry) => entry.message);
 
     expect(messages({ items: [item("a", 2), item("b", 10)] }, editTarget, 10)).toEqual([]);
-    expect(messages({ items: [item("a", 2)] }, t2iTarget, 0)[0]).toContain("captioned images only");
-    expect(messages({ items: [item("a", 1), item("b", 0)] }, editTarget, 10)[0]).toContain("at least one reference image");
-    expect(messages({ items: [item("a", 11)] }, editTarget, 10)[0]).toContain("at most 10");
-    expect(messages({ items: [item("a", 1, "  ")] }, editTarget, 10)[0]).toContain("edit instruction");
+    expect(messages({ items: [item("a", 2)] }, t2iTarget, 0)[0]).toContain("rejects references");
+    expect(messages({ items: [item("a", 1), item("b", 0)] }, editTarget, 10)[0]).toContain("needs a");
+    expect(messages({ items: [item("a", 11)] }, editTarget, 10)[0]).toContain("limit of 10");
+    expect(messages({ items: [item("a", 1, "  ")] }, editTarget, 10)[0]).toContain("instructions");
     expect(messages({ items: [item("a", 0)] }, t2iTarget, 0)).toEqual([]);
   });
 });
@@ -286,6 +286,6 @@ describe("edit-pair control conflict (sc-24161 review)", () => {
       (entry) => entry.message,
     );
     expect(messages).toHaveLength(1);
-    expect(messages[0]).toContain("control image");
+    expect(messages[0]).toContain("control inputs");
   });
 });

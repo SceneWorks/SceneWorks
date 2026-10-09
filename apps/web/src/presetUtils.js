@@ -189,7 +189,7 @@ export function loraImportFamilyNote({ chosenFamily, resolvedFamily, isFileImpor
   if (chosenFamily) return "";
   if (resolvedFamily) return ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`;
   if (!isFileImport) return "";
-  return " Family unresolved: the file's architecture couldn't be identified, so no model will offer it yet. Choose its family under Model Manager → LoRAs (Choose family), or re-import with a family selected.";
+  return " Choose family under LoRAs.";
 }
 
 export function normalizeFamilies(values) {
