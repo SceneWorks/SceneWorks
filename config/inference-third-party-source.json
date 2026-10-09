@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference revision df4606c2 (verified inference main): 745 provenance candidates and 104 production-Rust crate prefixes. This pin includes epic sc-24432 global decode speedups (speculative engine and proposers, cross-turn prefix cache, MLX pipelined decode, DeltaNet Metal, Candle CUDA graphs and decode_attention, MoE device routing), epic sc-20669 fused compressed KV cache, the YuE2 repairs, and epic sc-24107 Qwen-Image 2.1 LoRA/LoKr edit training and safety fixes. The vendored candle-core contains upstream 1e6aa85e plus the CUDA-graph parameter cache; the mlx-rs fork pin remains 48ff5e78. Existing compliance classifications and open items remain advisory under sc-19751. Generated source inventories and digests bind this exact source; historical capability captures and measurements retain their original provenance. This source audit makes no measurement currency claim.",
-  "inferenceRevision": "df4606c23ee6b5cf980158799bfb01327e9e19df",
-  "auditDigest": "6c6468f9a5ea27982b11b063a8c75ac250c26ba56d2b2f804402c95a94707c27",
+  "_comment": "Audit inventory rescanned at inference revision 3757c7e1 (verified inference main): 754 provenance candidates and 108 production-Rust crate prefixes. This pin includes epic sc-24432 global decode speedups (speculative engine and proposers, cross-turn prefix cache, MLX pipelined decode, DeltaNet Metal, Candle CUDA graphs and decode_attention, MoE device routing), epic sc-20669 fused compressed KV cache, the YuE2 repairs, and epic sc-24107 Qwen-Image 2.1 LoRA/LoKr edit training and safety fixes. The vendored candle-core contains upstream 1e6aa85e plus the CUDA-graph parameter cache; the mlx-rs fork pin remains 48ff5e78. Existing compliance classifications and open items remain advisory under sc-19751. Generated source inventories and digests bind this exact source; historical capability captures and measurements retain their original provenance. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "3757c7e19ce0477b52ca4ba8caaf9178c5b8f2f7",
+  "auditDigest": "9529c4577320d40ee42392c19a4239c845443c264107c129aa48899252735743",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "df4606c23ee6b5cf980158799bfb01327e9e19df",
+    "revision": "3757c7e19ce0477b52ca4ba8caaf9178c5b8f2f7",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 745,
-    "populationSha256": "3caef0b9550b1f0121295eb50e6a3e7c577b77844f3aa176e2c45e2fb1bcbaa7"
+    "matchedFiles": 754,
+    "populationSha256": "5621a94500a1594a3087676efe750196b3833bb4901a4194a015afbe7675dcea"
   },
   "portedSourceAreas": [
     {
@@ -943,10 +943,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "df4606c23ee6b5cf980158799bfb01327e9e19df",
+    "revision": "3757c7e19ce0477b52ca4ba8caaf9178c5b8f2f7",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 104,
-    "cratePopulationSha256": "5e4ba59e61486beb49342068681d613d19d3d47eb3332360d0f2503540230f21"
+    "cratePrefixes": 108,
+    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
   },
   "crateDispositions": [
     {
