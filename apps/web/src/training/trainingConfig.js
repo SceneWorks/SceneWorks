@@ -250,14 +250,14 @@ function targetResolutions(target) {
 // The resolution-bucket ladder for a base resolution (sc-2124) — the rule the Z-Image character
 // presets ship (`z_image_character_bucket_ladder` in sceneworks-core) and the A/B harness measured
 // (`scripts/epic-2123-ab.mjs` `bucketLadder`): every resolution the target trains at up to and
-// including `resolution`, smallest first, with 2^k repeats (4:2:1 for three edges, 2:1 for two);
-// climbing from `resolution` when fewer than two edges sit at or below it. Draft rows; null when the
-// target allows fewer than two resolutions.
+// including `resolution`, smallest first, with 2^k repeats (4:2:1 for three edges, 2:1 for two).
+// Unlike the harness it never climbs above `resolution`: a bucket larger than the resolution the user
+// picked would train (and need memory) above it. Draft rows; null (buckets off) when fewer than two
+// allowed resolutions sit at or below `resolution`.
 export function bucketLadderDraft(target, resolution) {
   const base = numberFromDraft(resolution);
   const allowed = [...new Set(targetResolutions(target))];
-  let edges = allowed.filter((value) => base === null || value <= base);
-  if (edges.length < 2) edges = allowed.filter((value) => base === null || value >= base);
+  const edges = allowed.filter((value) => base === null || value <= base);
   if (edges.length < 2) return null;
   return edges.map((value, index) => ({ resolution: String(value), repeats: String(2 ** (edges.length - 1 - index)) }));
 }
@@ -277,12 +277,13 @@ function sameBucketRows(left, right) {
 
 // The draft after the user sets Resolution to `resolution` (sc-2124): a bucket list that is still
 // the ladder of the previous resolution (as a Z-Image character preset seeds it) follows the new
-// resolution through `bucketLadderDraft`; buckets the user edited — or off — are left alone.
+// resolution through `bucketLadderDraft` (off when no ladder fits at or below it, so no bucket
+// exceeds the chosen resolution); buckets the user edited — or off — are left alone.
 export function draftWithResolution(configDraft, target, resolution) {
   const next = { ...configDraft, resolution };
   const previousLadder = bucketLadderDraft(target, configDraft?.resolution);
   if (previousLadder && sameBucketRows(configDraft?.resolutionBuckets, previousLadder)) {
-    next.resolutionBuckets = bucketLadderDraft(target, resolution) ?? configDraft.resolutionBuckets;
+    next.resolutionBuckets = bucketLadderDraft(target, resolution);
   }
   return next;
 }

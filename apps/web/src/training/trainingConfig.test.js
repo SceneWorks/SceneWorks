@@ -1744,8 +1744,8 @@ describe("bucket ladder follows Resolution (sc-2124)", () => {
   it("computes the harness ladder", () => {
     expect(bucketLadderDraft(zimage, "1024")).toEqual(rows([[512, 4], [768, 2], [1024, 1]]));
     expect(bucketLadderDraft(zimage, "768")).toEqual(rows([[512, 2], [768, 1]]));
-    // Fewer than two edges at or below the base: climb from it.
-    expect(bucketLadderDraft(zimage, "512")).toEqual(rows([[512, 4], [768, 2], [1024, 1]]));
+    // Fewer than two edges at or below the base: off — never a bucket above the chosen resolution.
+    expect(bucketLadderDraft(zimage, "512")).toBe(null);
     expect(bucketLadderDraft({ limits: { resolutions: [1024] } }, "1024")).toBe(null);
   });
 
@@ -1755,6 +1755,8 @@ describe("bucket ladder follows Resolution (sc-2124)", () => {
       resolution: "1024",
       resolutionBuckets: rows([[512, 4], [768, 2], [1024, 1]]),
     });
+    // Lowered below the smallest ladder: buckets turn off rather than keep a 768/1024 bucket.
+    expect(draftWithResolution(lowVram, zimage, "512").resolutionBuckets).toBe(null);
     const edited = { resolution: "768", resolutionBuckets: rows([[512, 3], [768, 1]]) };
     expect(draftWithResolution(edited, zimage, "1024").resolutionBuckets).toEqual(edited.resolutionBuckets);
     expect(draftWithResolution({ resolution: "768", resolutionBuckets: null }, zimage, "1024").resolutionBuckets).toBe(
