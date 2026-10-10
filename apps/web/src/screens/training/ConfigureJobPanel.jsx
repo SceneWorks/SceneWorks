@@ -221,6 +221,9 @@ export function ConfigureJobPanel({
   // The de-distill training adapter this run's selected version needs but doesn't have (sc-25213);
   // folded into `configValidity` by the screen, rendered here as the download offer.
   missingTrainingAdapterModels = [],
+  // The SAM3 Person Segmenter, when this run must generate missing subject masks and it is not
+  // installed (sc-2124); folded into `configValidity` by the screen, rendered here as the offer.
+  missingSubjectSegmenterModels = [],
   controlModelDownloadJobs = [],
   onDownloadModel,
   onOpenModels,
@@ -822,6 +825,17 @@ export function ConfigureJobPanel({
             downloadJobs={controlModelDownloadJobs}
             feature="Z-Image-Turbo LoRA training"
             models={missingTrainingAdapterModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
+          <RequiredModelsNotice
+            detail="Images without a subject mask get one generated with it when training starts; the run would be refused without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature="Subject-masked training"
+            models={missingSubjectSegmenterModels}
             onCancelJob={onCancelJob}
             onDownload={onDownloadModel}
             onOpenModels={onOpenModels}

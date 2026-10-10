@@ -63,7 +63,7 @@ struct SubjectMaskItem {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[derive(Clone, Debug)]
-struct SubjectMaskRecord {
+pub(crate) struct SubjectMaskRecord {
     content_hash: String,
     /// Single-channel PNG at the image's dimensions.
     png: Vec<u8>,
@@ -232,8 +232,7 @@ pub(crate) async fn run_dataset_subject_mask_job(
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<usize>(64);
     let blocking = spawn_subject_mask_segmentation(
-        model_path,
-        tokenizer_path,
+        sam3_segment_batch(model_path, tokenizer_path, cancel.clone()),
         items,
         cancel.clone(),
         tx,
@@ -290,16 +289,58 @@ pub(crate) async fn run_dataset_subject_mask_job(
     Ok(())
 }
 
-/// Segment `items` with ONE SAM3 session on a blocking thread (the model is built + quantized once,
-/// not per image), reporting each finished item's index on `tx`. Shared by the
-/// `dataset_subject_mask` job and the training run's subject-mask prepass (sc-2124).
+/// The segmenter [`generate_subject_masks`] drives: `segment_batch(count, load, finish)`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) type SegmentBatch = Box<
+    dyn FnOnce(usize, ImageLoader, MaskFinisher) -> WorkerResult<Vec<SubjectMaskRecord>> + Send,
+>;
+
+/// The production segmenter: ONE SAM3 session over the batch (the model is built + quantized once,
+/// not per image) — MLX on macOS, candle off-Mac — honoring `cancel` between images.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn sam3_segment_batch(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    cancel: CancelFlag,
+) -> SegmentBatch {
+    Box::new(move |count, load, finish| {
+        #[cfg(target_os = "macos")]
+        let masks = crate::person_segment_sam3::segment_persons_per_image(
+            model_path,
+            tokenizer_path,
+            count,
+            load,
+            finish,
+            Some(cancel),
+        );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let masks = crate::person_segment_sam3_candle::segment_persons_per_image(
+            model_path,
+            tokenizer_path,
+            count,
+            load,
+            finish,
+            Some(cancel),
+        );
+        masks
+    })
+}
+
+/// Run `segment_batch` over `items` on a blocking thread, reporting each finished item's index on
+/// `tx`. Shared by the `dataset_subject_mask` job and the training run's subject-mask prepass
+/// (sc-2124).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn spawn_subject_mask_segmentation(
-    model_path: PathBuf,
-    tokenizer_path: PathBuf,
+    segment_batch: SegmentBatch,
     items: Vec<SubjectMaskItem>,
     cancel: CancelFlag,
     tx: tokio::sync::mpsc::Sender<usize>,
@@ -310,28 +351,7 @@ fn spawn_subject_mask_segmentation(
             "dataset_subject_mask_start",
             json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
         );
-        let engine_cancel = cancel.clone();
-        let records = generate_subject_masks(items, cancel, tx, |count, load, finish| {
-            #[cfg(target_os = "macos")]
-            let masks = crate::person_segment_sam3::segment_persons_per_image(
-                model_path,
-                tokenizer_path,
-                count,
-                load,
-                finish,
-                Some(engine_cancel),
-            );
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let masks = crate::person_segment_sam3_candle::segment_persons_per_image(
-                model_path,
-                tokenizer_path,
-                count,
-                load,
-                finish,
-                Some(engine_cancel),
-            );
-            masks
-        })?;
+        let records = generate_subject_masks(items, cancel, tx, segment_batch)?;
         emit_event(
             "dataset_subject_mask_complete",
             json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
@@ -347,24 +367,74 @@ fn spawn_subject_mask_segmentation(
 ))]
 const PREPASS_CANCEL_MESSAGE: &str = "LoRA training canceled while generating subject masks.";
 
-/// The training run's subject-mask prepass (sc-2124). When the API found dataset images without a
-/// subject mask on a run that reads them (subject-masked loss — on by default for the Z-Image
-/// character presets — or the subject-restricted normal loss), it stamped their work list on the
-/// job as `subjectMaskPrepass` (the `dataset_subject_mask` item shape). This segments exactly those
-/// images with SAM3, stores the masks through the same `/subject-masks` sidecar the mask job uses,
-/// and returns; the training preflight that runs next re-reads the dataset's masks and still refuses
-/// an image left without a usable one (e.g. SAM3 found no person in it), naming it. No prepass key
-/// (every image already masked, or no masked technique) is a no-op. Progress stays inside the
-/// preparing band, below the 0.05 the training run starts from.
+/// Whether the dataset at `dataset_root` currently stores a mask (of any source — generated, an
+/// all-black "no subject" one, or a user upload) for the image with `content_hash`: an index record
+/// AND its file, like the coverage report.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(crate) async fn run_training_subject_mask_prepass(
+fn dataset_has_mask(
+    dataset_root: &Path,
+    index: &sceneworks_core::training_subject_masks::DatasetSubjectMasks,
+    content_hash: &str,
+) -> bool {
+    index.masks.contains_key(content_hash)
+        && dataset_root
+            .join(sceneworks_core::training_subject_masks::subject_mask_relative_path(content_hash))
+            .is_file()
+}
+
+/// The dataset's current mask index (absent ⇒ empty), read from its app-managed root.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn current_mask_index(
+    settings: &Settings,
+    dataset_root: &str,
+) -> WorkerResult<(
+    PathBuf,
+    sceneworks_core::training_subject_masks::DatasetSubjectMasks,
+)> {
+    let root = normalize_app_managed_path(settings, dataset_root, "Dataset root")?;
+    let index = sceneworks_core::training_subject_masks::read_subject_mask_index_at(&root)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "Could not read the dataset's subject mask index: {error}"
+            ))
+        })?;
+    Ok((root, index))
+}
+
+/// The training run's subject-mask prepass (sc-2124). When the API found dataset images without a
+/// subject mask on a run that reads them (subject-masked loss — on by default for the Z-Image
+/// character presets — or the subject-restricted normal loss), it stamped their work list on the
+/// job as `subjectMaskPrepass` (the `dataset_subject_mask` item shape). That list is only a
+/// submit-time snapshot, so this re-reads the dataset's masks NOW and segments only the images that
+/// still have none — an image masked since (generated, or uploaded by the user) is never
+/// re-segmented — and before storing re-reads once more, dropping any image that gained a mask while
+/// SAM3 ran, so an existing (above all an uploaded) mask is never overwritten. The masks go through
+/// the same `/subject-masks` sidecar the mask job uses; the strict training preflight that runs next
+/// still refuses an image left without a usable one (e.g. SAM3 found no person in it), naming it.
+/// No prepass key, or nothing left to segment, is a no-op. Progress stays in `0.01..=0.04`, below
+/// the 0.05 the training run posts next.
+///
+/// `make_segmenter` builds the segmenter only once there is something to segment (production:
+/// [`installed_sam3_segmenter`]); injected so the prepass is testable without weights.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_subject_mask_prepass_with<M>(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
-) -> WorkerResult<()> {
+    make_segmenter: M,
+) -> WorkerResult<()>
+where
+    M: FnOnce(CancelFlag) -> WorkerResult<SegmentBatch>,
+{
     let Some(prepass) = job.payload.get("subjectMaskPrepass") else {
         return Ok(());
     };
@@ -373,12 +443,17 @@ pub(crate) async fn run_training_subject_mask_prepass(
             "Training payload.subjectMaskPrepass must be an object.".to_owned(),
         )
     })?;
-    let items = subject_mask_items(settings, prepass)?;
+    let project_id = required_payload_string(prepass, "projectId")?;
+    let dataset_id = required_payload_string(prepass, "datasetId")?;
+    let dataset_root = required_payload_string(prepass, "datasetRoot")?;
+    let (root, index) = current_mask_index(settings, dataset_root)?;
+    let items: Vec<SubjectMaskItem> = subject_mask_items(settings, prepass)?
+        .into_iter()
+        .filter(|item| !dataset_has_mask(&root, &index, &item.content_hash))
+        .collect();
     if items.is_empty() {
         return Ok(());
     }
-    let project_id = required_payload_string(prepass, "projectId")?;
-    let dataset_id = required_payload_string(prepass, "datasetId")?;
     let backend = backend_label(&settings.gpu_id);
     let total = items.len();
     update_job(
@@ -395,18 +470,11 @@ pub(crate) async fn run_training_subject_mask_prepass(
     )
     .await?;
     check_cancel(api, &job.id, PREPASS_CANCEL_MESSAGE).await?;
-    let (model_path, tokenizer_path) =
-        crate::person_segment_sam3_common::require_segmenter_weights(settings)?;
     let cancel = CancelFlag::new();
+    let segment_batch = make_segmenter(cancel.clone())?;
     let (tx, rx) = tokio::sync::mpsc::channel::<usize>(64);
-    let blocking = spawn_subject_mask_segmentation(
-        model_path,
-        tokenizer_path,
-        items,
-        cancel.clone(),
-        tx,
-        job.id.clone(),
-    );
+    let blocking =
+        spawn_subject_mask_segmentation(segment_batch, items, cancel.clone(), tx, job.id.clone());
     let records = stream_batched_records(
         api,
         settings,
@@ -430,6 +498,15 @@ pub(crate) async fn run_training_subject_mask_prepass(
         },
     )
     .await?;
+    // Never overwrite: an image that gained a mask while SAM3 ran keeps it.
+    let (root, index) = current_mask_index(settings, dataset_root)?;
+    let records: Vec<SubjectMaskRecord> = records
+        .into_iter()
+        .filter(|record| !dataset_has_mask(&root, &index, &record.content_hash))
+        .collect();
+    if records.is_empty() {
+        return Ok(());
+    }
     post_dataset_sidecar(
         api,
         project_id,
@@ -441,6 +518,22 @@ pub(crate) async fn run_training_subject_mask_prepass(
     )
     .await?;
     Ok(())
+}
+
+/// The production `make_segmenter` of [`run_training_subject_mask_prepass_with`]: the installed SAM3
+/// segmenter (resolve-only, sc-17629 — an actionable install error, never a download).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) fn installed_sam3_segmenter(
+    settings: &Settings,
+) -> impl FnOnce(CancelFlag) -> WorkerResult<SegmentBatch> + Send + '_ {
+    move |cancel| {
+        let (model_path, tokenizer_path) =
+            crate::person_segment_sam3_common::require_segmenter_weights(settings)?;
+        Ok(sam3_segment_batch(model_path, tokenizer_path, cancel))
+    }
 }
 
 #[cfg(any(

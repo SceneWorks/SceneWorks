@@ -3,6 +3,9 @@ import { describe, expect, it } from "vitest";
 import { summarize } from "../validation/issues.js";
 import {
   configDraftFromTarget,
+  bucketLadderDraft,
+  draftWithResolution,
+  subjectMaskConsumerField,
   configReseedDecision,
   configValidation,
   ltx25WorkflowPlan,
@@ -1243,6 +1246,50 @@ describe("subject-masked loss (sc-24828)", () => {
     expect(issuesFor({ ...whole, subjectMaskLoss: false, subjectMaskSubjectWeight: "0" })).toEqual([]);
   });
 
+  // sc-2124 review (E6): a run that must generate masks while the SAM3 Person Segmenter is not
+  // installed is refused by the API, so it blocks Start here with the API's message on the same
+  // field; with nothing to generate, a missing segmenter does not matter. Mutation: ignore
+  // `subjectSegmenterMissing` ⇒ red.
+  it("blocks ungenerated masks while the SAM3 segmenter is missing, with the API's message", () => {
+    const ungenerated = report([[true, false], [false, false]]);
+    const issues = configValidation(whole, {
+      activeDataset: dataset,
+      selectedTarget: maskTarget,
+      subjectMaskReport: ungenerated,
+      subjectSegmenterMissing: true,
+    }).filter((entry) => entry.field === "subjectMaskLoss");
+    expect(issues.map((entry) => entry.message)).toEqual([
+      'Subject-masked loss needs a subject mask on every dataset image; 1 of 2 have none, and the SAM3 Person Segmenter that generates them is not installed. Install "SAM3 Person Segmenter" from the Models screen, or generate or upload the masks in Data Sets.',
+    ]);
+    expect(
+      configValidation(whole, {
+        activeDataset: dataset,
+        selectedTarget: maskTarget,
+        subjectMaskReport: report([[true, false]]),
+        subjectSegmenterMissing: true,
+      }).filter((entry) => entry.field === "subjectMaskLoss"),
+    ).toEqual([]);
+  });
+
+  // sc-2124 review (E6): with subject-masked loss AND the restricted normal loss on, the API names
+  // only `subjectMaskLoss` — the UI flags that one field too. Mutation: check coverage per
+  // technique ⇒ two fields flagged ⇒ red.
+  it("reports the mask requirement once, on subjectMaskLoss, when both mask techniques are on", () => {
+    const both = { ...whole, normalWeight: "0.1", normalRestrictToSubject: true };
+    const target = { ...maskTarget, limits: { ...maskTarget.limits, supportsNormalLoss: true } };
+    expect(subjectMaskConsumerField(both, target)).toBe("subjectMaskLoss");
+    expect(subjectMaskConsumerField({ ...both, subjectMaskLoss: false }, target)).toBe("normalRestrictToSubject");
+    expect(subjectMaskConsumerField({ ...both, subjectMaskLoss: false, normalRestrictToSubject: false }, target)).toBe(
+      null,
+    );
+    const flagged = configValidation(both, {
+      activeDataset: dataset,
+      selectedTarget: target,
+      subjectMaskReport: report([[true, true]]),
+    }).filter((entry) => /found no person/.test(entry.message));
+    expect(flagged.map((entry) => entry.field)).toEqual(["subjectMaskLoss"]);
+  });
+
   // sc-2124: an image with no mask yet does not block (the worker generates it before training);
   // an empty mask (no subject found) does, and unknown coverage is left to the API.
   it("blocks on an empty mask, not on an ungenerated one or unknown coverage", () => {
@@ -1388,7 +1435,7 @@ describe("body losses (sc-24832)", () => {
       );
     const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
     expect(on(partial).map((entry) => entry.message)).toEqual([
-      "Subject mask generation found no person in 1 of 3 images — upload masks for them in Data Sets, remove them, or turn this off",
+      "The subject-restricted normal loss needs a subject on every dataset image, but subject mask generation found no person in 1 of 3 images. Upload a subject mask for those images in Data Sets, remove them from the dataset, or turn off The subject-restricted normal loss.",
     ]);
     expect(on({ items: [{ hasMask: true, empty: false }] })).toEqual([]);
     expect(on({ items: [{ hasMask: true, empty: false }, { hasMask: false }] })).toEqual([]);
@@ -1683,5 +1730,35 @@ describe("auxModelsInstallNote", () => {
       "Needs a Depth Anything V2 model installed. The prediction is decoded through the base model's own VAE.",
     );
     expect(auxModelsInstallNote({ limits: {} }, ["ViTPose+ Base"])).toBe("Needs ViTPose+ Base installed.");
+  });
+});
+
+// sc-2124 review: a Z-Image character preset seeds the bucket ladder of its resolution; when the
+// user changes Resolution, a still-unedited ladder follows it by the same rule as the harness
+// `bucketLadder` / core `z_image_character_bucket_ladder`, and edited (or off) buckets stay put.
+// Mutation: keep the old ladder on a resolution change ⇒ red.
+describe("bucket ladder follows Resolution (sc-2124)", () => {
+  const zimage = { id: "z_image_turbo_lora", limits: { resolutions: [512, 768, 1024] } };
+  const rows = (pairs) => pairs.map(([resolution, repeats]) => ({ resolution: String(resolution), repeats: String(repeats) }));
+
+  it("computes the harness ladder", () => {
+    expect(bucketLadderDraft(zimage, "1024")).toEqual(rows([[512, 4], [768, 2], [1024, 1]]));
+    expect(bucketLadderDraft(zimage, "768")).toEqual(rows([[512, 2], [768, 1]]));
+    // Fewer than two edges at or below the base: climb from it.
+    expect(bucketLadderDraft(zimage, "512")).toEqual(rows([[512, 4], [768, 2], [1024, 1]]));
+    expect(bucketLadderDraft({ limits: { resolutions: [1024] } }, "1024")).toBe(null);
+  });
+
+  it("moves an unedited ladder with the resolution and leaves edited or absent buckets alone", () => {
+    const lowVram = { resolution: "768", resolutionBuckets: rows([[512, 2], [768, 1]]) };
+    expect(draftWithResolution(lowVram, zimage, "1024")).toEqual({
+      resolution: "1024",
+      resolutionBuckets: rows([[512, 4], [768, 2], [1024, 1]]),
+    });
+    const edited = { resolution: "768", resolutionBuckets: rows([[512, 3], [768, 1]]) };
+    expect(draftWithResolution(edited, zimage, "1024").resolutionBuckets).toEqual(edited.resolutionBuckets);
+    expect(draftWithResolution({ resolution: "768", resolutionBuckets: null }, zimage, "1024").resolutionBuckets).toBe(
+      null,
+    );
   });
 });

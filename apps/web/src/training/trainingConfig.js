@@ -201,21 +201,90 @@ export function subjectMaskCoverage(report) {
   };
 }
 
-// The Start-blocking issue for a technique that reads the subject masks, or "" when none: an image
-// whose stored mask is empty (no subject found) cannot be fixed by generating again, so it blocks;
-// an image with no mask yet does not — its mask is generated when training starts (sc-2124).
-export function subjectMaskCoverageIssue(report) {
-  const coverage = subjectMaskCoverage(report);
-  if (!coverage?.empty) {
-    return "";
+// Catalog id of the SAM3 person segmenter that generates missing subject masks before training
+// (the API's `SUBJECT_SEGMENTER_MODEL_ID`).
+export const SUBJECT_SEGMENTER_MODEL_ID = "sam3_person_segment";
+
+// The field a run's subject-mask requirement is reported on — mirrors the API's
+// `subject_mask_consumer`: `subjectMaskLoss` when subject-masked loss is on (even if the restricted
+// normal loss is on too), else `normalRestrictToSubject` when the subject-restricted normal loss is
+// on, else null (the run reads no mask).
+export function subjectMaskConsumerField(configDraft, selectedTarget) {
+  if (configDraft?.subjectMaskLoss && targetSupportsSubjectMaskLoss(selectedTarget)) {
+    return "subjectMaskLoss";
   }
-  return `Subject mask generation found no person in ${coverage.empty} of ${coverage.total} images — upload masks for them in Data Sets, remove them, or turn this off`;
+  const normalOn = bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft ?? {}, loss));
+  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.baseModel !== "ltx_2_5") {
+    return "normalRestrictToSubject";
+  }
+  return null;
+}
+
+function subjectMaskTechniqueName(field) {
+  return field === "subjectMaskLoss" ? "Subject-masked loss" : "The subject-restricted normal loss";
+}
+
+// The Start-blocking issue for the technique on `field` that reads the subject masks, or "" when
+// none — the API's submit-time refusals, worded the same:
+// - an image whose stored mask is empty (no subject found) cannot be fixed by generating again;
+// - images with no mask yet are generated with SAM3 when training starts (sc-2124), so they block
+//   only while the SAM3 Person Segmenter is not installed (`segmenterMissing`).
+export function subjectMaskCoverageIssue(report, field = "subjectMaskLoss", { segmenterMissing = false } = {}) {
+  const coverage = subjectMaskCoverage(report);
+  const technique = subjectMaskTechniqueName(field);
+  if (coverage?.empty) {
+    return `${technique} needs a subject on every dataset image, but subject mask generation found no person in ${coverage.empty} of ${coverage.total} images. Upload a subject mask for those images in Data Sets, remove them from the dataset, or turn off ${technique}.`;
+  }
+  if (coverage?.ungenerated && segmenterMissing) {
+    return `${technique} needs a subject mask on every dataset image; ${coverage.ungenerated} of ${coverage.total} have none, and the SAM3 Person Segmenter that generates them is not installed. Install "SAM3 Person Segmenter" from the Models screen, or generate or upload the masks in Data Sets.`;
+  }
+  return "";
 }
 
 // The target's advertised training resolutions, ascending (empty when it advertises none).
 function targetResolutions(target) {
   const values = target?.limits?.resolutions;
   return Array.isArray(values) ? values.map(Number).filter(Number.isFinite).sort((a, b) => a - b) : [];
+}
+
+// The resolution-bucket ladder for a base resolution (sc-2124) — the rule the Z-Image character
+// presets ship (`z_image_character_bucket_ladder` in sceneworks-core) and the A/B harness measured
+// (`scripts/epic-2123-ab.mjs` `bucketLadder`): every resolution the target trains at up to and
+// including `resolution`, smallest first, with 2^k repeats (4:2:1 for three edges, 2:1 for two);
+// climbing from `resolution` when fewer than two edges sit at or below it. Draft rows; null when the
+// target allows fewer than two resolutions.
+export function bucketLadderDraft(target, resolution) {
+  const base = numberFromDraft(resolution);
+  const allowed = [...new Set(targetResolutions(target))];
+  let edges = allowed.filter((value) => base === null || value <= base);
+  if (edges.length < 2) edges = allowed.filter((value) => base === null || value >= base);
+  if (edges.length < 2) return null;
+  return edges.map((value, index) => ({ resolution: String(value), repeats: String(2 ** (edges.length - 1 - index)) }));
+}
+
+function sameBucketRows(left, right) {
+  return (
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every(
+      (row, index) =>
+        numberFromDraft(row?.resolution) === numberFromDraft(right[index]?.resolution) &&
+        numberFromDraft(row?.repeats) === numberFromDraft(right[index]?.repeats),
+    )
+  );
+}
+
+// The draft after the user sets Resolution to `resolution` (sc-2124): a bucket list that is still
+// the ladder of the previous resolution (as a Z-Image character preset seeds it) follows the new
+// resolution through `bucketLadderDraft`; buckets the user edited — or off — are left alone.
+export function draftWithResolution(configDraft, target, resolution) {
+  const next = { ...configDraft, resolution };
+  const previousLadder = bucketLadderDraft(target, configDraft?.resolution);
+  if (previousLadder && sameBucketRows(configDraft?.resolutionBuckets, previousLadder)) {
+    next.resolutionBuckets = bucketLadderDraft(target, resolution) ?? configDraft.resolutionBuckets;
+  }
+  return next;
 }
 
 // Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
@@ -793,9 +862,12 @@ export function configValidation(
     missingControlModels = [],
     missingTrainingAdapterModels = [],
     subjectMaskReport = null,
+    subjectSegmenterMissing = false,
   } = {},
 ) {
   const issues = [];
+  // The one field the run's subject-mask requirement is reported on (the API's rule).
+  const maskField = subjectMaskConsumerField(configDraft, selectedTarget);
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
   }
@@ -861,12 +933,11 @@ export function configValidation(
     }
   }
   validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
-  for (const [field, message] of auxLossesIssues(configDraft, selectedTarget, subjectMaskReport)) {
+  for (const [field, message] of auxLossesIssues(configDraft, selectedTarget)) {
     issues.push(issue.error(field, message));
   }
-  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6), and every image
-  // needs a non-empty subject mask — the worker refuses the job otherwise, so incomplete coverage
-  // blocks Start here too (only when the report is loaded; unknown coverage is left to the worker).
+  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6); its mask coverage
+  // is checked below with the other mask consumer.
   if (configDraft.subjectMaskLoss && selectedTarget && !targetSupportsSubjectMaskLoss(selectedTarget)) {
     // The toggle is hidden for such a target, so a `true` can only be carried over from another
     // target's draft; it must block Start (the API refuses it too).
@@ -887,9 +958,16 @@ export function configValidation(
         ),
       );
     }
-    const maskIssue = subjectMaskCoverageIssue(subjectMaskReport);
+  }
+  // Every technique that reads the subject masks shares one coverage requirement, reported — like
+  // the API's refusal — once, on the consumer field (subject-masked loss wins over the restricted
+  // normal loss when both are on).
+  if (maskField) {
+    const maskIssue = subjectMaskCoverageIssue(subjectMaskReport, maskField, {
+      segmenterMissing: subjectSegmenterMissing,
+    });
     if (maskIssue) {
-      issues.push(issue.error("subjectMaskLoss", maskIssue));
+      issues.push(issue.error(maskField, maskIssue));
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -1279,7 +1357,7 @@ function auxLossesDraft(advanced) {
 // the value can only arrive from a carried-over draft, and the API refuses it anyway. A refused
 // combination (full fine-tune, no-video LTX-2.5 workflow) names the weight key, like the API: the
 // toggle stays visible on a supporting target, so the user can untick it there.
-function auxLossIssues(configDraft, selectedTarget, spec, subjectMaskReport) {
+function auxLossIssues(configDraft, selectedTarget, spec) {
   const key = (knob) => spec.prefix + knob;
   const issues = [];
   const weight = numberFromDraft(configDraft[key("Weight")]);
@@ -1313,27 +1391,21 @@ function auxLossIssues(configDraft, selectedTarget, spec, subjectMaskReport) {
       issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${spec.everyMax}`]);
     }
   }
-  issues.push(...(spec.after?.(configDraft, selectedTarget, spec.prefix, subjectMaskReport) ?? []));
+  issues.push(...(spec.after?.(configDraft, selectedTarget, spec.prefix) ?? []));
   return issues;
 }
 
 // The body losses' own knobs: the subject-restricted normal loss and the shape loss's cosine gate.
-function bodyLossExtraIssues(configDraft, selectedTarget, prefix, subjectMaskReport) {
+function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
   const issues = [];
   if (prefix === "normal" && configDraft.normalRestrictToSubject) {
     if (selectedTarget?.baseModel === "ltx_2_5") {
       // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
       // The toggle is hidden there, so a carried-over `true` names no input.
       issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
-    } else {
-      // Like subject-masked loss: every image needs a non-empty subject mask. Missing ones are
-      // generated when training starts; an empty one blocks Start (unknown coverage is left to the
-      // API).
-      const maskIssue = subjectMaskCoverageIssue(subjectMaskReport);
-      if (maskIssue) {
-        issues.push(["normalRestrictToSubject", maskIssue]);
-      }
     }
+    // Its subject-mask coverage requirement is checked once in configValidation, on the field the
+    // API names (`subjectMaskConsumerField`).
   }
   if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
     const c = numberFromDraft(configDraft.bodyShapeMinCos);
@@ -1345,10 +1417,10 @@ function bodyLossExtraIssues(configDraft, selectedTarget, prefix, subjectMaskRep
 }
 
 // Field issues for every enabled auxiliary loss (of `family` when given), in spec order.
-function auxLossesIssues(configDraft, selectedTarget, subjectMaskReport = null, family = null) {
+function auxLossesIssues(configDraft, selectedTarget, family = null) {
   return auxLossSpecs
     .filter((spec) => (!family || spec.family === family) && auxLossOn(configDraft, spec.prefix))
-    .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec, subjectMaskReport));
+    .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec));
 }
 
 // The auxiliary-loss keys a job snapshot carries: none for a loss that is off (a default job's
@@ -1373,25 +1445,25 @@ function auxLossesSnapshot(configDraft, family = null) {
 
 // Per-family views of the shared checks (depth anchoring, body, face, latent-perceptual).
 export function depthAnchoringIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, null, "depth");
+  return auxLossesIssues(configDraft, selectedTarget, "depth");
 }
 export function depthAnchoringSnapshot(configDraft) {
   return auxLossesSnapshot(configDraft, "depth");
 }
-export function bodyLossIssues(configDraft, selectedTarget, subjectMaskReport = null) {
-  return auxLossesIssues(configDraft, selectedTarget, subjectMaskReport, "body");
+export function bodyLossIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, "body");
 }
 export function bodyLossSnapshot(configDraft) {
   return auxLossesSnapshot(configDraft, "body");
 }
 export function faceLossIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, null, "face");
+  return auxLossesIssues(configDraft, selectedTarget, "face");
 }
 export function faceLossSnapshot(configDraft) {
   return auxLossesSnapshot(configDraft, "face");
 }
 export function latentPerceptualIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, null, "latent");
+  return auxLossesIssues(configDraft, selectedTarget, "latent");
 }
 export function latentPerceptualSnapshot(configDraft) {
   return auxLossesSnapshot(configDraft, "latent");

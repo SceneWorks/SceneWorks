@@ -2683,6 +2683,49 @@ const TRAINING_COMPONENT_TIER: &str = "bf16";
 /// The adapter is written by the engine into the plan's `output.outputDir`; the API registers it
 /// from the staged manifest entry. Backend-neutral: `load_trainer(engine_id, …)` resolves whichever
 /// backend's trainer is registered under `engine_id`.
+/// A real run's preparation up to its weights-free preflight (sc-2124): first the subject-mask
+/// prepass generates the masks the API found missing (`subjectMaskPrepass`; a no-op without it),
+/// posting progress in `0.01..=0.04`; then "Preparing LoRA training." at 0.05, so progress only
+/// moves forward; then the strict preflight against the masks now stored. `make_segmenter` is the
+/// prepass's segmenter factory ([`crate::subject_mask_jobs::installed_sam3_segmenter`] in
+/// production).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn prepare_training_run<M>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    make_segmenter: M,
+) -> WorkerResult<PreparedTrainingRun>
+where
+    M: FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>,
+{
+    crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+        api,
+        settings,
+        job,
+        make_segmenter,
+    )
+    .await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            "Preparing LoRA training.",
+            None,
+            backend_label(&settings.gpu_id),
+        ),
+    )
+    .await?;
+    preflight_training_run(settings, plan, false)
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2695,24 +2738,14 @@ pub(crate) async fn run_training_execution(
 ) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
+    let prepared_run = prepare_training_run(
         api,
-        &job.id,
-        training_progress(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.05,
-            "Preparing LoRA training.",
-            None,
-            backend,
-        ),
+        settings,
+        job,
+        plan,
+        crate::subject_mask_jobs::installed_sam3_segmenter(settings),
     )
     .await?;
-
-    // sc-2124: generate the subject masks the API found missing (a no-op without
-    // `subjectMaskPrepass`), then preflight strictly against the masks now stored.
-    crate::subject_mask_jobs::run_training_subject_mask_prepass(api, settings, job).await?;
-    let prepared_run = preflight_training_run(settings, plan, false)?;
 
     let weights_dir = match resolve_app_managed_model_dir(
         settings,
@@ -4290,6 +4323,291 @@ mod tests {
             .unwrap()
             .expect("masks resolved for restricted normals");
         assert_eq!(paths.len(), 2);
+    }
+
+    /// What the stub API saw during a training run's subject-mask prepass (sc-2124).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[derive(Clone, Default)]
+    struct PrepassApi {
+        progress: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+        posted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        dataset_root: std::sync::Arc<std::sync::Mutex<PathBuf>>,
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_job_value(payload: Value) -> Value {
+        json!({
+            "id": "train-job", "type": "lora_train", "status": "running",
+            "projectId": "proj", "projectName": null, "payload": payload, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.0, "stage": "queued", "message": "queued", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
+            "createdAt": "2026-10-10T00:00:00Z", "updatedAt": "2026-10-10T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    /// A stub rust-api: progress/heartbeat/job routes, and a `/subject-masks` route that stores
+    /// each POSTed mask the way the store does (PNG at its content-hash path + an index record), so
+    /// the preflight that follows the prepass reads them.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    async fn spawn_prepass_api(dataset_root: PathBuf) -> (String, PrepassApi) {
+        use axum::{
+            extract::{Path as AxumPath, State},
+            response::{IntoResponse, Response},
+            routing::{get, post},
+            Json, Router,
+        };
+        use base64::Engine as _;
+        async fn job_route() -> Response {
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn progress_route(
+            State(state): State<PrepassApi>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            if let Some(progress) = body["progress"].as_f64() {
+                state.progress.lock().unwrap().push(progress);
+            }
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            Json(json!({})).into_response()
+        }
+        async fn masks_route(
+            State(state): State<PrepassApi>,
+            AxumPath((_project, _dataset)): AxumPath<(String, String)>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            use sceneworks_core::training_subject_masks::{
+                subject_mask_relative_path, SubjectMaskRecord, SubjectMaskSource,
+                SUBJECT_MASK_INDEX_NAME,
+            };
+            let root = state.dataset_root.lock().unwrap().clone();
+            let mut index = read_subject_mask_index_at(&root).unwrap();
+            let items = body["items"].as_array().unwrap();
+            for item in items {
+                let hash = item["contentHash"].as_str().unwrap().to_owned();
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(item["maskPng"].as_str().unwrap())
+                    .unwrap();
+                std::fs::write(root.join(subject_mask_relative_path(&hash)), png).unwrap();
+                index.masks.insert(
+                    hash.clone(),
+                    SubjectMaskRecord {
+                        source: SubjectMaskSource::Auto,
+                        empty: false,
+                        width: 8,
+                        height: 8,
+                        updated_at: "2026-10-10T00:00:00Z".to_owned(),
+                        revision: String::new(),
+                    },
+                );
+                state.posted.lock().unwrap().push(hash);
+            }
+            std::fs::write(
+                root.join(SUBJECT_MASK_INDEX_NAME),
+                serde_json::to_vec(&index).unwrap(),
+            )
+            .unwrap();
+            Json(json!({ "stored": items.len() })).into_response()
+        }
+        let state = PrepassApi::default();
+        *state.dataset_root.lock().unwrap() = dataset_root;
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .route(
+                "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+                post(masks_route),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), state)
+    }
+
+    /// A stub segmenter: a full-white mask per image, counting the images it was asked to segment.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn white_mask_segmenter(
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>
+    {
+        move |_cancel| {
+            Ok(Box::new(move |count, mut load, mut finish| {
+                seen.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+                (0..count)
+                    .map(|index| {
+                        let image = load(index)?;
+                        let (w, h) = image.dimensions();
+                        finish(index, &image, vec![vec![255u8; (w * h) as usize]])
+                    })
+                    .collect()
+            }))
+        }
+    }
+
+    /// The `subjectMaskPrepass` the API stamps for `images` (every image, as at submit time).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_payload(data_dir: &Path, images: &[String]) -> Value {
+        let root = data_dir.join("datasets").join("ds-1");
+        json!({ "subjectMaskPrepass": {
+            "projectId": "proj",
+            "datasetId": "ds-1",
+            "datasetRoot": root.display().to_string(),
+            "items": images.iter().enumerate().map(|(i, image)| json!({
+                "itemId": format!("item_{i}"),
+                "imagePath": image,
+                "contentHash": sceneworks_core::media_convert::file_content_hash(Path::new(image)).unwrap(),
+            })).collect::<Vec<_>>(),
+        } })
+    }
+
+    /// sc-2124 review: a real run's preparation generates the subject masks the API found missing
+    /// BEFORE its strict preflight — a masked run on a dataset with unmasked images is prepared with
+    /// a mask path on every item — and progress only moves forward (prepass in 0.01..=0.04, then
+    /// 0.05). Mutation: skip the prepass in `prepare_training_run` ⇒ the preflight refuses ⇒ red;
+    /// post 0.05 first ⇒ the progress check ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn real_run_preparation_generates_missing_masks_before_the_strict_preflight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 2, &[], &[]);
+        let (url, api_state) = spawn_prepass_api(data_dir.join("datasets").join("ds-1")).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prepared = prepare_training_run(
+            &api,
+            &settings,
+            &job,
+            &masked_plan(&data_dir, &images, true),
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("masks generated, then the strict preflight passes");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(prepared.request.items.iter().all(|item| item
+            .subject_mask_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())));
+        let progress = api_state.progress.lock().unwrap().clone();
+        assert!(
+            progress.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress went backwards: {progress:?}"
+        );
+        assert_eq!(progress.last(), Some(&0.05), "{progress:?}");
+        assert!(
+            progress.first().is_some_and(|first| *first < 0.05),
+            "{progress:?}"
+        );
+        prepared.close().expect("close");
+    }
+
+    /// sc-2124 review: the prepass's image list is a submit-time snapshot; at run time only images
+    /// that STILL have no mask are segmented, so an existing mask — here a user upload — is never
+    /// re-segmented nor overwritten (and a fully masked dataset segments nothing). Mutation: drop the
+    /// run-time re-read ⇒ the uploaded image is segmented and POSTed ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn prepass_segments_only_images_still_without_a_mask_and_never_overwrites_an_upload() {
+        use sceneworks_core::training_subject_masks::{
+            subject_mask_relative_path, SubjectMaskSource, SUBJECT_MASK_INDEX_NAME,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        let root = data_dir.join("datasets").join("ds-1");
+        // Image 0's mask is a user upload made after submit.
+        let mut index = read_subject_mask_index_at(&root).unwrap();
+        let uploaded =
+            sceneworks_core::media_convert::file_content_hash(Path::new(&images[0])).unwrap();
+        index.masks.get_mut(&uploaded).unwrap().source = SubjectMaskSource::Upload;
+        std::fs::write(
+            root.join(SUBJECT_MASK_INDEX_NAME),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let uploaded_bytes =
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap();
+
+        let (url, api_state) = spawn_prepass_api(root.clone()).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("prepass");
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the unmasked images"
+        );
+        let posted = api_state.posted.lock().unwrap().clone();
+        assert_eq!(posted.len(), 2);
+        assert!(
+            !posted.contains(&uploaded),
+            "the uploaded mask was overwritten"
+        );
+        assert_eq!(
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap(),
+            uploaded_bytes
+        );
+        let index = read_subject_mask_index_at(&root).unwrap();
+        assert_eq!(index.masks[&uploaded].source, SubjectMaskSource::Upload);
+
+        // Every image masked now: a retry segments and posts nothing.
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("retry");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(api_state.posted.lock().unwrap().len(), 2);
     }
 
     /// sc-2124: a dry run of a job whose missing masks the real run generates first

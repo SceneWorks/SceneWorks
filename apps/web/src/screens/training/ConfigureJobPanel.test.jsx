@@ -1248,6 +1248,31 @@ describe("ConfigureJobPanel subject-masked loss", () => {
     expect(generateButton()).toBeTruthy();
   });
 
+  // sc-2124 review (E6): masks still to generate + no SAM3 segmenter ⇒ Start is blocked on the toggle
+  // and the panel offers the segmenter like any other missing model. Mutation: drop the notice ⇒ red.
+  it("offers the SAM3 segmenter and blocks Start when masks must be generated without it", () => {
+    const ungenerated = { items: [{ hasMask: true, empty: false }, { hasMask: false }] };
+    const SAM3 = { id: "sam3_person_segment", name: "SAM3 Person Segmenter", installState: "missing" };
+    const validity = validityFor(onDraft, { ...ctx(ungenerated), subjectSegmenterMissing: true });
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: ungenerated,
+          missingSubjectSegmenterModels: [SAM3],
+          onDownloadModel: () => {},
+        })}
+      />,
+    );
+    expect(container.textContent).toContain("SAM3 Person Segmenter");
+    expect(container.textContent).toContain("Subject-masked training");
+    expect(toggle().getAttribute("aria-invalid")).toBe("true");
+    const start = [...container.querySelectorAll("button")].find((el) => el.textContent.includes("Start training"));
+    expect(start.disabled).toBe(true);
+  });
+
   it("outlines out-of-range weights", () => {
     const draft = { ...onDraft, subjectMaskBackgroundWeight: "1.5", subjectMaskSubjectWeight: "0" };
     mount(

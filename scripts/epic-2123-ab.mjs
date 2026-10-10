@@ -925,15 +925,32 @@ async function presetFor(modelKey) {
   return preset;
 }
 
-// The identical baseline config every row starts from: the preset's config with EVERY key kept
+// Every `advanced` key some technique row sets — derived from the rows themselves (their
+// `advanced`, their optional halves, and `resolutionBuckets` for a bucket-ladder row), so a new row
+// is covered without a hand list.
+function techniqueKeys(modelKey, opts) {
+  const keys = new Set();
+  for (const row of techniqueRows(modelKey, opts)) {
+    Object.keys(row.advanced).forEach((key) => keys.add(key));
+    Object.values(row.optionalLimits ?? {}).forEach((list) => list.forEach((key) => keys.add(key)));
+    if (row.bucketLadder) keys.add("resolutionBuckets");
+  }
+  return keys;
+}
+
+// The identical baseline config every row starts from: the preset's config with every key kept
 // (optimizer, timestep type/bias, precision, caching, weight decay, `trainingAdapterRepo` /
-// `trainingAdapterVersion`, …). Only these are overridden: the seed, the trigger word,
-// in-training sampling off, `requestedGpu: auto`, `saveEvery` (`--save-every`, default = steps),
-// and whichever of --steps / --rank / --lr / --batch / --resolution was passed explicitly.
-// `--rank` keeps the preset's alpha/rank ratio.
-function baseConfig(preset, opts) {
+// `trainingAdapterVersion`, …) EXCEPT the technique keys (`techniqueKeys`) — a preset may turn a
+// technique on by default (the Z-Image character presets ship buckets + subject-masked loss,
+// sc-2124), and the baseline must stay all-off with each row carrying only its own technique.
+// Otherwise only these are overridden: the seed, the trigger word, in-training sampling off,
+// `requestedGpu: auto`, `saveEvery` (`--save-every`, default = steps), and whichever of --steps /
+// --rank / --lr / --batch / --resolution was passed explicitly. `--rank` keeps the preset's
+// alpha/rank ratio.
+function baseConfig(preset, opts, stripKeys) {
   const p = structuredClone(preset.config);
   const config = { ...p, advanced: { ...(p.advanced ?? {}) } };
+  for (const key of stripKeys) delete config.advanced[key];
   config.seed = opts.seed;
   config.triggerWord = opts.trigger;
   config.advanced.sampleEvery = 0;
@@ -954,7 +971,7 @@ function baseConfig(preset, opts) {
 async function modelContext(modelKey, opts) {
   const target = await targetFor(modelKey);
   const preset = await presetFor(modelKey);
-  const base = baseConfig(preset, opts);
+  const base = baseConfig(preset, opts, techniqueKeys(modelKey, opts));
   return { modelKey, target, preset, base, ladder: bucketLadder(target, base.resolution) };
 }
 
