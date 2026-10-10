@@ -2151,6 +2151,13 @@ fn ltx_q4_training_snapshot(snapshots: &[PathBuf]) -> Option<&PathBuf> {
         .find(|snapshot| ltx_q4_tier_files_present(snapshot))
 }
 
+/// How the LTX-2.3 Gemma-3 co-requisite is named to the user when it is what blocks a real run.
+/// Names the `gemma/` directory as well as the encoder, because the manifest installs it as its own
+/// filtered download (`files: ["gemma/*"]`, ~26 GB) separate from the `q4/` tier — so "the model is
+/// installed" and "this encoder is installed" are genuinely independent facts on disk.
+pub(crate) const LTX_GEMMA_CO_REQUISITE: &str =
+    "Gemma-3 text encoder co-requisite (the bundle's `gemma/`)";
+
 /// Whether a complete Gemma-3 co-requisite is reachable for an LTX-2.3 run: the snapshot the tier
 /// resolved from first, then its siblings.
 ///
@@ -2169,14 +2176,23 @@ fn ltx_gemma_co_requisite_present(snapshots: &[PathBuf], tier_snapshot: &FsPath)
 }
 
 /// Pre-flight status for the LTX-2.3 packed lane over a materialized turnkey cache: `Ready` only when
-/// a complete `q4/` tier AND a complete Gemma co-requisite are both reachable somewhere in it,
-/// otherwise `TrainingTierMissing` (the repo itself is on disk, so it is never `Missing`).
+/// a complete `q4/` tier AND a complete Gemma co-requisite are both reachable somewhere in it.
+///
+/// Otherwise the two blockers are reported SEPARATELY, because they are separate downloads with
+/// separate remedies: no complete packed tier anywhere is `TrainingTierMissing`, while a complete
+/// tier whose Gemma encoder is absent or torn is `TrainingCoRequisiteMissing` (#2953). Never
+/// `Missing` — the repo itself is on disk by the time this runs.
 fn ltx23_packed_training_status(snapshots: &[PathBuf]) -> TrainingBaseStatus {
     match ltx_q4_training_snapshot(snapshots) {
         Some(snapshot) if ltx_gemma_co_requisite_present(snapshots, snapshot) => {
             TrainingBaseStatus::Ready
         }
-        _ => TrainingBaseStatus::TrainingTierMissing,
+        // The packed tier is complete and the Gemma encoder is not: report THAT, rather than a
+        // tier the user already has. These two causes carry different remedies, and collapsing
+        // them is what left #2953 unexitable — "install the packed q4 tier" to someone whose q4
+        // tier is already whole is advice that cannot work however many times it is followed.
+        Some(_) => TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
+        None => TrainingBaseStatus::TrainingTierMissing,
     }
 }
 
@@ -2604,7 +2620,9 @@ pub(crate) fn validate_lora_id_component(lora_id: &str) -> Result<(), ApiError> 
 /// Outcome of the pre-flight training-base check. Splitting "nothing on disk" from "the model is
 /// installed for generation but its dense training tier isn't" lets the run-gate give the second case
 /// an actionable "install the training tier" message instead of a bare "not installed" — the exact
-/// confusion the #1694 fix surfaced (sc-13860, AC #4). Both non-`Ready` states block a real run.
+/// confusion the #1694 fix surfaced (sc-13860, AC #4). `TrainingCoRequisiteMissing` carries that same
+/// principle one step further for a tier whose sibling downloads can be absent independently (#2953).
+/// Every non-`Ready` state blocks a real run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TrainingBaseStatus {
     /// The dense training weights are present on disk — a real run can proceed.
@@ -2612,6 +2630,11 @@ pub(crate) enum TrainingBaseStatus {
     /// The base repo IS on disk but its family-specific training tier is absent (`bf16/` generally,
     /// packed `q4/` for LTX).
     TrainingTierMissing,
+    /// The family-specific training tier IS complete, but a separately-downloaded co-requisite the
+    /// trainer loads alongside it — named by the payload — is absent or torn. Distinct from
+    /// [`TrainingBaseStatus::TrainingTierMissing`] because the remedy is different: re-installing the
+    /// tier cannot fix it, so blaming the tier sends the user round a loop they cannot exit (#2953).
+    TrainingCoRequisiteMissing(&'static str),
     /// Nothing for this base is on disk — the model was never installed.
     Missing,
 }
@@ -2689,10 +2712,12 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
 }
 
 /// The 400 detail to reject a real run whose base model isn't training-ready, or `None` when it is.
-/// The two blocking states get DISTINCT messages: `Missing` keeps the historical "not installed …
-/// install it from the model catalog" wording, while `TrainingTierMissing` says the model IS installed
-/// (for generation) but training needs its family-specific tier — dense bf16 generally, packed q4
-/// for LTX QLoRA. Split out as a pure fn so the wording is unit-testable without the API.
+/// Every blocking state gets a DISTINCT message, because each has its own remedy: `Missing` keeps the
+/// historical "not installed … install it from the model catalog" wording; `TrainingTierMissing` says
+/// the model IS installed (for generation) but training needs its family-specific tier — dense bf16
+/// generally, packed q4 for LTX QLoRA; and `TrainingCoRequisiteMissing` says the tier is there and
+/// names the co-requisite that isn't, so the reader is not sent to re-install weights they already
+/// hold (#2953). Split out as a pure fn so the wording is unit-testable without the API.
 pub(crate) fn training_base_unavailable_message(
     status: TrainingBaseStatus,
     base_model: &str,
@@ -2711,6 +2736,12 @@ pub(crate) fn training_base_unavailable_message(
                  model catalog before starting a real training run (dry runs work without it)."
             ))
         }
+        TrainingBaseStatus::TrainingCoRequisiteMissing(co_requisite) => Some(format!(
+            "The training tier for base model '{base_model}' is installed, but the {co_requisite} \
+             that training loads alongside it is missing or incomplete. Re-install '{base_model}' \
+             from the model catalog to fetch it, then start the real training run again (dry runs \
+             work without it)."
+        )),
         TrainingBaseStatus::Missing => Some(format!(
             "Base model '{base_model}' is not installed. Install it from the model catalog before \
              starting a real training run (dry runs work without it)."

@@ -3897,7 +3897,7 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
     .expect("traversal index");
     assert_eq!(
         training_base_model_status(&data_dir, &target),
-        TrainingBaseStatus::TrainingTierMissing,
+        TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
         "an index traversal must never pass API readiness"
     );
     std::fs::write(
@@ -3913,7 +3913,7 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
     .expect("corrupt Gemma shard");
     assert_eq!(
         training_base_model_status(&data_dir, &target),
-        TrainingBaseStatus::TrainingTierMissing,
+        TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
         "a structurally invalid indexed shard must never pass API readiness"
     );
     write_test_safetensors_with_keys(
@@ -3931,11 +3931,33 @@ fn ltx_training_resolves_and_requires_the_turnkey_q4_tier() {
         .expect("tear Gemma co-requisite");
     assert_eq!(
         training_base_model_status(&data_dir, &target),
-        TrainingBaseStatus::TrainingTierMissing,
+        TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
         "a torn Gemma co-requisite must block the real run before the worker claims it"
     );
+
+    // Blocking is only half the job: the 400 has to name the thing that is actually absent. The q4
+    // tier is whole here, so a message naming it would be unfollowable advice.
     let message = training_base_unavailable_message(
+        training_base_model_status(&data_dir, &target),
+        &target.base_model,
+    )
+    .expect("a torn co-requisite blocks");
+    assert!(message.contains("Gemma-3 text encoder"), "{message}");
+    assert!(message.contains("gemma/"), "{message}");
+    assert!(
+        !message.contains("packed q4"),
+        "a complete q4 tier must not be named as the blocker: {message}"
+    );
+
+    // The tier-missing arm keeps naming the tier: tearing q4 as well moves the gate back to it.
+    std::fs::remove_file(q4.join("transformer.safetensors")).expect("tear q4 tier too");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
         TrainingBaseStatus::TrainingTierMissing,
+        "with no complete q4 tier anywhere the tier is the blocker again"
+    );
+    let message = training_base_unavailable_message(
+        training_base_model_status(&data_dir, &target),
         &target.base_model,
     )
     .expect("missing tier blocks");
@@ -4055,7 +4077,74 @@ fn ltx_training_accepts_a_q4_tier_split_across_bundle_revisions() {
     .expect("tear the only Gemma");
     assert_eq!(
         training_base_model_status(&data_dir, &target),
-        TrainingBaseStatus::TrainingTierMissing
+        // `seed_q4(&pre_bump)` above restored a complete tier, so the Gemma tear is now the only
+        // thing missing — and that, not the tier, is what the refusal must name.
+        TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE)
+    );
+}
+
+/// #2953, reopened: the snapshot-split fix above addressed one of the two ways this gate reports
+/// `TrainingTierMissing`, and the reporter was hitting the other. The LTX-2.3 bundle installs its
+/// ~26 GB Gemma-3 encoder as a co-requisite download (`files: ["gemma/*"]`) SEPARATE from the `q4/`
+/// tier, so a cache can carry a whole, trainable packed tier and no usable encoder at all — the
+/// shape left by a co-requisite fetch that never finished. Both causes used to produce the single
+/// message "training needs the packed q4 tier — install that tier from the model catalog", which for
+/// this cause is advice that cannot succeed: the q4 tier is already complete, so the reporter
+/// re-installed it, saw the identical 400, and had nothing left to try. The refusal has to name the
+/// component that is actually absent.
+#[test]
+fn ltx_training_blames_the_gemma_co_requisite_not_the_complete_q4_tier() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "ltx_video_lora")
+        .expect("LTX training target");
+    let repo = target.base_model_repo.as_deref().expect("turnkey repo");
+    let repo_root = huggingface_repo_cache_path(&data_dir, repo).expect("repo cache path");
+    let revision = "ltx-bundle-tier-only";
+    let snapshot = repo_root.join("snapshots").join(revision);
+
+    // A complete packed q4 tier and NO `gemma/` whatsoever: the tier download finished, the
+    // co-requisite one did not.
+    let q4 = snapshot.join("q4");
+    std::fs::create_dir_all(&q4).expect("q4 tier");
+    for file in [
+        "quantize_config.json",
+        "transformer.safetensors",
+        "connector.safetensors",
+        "vae_decoder.safetensors",
+        "vae_encoder.safetensors",
+    ] {
+        std::fs::write(q4.join(file), "x").expect("q4 training component");
+    }
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+
+    let status = training_base_model_status(&data_dir, &target);
+    assert_eq!(
+        status,
+        TrainingBaseStatus::TrainingCoRequisiteMissing(LTX_GEMMA_CO_REQUISITE),
+        "a complete tier with no encoder is a co-requisite gap, not a missing tier"
+    );
+
+    // The run is still refused — naming the right component must not loosen the gate.
+    let message = training_base_unavailable_message(status, &target.base_model)
+        .expect("an absent co-requisite still blocks a real run");
+    assert!(
+        message.contains("Gemma-3 text encoder"),
+        "the refusal must name the encoder: {message}"
+    );
+    assert!(
+        message.contains("gemma/"),
+        "the refusal must name the directory to look in: {message}"
+    );
+    assert!(
+        !message.contains("packed q4"),
+        "a complete q4 tier must never be named as the blocker — that is the #2953 dead end: \
+         {message}"
     );
 }
 
