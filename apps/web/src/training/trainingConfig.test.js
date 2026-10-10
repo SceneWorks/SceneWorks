@@ -1187,6 +1187,39 @@ describe("subject-masked loss (sc-24828)", () => {
     expect(advanced.subjectMaskSubjectWeight).toBe(0.8);
   });
 
+  // sc-2124: the Z-Image character presets carry resolution buckets + subject-masked loss in their
+  // `advanced`; selecting one seeds both into the form and they reach the job unchanged.
+  it("seeds a character preset's buckets and masked loss and round-trips them", () => {
+    const preset = {
+      config: {
+        ...target.defaults,
+        advanced: {
+          ...target.defaults?.advanced,
+          resolutionBuckets: [
+            { resolution: 512, repeats: 4 },
+            { resolution: 768, repeats: 2 },
+            { resolution: 1024, repeats: 1 },
+          ],
+          subjectMaskLoss: true,
+          subjectMaskBackgroundWeight: 0.1,
+          subjectMaskSubjectWeight: 1,
+        },
+      },
+    };
+    const draft = configDraftFromTarget(target, dataset, ["auto"], "", preset);
+    expect(draft.subjectMaskLoss).toBe(true);
+    expect(draft.resolutionBuckets).toEqual([
+      { resolution: "512", repeats: "4" },
+      { resolution: "768", repeats: "2" },
+      { resolution: "1024", repeats: "1" },
+    ]);
+    const advanced = snap(draft).config.advanced;
+    expect(advanced.subjectMaskLoss).toBe(true);
+    expect(advanced.subjectMaskBackgroundWeight).toBe(0.1);
+    expect(advanced.subjectMaskSubjectWeight).toBe(1);
+    expect(advanced.resolutionBuckets).toEqual(preset.config.advanced.resolutionBuckets);
+  });
+
   it("uses the API's bounds and defaults", () => {
     expect(subjectMaskWeightMax).toBe(1);
     expect(subjectMaskBackgroundWeightDefault).toBe(0.1);
@@ -1210,17 +1243,21 @@ describe("subject-masked loss (sc-24828)", () => {
     expect(issuesFor({ ...whole, subjectMaskLoss: false, subjectMaskSubjectWeight: "0" })).toEqual([]);
   });
 
-  it("blocks on incomplete mask coverage (an empty mask counts as missing), not on unknown coverage", () => {
+  // sc-2124: an image with no mask yet does not block (the worker generates it before training);
+  // an empty mask (no subject found) does, and unknown coverage is left to the API.
+  it("blocks on an empty mask, not on an ungenerated one or unknown coverage", () => {
     expect(issuesFor(whole, report([[true, false], [true, false]]))).toEqual([]);
     expect(issuesFor(whole, null)).toEqual([]);
+    expect(issuesFor(whole, report([[true, false], [false, false]]))).toEqual([]);
     const partial = issuesFor(whole, report([[true, false], [true, true], [false, false]]));
     expect(partial.map((entry) => [entry.field, entry.kind])).toEqual([["subjectMaskLoss", "error"]]);
-    expect(partial[0].message).toContain("missing for 2 of 3 images");
+    expect(partial[0].message).toContain("found no person in 1 of 3 images");
     expect(subjectMaskCoverage(report([[true, false], [true, true], [false, false]]))).toEqual({
       total: 3,
       usable: 1,
       empty: 1,
       missing: 2,
+      ungenerated: 1,
       complete: false,
     });
   });
@@ -1339,10 +1376,11 @@ describe("body losses (sc-24832)", () => {
     expect(issuesOn(draft, "normalRestrictToSubject")).toEqual([]);
   });
 
-  // Like subject-masked loss, restricted normals need a non-empty subject mask on every image:
-  // incomplete coverage is an error on the toggle; full or unknown coverage is not. Mutation: drop
-  // the coverage check in bodyLossIssues ⇒ red.
-  it("blocks subject-restricted normals on incomplete subject-mask coverage", () => {
+  // Like subject-masked loss, restricted normals need a non-empty subject mask on every image: an
+  // empty mask (no subject found) is an error on the toggle; a missing one is not (it is generated
+  // when training starts, sc-2124); full or unknown coverage is not. Mutation: drop the coverage
+  // check in bodyLossIssues ⇒ red.
+  it("blocks subject-restricted normals on an empty subject mask only", () => {
     const draft = { ...whole, normalWeight: "0.1", normalRestrictToSubject: true };
     const on = (subjectMaskReport) =>
       configValidation(draft, { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport }).filter(
@@ -1350,16 +1388,17 @@ describe("body losses (sc-24832)", () => {
       );
     const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
     expect(on(partial).map((entry) => entry.message)).toEqual([
-      "Subject masks are missing for 2 of 3 images — generate subject masks first",
+      "Subject mask generation found no person in 1 of 3 images — upload masks for them in Data Sets, remove them, or turn this off",
     ]);
     expect(on({ items: [{ hasMask: true, empty: false }] })).toEqual([]);
+    expect(on({ items: [{ hasMask: true, empty: false }, { hasMask: false }] })).toEqual([]);
     expect(on(null)).toEqual([]);
     // Unrestricted normals never read the masks.
     expect(
       configValidation(
         { ...draft, normalRestrictToSubject: false },
         { activeDataset: dataset, selectedTarget: bodyTarget, subjectMaskReport: partial },
-      ).filter((entry) => /Subject masks are missing/.test(entry.message)),
+      ).filter((entry) => /found no person/.test(entry.message)),
     ).toEqual([]);
   });
 

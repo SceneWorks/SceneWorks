@@ -231,42 +231,14 @@ pub(crate) async fn run_dataset_subject_mask_job(
 
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<usize>(64);
-    let blocking_cancel = cancel.clone();
-    let job_id = job.id.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<SubjectMaskRecord>> {
-        emit_event(
-            "dataset_subject_mask_start",
-            json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
-        );
-        let engine_cancel = blocking_cancel.clone();
-        // One SAM3 session for the whole dataset: the model is built + quantized once, not per image.
-        let records = generate_subject_masks(items, blocking_cancel, tx, |count, load, finish| {
-            #[cfg(target_os = "macos")]
-            let masks = crate::person_segment_sam3::segment_persons_per_image(
-                model_path,
-                tokenizer_path,
-                count,
-                load,
-                finish,
-                Some(engine_cancel),
-            );
-            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-            let masks = crate::person_segment_sam3_candle::segment_persons_per_image(
-                model_path,
-                tokenizer_path,
-                count,
-                load,
-                finish,
-                Some(engine_cancel),
-            );
-            masks
-        })?;
-        emit_event(
-            "dataset_subject_mask_complete",
-            json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
-        );
-        Ok(records)
-    });
+    let blocking = spawn_subject_mask_segmentation(
+        model_path,
+        tokenizer_path,
+        items,
+        cancel.clone(),
+        tx,
+        job.id.clone(),
+    );
 
     let dataset_id = required_payload_string(&job.payload, "datasetId")?.to_owned();
     let cfg = AnalysisJobConfig {
@@ -313,6 +285,159 @@ pub(crate) async fn run_dataset_subject_mask_job(
                 backend,
             ))
         },
+    )
+    .await?;
+    Ok(())
+}
+
+/// Segment `items` with ONE SAM3 session on a blocking thread (the model is built + quantized once,
+/// not per image), reporting each finished item's index on `tx`. Shared by the
+/// `dataset_subject_mask` job and the training run's subject-mask prepass (sc-2124).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn spawn_subject_mask_segmentation(
+    model_path: PathBuf,
+    tokenizer_path: PathBuf,
+    items: Vec<SubjectMaskItem>,
+    cancel: CancelFlag,
+    tx: tokio::sync::mpsc::Sender<usize>,
+    job_id: String,
+) -> tokio::task::JoinHandle<WorkerResult<Vec<SubjectMaskRecord>>> {
+    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<SubjectMaskRecord>> {
+        emit_event(
+            "dataset_subject_mask_start",
+            json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
+        );
+        let engine_cancel = cancel.clone();
+        let records = generate_subject_masks(items, cancel, tx, |count, load, finish| {
+            #[cfg(target_os = "macos")]
+            let masks = crate::person_segment_sam3::segment_persons_per_image(
+                model_path,
+                tokenizer_path,
+                count,
+                load,
+                finish,
+                Some(engine_cancel),
+            );
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let masks = crate::person_segment_sam3_candle::segment_persons_per_image(
+                model_path,
+                tokenizer_path,
+                count,
+                load,
+                finish,
+                Some(engine_cancel),
+            );
+            masks
+        })?;
+        emit_event(
+            "dataset_subject_mask_complete",
+            json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),
+        );
+        Ok(records)
+    })
+}
+
+/// Cancel copy of a training run stopped during its subject-mask prepass.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+const PREPASS_CANCEL_MESSAGE: &str = "LoRA training canceled while generating subject masks.";
+
+/// The training run's subject-mask prepass (sc-2124). When the API found dataset images without a
+/// subject mask on a run that reads them (subject-masked loss — on by default for the Z-Image
+/// character presets — or the subject-restricted normal loss), it stamped their work list on the
+/// job as `subjectMaskPrepass` (the `dataset_subject_mask` item shape). This segments exactly those
+/// images with SAM3, stores the masks through the same `/subject-masks` sidecar the mask job uses,
+/// and returns; the training preflight that runs next re-reads the dataset's masks and still refuses
+/// an image left without a usable one (e.g. SAM3 found no person in it), naming it. No prepass key
+/// (every image already masked, or no masked technique) is a no-op. Progress stays inside the
+/// preparing band, below the 0.05 the training run starts from.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(crate) async fn run_training_subject_mask_prepass(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    let Some(prepass) = job.payload.get("subjectMaskPrepass") else {
+        return Ok(());
+    };
+    let prepass = prepass.as_object().ok_or_else(|| {
+        WorkerError::InvalidPayload(
+            "Training payload.subjectMaskPrepass must be an object.".to_owned(),
+        )
+    })?;
+    let items = subject_mask_items(settings, prepass)?;
+    if items.is_empty() {
+        return Ok(());
+    }
+    let project_id = required_payload_string(prepass, "projectId")?;
+    let dataset_id = required_payload_string(prepass, "datasetId")?;
+    let backend = backend_label(&settings.gpu_id);
+    let total = items.len();
+    update_job(
+        api,
+        &job.id,
+        crate::training_jobs::training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.01,
+            &format!("Generating subject masks for {total} image(s) with SAM3."),
+            None,
+            backend,
+        ),
+    )
+    .await?;
+    check_cancel(api, &job.id, PREPASS_CANCEL_MESSAGE).await?;
+    let (model_path, tokenizer_path) =
+        crate::person_segment_sam3_common::require_segmenter_weights(settings)?;
+    let cancel = CancelFlag::new();
+    let (tx, rx) = tokio::sync::mpsc::channel::<usize>(64);
+    let blocking = spawn_subject_mask_segmentation(
+        model_path,
+        tokenizer_path,
+        items,
+        cancel.clone(),
+        tx,
+        job.id.clone(),
+    );
+    let records = stream_batched_records(
+        api,
+        settings,
+        job,
+        BatchedStream {
+            cancel_message: PREPASS_CANCEL_MESSAGE,
+            join_error_label: "training subject mask task join",
+        },
+        cancel,
+        rx,
+        blocking,
+        |index| {
+            crate::training_jobs::training_progress(
+                JobStatus::Preparing,
+                ProgressStage::Preparing,
+                0.01 + 0.03 * ((index + 1) as f64 / total as f64),
+                &format!("Generated subject mask {} of {total}.", index + 1),
+                None,
+                backend,
+            )
+        },
+    )
+    .await?;
+    post_dataset_sidecar(
+        api,
+        project_id,
+        dataset_id,
+        "subject-masks",
+        SUBJECT_MASK_SPACE,
+        subject_mask_records_payload(&records),
+        Some(SUBJECT_MASK_POST_CHUNK_BYTES),
     )
     .await?;
     Ok(())

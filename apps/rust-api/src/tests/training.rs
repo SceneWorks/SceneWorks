@@ -2575,7 +2575,7 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
             error["detail"],
-            "Training preset 'z_image_turbo_lora.character.prodigyopt.balanced' is version 1, but the request pinned version 99."
+            "Training preset 'z_image_turbo_lora.character.prodigyopt.balanced' is version 2, but the request pinned version 99."
         );
 }
 

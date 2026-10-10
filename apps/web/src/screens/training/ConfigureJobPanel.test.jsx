@@ -961,7 +961,7 @@ describe("ConfigureJobPanel body losses", () => {
   // an error on the checkbox while coverage is incomplete, and "Generate subject masks" (shown once
   // when subject-masked loss is on too). Mutation: drop the restricted-normal affordance ⇒ red.
   it("offers subject-mask coverage and generation for restricted normals", () => {
-    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: false }] };
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }] };
     const draft = { ...VALID_DRAFT, normalWeight: "0.1", normalRestrictToSubject: true };
     let generated = 0;
     mountWith({ target: ALL, draft, report: partial, onGenerate: () => (generated += 1) });
@@ -1114,9 +1114,10 @@ describe("ConfigureJobPanel latent-space perceptual losses", () => {
   });
 });
 
-// sc-24828 (epic 2123): subject-masked loss is an off-by-default advanced toggle. While on, the two
-// weight inputs and the dataset's mask coverage appear; incomplete coverage is an error on the
-// toggle (it blocks Start) and offers "Generate subject masks".
+// sc-24828 (epic 2123): subject-masked loss is an advanced toggle (on in the Z-Image character
+// presets, sc-2124). While on, the two weight inputs and the dataset's mask coverage appear; an
+// empty mask is an error on the toggle (it blocks Start), a missing one is generated when training
+// starts, and incomplete coverage offers "Generate subject masks".
 describe("ConfigureJobPanel subject-masked loss", () => {
   const fullReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: false }] };
   const partialReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
@@ -1220,6 +1221,31 @@ describe("ConfigureJobPanel subject-masked loss", () => {
     expect(generated).toBe(1);
     expect(generateButton()).toBeUndefined();
     expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  // sc-2124: a dataset whose images merely lack masks (none examined yet) trains as-is — the worker
+  // generates them first — so the toggle is not flagged and the readout says so. Mutation: block on
+  // `missing` instead of `empty` ⇒ red.
+  it("does not block on images that only lack a mask, and says they are generated at start", () => {
+    const ungenerated = { items: [{ hasMask: true, empty: false }, { hasMask: false }, { hasMask: false }] };
+    const validity = validityFor(onDraft, ctx(ungenerated));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: ungenerated,
+          onGenerateSubjectMasks: () => {},
+        })}
+      />,
+    );
+    expect(toggle().getAttribute("aria-invalid")).not.toBe("true");
+    expect(validity.surfaced.filter((entry) => entry.field === "subjectMaskLoss")).toEqual([]);
+    expect(container.querySelector("[data-testid=subject-mask-autogenerate]").textContent).toBe(
+      "2 images without a subject mask get one generated with SAM3 when training starts.",
+    );
+    expect(generateButton()).toBeTruthy();
   });
 
   it("outlines out-of-range weights", () => {

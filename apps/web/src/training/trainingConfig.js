@@ -189,7 +189,27 @@ export function subjectMaskCoverage(report) {
   const total = report.items.length;
   const usable = report.items.filter((item) => item?.hasMask && !item?.empty).length;
   const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
-  return { total, usable, empty, missing: total - usable, complete: total > 0 && usable === total };
+  // `ungenerated` images have no mask at all — the worker generates those with SAM3 before it trains
+  // (sc-2124), so only `empty` ones (SAM3 already found no subject) need the user.
+  return {
+    total,
+    usable,
+    empty,
+    missing: total - usable,
+    ungenerated: total - usable - empty,
+    complete: total > 0 && usable === total,
+  };
+}
+
+// The Start-blocking issue for a technique that reads the subject masks, or "" when none: an image
+// whose stored mask is empty (no subject found) cannot be fixed by generating again, so it blocks;
+// an image with no mask yet does not — its mask is generated when training starts (sc-2124).
+export function subjectMaskCoverageIssue(report) {
+  const coverage = subjectMaskCoverage(report);
+  if (!coverage?.empty) {
+    return "";
+  }
+  return `Subject mask generation found no person in ${coverage.empty} of ${coverage.total} images — upload masks for them in Data Sets, remove them, or turn this off`;
 }
 
 // The target's advertised training resolutions, ascending (empty when it advertises none).
@@ -867,14 +887,9 @@ export function configValidation(
         ),
       );
     }
-    const coverage = subjectMaskCoverage(subjectMaskReport);
-    if (coverage && !coverage.complete) {
-      issues.push(
-        issue.error(
-          "subjectMaskLoss",
-          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
-        ),
-      );
+    const maskIssue = subjectMaskCoverageIssue(subjectMaskReport);
+    if (maskIssue) {
+      issues.push(issue.error("subjectMaskLoss", maskIssue));
     }
   }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
@@ -1311,14 +1326,12 @@ function bodyLossExtraIssues(configDraft, selectedTarget, prefix, subjectMaskRep
       // The toggle is hidden there, so a carried-over `true` names no input.
       issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
     } else {
-      // Like subject-masked loss: every image needs a non-empty subject mask (the worker refuses
-      // the job otherwise), so incomplete coverage blocks Start (unknown coverage is left to it).
-      const coverage = subjectMaskCoverage(subjectMaskReport);
-      if (coverage && !coverage.complete) {
-        issues.push([
-          "normalRestrictToSubject",
-          `Subject masks are missing for ${coverage.missing} of ${coverage.total} images — generate subject masks first`,
-        ]);
+      // Like subject-masked loss: every image needs a non-empty subject mask. Missing ones are
+      // generated when training starts; an empty one blocks Start (unknown coverage is left to the
+      // API).
+      const maskIssue = subjectMaskCoverageIssue(subjectMaskReport);
+      if (maskIssue) {
+        issues.push(["normalRestrictToSubject", maskIssue]);
       }
     }
   }

@@ -770,6 +770,74 @@ fn builtin_registry_exposes_sd3_targets() {
     }
 }
 
+/// Epic 2123 A/B decision (sc-2124): every Z-Image character preset trains with resolution buckets
+/// (every target edge up to the preset's resolution, 2^k repeats) and subject-masked loss at
+/// 0.1/1.0, and still validates against its target; no other preset — Z-Image style or any other
+/// model — carries either key.
+#[test]
+fn zimage_character_presets_carry_buckets_and_subject_masked_loss_and_no_other_preset_does() {
+    let targets = builtin_training_targets();
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let mut zimage_characters = 0;
+    for preset in &presets.presets {
+        let advanced = &preset.config.advanced;
+        let is_zimage_character = preset.target_id == "z_image_turbo_lora"
+            && preset.recommended_for.iter().any(|tag| tag == "character");
+        if !is_zimage_character {
+            for key in [
+                "resolutionBuckets",
+                "subjectMaskLoss",
+                "subjectMaskBackgroundWeight",
+                "subjectMaskSubjectWeight",
+            ] {
+                assert!(
+                    !advanced.contains_key(key),
+                    "{} must not carry {key}",
+                    preset.id
+                );
+            }
+            continue;
+        }
+        zimage_characters += 1;
+        let expected = if preset.config.resolution == 768 {
+            json!([
+                { "resolution": 512, "repeats": 2 },
+                { "resolution": 768, "repeats": 1 }
+            ])
+        } else {
+            assert_eq!(preset.config.resolution, 1024, "{}", preset.id);
+            json!([
+                { "resolution": 512, "repeats": 4 },
+                { "resolution": 768, "repeats": 2 },
+                { "resolution": 1024, "repeats": 1 }
+            ])
+        };
+        assert_eq!(advanced["resolutionBuckets"], expected, "{}", preset.id);
+        assert_eq!(advanced["subjectMaskLoss"], true, "{}", preset.id);
+        assert_eq!(
+            advanced["subjectMaskBackgroundWeight"], 0.1,
+            "{}",
+            preset.id
+        );
+        assert_eq!(advanced["subjectMaskSubjectWeight"], 1.0, "{}", preset.id);
+        assert_eq!(preset.version, 2, "{}", preset.id);
+        let description = preset.ui["description"].as_str().unwrap();
+        assert!(
+            description.contains("0.33 to 0.50") && description.contains("subject-masked loss"),
+            "{}: {description}",
+            preset.id
+        );
+        let target = targets
+            .targets
+            .iter()
+            .find(|target| target.id == preset.target_id)
+            .unwrap();
+        validate_training_config_for_target(target, &preset.config)
+            .unwrap_or_else(|error| panic!("{} must validate: {error}", preset.id));
+    }
+    assert!(zimage_characters > 0, "no Z-Image character preset found");
+}
+
 #[test]
 fn builtin_presets_expose_sdxl_character_default() {
     let registry = sceneworks_core::training::builtin_training_presets();
