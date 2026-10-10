@@ -245,9 +245,19 @@ test("the closure is the loader's own crates, not the repository", { skip }, () 
   const crateOf = (file) => file.slice(0, file.indexOf("/src/"));
   const crates = new Set(files.map(crateOf));
   assert.ok(crates.has("crates/media/mlx-gen/mlx-gen-ltx"), [...crates].join(" "));
-  // Not one other model crate — the whole point of the unit.
+  // Not one other model crate — the whole point of the unit. The epic 2123 shared auxiliary-loss
+  // crates are the exception: mlx-gen-ltx's trainer genuinely depends on `mlx-gen-perceptual`, the
+  // one TrainingConfig -> PerceptualPath seam every trainer calls, and on the auxiliary models it
+  // builds (depth anchoring, face identity, body losses). They are shared infrastructure the loader
+  // compiles against, not sibling generators, so they belong in its closure.
+  const sharedAuxiliaryLossCrates = new Set(
+    ["perceptual", "depth", "face", "body"].map((name) => `crates/media/mlx-gen/mlx-gen-${name}`),
+  );
   const otherModels = [...crates].filter(
-    (crate) => /mlx-gen-|candle-gen-/.test(crate) && crate !== "crates/media/mlx-gen/mlx-gen-ltx",
+    (crate) =>
+      /mlx-gen-|candle-gen-/.test(crate) &&
+      crate !== "crates/media/mlx-gen/mlx-gen-ltx" &&
+      !sharedAuxiliaryLossCrates.has(crate),
   );
   assert.deepEqual(otherModels, [], `sibling model crates leaked into the closure: ${otherModels}`);
 });

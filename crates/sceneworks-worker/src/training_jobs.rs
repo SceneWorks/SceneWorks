@@ -916,6 +916,7 @@ fn training_request_from_plan(
                 // Instruction-edit references (sc-24161, inference Qwen Image 2.1 LoRA): this tree's
                 // dataset plan carries none yet, so every item trains captioned/control-only.
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -1546,6 +1547,8 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+        // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+        ..Default::default()
     }
 }
 
@@ -4895,6 +4898,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -4903,6 +4908,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5009,6 +5015,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5017,6 +5025,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5126,6 +5135,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5134,6 +5145,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5281,6 +5293,8 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            // epic 2123 technique knobs (inference pin advance) stay at their off defaults.
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
@@ -5289,6 +5303,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5474,6 +5489,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5715,6 +5731,7 @@ mod tests {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             }],
             config,
             output_dir,

@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision 25bd55cd: 745 provenance candidates and 104 production-Rust crate prefixes. The new vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The new speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference main source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
-  "auditDigest": "3e4090fb200d833b9661535d745ea10b541b9a53cf5f8f3541a9a4ade4bfe95e",
+  "_comment": "Audit inventory rescanned at inference revision 1544a288 (the Iris-3B inference feature-branch merge of sc-25679): 758 provenance candidates and 109 production-Rust crate prefixes. The new mlx-gen-iris crate is an architecture reimplementation of speridlabs/iris-3b classified under the iris-3b About component; mlx-gen-body, mlx-gen-perceptual, candle-gen-body and candle-gen-perceptual arrive with the pin advance from the epic 2123 work and remain unclassified advisory items for that epic. The new vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The new speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference main source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
+  "inferenceRevision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
+  "auditDigest": "2e4826e68aaca682a3a9cfcc435847efb9feff44f92140491763d5a44190bd22",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 745,
-    "populationSha256": "d37d590c3b64b27157fec35bedb9144dd13e54aa56992d529b6be92a75c37143"
+    "matchedFiles": 758,
+    "populationSha256": "0167bdcf31ea13e2ff4173b76b3c73056b942066700a6930924834cdd262db6e"
   },
   "portedSourceAreas": [
     {
@@ -581,6 +581,13 @@
       ]
     },
     {
+      "id": "architecture:crates/media/mlx-gen/mlx-gen-iris",
+      "pathPrefix": "crates/media/mlx-gen/mlx-gen-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Iris-3B provider (MLX lane, epic sc-25678 / sc-25679): an architecture reimplementation of the upstream speridlabs/iris-3b reference pipeline (pixel-space hybrid dual-/single-stream DiT with its PiT pixel head, the layerwise Qwen3-VL text adapter, the FlowDPM-Solver++ on the shifted rectified-flow schedule) and the Qwen3-VL-4B-Instruct text conditioning. The applicable terms (Apache-2.0 for both speridlabs/iris-3b and Qwen/Qwen3-VL-4B-Instruct) are mapped in the About manifest's iris-3b component; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
       "id": "architecture:crates/media/mlx-gen/mlx-gen-minimax-h3",
       "pathPrefix": "crates/media/mlx-gen/mlx-gen-minimax-h3/src/",
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
@@ -943,10 +950,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "1544a2889e53cc1f7adba1d49e8761b8acf03a63",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 104,
-    "cratePopulationSha256": "5e4ba59e61486beb49342068681d613d19d3d47eb3332360d0f2503540230f21"
+    "cratePrefixes": 109,
+    "cratePopulationSha256": "15afb236f2a96b098ab742c33f0d5b52b9ae91876b4b987664fd458ab6bed912"
   },
   "crateDispositions": [
     {

@@ -274,6 +274,7 @@ mod driver {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             })
             .collect();
         assert!(
@@ -392,6 +393,7 @@ mod driver {
                 control_image_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
+                subject_mask_path: None,
             })
             .collect();
         assert!(

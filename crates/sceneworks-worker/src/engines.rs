@@ -2472,6 +2472,8 @@ mod tests {
             supports_full_finetune: false,
             // Not an instruction-edit trainer.
             max_reference_images: 0,
+            // Implements none of the optional epic 2123 training techniques.
+            techniques: gen_core::TrainingTechniques::NONE,
         }
     }
     fn stub_candle_trainer_load(
