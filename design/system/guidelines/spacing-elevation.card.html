@@ -1,0 +1,20 @@
+<!-- @dsCard group="Spacing" viewport="700x180" name="Elevation" subtitle="shadow-sm · md · lg + accent glow" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 24px; background: var(--bg); font-family: var(--font-ui); }
+  .row { display: flex; gap: 26px; }
+  .item { display: grid; gap: 10px; justify-items: center; }
+  .box { width: 120px; height: 74px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+  .lbl { font-size: 11px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="row">
+  <div class="item"><div class="box" style="box-shadow:var(--shadow-sm)"></div><div class="lbl">sm</div><div class="var">--shadow-sm</div></div>
+  <div class="item"><div class="box" style="box-shadow:var(--shadow-md)"></div><div class="lbl">md</div><div class="var">--shadow-md</div></div>
+  <div class="item"><div class="box" style="box-shadow:var(--shadow-lg)"></div><div class="lbl">lg</div><div class="var">--shadow-lg</div></div>
+  <div class="item"><div class="box" style="box-shadow:var(--shadow-glow);border-color:var(--accent)"></div><div class="lbl">glow (focus)</div><div class="var">--shadow-glow</div></div>
+</div>
+</body></html>

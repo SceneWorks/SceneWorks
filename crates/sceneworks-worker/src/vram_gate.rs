@@ -275,7 +275,33 @@ pub(crate) fn predicted_peak_gb(manifest_entry: &JsonObject, tier_key: &str) -> 
     // Spelled exactly so: the manifest constraint-contract registry anchors the `candle.minMemoryGb`
     // reader on this expression (`tests/test_builtin_manifest_audit.py`).
     let candle = manifest_entry.get("candle")?;
+    // sc-24112: a per-tier ALREADY-PADDED floor, between the measured ladder and the scalar. It is
+    // deliberately NOT a `vramGbByTier` row: that ladder is a raw peak this gate pads with
+    // `HEADROOM_GB`, and its sibling `measured` flag files it as an evidence class — so a DERIVED
+    // per-tier floor put there would be padded twice AND laundered into evidence. Returned as-is,
+    // exactly like the scalar it generalizes. A tier with no row falls through to the scalar, which
+    // must therefore stay the CONSERVATIVE number for every unlisted key (today `nvfp4`): landing
+    // an unknown tier on a light tier's floor would be a permissive under-prediction, and an
+    // under-prediction admits a load that OOMs.
+    if let Some(gb) = tier_floor_gb(candle, tier_key) {
+        return Some(gb);
+    }
     candle.get("minMemoryGb").and_then(json_f64)
+}
+
+/// The derived per-tier floor `candle.minMemoryGbByTier[tier_key]`, or `None` when the block
+/// declares no row for this tier. No headroom is added and none may be: the manifest pads this
+/// number itself, exactly as it pads `candle.minMemoryGb`.
+///
+/// Unlike [`measured_resident_peak_gb`], an unmeasured `nvfp4` does NOT degrade to the `q8` row
+/// here. That degradation exists because q8's measured PEAK over-predicts NVFP4's, which is safe;
+/// a q8 FLOOR is a different quantity, and guessing with it would be the under-prediction this
+/// whole path exists to avoid. NVFP4 falls through to the scalar instead.
+fn tier_floor_gb(candle: &Value, tier_key: &str) -> Option<f64> {
+    candle
+        .get("minMemoryGbByTier")
+        .and_then(|tiers| tiers.get(tier_key))
+        .and_then(json_f64)
 }
 
 /// The RAW measured resident row, `candle.vramGbByTier[tier_key]` (or the `q8` row for an
@@ -5918,6 +5944,139 @@ mod tests {
         assert_eq!(predicted_peak_gb(&sparse, "q4"), Some(40.0));
         // No candle block ⇒ unmeasured ⇒ None (gate no-ops).
         assert_eq!(predicted_peak_gb(&obj(json!({})), "q4"), None);
+    }
+
+    /// sc-24109 armed this gate for `qwen_image_2_1` by giving the entry a `candle` block at all;
+    /// sc-24112 makes the number it resolves PER TIER. This is where that consequence is stated as
+    /// an assertion rather than left in prose.
+    ///
+    /// Before the candle block existed, `predicted_peak_gb` returned `None` for the id and the fit
+    /// gate was skipped ENTIRELY — a too-small card learned it was too small by OOMing mid-load.
+    /// sc-24109 gave it one floor for every tier key, which was right for a bf16-only install
+    /// (28.61 GiB of weights resident, 35.36 GiB peak at 2048²) and refused a 32 GB RTX 5090 and a
+    /// 40 GB A100. It is the WRONG answer for tiers whose weights are 16.33 and 9.78 GiB.
+    ///
+    /// The floors are DERIVED, not measured, and stated in GiB because `VramBudget.free_gb` is GiB
+    /// (`gpu::nvidia_vram_budget_gb` divides MiB by 1024): `ceil(max over the presets of (resident +
+    /// transient) GiB × 1.25)`. On CUDA the transient is the untiled decode tail's 3 structural
+    /// full-res maps, linear in area, so the largest-area preset 2400×1792 binds at 6.92 GiB.
+    /// The ×1.25 is deliberately NOT the `peak + HEADROOM_GB` this gate applies to a MEASURED row:
+    /// the engine's peak is a structural count that its own doc says omits allocator slack, graph
+    /// retention and kernel workspace, so a derived number carries a proportional margin until the
+    /// terminal measurement story replaces it with `vramGbByTier` rows (which then win ahead of
+    /// these floors and get the ordinary `+ HEADROOM_GB`).
+    ///
+    /// Budgets are REAL card reports, not round numbers: an RTX 5090 reports 31.84 GiB total, an
+    /// A100-40GB 39.5, a 24 GB card ~23.99 — so a floor stated in decimal GB (the pre-fix 31 for q8)
+    /// refused a 5090 as soon as a desktop compositor held 0.84 GiB.
+    #[test]
+    fn qwen_image_2_1_resolves_a_derived_candle_floor_per_tier() {
+        let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        let entry = obj(manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .clone());
+
+        // Each installable tier resolves its OWN derived floor, with no headroom added on top —
+        // these are already-padded floors, and padding them again is the double-charge that makes
+        // a per-tier floor read as a measured peak. The rule is recomputed from the derived
+        // resident weights (the MLX crate's `memory_strategy::derived` parameter counts) plus the
+        // 3-map transient at the largest-area preset (3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB)
+        // rather than restated.
+        for (tier, peak_gib) in [
+            ("bf16", 28.61 + 6.92),
+            ("q8", 16.33 + 6.92),
+            ("q4", 9.78 + 6.92),
+        ] {
+            let floor = (peak_gib * 1.25_f64).ceil();
+            assert_eq!(
+                predicted_peak_gb(&entry, tier),
+                Some(floor),
+                "{tier} must resolve ceil({peak_gib} GiB x 1.25) from candle.minMemoryGbByTier"
+            );
+        }
+        // A tier key with no row falls through to the SCALAR, which is the densest tier's floor.
+        // Landing NVFP4 on q4's floor would be a permissive under-prediction, and an
+        // under-prediction admits a load that OOMs.
+        assert_eq!(
+            predicted_peak_gb(&entry, NVFP4_TIER),
+            predicted_peak_gb(&entry, "bf16")
+        );
+        assert!(
+            entry["candle"].get("vramGbByTier").is_none(),
+            "these floors are DERIVED from parameter counts, not measured — a vramGbByTier row \
+             here would be an unmeasured claim wearing an evidence flag"
+        );
+
+        // The armed consequence, as the decision the gate actually returns, against realistic
+        // (total, free) GiB reports.
+        for (card, total_gb, free_gb, bf16, q8, q4) in [
+            ("24 GB card", 23.99, 22.5, false, false, true),
+            ("RTX 5090", 31.84, 30.5, false, true, true),
+            ("A100-40GB", 39.5, 38.5, false, true, true),
+            ("48 GB card", 47.99, 46.5, true, true, true),
+            ("H100-80GB", 79.2, 78.0, true, true, true),
+        ] {
+            let budget = VramBudget { total_gb, free_gb };
+            for (tier, admitted) in [("bf16", bf16), ("q8", q8), ("q4", q4)] {
+                assert_eq!(
+                    matches!(
+                        fit_decision(predicted_peak_gb(&entry, tier), Some(budget)),
+                        FitDecision::Fits
+                    ),
+                    admitted,
+                    "{card} ({free_gb} GiB free) must {} the {tier} install",
+                    if admitted {
+                        "be admitted for"
+                    } else {
+                        "be refused"
+                    }
+                );
+            }
+        }
+    }
+
+    /// The reader itself, away from the shipped catalog: resolution order, and the fact that the
+    /// per-tier floor is returned RAW while a measured row is padded.
+    #[test]
+    fn per_tier_floor_sits_between_the_measured_ladder_and_the_scalar() {
+        let entry = obj(json!({
+            "candle": {
+                "minMemoryGb": 48,
+                "minMemoryGbByTier": { "bf16": 48, "q8": 31, "q4": 23 }
+            }
+        }));
+        assert_eq!(predicted_peak_gb(&entry, "q4"), Some(23.0));
+        // *Mutation that reds this:* folding HEADROOM_GB into the per-tier branch.
+        assert_eq!(predicted_peak_gb(&entry, "q8"), Some(31.0));
+        // Unlisted tier ⇒ the scalar, never the nearest row.
+        assert_eq!(predicted_peak_gb(&entry, NVFP4_TIER), Some(48.0));
+
+        // A MEASURED row wins ahead of the derived floor and is padded, which is the whole reason
+        // the two keys are distinct.
+        let measured = obj(json!({
+            "candle": {
+                "minMemoryGb": 48,
+                "minMemoryGbByTier": { "q4": 23 },
+                "vramGbByTier": { "q4": 18.0 }
+            }
+        }));
+        assert_eq!(predicted_peak_gb(&measured, "q4"), Some(18.0 + HEADROOM_GB));
+
+        // No candle block at all ⇒ still unmeasured ⇒ the gate no-ops.
+        assert_eq!(predicted_peak_gb(&obj(json!({})), "q4"), None);
+        // A block with neither key ⇒ None, not a zero floor.
+        assert_eq!(predicted_peak_gb(&obj(json!({ "candle": {} })), "q4"), None);
     }
 
     #[test]

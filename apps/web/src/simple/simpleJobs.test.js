@@ -6,6 +6,9 @@ import {
   buildSimpleVideoRequest,
   parseResolutionPair,
   referenceStrengthFor,
+  simpleRewriteReferenceIds,
+  simpleNativeControls,
+  simpleRewriteResolutionTarget,
 } from "./simpleJobs.js";
 import { buildImageJobRequest } from "../imageJobRequest.js";
 import { STYLE_GROUPS, styleTextForId } from "../data/styleCatalog.js";
@@ -427,5 +430,51 @@ describe("buildSimpleAudioRequest", () => {
       durationSecs: null,
     });
     expect(request.targetDurationSecs).toBeUndefined();
+  });
+});
+
+// sc-24114 — Simple's Qwen rewriter reads the SAME ordered list the render sends.
+// *Mutation that reds this:* the pre-fix `[referenceAssetId]` for an ordered-reference model.
+describe("simpleRewriteReferenceIds", () => {
+  it("hands the rewriter the full ordered list on an ordered-reference model", () => {
+    expect(
+      simpleRewriteReferenceIds({
+        supportsOrderedReferences: true,
+        orderedReferenceIds: ["a", "b", "c"],
+        referenceAssetId: "a",
+      }),
+    ).toEqual(["a", "b", "c"]);
+    expect(
+      simpleRewriteReferenceIds({ supportsOrderedReferences: false, referenceAssetId: "a" }),
+    ).toEqual(["a"]);
+    expect(simpleRewriteReferenceIds({ supportsOrderedReferences: false })).toEqual([]);
+  });
+});
+
+// sc-24114 — the rewriter's aspect suggestion is never silently dropped in Simple.
+// *Mutation that reds this:* returning null for a preset the (memory-gated) chips do not offer.
+describe("simpleRewriteResolutionTarget", () => {
+  it("selects an offered preset, else lands the suggestion as the free size", () => {
+    expect(
+      simpleRewriteResolutionTarget("2048x2048", { resolutions: ["2048x2048"], nativeControls: true }),
+    ).toEqual({ resolution: "2048x2048" });
+    expect(
+      simpleRewriteResolutionTarget("2752x1536", { resolutions: ["2048x2048"], nativeControls: true }),
+    ).toEqual({ widthOverride: "2752", heightOverride: "1536" });
+    expect(
+      simpleRewriteResolutionTarget("2752x1536", { resolutions: ["1024x1024"], nativeControls: false }),
+    ).toBeNull();
+    expect(simpleRewriteResolutionTarget("", { nativeControls: true })).toBeNull();
+  });
+});
+
+// sc-24114 — only a model declaring the native envelope gets Simple's new surface.
+describe("simpleNativeControls", () => {
+  it("is true for the native-envelope keys and false for a bare count ladder", () => {
+    expect(simpleNativeControls({ limits: { hardMinSteps: 2 } })).toBe(true);
+    expect(simpleNativeControls({ limits: { maxReferenceAssets: 10 } })).toBe(true);
+    expect(simpleNativeControls({ limits: { count: [1, 2, 4] } })).toBe(false);
+    expect(simpleNativeControls({ limits: { requiresDimensionsMultipleOf: 16 } })).toBe(false);
+    expect(simpleNativeControls({})).toBe(false);
   });
 });

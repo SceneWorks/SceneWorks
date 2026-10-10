@@ -89,3 +89,29 @@ describe("styles.css: the two chip kinds are visually distinct", () => {
     }
   });
 });
+
+describe("styles.css: Film mode fills the editor and only its active step scrolls", () => {
+  const editor = ruleBody(".ve-editor");
+  const film = ruleBody(".ve-film");
+  const panels = ruleBody(".ve-film-panels");
+  const upper = ruleBody(".ve-upper");
+
+  it("lets the film workspace own the editor height instead of a capped strip", () => {
+    expect(declaration(editor, "overflow-y")).toBe("auto");
+    expect(declaration(film, "max-height")).toBeFalsy();
+    expect(declaration(film, "flex")).toContain("1 1");
+    expect(declaration(panels, "overflow-y")).toBe("auto");
+    expect(declaration(panels, "min-height")).toBe("0");
+  });
+
+  it("keeps the hidden mode and hidden steps out of layout, since .ve-film sets its own display", () => {
+    expect(declaration(film, "display")).toBe("flex");
+    expect(declaration(ruleBody(".ve-film[hidden]"), "display")).toBe("none");
+    expect(declaration(ruleBody('.ve-film [role="tabpanel"][hidden]'), "display")).toBe("none");
+  });
+
+  it("keeps the Program Monitor row tall enough to own its hit targets", () => {
+    expect(declaration(upper, "flex")).toContain("240px");
+    expect(declaration(upper, "min-height")).toBe("240px");
+  });
+});

@@ -53,6 +53,9 @@ on:
       - "crates/sceneworks-core/**"
       - "Cargo.toml"
       - "Cargo.lock"
+      - "vendor/glib-0.18.5/**"
+      - "scripts/check-glib-variant-iter.mjs"
+      - "scripts/fixtures/glib-variant-iter.rs"
       - ".github/workflows/desktop-linux-check.yml"
   workflow_dispatch:
 
@@ -119,6 +122,9 @@ jobs:
         env:
           CARGO_NET_OFFLINE: "false"
         run: cargo fetch --locked
+
+      - name: Check optimized glib Variant string iteration
+        run: node scripts/check-glib-variant-iter.mjs
 
       - name: Stage desktop test sidecar placeholders
         run: node apps/desktop/scripts/stage-test-sidecars.mjs

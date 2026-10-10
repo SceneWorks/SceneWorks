@@ -1,8 +1,9 @@
+import { appConfirm } from "../appConfirm.jsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { apiFetch, isAbortError } from "../api.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
-import { ensureItemVersionFields } from "../timeline.js";
+import { rebaseTimeline, timelineEdit } from "../timelineEdits.js";
 
 // Canonical serialization of a persisted-timeline snapshot for dirty comparison (sc-11967).
 // Value equality (not reference) so a server round-trip that re-emits the same content is
@@ -15,6 +16,11 @@ function serializeTimeline(timeline) {
 // target the dirty working copy has removed). A dedicated kind so it neither clobbers nor is
 // clobbered by the "general" error notice, and can be cleared once the conflict is resolved.
 const TIMELINE_GENERATION_CONFLICT_NOTICE = "timelineGenerationConflict";
+let timelineGenerationModulePromise = null;
+function loadTimelineGeneration() {
+  timelineGenerationModulePromise ??= import("../timelineGeneration.js");
+  return timelineGenerationModulePromise;
+}
 
 // sc-12018: whether the generation's target still exists in `timeline`. A replace rewrites a
 // specific item (context.itemId) inside its track; an extend/bridge only appends a new item to
@@ -22,24 +28,6 @@ const TIMELINE_GENERATION_CONFLICT_NOTICE = "timelineGenerationConflict";
 // object when the timelineId matches (it maps `tracks`), so a reference check cannot detect a
 // content no-op — this presence check can. Absent target ⇒ applying the generation to this
 // copy changes nothing, so it would silently vanish from the live editor.
-function timelineGenerationTargetPresent(timeline, job) {
-  const payload = job.payload ?? {};
-  const action = payload.advanced?.timelineAction;
-  const context = payload.advanced?.timelineContext ?? {};
-  if (!action || !timeline || context.timelineId !== timeline.id) {
-    return false;
-  }
-  const track = (timeline.tracks ?? []).find((candidate) => candidate.id === context.trackId);
-  if (!track) {
-    return false;
-  }
-  if (action === "replace") {
-    return (track.items ?? []).some((item) => item.id === context.itemId);
-  }
-  // extend / bridge only need the target track to exist — they append a new item to it.
-  return true;
-}
-
 // Owns the editor's timeline state (list, selection, the loaded timeline) plus every
 // timeline mutation, frame extraction, and the SSE-driven "apply generated clip to the
 // timeline" pipeline. Extracted from App.jsx (sc-1651) — the largest, most coupled
@@ -62,7 +50,7 @@ export function useTimelines({
   const [timelines, setTimelines] = useState([]);
   const [timelinesProjectId, setTimelinesProjectId] = useState(null);
   const [selectedTimelineId, setSelectedTimelineId] = useState(null);
-  const [activeTimeline, setActiveTimeline] = useState(null);
+  const [activeTimeline, setActiveTimelineState] = useState(null);
   const selectedTimelineIdRef = useRef(null);
   const timelineApplyQueueRef = useRef(Promise.resolve());
   // sc-11967 (S8): the active timeline survives soft navigation in memory, so the user can
@@ -76,9 +64,55 @@ export function useTimelines({
   const savedTimelineSnapshotRef = useRef(null);
   const activeTimelineRef = useRef(null);
 
+  const setActiveTimeline = useCallback((value) => {
+    const next = typeof value === "function" ? value(activeTimelineRef.current) : value;
+    activeTimelineRef.current = next;
+    setActiveTimelineState(next);
+  }, []);
+
+  function adoptStoredTimeline(stored) {
+    const working = activeTimelineRef.current;
+    const base = savedTimelineSnapshotRef.current ? JSON.parse(savedTimelineSnapshotRef.current) : null;
+    if (working?.id !== stored.id || !base || base.id !== stored.id) {
+      setActiveTimeline(stored);
+      savedTimelineSnapshotRef.current = serializeTimeline(stored);
+      return;
+    }
+    if ((stored.revision ?? 0) < (base.revision ?? 0)) return;
+    const rebased = rebaseTimeline(base, working, stored);
+    if (rebased.conflicts.length) {
+      // Keep the local edits and their old base until Save opens the resolver. Never silently
+      // accept either side of a same-item race during polling.
+      pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE,
+        `A generation or stored edit changed clips: ${rebased.conflicts.map((c) => c.label).join(", ")}. Save to choose your edits or the stored versions.`);
+      setActiveTimeline(rebaseTimeline(base, working, stored, { force: true }).timeline);
+      return;
+    }
+    setActiveTimeline(rebased.timeline);
+    savedTimelineSnapshotRef.current = serializeTimeline(stored);
+  }
+
+  const isFilmTimeline = Boolean(activeTimeline?.filmAssembly);
+
+  // Film delivery is server-owned and can finish without an editor SSE subscriber. A bounded
+  // read refresh discovers it while preserving pending edits; navigation does not own the run.
   useEffect(() => {
-    activeTimelineRef.current = activeTimeline;
-  }, [activeTimeline]);
+    if (!activeProject?.id || !selectedTimelineId || !isFilmTimeline) return;
+    let disposed = false;
+    let inFlight = false;
+    const timer = window.setInterval(async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${selectedTimelineId}`, token);
+        if (!disposed && activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === selectedTimelineId) adoptStoredTimeline(stored);
+      } catch (err) { if (!disposed) setError(err.message); }
+      finally { inFlight = false; }
+    }, 1000);
+    return () => { disposed = true; window.clearInterval(timer); };
+    // Ref-backed adoption reads current pending edits, never the timer's initial snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject?.id, selectedTimelineId, isFilmTimeline, token]);
 
   // Compare a timeline against the last-persisted snapshot. Unknown baseline (nothing loaded
   // yet) or no working copy → not dirty, so a freshly loaded/empty editor never prompts.
@@ -86,7 +120,7 @@ export function useTimelines({
     if (!timeline || savedTimelineSnapshotRef.current == null) {
       return false;
     }
-    return serializeTimeline(timeline) !== savedTimelineSnapshotRef.current;
+    return timelineEdit(JSON.parse(savedTimelineSnapshotRef.current), timeline).length > 0;
   }
 
   // Stable identity (reads refs only) so it can ride the memoized App context without
@@ -142,7 +176,7 @@ export function useTimelines({
         return refreshFailure("error", err);
       }
     },
-    [token, activeProject, activeProjectRef, setError],
+    [token, activeProject, activeProjectRef, setError, setActiveTimeline],
   );
 
   async function loadTimeline(projectId, timelineId) {
@@ -157,9 +191,7 @@ export function useTimelines({
       if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
         return;
       }
-      setActiveTimeline(timeline);
-      activeTimelineRef.current = timeline;
-      savedTimelineSnapshotRef.current = serializeTimeline(timeline);
+      adoptStoredTimeline(timeline);
       // sc-12018: a fresh load pulls the server copy (which received any conflicting
       // generation), so a prior edit/generation conflict notice is now stale — clear it.
       pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, "");
@@ -199,7 +231,7 @@ export function useTimelines({
         return null;
       }
     },
-    [token, activeProject, setError],
+    [token, activeProject, setError, setActiveTimeline],
   );
 
   const saveTimeline = useCallback(
@@ -207,20 +239,45 @@ export function useTimelines({
       if (!activeProject || !timeline) {
         return null;
       }
+      const workingAtSave = activeTimelineRef.current;
       try {
-        const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}`, token, {
-          method: "PUT",
-          body: JSON.stringify({ timeline }),
-        });
-        setActiveTimeline(saved);
+        const projectId = activeProject.id;
+        const path = `/api/v1/projects/${projectId}/timelines/${timeline.id}`;
+        const initialBase = savedTimelineSnapshotRef.current ? JSON.parse(savedTimelineSnapshotRef.current) : timeline;
+        let base = initialBase?.id === timeline.id ? initialBase : timeline;
+        let candidate = timeline;
+        let saved;
+        for (let attempt = 0; attempt < 4; attempt += 1) {
+          try {
+            saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: candidate, expectedRevision: base.revision ?? 0 }) });
+            break;
+          } catch (error) {
+            if (error.code !== "timeline_revision_conflict") throw error;
+            const stored = await apiFetch(path, token);
+            let merged = rebaseTimeline(base, candidate, stored);
+            if (merged.conflicts.length) {
+              const names = merged.conflicts.map((c) => c.label).join(", ");
+              const keepLocal = await appConfirm({ title: "Resolve timeline conflict", message: `These clips changed in the stored timeline: ${names}. Unrelated edits are preserved.`, confirmLabel: "Keep my versions", cancelLabel: "Keep stored versions" });
+              if (keepLocal) merged = rebaseTimeline(base, candidate, stored, { force: true });
+            }
+            candidate = merged.timeline;
+            base = stored;
+          }
+        }
+        if (!saved) throw new Error("The timeline keeps changing. Your edits are still here; save again to resolve the latest version.");
+        if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timeline.id) return saved;
+        // A user can continue editing while this request is running. Rebase those later edits
+        // over the result instead of treating the response as permission to erase them.
+        const live = activeTimelineRef.current;
+        const afterSave = live?.id === timeline.id ? rebaseTimeline(workingAtSave ?? timeline, live, saved) : { timeline: saved, conflicts: [] };
+        setActiveTimeline(afterSave.conflicts.length ? rebaseTimeline(workingAtSave ?? timeline, live, saved, { force: true }).timeline : afterSave.timeline);
         // sc-11967: reset the dirty baseline to the persisted copy so the timeline reads
         // clean immediately after save (the S7 sibling bug left the baseline stale, so the
         // re-select/SSE guards kept firing on an already-saved timeline).
-        activeTimelineRef.current = saved;
-        savedTimelineSnapshotRef.current = serializeTimeline(saved);
+        savedTimelineSnapshotRef.current = serializeTimeline(afterSave.conflicts.length ? initialBase : saved);
         // sc-12018: the saved copy is now authoritative, so any prior edit/generation conflict
         // notice ("saving will discard it") has been resolved one way or the other — clear it.
-        pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, "");
+        pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE, afterSave.conflicts.length ? "A clip changed while saving. Your newer edits remain pending; save again to resolve them." : "");
         refreshTimelines(activeProject.id);
         setError("");
         return saved;
@@ -229,8 +286,30 @@ export function useTimelines({
         return null;
       }
     },
-    [token, activeProject, setError, pushNotice, refreshTimelines],
+    [token, activeProject, activeProjectRef, setActiveTimeline, setError, pushNotice, refreshTimelines],
   );
+
+  const resolveTimelineTrim = useCallback(async (runId, shotId, resolution) => {
+    const working = activeTimelineRef.current;
+    if (!working || !activeProject) return;
+    const saved = await saveTimeline(working);
+    if (!saved) return;
+    if (!runId) {
+      try {
+        const { resolveGenerationTrim } = await loadTimelineGeneration();
+        const next = resolveGenerationTrim(saved, shotId, resolution);
+        if (next) await saveTimeline(next);
+      } catch (error) { setError(error.message); }
+      return;
+    }
+    try {
+      const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/film-deliveries`, token, {
+        method: "POST", body: JSON.stringify({ runId, resolveShotId: shotId, resolution, expectedRevision: saved.revision ?? 0 }),
+      });
+      if (activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === saved.id) adoptStoredTimeline(stored);
+    } catch (error) { setError(error.message); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject, token, saveTimeline, activeProjectRef, setError]);
 
   const exportTimeline = useCallback(
     async (timeline, options) => {
@@ -280,95 +359,6 @@ export function useTimelines({
     [createVideoJob],
   );
 
-  function applyTimelineGenerationResult(timeline, job) {
-    const payload = job.payload ?? {};
-    const action = payload.advanced?.timelineAction;
-    const context = payload.advanced?.timelineContext ?? {};
-    const assetId = job.result?.assetIds?.[0];
-    if (!action || !assetId || context.timelineId !== timeline.id) {
-      return timeline;
-    }
-    const resultAsset = job.result?.assets?.[0];
-    const displayName = resultAsset?.displayName ?? "Generated clip";
-    const createdAt = resultAsset?.createdAt ?? new Date().toISOString();
-    const tracks = timeline.tracks.map((track) => {
-      if (track.id !== context.trackId) {
-        return track;
-      }
-      if (action === "bridge") {
-        const bridgeItem = ensureItemVersionFields({
-          id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
-          trackId: track.id,
-          assetId,
-          type: "video",
-          displayName,
-          sourceIn: 0,
-          sourceOut: Number(payload.duration) || Math.max(0.1, Number(context.timelineEnd) - Number(context.timelineStart)),
-          timelineStart: Number(context.timelineStart),
-          timelineEnd: Number(context.timelineEnd),
-          speed: 1,
-          fit: "fit",
-          volume: 1,
-          versionAssetIds: [assetId],
-          currentVersionAssetId: assetId,
-          versionHistory: [{ assetId, createdAt, source: "bridge", jobId: job.id, note: "Generated bridge clip" }],
-          transitionIn: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
-          transitionOut: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
-        });
-        return { ...track, items: [...track.items, bridgeItem] };
-      }
-      if (action === "extend") {
-        const start = Number(context.timelineStart);
-        const duration = Number(payload.duration) || 4;
-        const extensionItem = ensureItemVersionFields({
-          id: `item_${crypto.randomUUID().replaceAll("-", "")}`,
-          trackId: track.id,
-          assetId,
-          type: "video",
-          displayName,
-          sourceIn: 0,
-          sourceOut: duration,
-          timelineStart: start,
-          timelineEnd: start + duration,
-          speed: 1,
-          fit: "fit",
-          volume: 1,
-          versionAssetIds: [assetId],
-          currentVersionAssetId: assetId,
-          versionHistory: [{ assetId, createdAt, source: "extension", jobId: job.id, note: "Generated extension" }],
-          transitionIn: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
-          transitionOut: { id: `transition_${crypto.randomUUID().replaceAll("-", "")}`, type: "cut", duration: 0 },
-        });
-        return { ...track, items: [...track.items, extensionItem] };
-      }
-      if (action === "replace") {
-        return {
-          ...track,
-          items: track.items.map((item) => {
-            if (item.id !== context.itemId) {
-              return item;
-            }
-            const current = ensureItemVersionFields(item);
-            return {
-              ...current,
-              assetId,
-              currentVersionAssetId: assetId,
-              type: "video",
-              displayName,
-              versionAssetIds: Array.from(new Set([...current.versionAssetIds, assetId])),
-              versionHistory: [
-                ...current.versionHistory,
-                { assetId, createdAt, source: "replacement", jobId: job.id, note: "Generated replacement" },
-              ],
-            };
-          }),
-        };
-      }
-      return track;
-    });
-    return { ...timeline, tracks };
-  }
-
   // sc-11231 (F-037): useJobEvents' SSE effect captures this at subscribe time (its deps
   // are only [access.authRequired, ready, token]), so it MUST be identity-stable — a plain
   // per-render function declaration left the stream calling a stale closure (the same
@@ -383,6 +373,9 @@ export function useTimelines({
   });
   const enqueueTimelineGenerationApply = useCallback(
     (job) => {
+      // Start the lazy chunk fetch in the caller's turn. The queued callback stays identity-stable,
+      // while short-lived SSE/test callers do not need an extra event-loop turn before the GET.
+      loadTimelineGeneration();
       timelineApplyQueueRef.current = timelineApplyQueueRef.current
         .then(() => applyCompletedTimelineGenerationRef.current?.(job))
         .catch((err) => setError(err.message));
@@ -397,60 +390,21 @@ export function useTimelines({
       return;
     }
     try {
-      // Always apply the generation onto the server copy and persist it, so the result is
-      // durable regardless of what the in-memory working copy looks like (never drop the
-      // generation).
-      const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
-      const updated = applyTimelineGenerationResult(timeline, job);
-      if (updated === timeline) {
-        return;
+      const path = `/api/v1/projects/${projectId}/timelines/${timelineId}`;
+      let saved;
+      let applyTimelineGenerationResult;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const timeline = await apiFetch(path, token);
+        ({ applyTimelineGenerationResult } = await loadTimelineGeneration());
+        const updated = applyTimelineGenerationResult(timeline, job);
+        if (serializeTimeline(updated) === serializeTimeline(timeline)) { saved = timeline; break; }
+        try {
+          saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: updated, expectedRevision: timeline.revision ?? 0 }) });
+          break;
+        } catch (error) { if (error.code !== "timeline_revision_conflict") throw error; }
       }
-      const saved = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token, {
-        method: "PUT",
-        body: JSON.stringify({ timeline: updated }),
-      });
-      // Preserve the existing gate: only touch the UI copy when this timeline is the one the
-      // user is looking at. Re-read the live working copy *after* the awaits — the user may
-      // have edited it while the fetch/save was in flight.
-      if (selectedTimelineIdRef.current === timelineId) {
-        const workingCopy = activeTimelineRef.current;
-        if (workingCopy?.id === timelineId && timelineHasUnsavedEdits(workingCopy)) {
-          // sc-11967 (S8): the active copy has unsaved structural edits. Overwriting it with
-          // the server copy would silently discard them, so merge the generation onto the
-          // working copy instead. The baseline is left untouched, so the copy stays dirty and
-          // the user still owns the decision to save their edits.
-          if (timelineGenerationTargetPresent(workingCopy, job)) {
-            const merged = applyTimelineGenerationResult(workingCopy, job);
-            setActiveTimeline(merged);
-            activeTimelineRef.current = merged;
-          } else {
-            // sc-12018 (S8 follow-up): the dirty working copy has DELETED the item/track this
-            // generation targets, so merging is a content no-op — the generation would be
-            // invisible in the live editor. It IS durably persisted to the server copy above,
-            // but if the user now SAVES their conflicting deletion the server copy is
-            // overwritten and the generation is lost. Surface the conflict instead of silently
-            // swallowing it; the working copy is left untouched so the user's deletion — and
-            // the ownership of the save decision — is preserved.
-            const action = job.payload?.advanced?.timelineAction;
-            const clipName = job.result?.assets?.[0]?.displayName;
-            const target = action === "replace" ? "a clip you removed" : "a track you removed";
-            pushNotice?.(
-              TIMELINE_GENERATION_CONFLICT_NOTICE,
-              `A generation finished for ${target} from this timeline${clipName ? ` (“${clipName}”)` : ""}. ` +
-                "It was saved to the stored timeline, but saving your current edits will discard it. " +
-                "Re-open this timeline to keep the generated clip.",
-            );
-          }
-        } else {
-          // Clean working copy → adopt the persisted server copy (which received the
-          // generation) and reset the baseline so the timeline stays clean (no spurious dirty
-          // on a later re-select). This is the pre-sc-11967 behavior. (The dirty-but-target-
-          // deleted case is handled above as an sc-12018 conflict, not here.)
-          setActiveTimeline(saved);
-          activeTimelineRef.current = saved;
-          savedTimelineSnapshotRef.current = serializeTimeline(saved);
-        }
-      }
+      if (!saved) throw new Error("The generated clip could not be applied because the timeline kept changing. Reopen the timeline to retry.");
+      if (activeProjectRef.current?.id === projectId && selectedTimelineIdRef.current === timelineId) adoptStoredTimeline(saved);
       refreshTimelines(projectId);
     } catch (err) {
       setError(err.message);
@@ -470,6 +424,7 @@ export function useTimelines({
     refreshTimelines,
     createTimeline,
     saveTimeline,
+    resolveTimelineTrim,
     exportTimeline,
     extractTimelineFrame,
     queueTimelineVideoJob,

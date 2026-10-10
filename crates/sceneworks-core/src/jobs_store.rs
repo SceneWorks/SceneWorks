@@ -59,7 +59,7 @@ pub use routing::gaps::{
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 pub use routing::{
-    canonical_video_route_probe, video_backend_mode_supported,
+    canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
     video_mode_conditioning_requirements, video_ui_modes,
 };
 
@@ -79,7 +79,7 @@ pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "int
 /// terminated immediately. Exactly the two statuses the `cancel_job` fast path — and
 /// the bulk [`JobsStore::cancel_pending_jobs`] — flip straight to terminal `canceled`.
 /// Kept in lockstep with that fast-path branch and the web `pendingStatuses` set.
-pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption"];
+pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_workflow"];
 pub const JOB_STATUSES: &[&str] = &[
     "queued",
     // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
@@ -87,6 +87,7 @@ pub const JOB_STATUSES: &[&str] = &[
     // ACTIVE_STATUSES and TERMINAL_STATUSES (like `queued`) so the claim SELECT ignores it and
     // the queue summary counts it as an in-flight, non-terminal job. See JobStatus::PendingCaption.
     "pending_caption",
+    "pending_workflow",
     "preparing",
     "downloading",
     "loading_model",
@@ -299,7 +300,7 @@ impl std::fmt::Display for JobsStoreError {
             ),
             Self::InvalidInitialStatus(status) => write!(
                 formatter,
-                "A job can only be created in 'queued' or 'pending_caption' status, not '{status}'."
+                "A job can only be created in 'queued', 'pending_caption', or 'pending_workflow' status, not '{status}'."
             ),
         }
     }
@@ -397,7 +398,7 @@ pub struct PlatformReachabilitySweepStats {
 /// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
 /// backfills every older row before workers can claim it, keeping policy changes
 /// out of the latency-sensitive claim transaction.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 1;
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 2;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -428,22 +429,21 @@ pub struct CreateJob {
     pub duplicate_of_job_id: Option<String>,
     pub attempts: u32,
     /// Status the job is created in. `None` means the default `queued` (immediately
-    /// claimable). `Some(JobStatus::PendingCaption)` creates the job NON-claimable so an
-    /// API-side async pre-step (the Ideogram 4 auto-caption, sc-9120) can rewrite its
-    /// payload and promote it to `queued` before any worker sees it. Only `queued` and
-    /// `pending_caption` are valid initial statuses; any other value is rejected so a job
-    /// can't be born mid-lifecycle (e.g. `running`) or terminal.
+    /// claimable). `PendingCaption` and `PendingWorkflow` are the two API-owned,
+    /// non-claimable pre-dispatch states. Any other value is rejected so a job cannot be born
+    /// mid-lifecycle (for example `running`) or terminal.
     pub initial_status: Option<JobStatus>,
 }
 
 impl CreateJob {
     /// The initial status string for the insert, defaulting to `queued`. Enforces the
-    /// invariant that a job is only ever born `queued` or `pending_caption` — the two
-    /// pre-worker statuses — so a caller can't inject a mid-lifecycle or terminal status.
+    /// invariant that a job is born only in a declared pre-worker state, so a caller cannot inject
+    /// a mid-lifecycle or terminal status.
     fn initial_status_str(&self) -> JobsStoreResult<&'static str> {
         match &self.initial_status {
             None | Some(JobStatus::Queued) => Ok("queued"),
             Some(JobStatus::PendingCaption) => Ok("pending_caption"),
+            Some(JobStatus::PendingWorkflow) => Ok("pending_workflow"),
             Some(other) => Err(JobsStoreError::InvalidInitialStatus(
                 other.as_str().to_owned(),
             )),
@@ -465,6 +465,14 @@ pub struct DuplicateJob {
 #[derive(Debug, Clone)]
 pub struct PendingCaptionPromotion {
     pub promoted: bool,
+    pub job: JobSnapshot,
+}
+
+/// Guarded transition result for an API-owned composed workflow. `changed` is false when a
+/// concurrent cancel or terminal transition won the race.
+#[derive(Debug, Clone)]
+pub struct PendingWorkflowTransition {
+    pub changed: bool,
     pub job: JobSnapshot,
 }
 
@@ -999,7 +1007,12 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let interrupted = self.list_jobs_by_status_on_connection(&transaction, ACTIVE_STATUSES)?;
+        // An API-only restart does not stop the separately hosted worker. Preserve an active job
+        // only when the durable worker row still proves exact ownership: the worker is busy and
+        // names this job as its current job. Its next heartbeat keeps that ownership live; an
+        // idle heartbeat from a restarted same-ID worker or the ordinary stale-worker sweep
+        // reclaims it. Everything else is already orphaned and must become terminal here.
+        let interrupted = self.list_startup_stranded_active_jobs_on_connection(&transaction)?;
         // A `pending_caption` job (sc-9120) is owned by an API-side background task, not a worker,
         // so an API restart LOSES its caption watcher — the row would otherwise sit un-claimable
         // forever (it is not `queued`, so no worker claims it, and it is not an ACTIVE status, so
@@ -1030,6 +1043,12 @@ impl JobsStore {
                    updated_at = ?1,
                    worker_id = null
              where status in ({active})
+               and not exists (
+                   select 1 from workers
+                    where workers.id = jobs.worker_id
+                      and workers.status = 'busy'
+                      and workers.current_job_id = jobs.id
+               )
             ",
                 active = active_statuses_sql()
             ),
@@ -1051,7 +1070,18 @@ impl JobsStore {
             // written. It describes why an ALIVE worker withdrew its capabilities; on a worker we
             // have just declared gone it is stale by construction, and `GET /api/v1/workers` would
             // otherwise keep handing clients a host remedy for a worker that is no longer there.
-            "update workers set status = 'offline', current_job_id = null, status_reason = null              where status != 'offline'",
+            &format!(
+                "update workers
+                    set status = 'offline', current_job_id = null, status_reason = null
+                  where status != 'offline'
+                    and not exists (
+                        select 1 from jobs
+                         where jobs.worker_id = workers.id
+                           and jobs.id = workers.current_job_id
+                           and jobs.status in ({active})
+                    )",
+                active = active_statuses_sql()
+            ),
             [],
         )?;
         let updated_ids = interrupted_ids
@@ -1190,6 +1220,136 @@ impl JobsStore {
         })
     }
 
+    /// Replace a composed workflow parent's payload while it remains non-claimable. Used to attach
+    /// the ordinary raster child id and, later, its authoritative persisted asset facts.
+    pub fn update_pending_workflow_payload(
+        &self,
+        job_id: &str,
+        payload: Map<String, Value>,
+    ) -> JobsStoreResult<PendingWorkflowTransition> {
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let facts_job_type = transaction
+            .query_row(
+                "select type from jobs where id = ?1",
+                params![job_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|value| parse_string_enum(&value))
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        let facts = ClaimRoutingFacts::from_parts(&facts_job_type, &payload);
+        let affected = transaction.execute(
+            "update jobs
+                set payload_json = ?1,
+                    updated_at = ?2,
+                    claim_facts_version = ?4,
+                    claim_payload_revision = payload_revision + 1,
+                    claim_mlx_eligible = ?5,
+                    claim_candle_eligible = ?6,
+                    claim_candle_pose_reject = ?7,
+                    claim_training_mlx_only = ?8,
+                    claim_seedvr2_upscale = ?9,
+                    claim_required_capability = ?10,
+                    claim_real_training = ?11,
+                    claim_model_key_1 = ?12,
+                    claim_model_key_2 = ?13,
+                    claim_model_key_3 = ?14,
+                    claim_model_key_4 = ?15
+              where id = ?3 and status = 'pending_workflow'",
+            params![
+                dumps(&payload)?,
+                now,
+                job_id,
+                CLAIM_ROUTING_FACTS_VERSION,
+                i64::from(facts.mlx_eligible),
+                i64::from(facts.candle_eligible),
+                i64::from(facts.candle_pose_reject),
+                i64::from(facts.training_mlx_only),
+                i64::from(facts.seedvr2_upscale),
+                facts.required_capability.as_str(),
+                i64::from(facts.real_training),
+                facts.model_key(0),
+                facts.model_key(1),
+                facts.model_key(2),
+                facts.model_key(3),
+            ],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(PendingWorkflowTransition {
+            changed: affected > 0,
+            job,
+        })
+    }
+
+    /// Atomically make a fully resolved composed workflow parent claimable. No incomplete parent
+    /// payload can pass this boundary, and a concurrent cancel cannot be resurrected.
+    pub fn promote_pending_workflow_job(
+        &self,
+        job_id: &str,
+        payload: Map<String, Value>,
+    ) -> JobsStoreResult<PendingWorkflowTransition> {
+        let updated = self.update_pending_workflow_payload(job_id, payload)?;
+        if !updated.changed {
+            return Ok(updated);
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let affected = transaction.execute(
+            "update jobs
+                set status = 'queued', stage = 'queued',
+                    message = 'Source image ready. Waiting for an available vector worker.',
+                    updated_at = ?1
+              where id = ?2 and status = 'pending_workflow'",
+            params![now, job_id],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(PendingWorkflowTransition {
+            changed: affected > 0,
+            job,
+        })
+    }
+
+    /// Terminate a still-pending workflow parent after its child fails or becomes unusable.
+    pub fn terminate_pending_workflow_job(
+        &self,
+        job_id: &str,
+        status: JobStatus,
+        message: &str,
+        error: Option<&str>,
+    ) -> JobsStoreResult<PendingWorkflowTransition> {
+        if !matches!(
+            status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        ) {
+            return Err(JobsStoreError::InvalidStatus(status.as_str().to_owned()));
+        }
+        let mut guard = self.lock.lock();
+        let connection = self.write_connection(&mut guard)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = utc_now();
+        let affected = transaction.execute(
+            "update jobs
+                set status = ?1, stage = ?1, progress = 1, message = ?2, error = ?3,
+                    completed_at = ?4, canceled_at = case when ?1 = 'canceled' then ?4 else canceled_at end,
+                    updated_at = ?4
+              where id = ?5 and status = 'pending_workflow'",
+            params![status.as_str(), message, error, now, job_id],
+        )?;
+        let job = self.get_job_on_connection(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(PendingWorkflowTransition {
+            changed: affected > 0,
+            job,
+        })
+    }
+
     /// Find an in-flight (non-terminal) `prompt_refine` job whose payload matches the given
     /// `prompt` + `aspect_ratio`, so a repeated Ideogram auto-caption (an impatient client
     /// re-POSTing the same image job) can REUSE an already-running magic-prompt expansion instead
@@ -1294,6 +1454,23 @@ impl JobsStore {
         let mut statement = connection.prepare(&sql)?;
         let jobs =
             collect_jobs(statement.query_map(params_from_iter(bindings.iter()), row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Every non-completed Create-from-Prompt parent that an API restart must resume or clean.
+    /// Deliberately unbounded: a durable coordinator cannot strand an older workflow merely because
+    /// 500 newer queue rows exist. The JSON predicate is paid once at startup, outside claim paths.
+    pub fn list_vector_prompt_workflow_jobs_for_recovery(
+        &self,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select * from jobs
+              where json_extract(payload_json, '$.workflow.kind') = 'create_from_prompt'
+                and status != 'completed'
+              order by created_at asc, id asc",
+        )?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)
     }
 
@@ -1576,7 +1753,10 @@ impl JobsStore {
         // that is STILL `pending_caption` (a race-free guarded UPDATE), so it can't resurrect a
         // just-canceled job. Any active (worker-owned) status falls to the cooperative branch
         // below that requests acknowledgement.
-        if job.status == JobStatus::Queued || job.status == JobStatus::PendingCaption {
+        if matches!(
+            job.status,
+            JobStatus::Queued | JobStatus::PendingCaption | JobStatus::PendingWorkflow
+        ) {
             transaction.execute(
                 "
                 update jobs
@@ -1610,7 +1790,7 @@ impl JobsStore {
     }
 
     /// Bulk-cancel every PENDING (not-yet-worker-owned) job — the fleet analog of the
-    /// `queued`/`pending_caption` fast path in [`cancel_job`] (issue: "cancel ALL
+    /// `queued`/`pending_caption`/`pending_workflow` fast path in [`cancel_job`] (issue: "cancel ALL
     /// pending jobs"). Optionally scoped to one project (matching the queue's project
     /// filter); omitted / `None` cancels every project's pending jobs. Each matching
     /// row goes straight to terminal `canceled` in one UPDATE — no worker owns it to
@@ -1618,7 +1798,7 @@ impl JobsStore {
     /// can broadcast `job.updated` per job and hand the acting client the flipped
     /// cards immediately.
     ///
-    /// Deliberately scoped to `queued` + `pending_caption` ([`PENDING_STATUSES`])
+    /// Deliberately scoped to the three API-owned pending states ([`PENDING_STATUSES`])
     /// ONLY. An active (worker-owned) job needs cooperative acknowledgement and is
     /// left untouched — cancel those one at a time via [`cancel_job`] so the owning
     /// worker self-terminates; already-terminal jobs never match either. The
@@ -1799,6 +1979,8 @@ impl JobsStore {
         let job = self.get_job_on_connection(&transaction, job_id)?;
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
+        // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
+        crate::yue2_score::jobs::refresh_block_for_duplicate(&mut payload);
         let job = self.create_job_on_connection(
             &transaction,
             CreateJob {
@@ -3301,13 +3483,12 @@ impl JobsStore {
                 format!("job_{job_hex}")
             }
         };
-        // A job is born either `queued` (immediately claimable) or, for an API-side async
-        // pre-step, `pending_caption` (sc-9120) — status and stage move in lockstep, and the
-        // waiting message reflects which gate the job is behind so the queue view reads
-        // correctly before a worker (or the background rewrite) ever touches it.
+        // Status and stage move in lockstep, and the waiting message reflects which API-owned
+        // gate the job is behind before a worker ever sees it.
         let initial_status = request.initial_status_str()?;
         let initial_message = match initial_status {
             "pending_caption" => "Preparing the prompt before dispatch.",
+            "pending_workflow" => "Creating the source image before vectorization.",
             _ => "Waiting for an available worker.",
         };
         let automatically_prioritized = job_type_automatically_jumps_queue(&request.job_type);
@@ -3389,6 +3570,29 @@ impl JobsStore {
             .join(", ");
         let mut statement = connection.prepare(&format!(
             "select * from jobs where status in ({status_list}) order by created_at desc"
+        ))?;
+        let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
+        Ok(jobs)
+    }
+
+    /// Active jobs that cannot still belong to a separately hosted worker after an API restart.
+    /// Keep this predicate identical to the guarded UPDATE in [`Self::mark_interrupted_on_startup`]
+    /// so the snapshots returned for SSE publication are exactly the rows the transaction changed.
+    fn list_startup_stranded_active_jobs_on_connection(
+        &self,
+        connection: &Connection,
+    ) -> JobsStoreResult<Vec<JobSnapshot>> {
+        let mut statement = connection.prepare(&format!(
+            "select jobs.* from jobs
+              where jobs.status in ({active})
+                and not exists (
+                    select 1 from workers
+                     where workers.id = jobs.worker_id
+                       and workers.status = 'busy'
+                       and workers.current_job_id = jobs.id
+                )
+              order by jobs.created_at desc",
+            active = active_statuses_sql()
         ))?;
         let jobs = collect_jobs(statement.query_map([], row_to_job)?)?;
         Ok(jobs)
@@ -4780,6 +4984,11 @@ fn is_real_training_job(job: &JobSnapshot) -> bool {
 /// placeholder. Mirrors the dry-run training capability split.
 fn required_capability(job: &JobSnapshot) -> &str {
     match job.job_type {
+        JobType::VectorGenerate => match job.payload.get("mode").and_then(Value::as_str) {
+            Some("image_to_svg") => WorkerCapability::VectorImageToSvg.as_str(),
+            Some("text_to_svg") => WorkerCapability::VectorTextToSvg.as_str(),
+            _ => JobType::VectorGenerate.as_str(),
+        },
         JobType::PersonDetect if person_job_is_preview(job) => {
             WorkerCapability::PersonDetectPreview.as_str()
         }
@@ -4790,6 +4999,14 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // is served by any worker that advertises the training capability — it has no dedicated
         // capability of its own (the real-run gate below additionally requires `lora_train_execute`).
         JobType::ControlTraining => WorkerCapability::LoraTrain.as_str(),
+        // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
+        // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
+        // may claim it. `audio_generate` is advertised exactly when that lane is linked
+        // (`inference_runtime::audio()`); the utility worker of a server build without the lane
+        // (the Docker image) therefore leaves it queued for the GPU worker instead of failing it.
+        JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
+            WorkerCapability::AudioGenerate.as_str()
+        }
         _ => job.job_type.as_str(),
     }
 }
@@ -5031,6 +5248,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::ImageEdit
             | JobType::ImageVqa
             | JobType::ImageInterleave
+            | JobType::VectorGenerate
             | JobType::ImageUpscale
             | JobType::ImageDetail
             | JobType::ImageSegment

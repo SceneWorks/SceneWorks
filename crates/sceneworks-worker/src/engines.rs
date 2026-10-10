@@ -183,6 +183,24 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 4.0,
         adapter_label: "mlx_qwen",
     },
+    // Qwen-Image 2.1 (sc-24108, epic 24107) — its OWN engine id, not a variant of the row above.
+    // `mlx-gen-qwen-image-2-1` registers `qwen_image_2_1`; the 2512 provider is untouched.
+    //
+    // `default_repo` is the UPSTREAM Hugging Face repo, not a SceneWorks re-host: the snapshot is
+    // public and ungated, and the Qwen RESEARCH LICENCE's §3 redistribution duties are ones the
+    // product never triggers because it pulls at runtime into the user's own cache.
+    //
+    // 40 steps is the engine's own `DEFAULT_STEPS`. `default_guidance` is 1.0 because 2.1's
+    // guidance axis is TRUE-CFG: the scale only engages once the request carries a negative
+    // prompt, so 1.0 means "CFG off until the user asks for it" rather than "no guidance support".
+    ModelRow {
+        sceneworks_id: "qwen_image_2_1",
+        engine_id: "qwen_image_2_1",
+        default_repo: "Qwen/Qwen-Image-2.1",
+        default_steps: 40,
+        default_guidance: 1.0,
+        adapter_label: "mlx_qwen_2_1",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -978,6 +996,29 @@ fn registry_capabilities_from(
         }
     };
 
+    // StarVector is registered in the ordinary core-llm catalog because its bounded SVG stream is
+    // a typed extension of TextLlm. The generic descriptor cannot advertise that extension, so keep
+    // this projection deliberately narrow: only the four exact native registrations admitted by
+    // the paired inference bundle can light up image_to_svg, and no registration can infer direct
+    // text_to_svg. A structurally similar vision LLM, a misspelled id, or a provider registered under
+    // the wrong backend contributes nothing.
+    const STARVECTOR_IMAGE_TO_SVG: &[(&str, &str)] = &[
+        ("mlx-starvector-1b", "mlx"),
+        ("mlx-starvector-8b", "mlx"),
+        ("candle-starvector-1b", "candle"),
+        ("candle-starvector-8b", "candle"),
+    ];
+    if text.registrations().any(|registration| {
+        let descriptor = (registration.descriptor)();
+        backends.contains(&descriptor.backend.as_str())
+            && descriptor.family == "starvector"
+            && descriptor.capabilities.supports_vision
+            && STARVECTOR_IMAGE_TO_SVG
+                .contains(&(descriptor.id.as_str(), descriptor.backend.as_str()))
+    }) {
+        push(Cap::VectorImageToSvg, &mut caps);
+    }
+
     for reg in media.generators() {
         let d = (reg.descriptor)();
         if !backends.contains(&d.backend) {
@@ -1720,6 +1761,7 @@ mod tests {
         "z_image",
         "z_image_edit",
         "qwen_image",
+        "qwen_image_2_1",
         "qwen_image_edit_2511",
         "qwen_image_edit_2511_lightning",
         "lens",
@@ -1828,6 +1870,18 @@ mod tests {
             | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
+            // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
+            // private, so there is no const to re-export.
+            //
+            // A literal here is only an ASSERTION, not a reading of the engine, so on its own it
+            // could not catch a pin bump that moved the real grid — the lattice test below would be
+            // comparing this literal with itself. What closes that is
+            // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
+            // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
+            // equals this value — live for this id since the pin carries the provider.
+            "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1862,6 +1916,18 @@ mod tests {
             | "mage_flow_edit_turbo" => 16,
             "lens" | "lens_turbo" => p::lens::VAE_SCALE_FACTOR,
             "qwen_image" | "qwen_image_edit" => p::qwen_image::SIZE_MULTIPLE,
+            // Qwen-Image 2.1 (sc-24108) enforces a DIFFERENT lattice from 2512: 32, not 16
+            // (its 16x-spatial 64-channel latent is patched on a 2x grid). Spelled as a literal for
+            // the same reason the Mage arm above is — the provider keeps its `SIZE_MULTIPLE`
+            // private, so there is no const to re-export.
+            //
+            // A literal here is only an ASSERTION, not a reading of the engine, so on its own it
+            // could not catch a pin bump that moved the real grid — the lattice test below would be
+            // comparing this literal with itself. What closes that is
+            // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
+            // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
+            // equals this value — live for this id since the pin carries the provider.
+            "qwen_image_2_1" => 32,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1975,6 +2041,33 @@ mod tests {
             // (candle) / silent refit (mlx). `None` = no exposed stride on this backend (the bespoke
             // InstantID/PuLID ids never reach here — `mlx_model` returned `None` and we `continue`d).
             let stride = pinned_image_stride(resolved.engine_id());
+            // sc-24108: tie the hand-written table to the DESCRIPTOR wherever the descriptor has an
+            // opinion. `pinned_image_stride` spells some strides as a provider const and others as
+            // a bare literal (Mage, and Qwen-Image 2.1, whose providers keep `SIZE_MULTIPLE`
+            // private), and for those the lattice test below was literal-vs-literal: it could only
+            // catch someone editing one of the two copies, never a pin bump that moved the real
+            // grid. `Capabilities::size_floor` advertises that grid weights-free
+            // (`SizeFloor::RangeCheckedOnGrid { multiple }`), so where it is advertised it is the
+            // authority and the table must agree with it.
+            //
+            // `None` = this descriptor's floor makes no grid claim (plain `RangeChecked`), so the
+            // table's value stays a SceneWorks-side assertion for that engine and is checked only
+            // by `pinned_image_stride_pins_each_engines_lattice`.
+            if let Some(advertised) = resolved
+                .descriptor
+                .capabilities
+                .size_floor
+                .explicit_size_multiple()
+            {
+                assert_eq!(
+                    stride,
+                    Some(advertised),
+                    "{id}: the PINNED engine {:?} advertises a ÷{advertised} request grid on its \
+                     `size_floor`, but `pinned_image_stride` says {stride:?}. The descriptor is \
+                     the authority — correct the table (sc-24108).",
+                    resolved.engine_id()
+                );
+            }
             for res in buckets.iter().chain(default.iter()) {
                 let (w, h) = res
                     .split_once('x')
@@ -2095,6 +2188,8 @@ mod tests {
             ("mage_flow_edit_base", 16),
             ("lens", 16),
             ("qwen_image", 16),
+            // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
+            ("qwen_image_2_1", 32),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];
@@ -2312,6 +2407,46 @@ mod tests {
             weightless_audio: None,
         };
 
+    fn stub_mlx_starvector_descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+        gen_core::core_llm::TextLlmDescriptor {
+            id: "mlx-starvector-1b".to_string(),
+            family: "starvector".to_string(),
+            backend: "mlx".to_string(),
+            capabilities: gen_core::core_llm::TextLlmCapabilities {
+                supports_vision: true,
+                ..Default::default()
+            },
+        }
+    }
+    const STUB_MLX_STARVECTOR: gen_core::core_llm::TextLlmRegistration =
+        gen_core::core_llm::TextLlmRegistration {
+            descriptor: stub_mlx_starvector_descriptor,
+            load: stub_textllm_load,
+            can_load: stub_textllm_can_load,
+            weightless_vision: None,
+            weightless_audio: None,
+        };
+
+    fn stub_candle_starvector_descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+        gen_core::core_llm::TextLlmDescriptor {
+            id: "candle-starvector-8b".to_string(),
+            family: "starvector".to_string(),
+            backend: "candle".to_string(),
+            capabilities: gen_core::core_llm::TextLlmCapabilities {
+                supports_vision: true,
+                ..Default::default()
+            },
+        }
+    }
+    const STUB_CANDLE_STARVECTOR: gen_core::core_llm::TextLlmRegistration =
+        gen_core::core_llm::TextLlmRegistration {
+            descriptor: stub_candle_starvector_descriptor,
+            load: stub_textllm_load,
+            can_load: stub_textllm_can_load,
+            weightless_vision: None,
+            weightless_audio: None,
+        };
+
     // A candle-backed stub `Trainer` (backend "candle") registered under an id that IS in TRAINER_IDS
     // (`sdxl`): proves a Windows/candle backend lights up `lora_train` + `lora_train_execute` from a
     // registered `backend = "candle"` trainer descriptor alone (sc-7817), so the CI lane exercises the
@@ -2335,6 +2470,8 @@ mod tests {
             // This SDXL registry-derivation stub is adapter-only. Mage owns the separate
             // native full-base descriptor on both backends.
             supports_full_finetune: false,
+            // Not an instruction-edit trainer.
+            max_reference_images: 0,
         }
     }
     fn stub_candle_trainer_load(
@@ -2356,6 +2493,8 @@ mod tests {
         let media = media.build().expect("test media registry");
         let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
             .register(STUB_TEXT_LLM)
+            .register(STUB_MLX_STARVECTOR)
+            .register(STUB_CANDLE_STARVECTOR)
             .build()
             .expect("test LLM registry");
         registry_capabilities_from(settings, &media, &text)
@@ -2489,6 +2628,53 @@ mod tests {
         // both off ⇒ nothing (neither the candle stub nor — on macOS — the real mlx twin is enabled).
         let off = registry_capabilities_with_stubs(&settings_with_backends(false, false));
         assert!(!off.contains(&Cap::PromptRefine));
+    }
+
+    #[test]
+    fn exact_enabled_starvector_registrations_project_image_to_svg_only() {
+        let mlx = registry_capabilities_with_stubs(&settings_with_backends(true, false));
+        assert!(mlx.contains(&Cap::VectorImageToSvg));
+        assert!(!mlx.contains(&Cap::VectorTextToSvg));
+
+        let candle = registry_capabilities_with_stubs(&settings_with_backends(false, true));
+        assert!(candle.contains(&Cap::VectorImageToSvg));
+        assert!(!candle.contains(&Cap::VectorTextToSvg));
+
+        let disabled = registry_capabilities_with_stubs(&settings_with_backends(false, false));
+        assert!(!disabled.contains(&Cap::VectorImageToSvg));
+        assert!(!disabled.contains(&Cap::VectorTextToSvg));
+    }
+
+    #[test]
+    fn starvector_projection_rejects_wrong_id_family_backend_and_nonvision_descriptors() {
+        fn descriptor() -> gen_core::core_llm::TextLlmDescriptor {
+            gen_core::core_llm::TextLlmDescriptor {
+                // Exact id for Candle, but deliberately registered as MLX and without the typed
+                // family's vision surface. No individual condition may be enough to claim.
+                id: "candle-starvector-1b".to_string(),
+                family: "llama".to_string(),
+                backend: "mlx".to_string(),
+                capabilities: Default::default(),
+            }
+        }
+        const WRONG: gen_core::core_llm::TextLlmRegistration =
+            gen_core::core_llm::TextLlmRegistration {
+                descriptor,
+                load: stub_textllm_load,
+                can_load: stub_textllm_can_load,
+                weightless_vision: None,
+                weightless_audio: None,
+            };
+        let media = gen_core::ProviderRegistryBuilder::new()
+            .build()
+            .expect("empty media registry");
+        let text = gen_core::core_llm::TextLlmRegistryBuilder::new()
+            .register(WRONG)
+            .build()
+            .expect("hostile text registry");
+        let caps = registry_capabilities_from(&settings_with_backends(true, true), &media, &text);
+        assert!(!caps.contains(&Cap::VectorImageToSvg));
+        assert!(!caps.contains(&Cap::VectorTextToSvg));
     }
 
     #[test]

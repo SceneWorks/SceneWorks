@@ -62,6 +62,10 @@ use uuid::Uuid;
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow
 // dead_code there (the rest are MLX-only) — same pattern as `openpose_skeleton`. On a non-candle
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
+/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
+/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
+/// share, so a per-lane copy would be two declarations of one fact.
+pub(crate) use sceneworks_core::admission_geometry;
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -146,6 +150,26 @@ mod execution_planner;
     allow(dead_code)
 )]
 mod refine_model_cache;
+// Bounds MLX's free-buffer cache across a long LLM decode (sc-24029). Dead off both natives for the
+// same reason `refine_model_cache` is: nothing there decodes on a resident text model.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod mlx_decode_cache;
+// Compressed-KV opt-in and the KV-cache report SceneWorks records for a local LLM generation
+// (sc-20682). Dead off both natives for the same reason as the two modules above.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod llm_kv_cache;
 use api_client::*;
 // Backend-neutral engine dispatch table + registry-derived capability advertisement
 // (sc-3723). All-targets: the table is pure data and the derivation runs off-macOS off an
@@ -174,6 +198,11 @@ use gpu::*;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_memory_strategy;
 mod fit_gate;
+// StarVector's cross-backend pre-load device admission. Unlike the image-only CUDA gate below,
+// vectors run through MLX on macOS and Candle/CUDA off-Mac, so this small reader is intentionally
+// all-targets. It consumes the exact unmeasured static weights floor and fails 8B closed until the
+// permanent-pin terminal candidate exists; terminal peaks and quality remain merge evidence.
+mod vector_admission;
 // Margin constants derived from repeat-capture variance in the calibration evidence (sc-18094,
 // epic 18093). Consumed by the stale-closure widening (sc-18095) and estimate-backed admission
 // (sc-18096/18097) follow-ups; pinned to `scripts/derive-ladder-margins.mjs` by
@@ -237,6 +266,15 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+mod vector_jobs;
+#[doc(hidden)]
+pub use vector_jobs::build_vector_asset_fact;
+use vector_jobs::*;
+#[doc(hidden)]
+pub use vector_jobs::{
+    terminal_sanitize_svg_bytes, terminal_write_sanitized_pair,
+    terminal_write_sanitized_pair_with_preview_size, TerminalSanitizedSvg,
+};
 // Ideogram 4 mandatory JSON-caption conditioning + placeholder detect-and-recover (epic 4725,
 // sc-6501). Pure prompt-guard + post-render heuristic, compiled cross-platform so its unit tests run
 // on the Linux parity lane. sc-6610: its functions are called only from the macOS MLX generate path
@@ -260,7 +298,25 @@ pub use video_jobs::{text_encoder_options_for_adapter, TextEncoderOption};
 // `inference_runtime::load_audio`, which errors clearly on a build that ships no audio registry (a
 // non-native desktop worker never advertises `audio_generate`, so the arm is unreachable there).
 mod audio_jobs;
+// YuE lyrics2song whole-render memory admission (sc-19386): max-over-stages + KV, all targets.
+mod yue_admission;
 use audio_jobs::*;
+// YuE2's whole-render memory admission (sc-23001, epic 22988): prices every stage of one render,
+// chooses the per-request memory controls the engine honours, refuses before the load, and holds
+// the admitted residency in a lease until the generator drops. Audio-lane only, all targets.
+mod yue2_admission;
+// sc-23001's YuE2 memory-profile capture entrypoint: one #[ignore]d test the terminal campaign
+// (`scripts/yue2-memory-profile.mjs`, sc-23002) runs once per case in a fresh process. Test-only,
+// and only where the candle audio lane is linked (Metal on macOS, CUDA under `backend-candle`).
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod yue2_memory_profile;
+// YuE2 song jobs (sc-22999): `audio_generate` jobs carrying a `yue2` block, run through the `yue2`
+// provider's `generate_with_report`. Compiled everywhere; the engine is reached through the audio
+// lane, which errors clearly on a build that links none.
+mod yue2_jobs;
+mod yue2_transcription;
+// Locally derived model tiers (sc-22999): the post-download deriver `localDerivation` rows name.
+mod local_derivation;
 // The Voice Clone "register a voice" embed path (sc-13517): the rust-api calls
 // `voice_register::embed_reference_clip` to compute a reference clip's Chatterbox-VE speaker vector
 // for the saved-voice registry. Public because it is invoked from another crate (rust-api), not the
@@ -318,7 +374,27 @@ mod face_likeness_compare_jobs;
 use face_likeness_compare_jobs::*;
 mod prompt_refine_jobs;
 use prompt_refine_jobs::*;
+// Qwen-Image 2.1 (sc-24113, epic 24107). Two small, pure adapters kept OUT of the 4k-line
+// `image_jobs` / `prompt_refine_jobs` bodies on purpose:
+//
+// * `qwen_alpha` is the single place the provisional RGBA-output contract is spelled, so the
+//   sc-24111 engine-side rename is a one-line change here.
+// * `qwen_prompt_rewrite` is the official prompt-rewriter adapter — which of the two PE
+//   checkpoints a request selects, the frozen system-prompt digests, and the reply parse. It
+//   loads no weights and runs no model; `prompt_refine_jobs` drives it through the existing
+//   native TextLlm lane.
 mod downloads;
+mod qwen_alpha;
+// Every consumer is the TextLlm lane in `prompt_refine_jobs`, which only a backend build compiles;
+// a no-backend build keeps the module for its pure-function tests.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
+mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
@@ -1031,6 +1107,42 @@ fn emit_event(event: &str, payload: Value) {
         object.insert("event".to_owned(), Value::String(event.to_owned()));
     }
     emit_event_value(Level::INFO, value);
+}
+
+/// Stack reserved for the outermost worker future.
+///
+/// The worker dispatch future contains every platform-compiled job handler. Windows executable
+/// main threads have a smaller default stack than macOS/Linux, so polling that future directly
+/// from `#[tokio::main]` can overflow before a claimed job reaches its first network transfer.
+/// Keep this explicit rather than relying on a linker-specific `/STACK` flag or Tokio's runtime
+/// worker-thread setting, neither of which changes the stack used by `Runtime::block_on`.
+pub const WORKER_ENTRY_STACK_BYTES: usize = 8 * 1024 * 1024;
+pub const WORKER_ENTRY_THREAD_NAME: &str = "sceneworks-worker-entry";
+
+/// Construct the Tokio runtime and the complete worker future on a named, explicitly sized thread.
+///
+/// `worker` is invoked inside the new thread so its future is never constructed on the process
+/// main thread. Both shipped worker entry binaries use this seam.
+pub fn run_on_worker_entry_thread<F, Fut>(worker: F) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = WorkerResult<()>> + 'static,
+{
+    let worker = std::thread::Builder::new()
+        .name(WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(WORKER_ENTRY_STACK_BYTES)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(WorkerError::Io)?;
+            runtime.block_on(worker())
+        })
+        .map_err(WorkerError::Io)?;
+    match worker.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
 }
 
 pub async fn run() -> WorkerResult<()> {
@@ -2052,6 +2164,9 @@ async fn run_utility_job(
             JobType::ImageEdit => run_image_generate_job(api, settings, &job)
                 .await
                 .map_err(|error| ("Image edit failed.", error)),
+            JobType::VectorGenerate => run_vector_job(api, settings, &job)
+                .await
+                .map_err(|error| ("Vector generation failed.", error)),
             // Native MLX tile-ControlNet detail refine (epic 3041, sc-3060), served in-process
             // by the engine on the macOS Apple-Silicon GPU worker. Off macOS the capability is
             // never advertised, so this arm is unreachable there and the job remains queued.

@@ -273,6 +273,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(
@@ -390,6 +391,7 @@ mod driver {
                 caption: caption.clone(),
                 control_image_path: None,
                 model_options: Default::default(),
+                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(
@@ -532,7 +534,11 @@ mod driver {
                 let out = generator.generate(&req, &mut |_p| {}).expect("generate");
                 let img = match out {
                     GenerationOutput::Images(mut v) => v.swap_remove(0),
-                    GenerationOutput::Video { .. } | GenerationOutput::Audio(_) => {
+                    // This grid renderer leaves `output_channels` at its `Rgb` default, so a
+                    // four-channel return would mean the engine ignored the request (sc-24111).
+                    GenerationOutput::ImagesRgba(_)
+                    | GenerationOutput::Video { .. }
+                    | GenerationOutput::Audio(_) => {
                         panic!("expected an image")
                     }
                 };

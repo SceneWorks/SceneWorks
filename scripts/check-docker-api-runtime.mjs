@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -118,6 +118,22 @@ async function main() {
     await runDocker([...compose, "logs", "--no-color", "api"], env).catch(() => {});
     try {
       await waitForHealth();
+      const image = execFileSync("docker", [...compose, "images", "-q", "api"], {
+        env,
+        encoding: "utf8",
+      }).trim();
+      if (!image) throw new Error("compose did not produce an API image");
+      // Exercise the image default separately: Compose's numeric user override
+      // would otherwise mask a regression to a root image.
+      execFileSync("docker", ["run", "--rm", "--entrypoint", "sh", image, "-ec",
+        'test "$(id -u)" = 1000; test "$(id -g)" = 1000; test "$HOME" = /home/sceneworks; touch "$HOME/.docker-smoke"; rm "$HOME/.docker-smoke"'],
+        { stdio: "inherit" });
+      // The mounted data tree is the home/cache root for arbitrary host UID/GID
+      // overrides. Prove the effective identity and a real bind-mounted write.
+      execFileSync("docker", [...compose, "exec", "-T", "api", "sh", "-ec",
+        'test "$(id -u)" = "$1"; test "$(id -g)" = "$2"; test "$HOME" = /sceneworks/data; touch "$HOME/cache/.docker-smoke"; rm "$HOME/cache/.docker-smoke"',
+        "sh", env.SCENEWORKS_UID ?? "1000", env.SCENEWORKS_GID ?? "1000"], { env, stdio: "inherit" });
+      console.log("Docker API image default and Compose UID/GID bind-write checks passed.");
     } catch (error) {
       // The initial log snapshot often happens before create_app reaches the
       // stalled operation. Capture final health and boot logs at the deadline.

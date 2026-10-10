@@ -1,0 +1,23 @@
+<!-- @dsCard group="Brand" viewport="700x150" name="Motion" subtitle="One easing, two durations — hover the bars" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 20px; background: var(--bg); font-family: var(--font-ui); color: var(--text); }
+  .rows { display: grid; gap: 12px; max-width: 560px; }
+  .r { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 14px; }
+  .k { font-size: 12px; font-weight: 600; }
+  .k span { display: block; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); font-weight: 400; }
+  .track { height: 22px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill); position: relative; overflow: hidden; }
+  .fill { position: absolute; inset: 2px auto 2px 2px; width: 22px; background: var(--accent); border-radius: var(--r-pill); }
+  .fast .fill { transition: width var(--t-fast) var(--ease-out); }
+  .med .fill { transition: width var(--t-med) var(--ease-out); }
+  body:hover .fill { width: calc(100% - 4px); }
+</style></head>
+<body>
+<div class="rows">
+  <div class="r"><div class="k">--t-fast<span>120ms</span></div><div class="track fast"><div class="fill"></div></div></div>
+  <div class="r"><div class="k">--t-med<span>220ms</span></div><div class="track med"><div class="fill"></div></div></div>
+  <div class="r"><div class="k">--ease-out<span>cubic-bezier(.22,1,.36,1)</span></div><div style="font-size:12px;color:var(--text-muted)">Standard easing for every transition — hovers, popovers, theme flips.</div></div>
+</div>
+</body></html>

@@ -524,6 +524,17 @@ fn model_requires_license_acknowledgment(model: &Value) -> bool {
 /// being refused for a field the typed route never wrote.
 pub(crate) const LICENSE_ACKNOWLEDGED_PAYLOAD_KEY: &str = "licenseAcknowledged";
 
+/// Error code for a fetch of a repo a catalog entry declares as a BLOCKED conditional component
+/// (sc-22998: YuE2's SheetSage2 / MERT-v2-FullSong cover closure). Distinct from
+/// [`LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE`] because no acknowledgment clears it: the block is an
+/// owner decision the user cannot make from a checkbox.
+pub(crate) const COMPONENT_BLOCKED_CODE: &str = "component_blocked";
+
+/// The derivation a `ModelDownload` job runs after fetching the original (sc-22999): the worker
+/// derives this tier locally through the audio-lane preparer into
+/// `local_derivation_snapshot_dir` and verifies it against the pinned weights.
+pub(crate) const LOCAL_DERIVATION_PAYLOAD_KEY: &str = "localDerivation";
+
 /// Canonical comparison key for a Hugging Face `owner/name`. Lowercased so a case-variant repo
 /// string cannot walk past a gate keyed on the catalog's spelling — the hub resolves `owner/Name`
 /// and `owner/name` to the same repository, so treating them as different would be a bypass.
@@ -581,6 +592,13 @@ fn huggingface_repo_from_url(url: &str) -> Option<String> {
 /// encoder and both VAEs come straight from `MiniMaxAI/MiniMax-H3`, which is the repo the review's
 /// bypass named, and a primary-only index would have missed it.
 ///
+/// Also every `conditionalComponents[].repo` (sc-22998). Those repos are not `downloads[]` rows, so
+/// no install fetches them, but every repo-keyed door (`POST /api/v1/jobs`, `/models/import`,
+/// `/loras/import`, `/loras/:id/download`) takes a caller-supplied repo verbatim, so the gate must
+/// know them. A component carrying `blocked` is indexed for EVERY entry, acknowledgment or not, and
+/// is refused outright by [`ensure_license_acknowledged_for_source`]; a blocked entry takes
+/// precedence over an acknowledgment entry for the same repo.
+///
 /// Read from the UNFILTERED manifest entries on purpose. The catalog snapshot narrows `downloads`
 /// to the running OS (`retain_downloads_for_os`), and every MiniMax-H3 row is platform-scoped: the
 /// MLX tiers and their co-requisites are `platforms: ["macos"]` and sc-19558's raw-snapshot set is
@@ -593,11 +611,16 @@ async fn license_acknowledgment_repo_index(
     state: &AppState,
 ) -> Result<std::collections::BTreeMap<String, LicenseAcknowledgmentSource>, ApiError> {
     let (models, _) = merged_model_manifest_entries(state).await?;
-    let mut index = std::collections::BTreeMap::new();
+    Ok(license_acknowledgment_index_for(&models))
+}
+
+/// [`license_acknowledgment_repo_index`] over already-loaded manifest entries.
+fn license_acknowledgment_index_for(
+    models: &[Value],
+) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
+    let mut index: std::collections::BTreeMap<String, LicenseAcknowledgmentSource> =
+        std::collections::BTreeMap::new();
     for model in models {
-        if !model_requires_license_acknowledgment(&model) {
-            continue;
-        }
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -606,28 +629,76 @@ async fn license_acknowledgment_repo_index(
             .and_then(Value::as_str)
             .unwrap_or(model_id)
             .to_owned();
-        for download in model
-            .get("downloads")
+        let source = |blocked: Option<BlockedComponent>| LicenseAcknowledgmentSource {
+            model_id: model_id.to_owned(),
+            model_name: model_name.clone(),
+            blocked,
+        };
+        let conditional = model
+            .get("conditionalComponents")
             .and_then(Value::as_array)
             .into_iter()
-            .flatten()
-        {
-            let Some(key) = download
+            .flatten();
+        // Blocked conditional components first, for EVERY entry: no acknowledgment unblocks them.
+        for component in conditional.clone() {
+            let Some(block) = component.get("blocked") else {
+                continue;
+            };
+            let Some(key) = component
                 .get("repo")
                 .and_then(Value::as_str)
                 .and_then(huggingface_repo_key)
             else {
                 continue;
             };
-            index
-                .entry(key)
-                .or_insert_with(|| LicenseAcknowledgmentSource {
-                    model_id: model_id.to_owned(),
-                    model_name: model_name.clone(),
-                });
+            let text = |field: &str| {
+                block
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            index.insert(
+                key,
+                source(Some(BlockedComponent {
+                    component_id: component
+                        .get("componentId")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    reason: text("reason"),
+                    unblock: text("unblock"),
+                })),
+            );
+        }
+        if !model_requires_license_acknowledgment(model) {
+            continue;
+        }
+        let downloads = model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for row in downloads.chain(conditional) {
+            let Some(key) = row
+                .get("repo")
+                .and_then(Value::as_str)
+                .and_then(huggingface_repo_key)
+            else {
+                continue;
+            };
+            index.entry(key).or_insert_with(|| source(None));
         }
     }
-    Ok(index)
+    index
+}
+
+/// A conditional component a catalog entry declares as `blocked` (sc-22998).
+#[derive(Clone)]
+pub(crate) struct BlockedComponent {
+    pub(crate) component_id: String,
+    pub(crate) reason: String,
+    pub(crate) unblock: String,
 }
 
 /// The catalog entry whose licence acknowledgment covers a fetch of some repo. The NAME travels
@@ -638,6 +709,9 @@ async fn license_acknowledgment_repo_index(
 pub(crate) struct LicenseAcknowledgmentSource {
     pub(crate) model_id: String,
     pub(crate) model_name: String,
+    /// Set when the repo is a BLOCKED conditional component (sc-22998): refused whatever the
+    /// caller asserts.
+    pub(crate) blocked: Option<BlockedComponent>,
 }
 
 /// Client-visible keys naming the model whose licence acknowledgment covers a catalog row that is
@@ -685,7 +759,10 @@ pub(crate) async fn annotate_license_acknowledgment_sources(
         return Ok(());
     }
     for (position, key) in keyed {
-        let Some(source) = index.get(key.as_str()) else {
+        let Some(source) = index
+            .get(key.as_str())
+            .filter(|source| source.blocked.is_none())
+        else {
             continue;
         };
         let Some(object) = rows[position].as_object_mut() else {
@@ -743,6 +820,30 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
         return Ok(());
     }
     let index = license_acknowledgment_repo_index(state).await?;
+    // A blocked conditional component is refused before anything else, and an acknowledgment does
+    // not clear it (sc-22998).
+    if let Some((requested, source, blocked)) = candidates.iter().find_map(|(named, key)| {
+        index.get(key.as_str()).and_then(|source| {
+            source
+                .blocked
+                .as_ref()
+                .map(|blocked| (named, source, blocked))
+        })
+    }) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            detail: format!(
+                "'{requested}' is the '{component}' component of '{model_id}', which is blocked: \
+                 {reason} Unblock condition: {unblock}",
+                component = blocked.component_id,
+                model_id = source.model_id,
+                reason = blocked.reason,
+                unblock = blocked.unblock,
+            ),
+            code: Some(COMPONENT_BLOCKED_CODE),
+            context: None,
+        });
+    }
     let Some((requested, source)) = candidates
         .iter()
         .find_map(|(named, key)| index.get(key.as_str()).map(|source| (named, source)))
@@ -837,6 +938,11 @@ pub(crate) async fn create_model_download_job(
             context: None,
         });
     }
+    // sc-22999: the acceptance is recorded server-side for the entry's current terms, so a queued
+    // YuE2 job can re-check it at execution and a withdrawn acknowledgment refuses the job.
+    if model_requires_license_acknowledgment(&model) && payload.license_acknowledged {
+        crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+    }
     // Tier selection (sc-8508): an explicit `variant` installs that quant tier's download entry; an
     // absent variant installs the default tier (back-compat). A variant the model doesn't advertise
     // is a 400 rather than a silent wrong-tier install.
@@ -855,14 +961,75 @@ pub(crate) async fn create_model_download_job(
             ApiError::bad_request("Model does not define a Hugging Face download")
         })?,
     };
+    // sc-24112: a DECLARED-but-unpublished tier is refused HERE, at the one place a download job is
+    // created, rather than by hiding the row — the catalog must keep enumerating it so the tier
+    // axis, the memory ladder and the picker are all real before the bytes exist. Its revision is
+    // the null SHA, so without this the job would queue a fetch that cannot resolve and the user
+    // would see an opaque download failure instead of the reason.
+    if is_pending_artifact_download(&download) {
+        return Err(ApiError::bad_request(format!(
+            "Model '{model_id}' declares the '{}' tier but its artifact is not published yet; \
+             install a different tier.",
+            download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+        )));
+    }
+    // sc-22998 / sc-22999: a locally derived tier (YuE2 q8 / q4) is not an artifact anyone can
+    // download — it is produced on this machine from the `fromVariant` original. Its row's `files`
+    // name the ORIGINAL, so the job fetches (or re-verifies) that original under the ORIGINAL's
+    // variant (its receipt is the original's, never the tier's) and carries the derivation for the
+    // worker's audio-lane preparer to run afterwards. The tier reads installed only once its
+    // snapshot verifies against the pinned weights (`derived_snapshot_state`).
+    let derivation =
+        if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+            &download,
+        ) {
+            let variant = download
+                .get("variant")
+                .and_then(Value::as_str)
+                .unwrap_or("selected")
+                .to_owned();
+            let derivation =
+                sceneworks_core::model_artifacts::artifact_selection::local_derivation(&download)
+                    .ok_or_else(|| {
+                    ApiError::bad_request(format!(
+                        "Model '{model_id}': the '{variant}' tier declares a malformed \
+                         localDerivation block."
+                    ))
+                })?;
+            Some((variant, derivation))
+        } else {
+            None
+        };
+    let download = match &derivation {
+        Some((variant, derivation)) => model_download_for_variant(&model, &derivation.from_variant)
+            .filter(|original| {
+                !sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                    original,
+                )
+            })
+            .ok_or_else(|| {
+                ApiError::bad_request(format!(
+                    "Model '{model_id}': the '{variant}' tier derives from '{}', which this \
+                     catalog does not define as a download.",
+                    derivation.from_variant
+                ))
+            })?,
+        None => download,
+    };
     // The selected `download` is always the primary/tier entry — `model_download` and
     // `model_download_for_variant` skip co-requisites (sc-9696), so a co-requisite can never be
     // installed as if it were the model itself.
-    let requested_variant = payload
-        .variant
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let requested_variant = match &derivation {
+        Some((_, derivation)) => Some(derivation.from_variant.as_str()),
+        None => payload
+            .variant
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    };
 
     // Only the SELECTED tier's co-requisites (sc-14980). Mage-Flow's shared text encoder exists as
     // three per-tier subtrees; fetching all of them would pull 16.1 GB of text encoder for a q4
@@ -873,8 +1040,39 @@ pub(crate) async fn create_model_download_job(
         .get("variant")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Choice groups (sc-22998): of a group's options — YuE2's standard / legacy decoder — only the
+    // one the request names (else the manifest default) is queued; the others stay add-ons. An
+    // unknown group or option is refused rather than answered with a different option.
+    //
+    // The request's choices are validated first (an unknown group or option is refused), then any
+    // group the request leaves unset takes the option already partly on disk before the default, so
+    // a REPAIR of a half-downloaded legacy decoder completes it instead of fetching the standard one.
+    sceneworks_core::model_artifacts::artifact_selection::resolve_co_requisite_choices(
+        &model,
+        selected_variant.as_deref(),
+        &payload.choices,
+    )
+    .map_err(|error| ApiError::bad_request(format!("Model '{model_id}': {error}")))?;
+    let repair_choices =
+        sceneworks_core::model_artifacts::artifact_selection::co_requisite_choices_for_repair(
+            &model,
+            selected_variant.as_deref(),
+            &payload.choices,
+            |download| co_requisite_presence(&state.settings.data_dir, download),
+        );
+    let choices =
+        sceneworks_core::model_artifacts::artifact_selection::resolve_co_requisite_choices(
+            &model,
+            selected_variant.as_deref(),
+            &repair_choices,
+        )
+        .map_err(|error| ApiError::bad_request(format!("Model '{model_id}': {error}")))?;
     let co_requisites =
-        model_co_requisite_downloads_for_variant(&model, selected_variant.as_deref());
+        sceneworks_core::model_artifacts::artifact_selection::model_co_requisite_downloads_for_selection(
+            &model,
+            selected_variant.as_deref(),
+            &choices,
+        );
 
     // The REPO-keyed half of the same gate (sc-17227). The check above is keyed on the catalog id
     // in the PATH, so it fires only when the entry that id names declares
@@ -908,7 +1106,7 @@ pub(crate) async fn create_model_download_job(
     )
     .await?;
 
-    let job_payload = build_model_download_job_payload(
+    let mut job_payload = build_model_download_job_payload(
         &model,
         &model_id,
         &download,
@@ -917,6 +1115,19 @@ pub(crate) async fn create_model_download_job(
         payload.license_acknowledged,
         &state.settings.data_dir,
     )?;
+    if let Some((variant, derivation)) = &derivation {
+        job_payload.insert(
+            LOCAL_DERIVATION_PAYLOAD_KEY.to_owned(),
+            json!({
+                "variant": variant,
+                "fromVariant": derivation.from_variant,
+                "conversion": derivation.conversion,
+                "weightsFile": derivation.weights_file,
+                "weightsBytes": derivation.weights_bytes,
+                "weightsSha256": derivation.weights_sha256,
+            }),
+        );
+    }
 
     // Co-requisites (sc-9696): dependencies that must install ALONGSIDE the primary — e.g. the PiD
     // decoder's shared gemma-2-2b-it caption encoder, or 10Eros's cond_safe distill LoRA. Without
@@ -963,6 +1174,216 @@ pub(crate) async fn create_model_download_job(
     )
     .await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// A purpose the entry declares no conditional components for (sc-23002).
+pub(crate) const CONDITIONAL_COMPONENTS_NOT_DECLARED_CODE: &str =
+    "conditional_components_not_declared";
+
+/// `POST /api/v1/models/:model_id/conditional-components/:purpose/download` (sc-23002) — acquire the
+/// pinned components a model needs only for `purpose` (YuE2's SheetSage2 + MERT-v2-FullSong cover
+/// closure). They are never `downloads[]` rows, so no install reaches them; this is the one door, and
+/// it applies the entry's gates exactly as the model install does:
+///
+/// * a `blocked` component refuses the whole purpose (403 `component_blocked`, reason + unblock);
+/// * an entry that requires a licence acknowledgment refuses without one (403
+///   `license_acknowledgment_required`) and records it server-side when asserted, for the entry's
+///   CURRENT terms — the same acknowledgment YuE2 jobs re-check at execution;
+/// * the repo-keyed half of the gate runs over the repos it will queue, as on every other door.
+///
+/// Each component not already installed is queued as its own `model_download` job (the worker is
+/// one repo per job) at its pinned revision and file list, carrying the acknowledgment so a retry
+/// re-validates. Components already on disk are reported, not re-fetched.
+pub(crate) async fn create_conditional_components_download_jobs(
+    State(state): State<AppState>,
+    Path((model_id, purpose)): Path<(String, String)>,
+    ApiJson(payload): ApiJson<ConditionalComponentsDownloadRequest>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    use sceneworks_core::model_usage_policy::{
+        conditional_component_downloads, ConditionalComponentsError,
+    };
+    let model = model_catalog(&state)
+        .await?
+        .into_iter()
+        .find(|item| item.get("id").and_then(Value::as_str) == Some(model_id.as_str()))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            detail: "Model not found".to_owned(),
+            context: None,
+            code: None,
+        })?;
+    let rows = conditional_component_downloads(&model, &purpose).map_err(|error| match error {
+        ConditionalComponentsError::NotDeclared { .. } => ApiError::typed(
+            StatusCode::NOT_FOUND,
+            format!("Model '{model_id}': {error}."),
+            CONDITIONAL_COMPONENTS_NOT_DECLARED_CODE,
+            json!({ "purpose": purpose }),
+        ),
+        ConditionalComponentsError::Blocked { ref blocked, .. } => ApiError::typed(
+            StatusCode::FORBIDDEN,
+            format!("Model '{model_id}': {error}"),
+            COMPONENT_BLOCKED_CODE,
+            json!({
+                "purpose": purpose,
+                "blocked": blocked.iter().map(|(component_id, reason, unblock)| json!({
+                    "componentId": component_id, "reason": reason, "unblock": unblock,
+                })).collect::<Vec<_>>(),
+            }),
+        ),
+    })?;
+    if model_requires_license_acknowledgment(&model) {
+        if !payload.license_acknowledged {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                detail: format!(
+                    "Model '{model_id}' requires accepting its license before its '{purpose}' \
+                     components download. Accept the license on the Models screen, or send \
+                     `licenseAcknowledged: true` to assert that the user has accepted it."
+                ),
+                code: Some(LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE),
+                context: None,
+            });
+        }
+        crate::yue2_jobs::record_license_acknowledgment(&state, &model, "download").await?;
+    }
+    let repos: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row.get("repo").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    let repo_refs: Vec<Option<&str>> = repos.iter().map(|repo| Some(repo.as_str())).collect();
+    ensure_license_acknowledged_for_source(&state, &repo_refs, None, payload.license_acknowledged)
+        .await?;
+    let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
+    let mut jobs = Vec::new();
+    let mut components = Vec::new();
+    for row in &rows {
+        let component_id = row.get("componentId").cloned().unwrap_or(Value::Null);
+        let presence = co_requisite_presence(&state.settings.data_dir, row);
+        if presence == CoRequisitePresence::Installed {
+            components.push(json!({
+                "componentId": component_id,
+                "repo": row.get("repo"),
+                "revision": row.get("revision"),
+                "status": "installed",
+            }));
+            continue;
+        }
+        let job_payload = build_model_download_job_payload(
+            &model,
+            &model_id,
+            row,
+            None,
+            false,
+            payload.license_acknowledged,
+            &state.settings.data_dir,
+        )?;
+        let job = create_generation_job(
+            state.clone(),
+            JobType::ModelDownload,
+            None,
+            None,
+            job_payload,
+            requested_gpu.clone(),
+        )
+        .await?;
+        components.push(json!({
+            "componentId": component_id,
+            "repo": row.get("repo"),
+            "revision": row.get("revision"),
+            "status": "queued",
+            "jobId": job.id,
+        }));
+        jobs.push(public_job_snapshot(job));
+    }
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "purpose": purpose, "jobs": jobs, "components": components })),
+    ))
+}
+
+/// Stamp each conditional component row of a catalog entry with its install state (sc-23002) and
+/// summarize each purpose — `conditionalPurposes.<purpose>.installState` is `installed` only when
+/// every component the purpose needs is, `incomplete` when any is partly on disk, else `missing`,
+/// and `blocked` when any carries a block — so a client can tell whether a cover from a recording
+/// can run without guessing from file names.
+fn apply_conditional_component_state(object: &mut JsonObject, data_dir: &FsPath) {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let Some(rows) = object
+        .get_mut("conditionalComponents")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    let mut purposes: std::collections::BTreeMap<String, (bool, bool, bool)> =
+        std::collections::BTreeMap::new();
+    for row in rows.iter_mut() {
+        let presence = co_requisite_presence(data_dir, row);
+        let blocked = row.get("blocked").is_some();
+        let state = match presence {
+            CoRequisitePresence::Installed => "installed",
+            CoRequisitePresence::Incomplete => "incomplete",
+            CoRequisitePresence::Absent => "missing",
+        };
+        for purpose in row
+            .get("requiredFor")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            let entry = purposes
+                .entry(purpose.to_owned())
+                .or_insert((true, false, false));
+            entry.0 &= presence == CoRequisitePresence::Installed;
+            entry.1 |= presence == CoRequisitePresence::Incomplete;
+            entry.2 |= blocked;
+        }
+        if let Some(row) = row.as_object_mut() {
+            row.insert("installState".to_owned(), json!(state));
+        }
+    }
+    let summary: JsonObject = purposes
+        .into_iter()
+        .map(|(purpose, (installed, incomplete, blocked))| {
+            let state = if installed {
+                "installed"
+            } else if incomplete {
+                "incomplete"
+            } else {
+                "missing"
+            };
+            (
+                purpose,
+                json!({ "installState": state, "blocked": blocked }),
+            )
+        })
+        .collect();
+    object.insert("conditionalPurposes".to_owned(), Value::Object(summary));
+}
+
+/// The install state of `model`'s `purpose` components right now (sc-23002): `Ok(())` when every
+/// one is installed; otherwise the component ids that are not.
+pub(crate) fn conditional_components_missing(
+    data_dir: &FsPath,
+    model: &Value,
+    purpose: &str,
+) -> Result<Vec<Value>, sceneworks_core::model_usage_policy::ConditionalComponentsError> {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    let rows =
+        sceneworks_core::model_usage_policy::conditional_component_downloads(model, purpose)?;
+    Ok(rows
+        .into_iter()
+        .filter(|row| co_requisite_presence(data_dir, row) != CoRequisitePresence::Installed)
+        .map(|row| {
+            json!({
+                "componentId": row.get("componentId"),
+                "repo": row.get("repo"),
+                "revision": row.get("revision"),
+            })
+        })
+        .collect())
 }
 
 fn ensure_model_downloadable(model: &Value) -> Result<(), ApiError> {
@@ -2176,48 +2597,56 @@ pub(crate) async fn delete_model_variant(
     // tier as a `files`-filtered slice of a shared HF cache repo (sc-12024); convert-at-install
     // models (Anima) keep it as a real `<converted>/<tier>/` dir emitted by one convert job
     // (sc-12025). Resolve whichever this model uses; a variant that is neither has nothing to delete.
-    let removal_result = if let Some(download) = model_download_for_variant(&model, &variant) {
-        let repo = download
-            .get("repo")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let files = string_array_field(&download, "files");
-        // A tier with no `files` scope is the whole repo (a single-variant "default"), not a
-        // deletable slice of a shared cache — refuse rather than risk wiping every tier. The UI
-        // only offers this on real quant tiers (bf16/q8/q4), which always carry a `files` glob.
-        if files.is_empty() {
+    let derived = model_download_for_variant(&model, &variant).filter(|download| {
+        sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(download)
+    });
+    let removal_result = if let Some(download) = derived {
+        // sc-22998: a locally derived tier owns ONLY its derived snapshot. Its row's `files` are the
+        // original's, which belong to the `fromVariant` tier and are never touched here.
+        let snapshot = sceneworks_core::model_artifacts::artifact_selection::local_derivation(
+            &download,
+        )
+        .and_then(|derivation| {
+            sceneworks_core::model_artifacts::artifact_selection::local_derivation_snapshot_dir(
+                data_dir,
+                &model_id,
+                &variant,
+                &derivation,
+            )
+        })
+        .ok_or_else(|| {
+            ApiError::bad_request(format!(
+                "Tier '{variant}' declares a malformed local derivation"
+            ))
+        })?;
+        if !snapshot.is_dir() {
             return Err(ApiError::bad_request(format!(
-                "Tier '{variant}' has no file scope; delete the whole model instead"
+                "Tier '{variant}' is not installed"
             )));
         }
-        let repo_cache = huggingface_repo_cache_path(data_dir, &repo);
-        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&repo)));
-        // Some families expose load-time quant choices over one dense snapshot (Mage-Flow):
-        // their q4/q8/bf16 entries intentionally overlap. Protect every path still referenced
-        // by a sibling logical tier; a delete then truthfully reclaims zero bytes rather than
-        // corrupting the snapshot used by the remaining choices.
-        let retained_files = model
-            .get("downloads")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|entry| {
-                !is_co_requisite_download(entry)
-                    && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
-                    && entry
-                        .get("variant")
-                        .and_then(Value::as_str)
-                        .is_some_and(|value| !value.eq_ignore_ascii_case(&variant))
+        let reclaimable = converted_tier_real_bytes(&snapshot);
+        remove_owned_artifacts(vec![snapshot], &allowed_roots, true)
+            .await
+            .map(|removal| TierRemoval {
+                reclaimed_bytes: if removal.removed_paths.is_empty() {
+                    0
+                } else {
+                    reclaimable
+                },
+                removed_paths: removal.removed_paths,
+                retained_paths: removal.retained_paths,
+                trash_failed_paths: removal.trash_failed_paths,
             })
-            .flat_map(|entry| string_array_field(entry, "files"))
-            .collect::<Vec<_>>();
+    } else if let Some(download) = model_download_for_variant(&model, &variant) {
+        let scope = tier_delete_scope(&model, &download, &variant)?;
+        let repo_cache = huggingface_repo_cache_path(data_dir, &scope.repo);
+        let managed_dir = Some(data_dir.join("models").join(safe_download_dir(&scope.repo)));
         // Always permanent (skip the OS trash) — see the fn doc (sc-12088).
         remove_tier_artifacts(
             repo_cache,
             managed_dir,
-            &files,
-            &retained_files,
+            &scope.files,
+            &scope.retained_files,
             &allowed_roots,
             true,
         )
@@ -2292,6 +2721,102 @@ pub(crate) async fn delete_model_variant(
     })))
 }
 
+/// What one per-tier delete removes: the repo it lives in, the globs that select its files, and
+/// the globs a sibling tier in the SAME repo still owns.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct TierDeleteScope {
+    pub(crate) repo: String,
+    pub(crate) files: Vec<String>,
+    pub(crate) retained_files: Vec<String>,
+}
+
+/// Whether a tier row with NO `files` scope is still reclaimable on its own (sc-24112): no other
+/// download row of the same model — tier, alternate or co-requisite — names its `repo`, so that
+/// repo's whole snapshot IS this tier. `qwen_image_2_1`'s bf16 tier is the released upstream
+/// snapshot, the only row on `Qwen/Qwen-Image-2.1`, while its q8/q4 live in the SceneWorks re-host;
+/// deleting it can strand nothing. A scope-less row on a repo a sibling shares is still the model,
+/// not a slice of it, and stays refused.
+pub(crate) fn is_sole_repo_tier(model: &Value, download: &Value) -> bool {
+    // Only a DECLARED tier: an untagged single-download row is the "default" pseudo-variant, which
+    // the per-tier route cannot address at all.
+    let tagged = download
+        .get("variant")
+        .and_then(Value::as_str)
+        .is_some_and(|variant| !variant.trim().is_empty());
+    let Some(repo) = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .filter(|_| tagged)
+    else {
+        return false;
+    };
+    let sharers = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| entry.get("repo").and_then(Value::as_str) == Some(repo))
+        .count();
+    sharers == 1
+}
+
+/// Scope a per-tier delete of `variant` (its catalog row is `download`).
+///
+/// A row with a `files` scope deletes that slice and protects every path a sibling logical tier in
+/// the same repo still references (Mage-Flow's overlapping load-time tiers reclaim zero bytes
+/// rather than corrupting the snapshot the remaining choices use). A row with NO scope is refused
+/// ("delete the whole model instead") unless it is the sole row on its repo
+/// ([`is_sole_repo_tier`]), in which case the whole repo snapshot is the tier and every file in it
+/// goes.
+pub(crate) fn tier_delete_scope(
+    model: &Value,
+    download: &Value,
+    variant: &str,
+) -> Result<TierDeleteScope, ApiError> {
+    let repo = download
+        .get("repo")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let files = string_array_field(download, "files");
+    if files.is_empty() {
+        if is_sole_repo_tier(model, download) {
+            return Ok(TierDeleteScope {
+                repo,
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            });
+        }
+        return Err(ApiError::bad_request(format!(
+            "Tier '{variant}' has no file scope; delete the whole model instead"
+        )));
+    }
+    let retained_files = model
+        .get("downloads")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|entry| {
+            !is_co_requisite_download(entry)
+                // sc-22998: a locally derived tier's `files` name the ORIGINAL it is derived from;
+                // it does not own them, so deleting the original must not "retain" them for it.
+                && !sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                    entry,
+                )
+                && entry.get("repo").and_then(Value::as_str) == Some(repo.as_str())
+                && entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.eq_ignore_ascii_case(variant))
+        })
+        .flat_map(|entry| string_array_field(entry, "files"))
+        .collect::<Vec<_>>();
+    Ok(TierDeleteScope {
+        repo,
+        files,
+        retained_files,
+    })
+}
 /// Result of removing a single quant tier's on-disk artifacts (sc-12024).
 #[derive(Default)]
 pub(crate) struct TierRemoval {
@@ -3619,8 +4144,38 @@ pub(crate) async fn model_catalog_sized(state: &AppState) -> Result<Vec<Value>, 
             &state.settings.data_dir,
             &state.settings.external_model_roots,
         )?;
+        annotate_commercial_use_alternatives(model, &selection_catalog);
     }
     Ok(models)
+}
+
+/// Resolve a declared `commercialUse` pointer against this catalog (sc-22998): a model whose
+/// weights are not commercially eligible gets `commercialUse.alternatives`, the ids of its
+/// `alternativeFamily` that are themselves eligible here — YuE2 lists the YuE1 entries. The declared
+/// block is otherwise passed through untouched, and nothing here reroutes anything.
+///
+/// This EXPOSES the verdict; it enforces nothing. The routes that enforce it (sc-22999) are the
+/// YuE2 job route and its execution-time eligibility check (`yue2_jobs`) and timeline exports,
+/// which also persist the licence acknowledgment and noncommercial policy into provenance.
+fn annotate_commercial_use_alternatives(model: &mut Value, catalog: &[Value]) {
+    if model.get("commercialUse").is_none() {
+        return;
+    }
+    let Some(id) = model.get("id").and_then(Value::as_str).map(str::to_owned) else {
+        return;
+    };
+    if let Ok(sceneworks_core::model_usage_policy::CommercialUseVerdict::Refused {
+        alternatives,
+        ..
+    }) = sceneworks_core::model_usage_policy::commercial_use_verdict(catalog, &id)
+    {
+        if let Some(block) = model
+            .get_mut("commercialUse")
+            .and_then(Value::as_object_mut)
+        {
+            block.insert("alternatives".to_owned(), json!(alternatives));
+        }
+    }
 }
 
 /// Add runtime-only text-encoder choices to the public model catalog. The worker owns enumeration so
@@ -4654,6 +5209,138 @@ mod download_receipt_tests {
             .unwrap_or_else(|| panic!("builtin entry {model_id} present"))
     }
 
+    /// The optional native film planner must describe a loadable official checkpoint, not merely a
+    /// repository directory. Its first pin predated the weights and held only metadata; that exact
+    /// snapshot plus its completed download receipt must remain unavailable. The current pin is a
+    /// 15-shard indexed checkpoint, and one wildcard-matching shard is still a torn install.
+    #[test]
+    fn qwen36_film_planner_requires_the_current_complete_indexed_snapshot() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data = temp.path();
+        let model = builtin_models_entry("film_planner_qwen3_6_27b");
+        let download = model_download(&model).expect("Qwen planner download");
+        let repo = download["repo"].as_str().unwrap();
+        let current_revision = "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9";
+        let obsolete_revision = "70215ea87f5a6ae62bb56822396c1b42f1a18e0b";
+        assert_eq!(download["revision"], current_revision);
+        assert_eq!(
+            download["files"],
+            json!([
+                "config.json",
+                "generation_config.json",
+                "tokenizer.json",
+                "tokenizer_config.json",
+                "model.safetensors.index.json",
+                "model-*.safetensors"
+            ])
+        );
+        assert_eq!(
+            download["breaking"], true,
+            "only the unusable README-only receipt needs stale-install refusal"
+        );
+
+        let root = huggingface_repo_cache_path(data, repo).unwrap();
+        let obsolete = root.join("snapshots").join(obsolete_revision);
+        std::fs::create_dir_all(&obsolete).unwrap();
+        std::fs::write(obsolete.join("README.md"), b"model card only").unwrap();
+        let managed = data.join("models").join(safe_download_dir(repo));
+        std::fs::create_dir_all(&managed).unwrap();
+        std::fs::write(
+            managed.join(".sceneworks-download-complete.json"),
+            serde_json::to_vec(&json!({
+                "schemaVersion": 2,
+                "repo": repo,
+                "modelId": "film_planner_qwen3_6_27b",
+                "variant": "default",
+                "manifestFiles": [],
+                "resolvedFiles": ["README.md"],
+                "snapshotRevision": obsolete_revision
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let readme_only = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !readme_only.installed,
+            "an old completed receipt cannot make a metadata-only snapshot usable"
+        );
+        assert!(
+            readme_only
+                .missing_required_files
+                .iter()
+                .any(|file| file == "config.json"),
+            "missing loader artifacts stay visible: {:?}",
+            readme_only.missing_required_files
+        );
+
+        let current = root.join("snapshots").join(current_revision);
+        std::fs::create_dir_all(&current).unwrap();
+        for file in [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+        ] {
+            std::fs::write(current.join(file), b"{}").unwrap();
+        }
+        let shard_name = |ordinal: usize| format!("model-{ordinal:05}-of-00015.safetensors");
+        std::fs::write(current.join("model.safetensors.index.json"), b"{not json").unwrap();
+        std::fs::write(current.join(shard_name(1)), b"first shard").unwrap();
+        let invalid_index =
+            install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !invalid_index.installed
+                && invalid_index.cache_incomplete
+                && invalid_index
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model.safetensors.index.json"),
+            "an explicitly required invalid index cannot make a wildcard shard set usable: {:?}",
+            invalid_index.missing_required_files
+        );
+
+        let weight_map = (1..=15)
+            .map(|ordinal| {
+                (
+                    format!("tensor.{ordinal}"),
+                    Value::String(shard_name(ordinal)),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        std::fs::write(
+            current.join("model.safetensors.index.json"),
+            serde_json::to_vec(&json!({ "weight_map": weight_map })).unwrap(),
+        )
+        .unwrap();
+
+        let partial = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            !partial.installed && partial.cache_incomplete,
+            "one shard matches the wildcard but cannot satisfy a 15-shard index; missing={:?}",
+            partial.missing_required_files
+        );
+        assert!(
+            partial
+                .missing_required_files
+                .iter()
+                .any(|file| file == &shard_name(15)),
+            "the index names the missing shards: {:?}",
+            partial.missing_required_files
+        );
+
+        for ordinal in 2..=15 {
+            std::fs::write(current.join(shard_name(ordinal)), b"shard").unwrap();
+        }
+        let complete = install_state_for(model_download_context(&model).unwrap(), &model, data);
+        assert!(
+            complete.installed,
+            "complete indexed snapshot; missing={:?}",
+            complete.missing_required_files
+        );
+        assert!(complete.missing_required_files.is_empty());
+    }
+
     /// Manifest `files` entries are match patterns, not literal names — Eros's shared Gemma
     /// encoder ships as `"gemma/*"`. Seeding must write a CONCRETE file the pattern matches:
     /// `snapshot_contains_pattern` globs the snapshot, so any real name under `gemma/` reads
@@ -5503,12 +6190,9 @@ mod download_receipt_tests {
     /// `backfill_refuses_a_partially_downloaded_sharded_tier` cannot witness it: that tier is
     /// diffusers, so `diffusers_snapshot_health` already drives `cache_installed` false and
     /// `install_state_for` never enters the backfill at all — delete the guard and that test still
-    /// passes. The guard's reachable lane is a tier that declares NO `model_index.json`: a flat
-    /// explicit-`files` filter whose every pattern is satisfied reads cache-installed, so backfill IS
-    /// entered, and only `listed_shard_indexes_are_complete` over the resolved set stands between an
-    /// index naming a never-downloaded shard and a receipt claiming that set is complete. (The
-    /// cache-health badge for an explicit-file filter is deliberately left as it was — the user
-    /// declared those files and they are all there — so this fixture is the guard alone.)
+    /// passes. A flat explicit filter now also refuses the torn set at catalog-health time, so this
+    /// test calls the backfill seam directly to keep its independent guard covered, then proves the
+    /// public install state reports the same missing shard.
     #[test]
     fn backfill_refuses_a_flat_tier_whose_shard_index_is_torn() {
         let _env = isolate_hf_cache();
@@ -5537,29 +6221,32 @@ mod download_receipt_tests {
                 "files": ["config.json", "model.safetensors.index.json", "*.safetensors"]
             }]
         });
-        let marker = data_dir
-            .join("models")
-            .join(safe_download_dir(repo))
-            .join(".sceneworks-download-complete.json");
+        let managed = data_dir.join("models").join(safe_download_dir(repo));
+        let marker = managed.join(".sceneworks-download-complete.json");
 
-        let state = install_state_for(model_download_context(&model).unwrap(), &model, data_dir);
-        assert!(
-            state.installed,
-            "fixture precondition: every declared pattern is present, so cache health reads \
-             installed and the backfill lane is genuinely entered"
-        );
+        let context = model_download_context(&model).unwrap().unwrap();
+        backfill_current_receipt(&managed, &model, &context, data_dir);
         assert!(
             !marker.exists(),
-            "backfill must refuse to record a set whose own shard index names a file that never \
-             landed — nothing else on this lane is watching"
+            "backfill must independently refuse an index whose shard never landed"
+        );
+
+        let state = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !state.installed
+                && state.cache_incomplete
+                && state
+                    .missing_required_files
+                    .iter()
+                    .any(|file| file == "model-00001-of-00002.safetensors"),
+            "filtered cache health must refuse the same torn set: {:?}",
+            state.missing_required_files
         );
 
         // Mutation check: the absent shard arriving lets the SAME call mint the receipt, proving the
         // guard discriminates on shard completeness rather than never writing for this shape.
         std::fs::write(snapshot.join("model-00001-of-00002.safetensors"), b"shard").unwrap();
-        assert!(
-            install_state_for(model_download_context(&model).unwrap(), &model, data_dir).installed
-        );
+        assert!(install_state_for(Some(context), &model, data_dir).installed);
         let receipt: Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
         assert_eq!(receipt["backfilled"], true);
         assert!(
@@ -6774,10 +7461,16 @@ fn install_state_for(
                 );
             }
         }
-        for co_requisite in model_co_requisite_downloads(model)
-            .into_iter()
-            .filter(|download| co_requisite_variant(download).is_none())
-        {
+        // A choice group (sc-22998, YuE2's decoder) is satisfied by ANY installed option; when none
+        // is, a partially installed option (the one a repair completes), else the default, is what
+        // the install reports missing.
+        for co_requisite in co_requisite_rows_gating_install(
+            model_co_requisite_downloads(model)
+                .into_iter()
+                .filter(|download| co_requisite_variant(download).is_none())
+                .collect(),
+            |download| co_requisite_presence(data_dir, download),
+        ) {
             let Some(repo) = co_requisite.get("repo").and_then(Value::as_str) else {
                 continue;
             };
@@ -6830,6 +7523,40 @@ fn install_state_for(
             missing_required_files: Vec::new(),
             update_available: false,
         }
+    }
+}
+
+/// Per co-requisite choice group, the options whose component is installed on this host
+/// (`{"decoder": ["standard"]}`); `None` for a model with no choice group.
+fn installed_co_requisite_choices(model: &Value, data_dir: &FsPath) -> Option<Value> {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        co_requisite_choice, model_co_requisite_downloads,
+    };
+    let mut groups: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for download in model_co_requisite_downloads(model) {
+        let Some(choice) = co_requisite_choice(&download) else {
+            continue;
+        };
+        let options = groups.entry(choice.group).or_default();
+        let installed =
+            co_requisite_cache_health(data_dir, &download).is_some_and(|health| health.installed);
+        if installed && !options.contains(&choice.option) {
+            options.push(choice.option);
+        }
+    }
+    (!groups.is_empty()).then(|| json!(groups))
+}
+
+/// [`co_requisite_cache_health`] as the three-way presence choice-group gating reads (sc-22998).
+fn co_requisite_presence(
+    data_dir: &FsPath,
+    download: &Value,
+) -> sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence {
+    use sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence;
+    match co_requisite_cache_health(data_dir, download) {
+        Some(health) if health.installed => CoRequisitePresence::Installed,
+        Some(health) if health.incomplete => CoRequisitePresence::Incomplete,
+        _ => CoRequisitePresence::Absent,
     }
 }
 
@@ -6957,6 +7684,24 @@ struct ModelVariantState {
     /// The raw `downloads[].footprint` object (disk size + optional measured memory), passed
     /// through verbatim for the RAM-suggestion surfaces (sc-8509/8516). `Null` when absent.
     footprint: Value,
+    /// This tier is DECLARED but its artifact is not published yet (`downloads[].pendingArtifact`,
+    /// sc-24112). The picker still lists it — the tier axis is real — but it can never be queued,
+    /// never reads `installed`, and is rendered unavailable rather than as a download button.
+    pending_artifact: bool,
+    /// Whether the PER-TIER delete can reclaim this tier on its own (never for a pending row):
+    /// true when the row carries a non-empty `files` scope, OR when it is a scope-less tier that is
+    /// the sole row on its repo ([`is_sole_repo_tier`]) — `qwen_image_2_1`'s bf16 tier, which IS
+    /// the whole upstream snapshot and shares that repo with nothing. A scope-less row on a repo a
+    /// sibling shares is the model rather than a slice of it, and `DELETE
+    /// /models/:id/variants/:variant` refuses it with "delete the whole model instead", so the UI
+    /// must not offer a per-tier delete for it. Both answers come from [`tier_delete_scope`]'s own
+    /// rule, so the button and the route cannot disagree.
+    tier_deletable: bool,
+    /// sc-22998: `Some` only for a locally derived tier (`downloads[].localDerivation`). `true` while
+    /// no snapshot verified against the pinned derived weights exists at its location — the tier
+    /// is then not installed; `POST /models/:id/download {variant}` fetches the original and the
+    /// worker derives the tier locally (sc-22999).
+    derivation_pending: Option<bool>,
 }
 
 // Whether `model`'s `downloads` array is a quant-matrix — i.e. at least one supported entry carries
@@ -7147,14 +7892,61 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
+            // sc-22998: a locally derived tier's `files` are its ORIGINAL's, so the cache probe
+            // above describes the original, never the tier. It is installed only when a derived
+            // snapshot at its declared location verifies against the pinned derived weights (and
+            // its companions, checked below, are present); otherwise it is `derivationPending`.
+            let mut derivation_pending = None;
+            let mut derived_path = None;
+            let mut derived_exists = false;
+            if sceneworks_core::model_artifacts::artifact_selection::declares_local_derivation(
+                entry,
+            ) {
+                use sceneworks_core::model_artifacts::artifact_selection::{
+                    derived_snapshot_state, local_derivation, local_derivation_snapshot_dir,
+                    DerivedSnapshotState,
+                };
+                let variant = entry
+                    .get("variant")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let located = local_derivation(entry).and_then(|derivation| {
+                    local_derivation_snapshot_dir(data_dir, model_id, variant, &derivation)
+                        .map(|dir| (dir, derivation))
+                });
+                let state = match &located {
+                    Some((dir, derivation)) => derived_snapshot_state(dir, derivation),
+                    None => DerivedSnapshotState::Invalid(
+                        "the tier declares a malformed local derivation".to_owned(),
+                    ),
+                };
+                missing_required_files.clear();
+                cache_incomplete = false;
+                let verified = state == DerivedSnapshotState::Verified;
+                derived_exists = !matches!(state, DerivedSnapshotState::Absent);
+                if let DerivedSnapshotState::Invalid(why) = &state {
+                    missing_required_files.push(format!("derived {variant} snapshot: {why}"));
+                }
+                // The companion check below still applies to a verified derived tier.
+                installed = verified;
+                derivation_pending = Some(!verified);
+                derived_path = located
+                    .filter(|_| derived_exists)
+                    .map(|(dir, _)| dir.display().to_string());
+            }
+
             // A tier is usable only with its own required companions. Checking these only at
             // model level let a complete q4 encoder certify bf16 and hid its repair action.
             // An absent primary remains absent even if shared files from another tier exist.
             let mut dependencies_missing = false;
             if installed || cache_incomplete {
-                for download in model_co_requisite_downloads_for_variant(
-                    model,
-                    entry.get("variant").and_then(Value::as_str),
+                // Any installed option of a choice group satisfies it (sc-22998).
+                for download in co_requisite_rows_gating_install(
+                    model_co_requisite_downloads_for_variant_all_options(
+                        model,
+                        entry.get("variant").and_then(Value::as_str),
+                    ),
+                    |download| co_requisite_presence(data_dir, download),
                 )
                 .into_iter()
                 .filter(|download| download.get("required").and_then(Value::as_str) != Some("soft"))
@@ -7190,6 +7982,15 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             } else {
                 None
             };
+            // sc-24112: a DECLARED-but-unpublished tier can never be installed, whatever the cache
+            // probe above happened to find. Forcing it here rather than filtering the row out keeps
+            // the tier in the picker (the axis is real) while making every downstream
+            // "installed?"/"queue it?" answer false through the ONE field they all read.
+            let pending_artifact = is_pending_artifact_download(entry);
+            if pending_artifact {
+                installed = false;
+                cache_incomplete = false;
+            }
             ModelVariantState {
                 variant: entry
                     .get("variant")
@@ -7198,13 +7999,26 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "default".to_owned()),
                 installed,
-                installed_path: installed_path.map(|path| path.display().to_string()),
+                installed_path: if derivation_pending.is_some() {
+                    derived_path
+                } else {
+                    installed_path.map(|path| path.display().to_string())
+                },
                 cache_incomplete,
                 dependencies_missing,
                 missing_required_files,
                 download_size_bytes: manifest_download_size_bytes(model, entry)
                     .or_else(|| variant_footprint_disk_bytes(entry)),
                 footprint: entry.get("footprint").cloned().unwrap_or(Value::Null),
+                pending_artifact,
+                tier_deletable: !pending_artifact
+                    && if derivation_pending.is_some() {
+                        // Only the derived snapshot is ever deleted, so only one that exists.
+                        derived_exists
+                    } else {
+                        !files.is_empty() || is_sole_repo_tier(model, entry)
+                    },
+                derivation_pending,
             }
         })
         .collect()
@@ -7276,10 +8090,27 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
     let variants = model_variant_states(&model, data_dir)
         .into_iter()
         .map(|variant| {
-            json!({
+            let mut row = json!({
                 "variant": variant.variant,
                 "installed": variant.installed,
-                "installState": if variant.installed { "installed" } else { "missing" },
+                // sc-24112: a pending tier is neither installed nor installable. `"pending"` is a
+                // THIRD install state rather than `"missing"` so the web can say "not published
+                // yet" instead of offering a download button that would queue a fetch of a
+                // revision that does not resolve.
+                "installState": if variant.pending_artifact {
+                    "pending"
+                } else if variant.installed {
+                    "installed"
+                } else if variant.derivation_pending == Some(true) {
+                    // sc-22998: a locally derived tier with no verified derived snapshot. A distinct
+                    // state so the web offers neither a download (there is nothing to fetch) nor
+                    // "missing" (which it would read as "download me").
+                    "derivationPending"
+                } else {
+                    "missing"
+                },
+                "pendingArtifact": variant.pending_artifact,
+                "tierDeletable": variant.tier_deletable,
                 "cacheState": if variant.cache_incomplete {
                     "incomplete"
                 } else if variant.installed {
@@ -7297,7 +8128,13 @@ fn apply_variant_fields(object: &mut JsonObject, data_dir: &FsPath) {
                     .map(|value| json!(value))
                     .unwrap_or(Value::Null),
                 "footprint": variant.footprint,
-            })
+            });
+            // Emitted only on a locally derived tier, so every other model's variant rows keep
+            // their existing shape.
+            if let (Some(pending), Some(row)) = (variant.derivation_pending, row.as_object_mut()) {
+                row.insert("derivationPending".to_owned(), Value::Bool(pending));
+            }
+            row
         })
         .collect::<Vec<_>>();
     object.insert("hasVariantMatrix".to_owned(), Value::Bool(has_matrix));
@@ -7646,6 +8483,30 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
         // Explicit empty wins over permissive family fallback in the validator.
         compatibility.insert("families".to_owned(), Value::Array(Vec::new()));
         compatibility.insert("supported".to_owned(), Value::Bool(false));
+    }
+}
+
+/// A manifest that DECLARES `loraCompatibility.families: []` (e.g. `qwen_image_2_1`, whose engine
+/// refuses adapters) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
+/// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
+/// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
+/// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on
+/// exactly the models the API refuses. An explicit `supported` already on the entry is kept.
+fn mark_empty_lora_advertisement_unsupported(object: &mut JsonObject) {
+    let Some(compatibility) = object
+        .get_mut("loraCompatibility")
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if compatibility
+        .get("families")
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty)
+    {
+        compatibility
+            .entry("supported".to_owned())
+            .or_insert(Value::Bool(false));
     }
 }
 
@@ -8280,9 +9141,16 @@ fn apply_model_catalog_entry(
         && cleanup_with_model_artifact_paths(&model, data_dir)
             .iter()
             .any(|path| std::fs::symlink_metadata(path).is_ok());
+    // sc-22988: which options of each co-requisite choice group are installed here (YuE2's
+    // `decoder`: `standard` / `legacy`), so a surface that offers the choice can disable an option
+    // whose component is not installed. Present only on a model that declares a choice group.
+    let installed_choices = installed_co_requisite_choices(&model, data_dir);
     let object = model
         .as_object_mut()
         .ok_or_else(|| ApiError::internal("Model manifest entry must be an object"))?;
+    if let Some(choices) = installed_choices {
+        object.insert("installedChoices".to_owned(), choices);
+    }
     object.insert(
         "modelAvailability".to_owned(),
         serde_json::to_value(&availability).map_err(|error| {
@@ -8395,6 +9263,7 @@ fn apply_model_catalog_entry(
     apply_mac_and_mlx_fields(object, data_dir);
     apply_imported_provider_surface(object);
     apply_imported_lora_advertisement(object);
+    mark_empty_lora_advertisement_unsupported(object);
     // Live denoise preview support (sc-16965, epic 16948): `preview.byBackend`, read from the
     // generated `config/manifests/builtin.preview-support.jsonc` rather than from a registry, because
     // THIS process may link no engines at all (docker/rust.Dockerfile builds the API without
@@ -8405,6 +9274,7 @@ fn apply_model_catalog_entry(
     sceneworks_core::preview_support::apply_to_model_entry(object);
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
+    apply_conditional_component_state(object, data_dir);
     if platform_cleanup_only {
         // The tombstone exists only to expose whole-model Delete. Strip every tier/conversion
         // action projection even though the preserved manifest metadata is still needed by the
@@ -8826,86 +9696,10 @@ mod model_size_concurrency_tests {
         let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
         let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
             .expect("builtin manifest parses");
-        // macOS gains one over windows/linux for each mac-only entry; sc-8444 added
-        // `krea_realtime_14b` (macOS-only — there is no candle Krea Realtime engine), taking it
-        // from 81 to 82.
-        //
-        // sc-17627 then declared the three person-vision utilities that were previously job-time
-        // auto-downloads with no catalog entry at all: `sam3_person_segment` (both platforms),
-        // `sam2_person_segment` (macOS-only — `mod person_segment` is `#[cfg(target_os = "macos")]`)
-        // and `person_detector` (one platform-scoped row each, so exactly one survives
-        // `retain_downloads_for_os` per OS). macOS +3 → 85, windows/linux +2 → 82. `real_esrgan`
-        // swapped its repo rather than adding one, so it does not move these counts.
-        //
-        // sc-17632 then declared `seedvr2_upscaler`, the last of that same class: a job-time
-        // auto-download with no catalog entry, fetched TWICE into two `<data_dir>/cache` subtrees.
-        // One download row, no `platforms` scoping (both the image and video SeedVR2 lanes run on
-        // macOS and on the off-Mac candle lane), so every OS gains exactly one: macOS 85 → 86,
-        // windows/linux 82 → 83.
-        //
-        // sc-17634 declared `dwpose_pose_detector`, the LAST of that class and the only one that
-        // was not a Hugging Face download at all (two openmmlab `.zip` bundles, re-hosted at
-        // `SceneWorks/dwpose-onnx` so it can be installed like everything else). One download row
-        // carrying both ONNX graphs, no `platforms` scoping — the pose lane runs on macOS and on
-        // the off-Mac candle lane — so every OS gains exactly one: macOS 86 → 87, windows/linux
-        // 83 → 84.
-        //
-        // SCAIL-2 bf16 is now the shared cross-backend package, so Windows and Linux
-        // each gain its exact pinned download context while macOS keeps the same one.
-        //
-        // sc-18481 retired AuraSR from the installable catalog because every production backend
-        // rejects its dead `engine:aura-sr` route. Its unscoped download row had contributed one
-        // context on every OS, so removing it reduces macOS 87 → 86 and windows/linux 85 → 84.
-        //
-        // sc-17158 declared the MiniMax-H3 pair. Both entries share ONE repo
-        // (`SceneWorks/minimax-h3-mlx`) and are distinguished only by their default tier's `files`
-        // predicate — `q4/transformer/*` versus `q4/transformer_ref/*` — so the context key
-        // `(repo, files)` still separates them and macOS gains exactly two. Windows/Linux gained
-        // NOTHING at the time: every MiniMax-H3 download row was `platforms: ["macos"]`, so
-        // `retain_downloads_for_os` emptied both entries there and `model_download_context` yielded
-        // `None`. That asymmetry is the point of running this loop per OS.
-        //
-        // sc-19558 then gave `minimax_h3` — and ONLY `minimax_h3` — an off-Mac artifact: a
-        // `platforms: ["windows", "linux"]` set reading the raw upstream `MiniMaxAI/MiniMax-H3`
-        // snapshot, which is the layout `candle-gen-minimax-h3::REQUIRED_COMPONENT_DIRS` loads. Its
-        // ONE primary row (`transformer/*`) is a new `(repo, files)` context off-Mac, so
-        // windows/linux gain exactly one at that point. SC-20756 later adds the distinct hosted
-        // `q4/transformer_ref/*` context for the reference partition.
-        //
-        // sc-20267 then widened `minimax_h3`'s q4/q8 tier rows to `["macos","windows","linux"]`. That
-        // SWAPS which key that +1 is off-Mac without changing the count: `model_download` prefers the
-        // `default: true` row, so the off-Mac context is now
-        // `(SceneWorks/minimax-h3-mlx, ["q4/transformer/*"])` rather than
-        // `(MiniMaxAI/MiniMax-H3, ["transformer/*"])`, and no other off-Mac entry contributes either
-        // key. Recorded because the arithmetic below is unchanged while the reason for one of its terms
-        // is not — a reader auditing this count off-Mac will find a repo the sc-19558 note says those
-        // platforms never fetch.
-        //
-        // SC-20756 then makes the already-hosted Ref2VA tiers installable off-Mac; the pinned
-        // provider has admitted that conditioning surface since sc-17157.
-        //
-        // SC-18902 (main) then removed Eros's failed Candle route and platform-scoped both of its
-        // download rows to macOS, so its primary context leaves Windows/Linux while macOS is
-        // unchanged. sc-19708 (main) declared `instantid_face_stack`: the SCRFD + ArcFace pair the
-        // face-analysis and identity lanes stage from `SceneWorks/instantid-mlx`, one unscoped
-        // download row, so every OS gains exactly one.
-        //
-        // THE NUMBERS BELOW ARE THE 2026-08-19 SYNC MERGE'S, not any single side's. Starting from
-        // the shared 87 / 84 / 84, six independent deltas all apply:
-        //   main  SCAIL-2 shared bf16 package      +0 / +1 / +1
-        //   main  sc-18481 AuraSR retirement       −1 / −1 / −1   (its row was unscoped)
-        //   main  SC-18902 Eros rows macOS-scoped  +0 / −1 / −1
-        //   main  sc-19708 instantid_face_stack    +1 / +1 / +1   (unscoped row)
-        //   epic  sc-17158 MiniMax-H3 pair         +2 / +0 / +0   (both rows macOS-only)
-        //   epic  sc-19558 H3 off-Mac artifact     +0 / +1 / +1
-        //   epic  sc-20756 H3 Ref2VA off-Mac tier  +0 / +1 / +1
-        // giving 89 / 86 / 86. Each side read only its own set and so read 87/84/84 (main) or
-        // 88/85/85 (epic, at the previous sync); neither is right once both land. SC-18780 then
-        // publishes the single cross-platform LTX 2.5 turnkey context, giving 90 / 87 / 87.
-        // Still far below `MODEL_SIZE_CACHE_LIMIT` (256), which is what this guard protects.
-        for (os, expected_distinct_contexts) in
-            [("macos", 90_usize), ("windows", 87), ("linux", 87)]
-        {
+        // The cache is keyed by `(repo, files)`, so shared model rows deliberately collapse to one
+        // entry. Assert the invariant the production scan needs instead of sealing today's catalog
+        // population: every platform's distinct contexts fit together and remain addressable.
+        for os in ["macos", "windows", "linux"] {
             let mut keys = std::collections::HashSet::new();
             for mut model in manifest["models"]
                 .as_array()
@@ -8918,17 +9712,27 @@ mod model_size_concurrency_tests {
                     keys.insert((context.repo, context.files));
                 }
             }
-            assert_eq!(
-                keys.len(),
-                expected_distinct_contexts,
-                "{os} builtin download-context count changed; reconsider cache capacity"
-            );
+            assert!(!keys.is_empty(), "{os} has no builtin download contexts");
             assert!(
                 keys.len() <= MODEL_SIZE_CACHE_LIMIT,
                 "{os} builtin catalog has {} distinct download contexts but cache holds only {}",
                 keys.len(),
                 MODEL_SIZE_CACHE_LIMIT
             );
+
+            let keys: Vec<_> = keys.into_iter().collect();
+            let mut cache = ModelSizeCache::default();
+            for (index, key) in keys.iter().cloned().enumerate() {
+                cache.insert(key, index as u64 + 1);
+            }
+            assert_eq!(cache.entries.len(), keys.len());
+            for (index, key) in keys.iter().enumerate() {
+                assert_eq!(
+                    cache.get(key),
+                    Some(Some(index as u64 + 1)),
+                    "{os} context {key:?} was evicted from a cache that should fit the catalog"
+                );
+            }
         }
     }
 
@@ -9447,8 +10251,9 @@ pub(crate) use sceneworks_core::model_artifacts::artifact_selection::is_co_requi
 /// and only the one matching the selected tier should be fetched, sized, or gated on. Keying that on
 /// the presence of `variant` keeps every existing co-requisite on exactly its current path.
 pub(crate) use sceneworks_core::model_artifacts::artifact_selection::{
-    co_requisite_variant, model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
-    model_download_for_variant,
+    co_requisite_rows_gating_install, co_requisite_variant, is_pending_artifact_download,
+    model_co_requisite_downloads, model_co_requisite_downloads_for_variant,
+    model_co_requisite_downloads_for_variant_all_options, model_download_for_variant,
 };
 
 /// Best-effort credential host for a gated model when the manifest entry doesn't
@@ -9613,6 +10418,52 @@ fn huggingface_filtered_cache_health(
     // Whether the COARSE check found none of the filter's patterns present — the "cleanly absent
     // tier" signal, captured before the tier-completeness augmentation below can add entries.
     let coarse_all_absent = missing.len() == files.len();
+
+    // A flat sharded Transformers checkpoint commonly declares an index plus `model-*.safetensors`.
+    // The glob is satisfied by the FIRST shard, so the coarse pattern check alone can call a torn
+    // 15-shard model installed. Evaluate every candidate revision as one coherent snapshot and fold
+    // in the shard set declared by its selected index. This reuses the whole-repo/receipt validator;
+    // no tensor bytes or headers are read, only the small index and one stat per named shard.
+    let has_flat_shard_glob = files.iter().any(|pattern| {
+        !pattern.contains('/')
+            && pattern_contains_glob(pattern)
+            && pattern.to_ascii_lowercase().ends_with(".safetensors")
+    });
+    let indexed_health = has_flat_shard_glob.then(|| {
+        snapshots
+            .iter()
+            .filter_map(|snapshot| {
+                let files_on_disk = snapshot_files(snapshot);
+                let selected_indexes = files_on_disk
+                    .iter()
+                    .filter(|file| {
+                        file.ends_with(sceneworks_core::safetensors::SAFETENSORS_INDEX_SUFFIX)
+                            && files.iter().any(|pattern| pattern_matches(pattern, file))
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if selected_indexes.is_empty() {
+                    return None;
+                }
+                let mut candidate_missing = files
+                    .iter()
+                    .filter(|pattern| !snapshot_contains_pattern(snapshot, pattern))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                for shard in torn_shard_indexes_in(snapshot, &selected_indexes) {
+                    if !candidate_missing.contains(&shard) {
+                        candidate_missing.push(shard);
+                    }
+                }
+                Some(candidate_missing)
+            })
+            .min_by_key(Vec::len)
+    });
+    if let Some(Some(indexed_missing)) = indexed_health {
+        // Required metadata, index and shards must coexist in ONE revision. Replacing the coarse
+        // cross-snapshot result also prevents different revisions from satisfying different files.
+        missing = indexed_missing;
+    }
 
     // Flat diffusers snapshots (Mage-Flow's logical q4/q8/bf16 load-time choices) list the
     // root `model_index.json` plus component globs rather than one `<tier>/*` subdir. The coarse
@@ -11770,6 +12621,131 @@ mod variant_install_tests {
         );
     }
 
+    /// sc-24112 — a DECLARED-but-unpublished tier (`pendingArtifact`).
+    ///
+    /// The catalog keeps ENUMERATING it, because the tier axis has to be real before the bytes
+    /// exist: the memory ladder, both fit gates, the tier picker and the download panel are all
+    /// built and tested against the tier that is coming. What it must never be is *installable* —
+    /// its revision is the null SHA, so a queued fetch cannot resolve and the user would see an
+    /// opaque download failure instead of the reason.
+    ///
+    /// The flags below are what every downstream surface reads, so this is the one place the rule
+    /// is decided rather than re-derived per consumer.
+    #[test]
+    fn a_pending_artifact_tier_is_listed_but_never_installed() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        // Make q8 pending, exactly as the shipped `qwen_image_2_1` rows are.
+        downloads[1]["pendingArtifact"] = json!(true);
+        downloads[1]["revision"] =
+            json!(sceneworks_core::model_artifacts::artifact_selection::PENDING_ARTIFACT_REVISION);
+
+        let states = model_variant_states(&model, data.path());
+        assert_eq!(
+            states
+                .iter()
+                .map(|s| s.variant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["q4", "q8", "bf16"],
+            "a pending tier is still ENUMERATED — the tier axis is a catalog declaration, not a \
+             statement about what is on disk"
+        );
+        let q8 = states
+            .iter()
+            .find(|state| state.variant == "q8")
+            .expect("q8 is enumerated");
+        assert!(q8.pending_artifact);
+        assert!(
+            !q8.installed && !q8.cache_incomplete,
+            "a pending tier reads neither installed nor incomplete, whatever the cache probe \
+             happened to find — there is nothing it could legitimately have found"
+        );
+        assert!(
+            !q8.tier_deletable,
+            "nothing was ever fetched, so there is nothing for the per-tier delete to reclaim"
+        );
+        // Its siblings are untouched: this is a per-row fact, not a switch that disables the matrix.
+        for variant in ["q4", "bf16"] {
+            let state = states
+                .iter()
+                .find(|state| state.variant == variant)
+                .expect("sibling tier");
+            assert!(!state.pending_artifact);
+            assert!(
+                state.tier_deletable,
+                "{variant} carries a `files` scope, so its per-tier delete can reclaim it alone"
+            );
+        }
+    }
+
+    /// The other half of `tier_deletable`: a tier with NO `files` scope.
+    ///
+    /// `DELETE /models/:id/variants/:variant` refuses it ("delete the whole model instead"),
+    /// because a whole-repo row IS the model rather than a slice of it — deleting it would wipe a
+    /// cache other tiers may share. Before sc-24112 every variant row carried a glob and the
+    /// delete handler's own comment assumed it always would; `qwen_image_2_1`'s bf16 tier is the
+    /// whole upstream snapshot and broke that assumption, so the UI needs this stated rather than
+    /// inferred — otherwise it renders a Delete button that always errors.
+    #[test]
+    fn a_whole_repo_tier_reports_that_it_cannot_be_reclaimed_alone() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+
+        let states = model_variant_states(&model, data.path());
+        let bf16 = states
+            .iter()
+            .find(|state| state.variant == "bf16")
+            .expect("bf16 is enumerated");
+        assert!(
+            !bf16.tier_deletable,
+            "a tier with no file scope cannot be deleted on its own; the API refuses it and the \
+             UI must not offer it"
+        );
+        assert!(
+            states
+                .iter()
+                .filter(|state| state.variant != "bf16")
+                .all(|state| state.tier_deletable),
+            "the scoped siblings still reclaim normally"
+        );
+    }
+
+    /// sc-24112 — a scope-less tier that is the SOLE row on its repo IS reclaimable on its own: that
+    /// repo's whole snapshot is the tier. The split-repo layout (`qwen_image_2_1`'s bf16 is the
+    /// upstream snapshot, its q8/q4 the SceneWorks re-host) otherwise left a 30.86 GiB tier with no
+    /// per-tier delete at all. The shared-repo case above stays refused.
+    #[test]
+    fn a_scope_less_tier_alone_on_its_repo_is_deletable() {
+        let data = tempfile::tempdir().expect("temp data dir");
+        let mut model = quant_matrix_model("SceneWorks/matrix");
+        let downloads = model["downloads"].as_array_mut().expect("downloads");
+        downloads[2]["files"] = json!([]);
+        downloads[2]["repo"] = json!("Upstream/dense");
+
+        let states = model_variant_states(&model, data.path());
+        assert!(
+            states.iter().all(|state| state.tier_deletable),
+            "the sole-repo bf16 and its scoped siblings all reclaim alone"
+        );
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        assert_eq!(
+            tier_delete_scope(&model, &bf16, "bf16").expect("scoped"),
+            TierDeleteScope {
+                repo: "Upstream/dense".to_owned(),
+                files: vec!["*".to_owned()],
+                retained_files: Vec::new(),
+            }
+        );
+        // …and the route's refusal still holds for a scope-less row whose repo IS shared.
+        let mut shared = model.clone();
+        shared["downloads"][0]["files"] = json!([]);
+        let shared_q4 = model_download_for_variant(&shared, "q4").expect("q4 row");
+        assert!(tier_delete_scope(&shared, &shared_q4, "q4").is_err());
+    }
+
     #[test]
     fn variant_footprint_disk_bytes_reads_required_field() {
         let entry = json!({ "footprint": { "diskSizeBytes": 42 } });
@@ -12159,6 +13135,77 @@ mod variant_delete_tests {
         assert!(!repo.join("snapshots/rev/q4").exists());
         // Only the exclusive blob's bytes count as reclaimed; the shared blob does not.
         assert_eq!(removal.reclaimed_bytes, 100);
+    }
+
+    /// sc-24112 — the SHIPPED `qwen_image_2_1` entry, as published at sc-24114 (no placeholder
+    /// flags left): deleting bf16 reclaims the whole upstream `Qwen/Qwen-Image-2.1` snapshot
+    /// (30.86 GiB in production, the tier's only bytes) and leaves the SceneWorks re-host holding
+    /// q8/q4 untouched. Before, the scope-less bf16 row could never be reclaimed per tier at all.
+    ///
+    /// *Mutation that reds this:* `is_sole_repo_tier` answering `false` — the scope is refused.
+    #[tokio::test]
+    async fn deleting_the_qwen_image_2_1_bf16_tier_reclaims_only_the_upstream_snapshot() {
+        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+                .iter()
+                .find(|(name, _)| *name == "builtin.models.jsonc")
+                .expect("builtin.models.jsonc embedded")
+                .1,
+        ))
+        .expect("builtin.models.jsonc parses");
+        let model = shipped["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is in the shipped catalog")
+            .clone();
+        let bf16 = model_download_for_variant(&model, "bf16").expect("bf16 row");
+        let scope = tier_delete_scope(&model, &bf16, "bf16").expect("bf16 is reclaimable alone");
+        assert_eq!(scope.repo, "Qwen/Qwen-Image-2.1");
+        assert!(scope.retained_files.is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hub = tmp.path().join("hub");
+        let upstream = hub.join("models--Qwen--Qwen-Image-2.1");
+        let rehost = hub.join("models--SceneWorks--qwen-image-2-1-mlx");
+        seed(
+            &upstream,
+            "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+            "u1",
+            300,
+        );
+        seed(&upstream, "text_encoder/model.safetensors", "u2", 200);
+        seed(&upstream, "model_index.json", "u3", 10);
+        seed(&rehost, "q8/transformer/model.safetensors", "r8", 70);
+        seed(&rehost, "q4/transformer/model.safetensors", "r4", 40);
+
+        let removal = remove_tier_artifacts(
+            Some(upstream.clone()),
+            None,
+            &scope.files,
+            &scope.retained_files,
+            std::slice::from_ref(&hub),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            removal.reclaimed_bytes, 510,
+            "every upstream blob is the bf16 tier's"
+        );
+        assert!(!upstream.join("blobs/u1").exists());
+        assert!(!upstream.join("snapshots/rev/model_index.json").exists());
+        // The re-host — the q8/q4 tiers — is a different repo and is never scanned.
+        assert!(rehost.join("blobs/r8").exists());
+        assert!(rehost.join("blobs/r4").exists());
+        assert!(rehost
+            .join("snapshots/rev/q8/transformer/model.safetensors")
+            .exists());
+        assert!(rehost
+            .join("snapshots/rev/q4/transformer/model.safetensors")
+            .exists());
     }
 
     #[tokio::test]
@@ -13022,6 +14069,47 @@ mod imported_lora_advertisement_tests {
             withdrawn_entry["loraCompatibility"]["types"],
             json!(["character", "style"])
         );
+    }
+
+    /// A manifest-declared `families: []` (Qwen Image 2.1) is refused by the LoRA validator, so the
+    /// catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers every
+    /// LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
+    /// advertisements, and an explicit `supported`, are left alone.
+    #[test]
+    fn a_declared_empty_lora_advertisement_is_marked_unsupported() {
+        let mut qwen =
+            json!({ "id": "qwen_image_2_1", "loraCompatibility": { "families": [], "types": [] } })
+                .as_object()
+                .expect("object")
+                .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen);
+        assert_eq!(
+            qwen["loraCompatibility"],
+            json!({ "families": [], "types": [], "supported": false })
+        );
+
+        let serving = json!({ "families": ["qwen-image"], "types": ["style"] });
+        let mut qwen_2512 = json!({ "id": "qwen_image", "loraCompatibility": serving.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut qwen_2512);
+        assert_eq!(qwen_2512["loraCompatibility"], serving);
+
+        let mut absent = json!({ "id": "external_qwen", "loraCompatibility": {} })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut absent);
+        assert_eq!(absent["loraCompatibility"], json!({}));
+
+        let explicit = json!({ "families": [], "supported": true });
+        let mut kept = json!({ "id": "x", "loraCompatibility": explicit.clone() })
+            .as_object()
+            .expect("object")
+            .clone();
+        mark_empty_lora_advertisement_unsupported(&mut kept);
+        assert_eq!(kept["loraCompatibility"], explicit);
     }
 
     #[test]

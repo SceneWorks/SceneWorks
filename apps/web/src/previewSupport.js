@@ -22,6 +22,7 @@ import { terminalStatuses } from "./jobTypes.js";
 export const PRE_DENOISE_STAGES = new Set([
   "queued",
   "pending_caption",
+  "pending_workflow",
   "preparing",
   "downloading",
   "importing",

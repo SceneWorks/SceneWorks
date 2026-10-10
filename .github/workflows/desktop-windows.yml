@@ -71,6 +71,8 @@ on:
       - "package.json"
       - ".github/actions/prepare-rust-runner/**"
       - ".github/workflows/desktop-windows.yml"
+      - "scripts/select-starvector-windows-python.ps1"
+      - "scripts/select-starvector-windows-python.test.ps1"
   workflow_dispatch:
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
@@ -132,6 +134,9 @@ jobs:
         run: npm ci --prefix apps/desktop
       - name: Validate desktop bundle configuration
         run: npm --prefix apps/desktop test
+      - name: Run StarVector Windows Python selection regression
+        shell: powershell
+        run: .\scripts\select-starvector-windows-python.test.ps1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.97.1"
@@ -212,6 +217,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select physical GPU 1 for main-push packaging
+        if: ${{ github.event_name == 'push' }}
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'CUDA_DEVICE_ORDER=PCI_BUS_ID'
+          Add-Content -Path $env:GITHUB_ENV -Value 'CUDA_VISIBLE_DEVICES=1'
       # sc-13166: same self-hosted `cuda` pool as windows-candle.yml — point this lane at
       # the real rustup toolchain bin (prepended to PATH) so it never dispatches through
       # the fragile %USERPROFILE%\.cargo\bin proxies that go dangling on rustup

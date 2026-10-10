@@ -23,7 +23,6 @@ use std::sync::{Mutex, OnceLock};
 
 use gen_core::CancelFlag;
 // CARVE-OUT(epic 3720): backend-specific; absorbed by Segmenter in Phase 6.
-use runtime_macos::media::weights::Weights;
 use runtime_macos::providers::sam2::{Sam2ModelSize, Sam2VideoPredictor};
 
 use crate::{Settings, WorkerError, WorkerResult};
@@ -258,7 +257,7 @@ pub(crate) fn propagate_track_blocking(
         guard
     });
     if guard.is_none() {
-        let weights = Weights::from_file(&weights_path)
+        let weights = crate::image_jobs::read_weights(&weights_path)
             .map_err(|e| WorkerError::Engine(format!("sam2 weights load: {e}")))?;
         let predictor = Sam2VideoPredictor::from_weights_for_size(&weights, Sam2ModelSize::Large)
             .map_err(|e| WorkerError::Engine(format!("sam2 predictor build: {e}")))?;

@@ -93,11 +93,8 @@ pub struct Managed {
     /// (those children are owned by the supervisor, not tracked here). Only populated
     /// on the Windows or Linux candle build.
     pub candle_worker: Mutex<Option<CommandChild>>,
-    /// On-demand keychain credential socket served to the MLX worker (sc-5891).
-    /// Started once before the worker spawns; the worker pulls a host's secret from
-    /// it the first time a download needs auth, so the keychain is read lazily
-    /// instead of eagerly at launch. macOS-only.
-    #[cfg(target_os = "macos")]
+    /// On-demand OS-credential bridge served to the API sidecar on every desktop
+    /// platform and the MLX worker on macOS (sc-5891, sc-23730).
     pub cred_ipc: Mutex<Option<crate::cred_ipc::CredIpc>>,
     /// OS-assigned API port, discovered from the sidecar's startup line.
     api_port: Mutex<Option<u16>>,
@@ -1407,6 +1404,17 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // they must match the worker's download root or every model reads "missing".
     command = inject_huggingface_cache_env(command, &hf_home);
     command = inject_resolved_cache_env(command, &settings.resolved_cache)?;
+    // External film planning resolves credentials inside the API sidecar. Reuse the same desktop
+    // secret bridge as model downloads. The sidecar receives only an ephemeral local endpoint and
+    // per-launch capability, then resolves the current OS-stored value for each request. No token
+    // is written to project/config files or exposed to the webview.
+    {
+        let managed = app.state::<Managed>();
+        let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
+        if let Some(ipc) = guard.as_ref() {
+            command = ipc.inject_env(command);
+        }
+    }
     // Epic 3482 (Python Eradication) final cutover (sc-3492) — macOS runs MLX-only.
     // `Settings.mlx_required` ← `SCENEWORKS_MLX_REQUIRED` (sc-3483): the MPS/torch worker
     // never claims an MLX-eligible job, and an MLX-eligible job that no live `mlx` worker
@@ -1483,7 +1491,7 @@ fn spawn_api(app: &AppHandle) -> Result<(), String> {
     // Job Object, so the whole subtree dies with the desktop and no orphan can pin the API port
     // on the next launch.
     #[cfg(windows)]
-    sidecar_job::confine(child.pid());
+    sidecar_job::confine(child.pid(), "api");
     app.state::<Managed>()
         .api
         .lock()
@@ -1744,13 +1752,11 @@ fn gate_window(app: AppHandle) {
     });
 }
 
-/// Start the on-demand credential socket (sc-5891) once and stash it in `Managed`.
-/// The MLX worker is handed its socket path + token at spawn and pulls a recorded
-/// keychain secret from it the first time a download needs auth — so the keychain is
-/// read lazily, not eagerly at launch. Idempotent; a start failure is logged and the
-/// worker simply gets no credentials (a gated download then fails with an auth error
-/// rather than the app prompting at launch).
-#[cfg(target_os = "macos")]
+/// Start the on-demand credential bridge once and stash it in `Managed`. The API
+/// and, on macOS, the MLX worker receive its local endpoint plus per-launch token
+/// and pull a recorded OS secret only when an operation needs auth. Idempotent; a
+/// start failure leaves sidecars without desktop credentials and never falls back
+/// to a persisted plaintext bridge.
 fn ensure_cred_ipc(app: &AppHandle) {
     let managed = app.state::<Managed>();
     let mut slot = managed.cred_ipc.lock().expect("cred_ipc lock");
@@ -1761,32 +1767,24 @@ fn ensure_cred_ipc(app: &AppHandle) {
     match crate::cred_ipc::start(socket) {
         Some(handle) => *slot = Some(handle),
         None => append_log(
-            &logs_dir().join("mlx-worker.log"),
-            "[desktop] credential socket failed to start; gated downloads will need a re-entered token\n",
+            &logs_dir().join("api.log"),
+            "[desktop] credential bridge failed to start; desktop credentials are unavailable to sidecars\n",
         ),
     }
 }
 
 /// Drop a host's cached secret from the credential socket (sc-5891) so a later pull
 /// re-reads the keychain. Called when the user updates or removes a credential, so a
-/// revoked/changed token stops being served without an app restart. No-op off macOS
-/// (no socket there).
+/// revoked/changed token stops being served without an app restart.
 pub fn invalidate_credential_cache(app: &AppHandle, host: &str) {
-    #[cfg(target_os = "macos")]
+    if let Some(ipc) = app
+        .state::<Managed>()
+        .cred_ipc
+        .lock()
+        .expect("cred_ipc lock")
+        .as_ref()
     {
-        if let Some(ipc) = app
-            .state::<Managed>()
-            .cred_ipc
-            .lock()
-            .expect("cred_ipc lock")
-            .as_ref()
-        {
-            ipc.invalidate(host);
-        }
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (app, host);
+        ipc.invalidate(host);
     }
 }
 
@@ -2217,6 +2215,11 @@ fn supervise_worker(
                 }
             };
             record_pid(&app, Some(child.pid()));
+            // sc-24743: on Windows this is the candle `auto` supervisor; confine it (and the
+            // per-GPU children it spawns) to the kill-on-close job so a desktop force-quit
+            // frees their VRAM at once instead of after the in-flight generation.
+            #[cfg(windows)]
+            sidecar_job::confine(child.pid(), label);
             slot(&app.state::<Managed>())
                 .lock()
                 .expect("worker lock")
@@ -2492,12 +2495,7 @@ fn supervise_mlx_worker(app: AppHandle) {
                 let managed = ctx.app.state::<Managed>();
                 let guard = managed.cred_ipc.lock().expect("cred_ipc lock");
                 if let Some(ipc) = guard.as_ref() {
-                    command = command
-                        .env(
-                            "SCENEWORKS_CRED_IPC_SOCKET",
-                            ipc.socket.to_string_lossy().to_string(),
-                        )
-                        .env("SCENEWORKS_CRED_IPC_TOKEN", &ipc.token);
+                    command = ipc.inject_env(command);
                     let hosts = crate::settings::recorded_credential_hosts().join(",");
                     if !hosts.is_empty() {
                         command = command.env("SCENEWORKS_CREDENTIAL_HOSTS", hosts);
@@ -2704,6 +2702,11 @@ fn record_api_pid(app: &AppHandle, pid: u32) {
 /// the OS-enforced backstop the pidfile `taskkill /T` reaping ([`kill_pid`]) can't guarantee
 /// once the tracked parent has already exited.
 ///
+/// The candle GPU worker sidecar (the `auto` supervisor + its per-GPU children) is confined
+/// the same way (sc-24743): its parent-PID watchdog alone lets a child mid-denoise keep its
+/// VRAM until the in-flight generation finishes, and the next launch's reap only knows the
+/// (already dead) supervisor PID.
+///
 /// Best-effort: any failure is logged and left to the existing reaping, never fatal.
 #[cfg(windows)]
 mod sidecar_job {
@@ -2759,12 +2762,13 @@ mod sidecar_job {
         }
     }
 
-    /// Assign sidecar process `pid` to the shared kill-on-close job.
-    pub(super) fn confine(pid: u32) {
+    /// Assign sidecar process `pid` (named `sidecar` in logs) to the shared kill-on-close job.
+    pub(super) fn confine(pid: u32, sidecar: &str) {
         let Some(job) = job_handle() else {
             tracing::warn!(
                 event = "sidecar_job_unavailable",
                 pid,
+                sidecar,
                 "could not create kill-on-close job; relying on taskkill reaping"
             );
             return;
@@ -2774,7 +2778,12 @@ mod sidecar_job {
         unsafe {
             let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, FALSE, pid);
             if process.is_null() {
-                tracing::warn!(event = "sidecar_job_open_failed", pid, "OpenProcess failed");
+                tracing::warn!(
+                    event = "sidecar_job_open_failed",
+                    pid,
+                    sidecar,
+                    "OpenProcess failed"
+                );
                 return;
             }
             let assigned = AssignProcessToJobObject(job, process) != 0;
@@ -2783,12 +2792,14 @@ mod sidecar_job {
                 tracing::info!(
                     event = "sidecar_job_assigned",
                     pid,
-                    "API sidecar confined to kill-on-close job"
+                    sidecar,
+                    "sidecar confined to kill-on-close job"
                 );
             } else {
                 tracing::warn!(
                     event = "sidecar_job_assign_failed",
                     pid,
+                    sidecar,
                     "assign to job failed"
                 );
             }
@@ -3083,9 +3094,8 @@ fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
         .expect("candle worker lock")
         .take();
     let api_child = managed.api.lock().expect("api lock").take();
-    // Take the credential IPC handle so its socket file can be unlinked on a graceful
-    // quit (sc-5891); see the clean-exit block below. macOS-only (the socket is too).
-    #[cfg(target_os = "macos")]
+    // Take the credential IPC handle so its Unix socket can be unlinked on a graceful
+    // quit (sc-5891). The Windows loopback listener owns no filesystem artifact.
     let cred_ipc = managed.cred_ipc.lock().expect("cred_ipc lock").take();
     let handle = app.clone();
     std::thread::spawn(move || {
@@ -3146,9 +3156,8 @@ fn begin_teardown(app: &AppHandle, then: Teardown) -> bool {
         // Unlink the credential IPC socket (sc-5891) so a graceful quit doesn't leave a
         // stale `cred-ipc.sock` in the data dir. A crash/force-quit skips this, but the
         // next launch's bind reaps it (`cred_ipc::start` removes a stale socket first).
-        #[cfg(target_os = "macos")]
         if let Some(cred_ipc) = cred_ipc {
-            let _ = std::fs::remove_file(&cred_ipc.socket);
+            cred_ipc.cleanup();
         }
         match then {
             Teardown::Exit => handle.exit(0),
@@ -3798,6 +3807,10 @@ async fn run_startup(app: AppHandle) {
         return;
     }
     emit(&app, "starting", "Starting the local engine…", false);
+    // Start the OS-credential bridge before constructing the API command so the
+    // sidecar receives its endpoint on the first launch. This does not open a
+    // secret item until a planning request asks for one.
+    ensure_cred_ipc(&app);
     if let Err(error) = spawn_api(&app) {
         emit(&app, "error", error, true);
         return;

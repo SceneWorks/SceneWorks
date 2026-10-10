@@ -46,7 +46,7 @@
 // The usual objection to a recorded fixture is decay. It does not apply here, for two
 // structural reasons:
 //
-//  1. **All 100 current keys and two frozen legacy-import keys are pinned to immutable lowercase
+//  1. **Every current key and the two frozen legacy-import keys are pinned to immutable lowercase
 //     40-hex revisions.** A git SHA's file
 //     listing is timeless — re-reading it in a year returns the same bytes. There is nothing to
 //     decay. sc-18924 closed the last 11-key moving-default-branch window, and the offline gate now
@@ -370,11 +370,21 @@ function indexWaivers({ waivers, keyOf, describe, malformedKind, duplicateKind, 
 // An empty declaration is a deliberate whole-repo fetch, not an omission — there is no
 // per-pattern claim to verify, so it produces no claim at all. (The worker's aggregate
 // zero-file check still covers an empty repo at download time.)
+//
+// A `pendingArtifact` row (sc-24112) produces no claim either, for a stricter reason: its artifact
+// does not exist on the Hub yet, so there is no listing to grade its patterns against and no
+// possible recording — `--write` would have to invent one. The row carries the null-SHA
+// placeholder, nothing will ever download it (the API refuses the job), and dropping the flag is
+// the same edit that pins the real revision — at which point the row becomes an ordinary claim and
+// this gate starts demanding a recording for it. So this is a deferral of grading to the moment
+// there is something to grade, NOT an exemption: `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
+// keeps the flag from outliving the upload, and the key census below counts only gradeable rows.
 export function collectClaims({ models, loras }) {
   const claims = [];
   for (const model of models.models ?? []) {
     for (const download of model.downloads ?? []) {
       if (download.provider !== "huggingface") continue;
+      if (download.pendingArtifact === true) continue;
       const declared = download.files ?? [];
       if (declared.length === 0) continue;
       claims.push({

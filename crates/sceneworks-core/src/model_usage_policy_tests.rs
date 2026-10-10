@@ -1,0 +1,222 @@
+//! sc-22998: the commercial-use verdict and the conditional-component seam, judged on the LIVE
+//! builtin catalog — the YuE2 entry and the six YuE1 (epic sc-19373) entries that ship beside it
+//! (epic sc-22988 acceptance test 5).
+
+use super::*;
+use crate::builtin_manifests::BUILTIN_MANIFESTS;
+use serde_json::json;
+
+fn builtin_models() -> Vec<Value> {
+    let (_, contents) = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .expect("builtin.models.jsonc is embedded");
+    let manifest: Value =
+        serde_json::from_str(&crate::jsonc::strip_jsonc_comments(contents)).expect("parses");
+    manifest["models"].as_array().expect("models").clone()
+}
+
+fn builtin_yue2() -> Value {
+    builtin_models()
+        .into_iter()
+        .find(|model| model["id"] == "yue2")
+        .expect("yue2 is in the builtin catalog")
+}
+
+/// The six YuE1 catalog ids, in builtin catalog order.
+const YUE1_IDS: [&str; 6] = [
+    "yue_en_cot",
+    "yue_en_icl",
+    "yue_zh_cot",
+    "yue_zh_icl",
+    "yue_jp_kr_cot",
+    "yue_jp_kr_icl",
+];
+
+/// The builtin catalog with every YuE1 entry removed — the swapped-model negative case of a V1 id
+/// the catalog does not hold.
+fn catalog_without_yue1() -> Vec<Value> {
+    builtin_models()
+        .into_iter()
+        .filter(|model| model["family"] != "yue")
+        .collect()
+}
+
+#[test]
+fn commercial_route_refuses_yue2_and_points_to_eligible_yue1_entries_only() {
+    // Operates on the real resolution point: an id looked up in a catalog that holds the LIVE
+    // builtin yue2 entry. Mutation that reds this: drop `commercialUse` + `nonCommercial` from the
+    // manifest entry (verdict becomes Eligible), or change `alternativeFamily` away from `yue`
+    // (alternatives go empty).
+    let catalog = builtin_models();
+    let verdict = commercial_use_verdict(&catalog, "yue2").expect("yue2 resolves");
+    let CommercialUseVerdict::Refused {
+        model_id,
+        reason,
+        alternative_family,
+        alternatives,
+        note,
+    } = verdict
+    else {
+        panic!("a commercial-use route must refuse YuE2, got {verdict:?}");
+    };
+    assert_eq!(model_id, "yue2");
+    assert!(reason.contains("CC BY-NC 4.0"), "{reason}");
+    assert_eq!(alternative_family.as_deref(), Some("yue"));
+    assert_eq!(alternatives, YUE1_IDS);
+    let note = note.expect("the pointer carries its rights caveat");
+    assert!(
+        note.contains("does not clear rights"),
+        "the V1 pointer must not claim unrelated rights clearance: {note}"
+    );
+}
+
+#[test]
+fn a_yue1_entry_is_eligible_and_never_resolves_to_yue2() {
+    let catalog = builtin_models();
+    for id in YUE1_IDS {
+        assert_eq!(
+            commercial_use_verdict(&catalog, id).unwrap(),
+            CommercialUseVerdict::Eligible {
+                model_id: id.to_owned()
+            }
+        );
+    }
+}
+
+#[test]
+fn an_unknown_or_ambiguous_id_is_an_error_never_another_model() {
+    // Swapped-model negative fixtures: a V1 id this catalog does not hold must not be answered with
+    // the V2 entry that shares its prefix, and V2 must not be answered with a V1 row.
+    let catalog = catalog_without_yue1();
+    assert_eq!(
+        commercial_use_verdict(&catalog, "yue_en_cot"),
+        Err(CommercialUseError::UnknownModel("yue_en_cot".to_owned()))
+    );
+    assert_eq!(
+        commercial_use_verdict(&catalog, "yue"),
+        Err(CommercialUseError::UnknownModel("yue".to_owned()))
+    );
+    let mut duplicated = builtin_models();
+    duplicated.push(builtin_yue2());
+    assert_eq!(
+        commercial_use_verdict(&duplicated, "yue2"),
+        Err(CommercialUseError::AmbiguousModel("yue2".to_owned()))
+    );
+}
+
+#[test]
+fn alternatives_exclude_restricted_family_members_and_self_pointers() {
+    // A YuE1 entry that is itself non-commercial is not offered; a block pointing at its own family
+    // offers nothing (it would hand the refused weights back).
+    let mut catalog = builtin_models();
+    catalog
+        .iter_mut()
+        .find(|model| model["id"] == "yue_jp_kr_cot")
+        .expect("yue_jp_kr_cot is in the builtin catalog")["nonCommercial"] = json!(true);
+    let CommercialUseVerdict::Refused { alternatives, .. } =
+        commercial_use_verdict(&catalog, "yue2").unwrap()
+    else {
+        panic!("refused");
+    };
+    assert!(!alternatives.contains(&"yue_jp_kr_cot".to_owned()));
+    assert!(alternatives.contains(&"yue_jp_kr_icl".to_owned()));
+
+    let mut self_pointer = builtin_yue2();
+    self_pointer["commercialUse"]["alternativeFamily"] = json!("yue2");
+    let CommercialUseVerdict::Refused { alternatives, .. } =
+        commercial_use_verdict(&[self_pointer], "yue2").unwrap()
+    else {
+        panic!("refused");
+    };
+    assert!(alternatives.is_empty());
+}
+
+#[test]
+fn non_commercial_flag_refuses_even_without_or_against_a_commercial_use_block() {
+    let flagged = json!({"id": "nc", "family": "x", "nonCommercial": true});
+    assert!(matches!(
+        commercial_use_verdict(std::slice::from_ref(&flagged), "nc"),
+        Ok(CommercialUseVerdict::Refused { .. })
+    ));
+    let contradictory = json!({
+        "id": "nc", "family": "x", "nonCommercial": true,
+        "commercialUse": {"eligible": true}
+    });
+    assert!(matches!(
+        commercial_use_verdict(&[contradictory], "nc"),
+        Ok(CommercialUseVerdict::Refused { .. })
+    ));
+}
+
+#[test]
+fn the_live_cover_closure_is_acquirable_and_only_for_covers() {
+    // The live entry since the owner's 2026-09-27 decision (sc-23002): SheetSage2 +
+    // MERT-v2-FullSong are declared for covers, carry no block, and are the purpose's rows in
+    // declaration order. Mutation that reds this: re-adding a `blocked` record to either component,
+    // or dropping `cover` from a component's `requiredFor`.
+    let yue2 = builtin_yue2();
+    let rows = conditional_component_downloads(&yue2, "cover").expect("acquirable for covers");
+    let repos = rows
+        .iter()
+        .map(|row| row["repo"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(repos, ["m-a-p/SheetSage2", "m-a-p/MERT-v2-FullSong"]);
+    // Base generation declares no conditional components at all.
+    assert_eq!(
+        conditional_component_downloads(&yue2, "generation"),
+        Err(ConditionalComponentsError::NotDeclared {
+            purpose: "generation".to_owned()
+        })
+    );
+}
+
+#[test]
+fn a_blocked_component_still_refuses_its_purpose_with_reason_and_unblock() {
+    // The block machinery stays in force for any entry that declares one (a synthetic block on a
+    // copy of the live entry): the whole purpose is refused, naming every blocked component's reason
+    // and unblock condition. Mutation that reds this: returning rows while any row is blocked.
+    let mut yue2 = builtin_yue2();
+    for component in yue2["conditionalComponents"].as_array_mut().unwrap() {
+        component["blocked"] = json!({"reason": "blocked: r", "unblock": "u"});
+    }
+    let Err(ConditionalComponentsError::Blocked { purpose, blocked }) =
+        conditional_component_downloads(&yue2, "cover")
+    else {
+        panic!("a blocked closure must be refused");
+    };
+    assert_eq!(purpose, "cover");
+    let ids = blocked
+        .iter()
+        .map(|(id, _, _)| id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids, ["yue2_sheetsage2", "yue2_mert_v2_fullsong"]);
+    assert!(blocked
+        .iter()
+        .all(|(_, reason, unblock)| reason == "blocked: r" && unblock == "u"));
+}
+
+#[test]
+fn the_cover_closure_yields_exact_pinned_co_requisite_rows() {
+    // The seam itself: every pinned identity is carried through verbatim and the rows can never be
+    // taken for a primary download.
+    let yue2 = builtin_yue2();
+    let rows = conditional_component_downloads(&yue2, "cover").expect("acquirable");
+    assert_eq!(rows.len(), 2);
+    for (row, component) in rows
+        .iter()
+        .zip(yue2["conditionalComponents"].as_array().unwrap())
+    {
+        for key in ["provider", "repo", "revision", "files", "componentId"] {
+            assert_eq!(row[key], component[key], "{key}");
+        }
+        assert_eq!(row["coRequisite"], json!(true));
+    }
+    // One blocked component still refuses the whole purpose.
+    let mut half = yue2.clone();
+    half["conditionalComponents"][1]["blocked"] = json!({"reason": "r", "unblock": "u"});
+    assert!(matches!(
+        conditional_component_downloads(&half, "cover"),
+        Err(ConditionalComponentsError::Blocked { .. })
+    ));
+}

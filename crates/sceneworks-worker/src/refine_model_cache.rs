@@ -171,7 +171,7 @@ mod tests {
     fn spec(source: &str) -> LoadSpec {
         LoadSpec {
             source: source.to_owned(),
-            quantize: None,
+            ..Default::default()
         }
     }
 

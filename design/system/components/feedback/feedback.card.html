@@ -1,0 +1,60 @@
+<!-- @dsCard group="Components" viewport="700x260" name="Feedback / StatusDot & Modal" subtitle="Status dots + overlay dialog" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head>
+<meta charset="UTF-8" />
+<link rel="stylesheet" href="../../styles.css" />
+<style>
+  body { margin: 0; padding: 20px; background: var(--bg); }
+  .wrap { display: grid; gap: 18px; }
+  .block { display: grid; gap: 8px; }
+  .cap { font-size: 10.5px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); }
+  .row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding: 12px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-md); }
+  .st { display: inline-flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<script type="text/babel">
+const { StatusDot, Modal, Button, Markdown } = window.SceneWorksDesignSystem_b6febf;
+function App() {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="wrap">
+      <div className="block">
+        <span className="cap">StatusDot</span>
+        <div className="row">
+          <span className="st"><StatusDot ok /> worker online</span>
+          <span className="st"><StatusDot /> API unreachable</span>
+          <span className="st"><span className="dot"></span> ready</span>
+          <span className="st"><span className="dot busy"></span> generating</span>
+          <span className="st"><span className="dot idle"></span> idle</span>
+        </div>
+      </div>
+      <div className="block">
+        <span className="cap">Modal</span>
+        <div className="row">
+          <Button variant="primary" onClick={() => setOpen(true)}>Open dialog</Button>
+        </div>
+      </div>
+      {open ? (
+        <Modal onClose={() => setOpen(false)} label="Demo dialog">
+          <h2 style={{ margin: 0, fontSize: 18 }}>Rename 12 assets</h2>
+          <Markdown content={"Closes on **Escape** or backdrop click. Focus moves into the dialog on mount."} />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+            <Button variant="secondary" onClick={() => setOpen(false)}>Cancel</Button>
+            <Button variant="primary" onClick={() => setOpen(false)}>Apply</Button>
+          </div>
+        </Modal>
+      ) : null}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

@@ -39,3 +39,18 @@ export function applySuccessfulProjectRefresh(result, setProjects, setActiveProj
   setActiveProject((current) => reconcileActiveProject(projects, current));
   return true;
 }
+
+const EDITOR_MEDIA_TYPES = new Set([
+  "audio",
+  "document",
+  "frame",
+  "image",
+  "render",
+  "upload",
+  "video",
+  "vector",
+]);
+
+export function selectEditorMediaAssets(assets) {
+  return assets.filter((asset) => EDITOR_MEDIA_TYPES.has(asset.type));
+}

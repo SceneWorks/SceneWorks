@@ -89,6 +89,12 @@ pub struct TurboRecipe {
     /// The audio sigma shift. Recorded on the asset; the engine is fixed at
     /// [`ENGINE_AUDIO_SIGMA_SHIFT`].
     pub audio_shift: f32,
+    /// The SHORT EDGE of the canvas this file was distilled at (`sampling.trainingShortEdge`), when
+    /// the catalog declares one — 768 for a 768p file, 544 for a 544p one.
+    ///
+    /// The shipped entries declare this from the upstream model-specs table. An undeclared canvas
+    /// remains generic for user or future entries; it is never inferred from a filename.
+    pub training_short_edge: Option<u32>,
 }
 
 static TURBO_RECIPES: OnceLock<Vec<TurboRecipe>> = OnceLock::new();
@@ -138,12 +144,18 @@ fn parse_turbo_recipes(contents: &str) -> Vec<TurboRecipe> {
                 .and_then(Value::as_str)
                 .unwrap_or(&lora_id)
                 .to_owned();
+            let training_short_edge = sampling
+                .get("trainingShortEdge")
+                .and_then(Value::as_u64)
+                .and_then(|edge| u32::try_from(edge).ok())
+                .filter(|edge| *edge > 0);
             (steps > 0 && video_shift > 0.0 && audio_shift > 0.0).then_some(TurboRecipe {
                 lora_id,
                 name,
                 steps,
                 video_shift,
                 audio_shift,
+                training_short_edge,
             })
         })
         .collect()
@@ -211,7 +223,11 @@ pub fn resolve_turbo_recipe(
 
 impl TurboRecipe {
     /// Whether two recipes ask for the same schedule (ignoring identity).
-    fn recipe_eq(&self, other: &Self) -> bool {
+    ///
+    /// This is also the planner's test for schedule PARITY across a mixed film's two partitions
+    /// (sc-23406): one notion of "the same schedule", shared with the refusal above, so the
+    /// envelope cannot offer a pair the worker would then call contradictory.
+    pub(crate) fn recipe_eq(&self, other: &Self) -> bool {
         self.steps == other.steps
             && self.video_shift.to_bits() == other.video_shift.to_bits()
             && self.audio_shift.to_bits() == other.audio_shift.to_bits()
@@ -342,6 +358,19 @@ mod tests {
         let eight = turbo_recipe_for_lora_id("minimax_h3_turbo_8step").expect("the 8-step recipe");
         assert_eq!(four.steps, 4, "the file upstream calls 4-step runs 4 NFE");
         assert_eq!(eight.steps, 8, "the file upstream calls 8-step runs 8 NFE");
+    }
+
+    #[test]
+    fn shipped_turbo_recipes_declare_their_published_training_canvases() {
+        let edge = |id| {
+            turbo_recipe_for_lora_id(id)
+                .unwrap_or_else(|| panic!("{id} recipe"))
+                .training_short_edge
+        };
+        assert_eq!(edge("minimax_h3_turbo_4step_768p"), Some(768));
+        assert_eq!(edge("minimax_h3_turbo_8step"), Some(544));
+        assert_eq!(edge("minimax_h3_turbo_4step_v01"), Some(544));
+        assert_eq!(edge("minimax_h3_ref2v_turbo_4step"), Some(544));
     }
 
     /// The resolver: no accelerator ⇒ the base regime, one ⇒ its own recipe, and the recipe follows

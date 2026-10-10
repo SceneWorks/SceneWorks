@@ -1,0 +1,166 @@
+{
+  // sc-23406 cell (a) labeled set: the six MiniMax-H3 q4 REFERENCE-CONDITIONED takes of
+  // plan.v2.jsonc rendered 2026-09-15 (run_6e9facfb1835471c90a928b58109e27d), hand-labeled frame
+  // by frame under RUBRIC.md with the per-shot notes in manual/SCORES.md. Same shape and rules as
+  // config/film-harness/review-eval/evaluation-2026-09-14-takes.jsonc (phase 1): media outside the
+  // repository, mediaRoot names the evidence directory, a missing frame is a refusal.
+  //
+  // Labels are what a CORRECT reviewer should report per question — not what the model said and
+  // not what the plan intended. The uncomfortable ones:
+  //   * sh020_courier / sh020_parcel are `mismatch` (frames: all): frame 1 (0.41 s) is an empty
+  //     room — the courier is in frame by 0.8 s, but the review plan's "all" grades the three
+  //     sampled frames and frame 1 shows no courier and no parcel. Same precedent as phase 1's
+  //     evaluation-2026-09-14 set for the same situation; a true fact about the take.
+  //   * sh050_recipient is `match`: the approved recipient plate is a MAN, the prompt says "she";
+  //     the reviewer's question asks for a person in a work apron, which the take shows.
+  //   * sh050_parcel (frames: all) is `mismatch`: no parcel is in view in frames 1–2 although the
+  //     startState puts it on the bench.
+  //   * sh050_action is `match`: the review's question is only "standing at the workbench?", which
+  //     the last frame shows, even though the rubric's "looking down" is unobservable (head cropped).
+  //   * sh060_action is `match`: the question is "open or sealed?" and the box is open, even though
+  //     the rubric docks the lid still being held.
+  //   * sh050_cut is `unobserved`: the pegboard question cannot be answered on SH050's last frame
+  //     (timber and a window behind the torso, no wall of tools in view); a reviewer answering "no"
+  //     there against SH040's "yes" would report a jump between two takes of the SAME room.
+  //   * sh030_sleeve is `unobserved`: on the first frame only a hand at the right edge is in view.
+  //   * sh060_apron_sleeve is `match` here (unlike phase 1): the rolled grey sleeve IS visible.
+  "schemaVersion": 1,
+  "id": "courier-review-eval-sc-23406-cell-a",
+  "version": 1,
+  "description": "Hand labels for the sc-23406 cell (a) takes (MiniMax-H3 q4 MLX, minimax_h3_ref, 576x320, 5.17 s, 24 fps, 4 references @ 2048).",
+  "mediaRoot": "~/SceneWorks/film-harness-evidence/sc-23406/frames/cell-a",
+  "reviewPlan": "../courier-workshop/review.jsonc",
+
+  "cases": [
+    {
+      "id": "a_sh010_a1",
+      "shotId": "SH010",
+      "label": "correct",
+      "description": "The workshop_location plate re-staged: dog-holed bench with vice centre, tool pegboard, door camera-left, window right; empty, then the door opens and the courier plate's man (blue work jacket, canvas satchel) stands in the doorway holding the red lidded box. Rubric 12/12.",
+      "frames": [
+        { "file": "SH010-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH010-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH010-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh010_location": "match",
+        "sh010_courier": "match",
+        "sh010_courier_jacket": "match",
+        "sh010_parcel": "match",
+        "sh010_parcel_custody": "match",
+        "sh010_action": "match"
+      }
+    },
+    {
+      "id": "a_sh020_a1",
+      "shotId": "SH020",
+      "label": "late_entry_same_room",
+      "description": "Frame 1 is the same room, empty (the courier enters from camera-left by 0.8 s); frame 2 the courier in the doorway with the red box; frame 3 at the bench from behind with the box in hand. Rubric 10/12 (identity 1, cut 1).",
+      "frames": [
+        { "file": "SH020-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH020-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH020-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH010-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh020_location": "match",
+        "sh020_courier": "mismatch",
+        "sh020_courier_jacket": "unobserved",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "match",
+        "sh020_action": "match",
+        "sh020_cut": "match"
+      }
+    },
+    {
+      "id": "a_sh030_a1",
+      "shotId": "SH030",
+      "label": "correct",
+      "description": "The workbench_table plate as a close-up; hands in the courier's blue sleeves lower the red lidded box onto the bench and withdraw. Rubric 12/12.",
+      "frames": [
+        { "file": "SH030-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH030-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH030-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH020-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "unobserved",
+        "sh030_parcel": "match",
+        "sh030_parcel_custody": "match",
+        "sh030_action": "match",
+        "sh030_cut": "match"
+      }
+    },
+    {
+      "id": "a_sh040_a1",
+      "shotId": "SH040",
+      "label": "correct_back_to_camera",
+      "description": "SH010's room again: the red box on the bench, the courier walks away to the door camera-left (back to camera), steps out, door closed at the end with the box on the bench. Rubric 11/12 (identity 1).",
+      "frames": [
+        { "file": "SH040-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH040-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH040-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH030-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh040_location": "match",
+        "sh040_parcel": "match",
+        "sh040_parcel_custody": "match",
+        "sh040_action": "match",
+        "sh040_cut": "unobserved"
+      }
+    },
+    {
+      "id": "a_sh050_a1",
+      "shotId": "SH050",
+      "label": "parcel_out_of_view_head_cropped",
+      "description": "The recipient plate's man (grey apron, rolled sleeves) enters through the door camera-left of the same room wiping his hands on a rag; frames 1–2 show the bench with no box on it; frame 3 at the bench with the red box in front of him, head cropped out. Rubric 10/12 (parcel 1, action 1).",
+      "frames": [
+        { "file": "SH050-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH050-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH050-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH040-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh050_location": "match",
+        "sh050_recipient": "match",
+        "sh050_recipient_apron": "match",
+        "sh050_parcel": "mismatch",
+        "sh050_parcel_custody": "match",
+        "sh050_action": "match",
+        "sh050_cut": "unobserved"
+      }
+    },
+    {
+      "id": "a_sh060_a1",
+      "shotId": "SH060",
+      "label": "lid_open_still_held",
+      "description": "The sealed red box on the bench plate, the recipient's grey apron and rolled sleeve at left; the hands lift the tape and open the box; last frame the lid is held up, flap folded, pale interior, hands still on the box. Rubric 11/12 (action 1).",
+      "frames": [
+        { "file": "SH060-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH060-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH060-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH050-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh060_bench": "match",
+        "sh060_apron_sleeve": "match",
+        "sh060_parcel": "match",
+        "sh060_parcel_custody": "match",
+        "sh060_action": "match",
+        "sh060_cut": "match"
+      }
+    }
+  ]
+}

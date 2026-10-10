@@ -618,6 +618,9 @@ fn conditioning_label(kind: gen_core::ConditioningKind) -> &'static str {
         // sc-17149's third video conditioning mechanism, spelled the way gen-core's own
         // request-vocabulary serializes it (`conditioning.reference_video.fps`).
         gen_core::ConditioningKind::ReferenceVideo => "reference_video",
+        // sc-24111's alpha-carrying reference, spelled the same way gen-core serializes it
+        // (`conditioning.reference_rgba.strength`).
+        gen_core::ConditioningKind::ReferenceRgba => "reference_rgba",
     }
 }
 

@@ -15,8 +15,11 @@ crates/audio/candle-audio-moss-sfx
 crates/audio/candle-audio-moss-tts
 crates/audio/candle-audio-moss-tts-realtime
 crates/audio/candle-audio-openvoice
+crates/audio/candle-audio-sheetsage2
 crates/audio/candle-audio-stable-audio-3
 crates/audio/candle-audio-whisper
+crates/audio/candle-audio-yue
+crates/audio/candle-audio-yue2
 crates/bundles/runtime-catalog
 crates/bundles/runtime-cpu
 crates/bundles/runtime-cuda
@@ -25,6 +28,7 @@ crates/contracts/core-llm
 crates/contracts/core-llm/core-llm-testkit
 crates/contracts/gen-core
 crates/contracts/gen-core-testkit
+crates/kernels/candle-quant-kernels
 crates/llm/candle-llm
 crates/llm/mlx-llm
 crates/llm/mlx-llm/server
@@ -52,6 +56,7 @@ crates/media/candle-gen/candle-gen-mochi
 crates/media/candle-gen/candle-gen-pid
 crates/media/candle-gen/candle-gen-pulid
 crates/media/candle-gen/candle-gen-qwen-image
+crates/media/candle-gen/candle-gen-qwen-image-2-1
 crates/media/candle-gen/candle-gen-sam3
 crates/media/candle-gen/candle-gen-sana
 crates/media/candle-gen/candle-gen-scail2
@@ -62,6 +67,7 @@ crates/media/candle-gen/candle-gen-sensenova
 crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-wan
 crates/media/candle-gen/candle-gen-z-image
+crates/media/candle-gen/vendor/candle-core
 crates/media/candle-gen/vendor/candle-kernels
 crates/media/mlx-gen
 crates/media/mlx-gen/mlx-gen-anima
@@ -88,6 +94,7 @@ crates/media/mlx-gen/mlx-gen-mochi
 crates/media/mlx-gen/mlx-gen-pid
 crates/media/mlx-gen/mlx-gen-pulid
 crates/media/mlx-gen/mlx-gen-qwen-image
+crates/media/mlx-gen/mlx-gen-qwen-image-2-1
 crates/media/mlx-gen/mlx-gen-sam2
 crates/media/mlx-gen/mlx-gen-sam3
 crates/media/mlx-gen/mlx-gen-sana

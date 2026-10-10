@@ -7,11 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "81fda3bd5a9d5920ad9cdc62796df3305be96742",
-      "audioInferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a"
+      "inferenceRevision": "8f986217ad31475b288f452d78a30ef05a4d7268"
     },
     "mlx": {
-      "inferenceRevision": "fff98b05b31e24423c517f05553d1379bf24fc3a"
+      "inferenceRevision": "11319984d0c5aa7ff63bffa0760d93aec823aeea"
     }
   },
   "models": {
@@ -171,6 +170,10 @@
       "candle": true,
       "mlx": true
     },
+    "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
     "qwen_image_edit": {
       "mlx": true
     },
@@ -257,6 +260,27 @@
       "candle": false
     },
     "stable_audio_3_small_sfx_base": {
+      "candle": false
+    },
+    "yue2": {
+      "candle": false
+    },
+    "yue_en_cot": {
+      "candle": false
+    },
+    "yue_en_icl": {
+      "candle": false
+    },
+    "yue_jp_kr_cot": {
+      "candle": false
+    },
+    "yue_jp_kr_icl": {
+      "candle": false
+    },
+    "yue_zh_cot": {
+      "candle": false
+    },
+    "yue_zh_icl": {
       "candle": false
     },
     "z_image": {

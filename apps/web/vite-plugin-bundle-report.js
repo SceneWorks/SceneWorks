@@ -56,6 +56,8 @@ export const initialExclusions = Object.freeze({
   ],
   "Simple UI": ["/src/simple/SimpleShell.jsx", "/src/simple/studioParts.jsx"],
   "Setup Wizard": ["/src/screens/SetupWizard.jsx"],
+  "Batch operations": ["/src/components/BatchOperationsPanel.jsx"],
+  "Workflow replay offer": ["/src/components/WorkflowDropPanel.jsx"],
 });
 
 function normalize(value) {

@@ -1,0 +1,21 @@
+<!-- @dsCard group="Colors" viewport="700x140" name="Brand Palette" subtitle="Fixed brand colors — theme-independent" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 16px; background: var(--bg); font-family: var(--font-ui); }
+  .grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .sw { border-radius: var(--r-md); overflow: hidden; border: 1px solid var(--border); }
+  .chip { height: 64px; }
+  .meta { padding: 7px 9px; background: var(--surface); }
+  .name { font-size: 11.5px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10.5px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="grid">
+  <div class="sw"><div class="chip" style="background:var(--ink)"></div><div class="meta"><div class="name">Ink</div><div class="var">--ink · #0f1622</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--teal)"></div><div class="meta"><div class="name">Teal</div><div class="var">--teal · #2fa193</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--mist)"></div><div class="meta"><div class="name">Mist</div><div class="var">--mist · #b9babb</div></div></div>
+  <div class="sw"><div class="chip" style="background:var(--paper)"></div><div class="meta"><div class="name">Paper</div><div class="var">--paper · #fbfaf6</div></div></div>
+</div>
+</body></html>

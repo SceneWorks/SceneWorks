@@ -67,7 +67,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Cursor, Seek, Write};
 use std::path::Path;
 
-use image::{ImageFormat, RgbImage};
+use image::{ImageFormat, RgbImage, RgbaImage};
 use png::text_metadata::{EncodableTextChunk, ITXtChunk, TEXtChunk};
 
 use crate::workflow_parameters::{parameters_text, PARAMETERS_CHUNK_KEYWORD};
@@ -246,7 +246,90 @@ fn io_error(error: &std::io::Error) -> WorkflowChunkError {
 // Write
 // ---------------------------------------------------------------------------
 
-/// Encode `rgb` to `path` as a PNG, embedding `share` as a compressed `iTXt` chunk — and its
+/// The pixel buffers [`write_workflow_chunk`] can encode, borrowed.
+///
+/// This used to be a bare `&RgbImage`, and the type was the whole of the bug sc-24111 exists to
+/// fix: a model that renders native transparency (Qwen Image 2.1) hands the worker an RGBA buffer,
+/// and the one funnel every generated image is written through could not express it. The channel
+/// was not dropped by a lossy step somewhere downstream — it could never be named in the first
+/// place, so every call site ahead of it had already flattened with `into_rgb8()` just to satisfy
+/// the signature.
+///
+/// Two deliberate properties:
+///
+/// * **RGB is untouched.** `From<&RgbImage>` means every existing caller compiles unchanged and
+///   takes the identical branch it always did — same `ColorType::Rgb`, same `save_with_format` on
+///   the `None` arm, same bytes. `the_none_path_is_byte_identical_to_save_with_format` and
+///   `the_some_path_is_the_none_path_plus_the_chunks` in `tests/workflow_png.rs` still run over
+///   the RGB fixtures and still compare byte for byte.
+/// * **The colour type follows the buffer, not the contents.** An `RgbaImage` whose alpha happens
+///   to be 255 everywhere is still written as RGBA. Sniffing the pixels would make the output
+///   format depend on the image, which is a far worse contract for a caller to reason about than
+///   "you get back the channels you handed in", and it would make a fully-opaque render from an
+///   alpha-capable model silently change shape.
+#[derive(Clone, Copy)]
+pub enum WorkflowImage<'a> {
+    /// 8-bit RGB. What every pre-sc-24111 caller hands in.
+    Rgb(&'a RgbImage),
+    /// 8-bit RGBA. Native transparency, preserved through to the file.
+    Rgba(&'a RgbaImage),
+}
+
+impl WorkflowImage<'_> {
+    fn width(&self) -> u32 {
+        match self {
+            Self::Rgb(image) => image.width(),
+            Self::Rgba(image) => image.width(),
+        }
+    }
+
+    fn height(&self) -> u32 {
+        match self {
+            Self::Rgb(image) => image.height(),
+            Self::Rgba(image) => image.height(),
+        }
+    }
+
+    fn color(&self) -> png::ColorType {
+        match self {
+            Self::Rgb(_) => png::ColorType::Rgb,
+            Self::Rgba(_) => png::ColorType::Rgba,
+        }
+    }
+
+    fn as_raw(&self) -> &[u8] {
+        match self {
+            Self::Rgb(image) => image.as_raw(),
+            Self::Rgba(image) => image.as_raw(),
+        }
+    }
+
+    /// The `image`-crate write the `None` arm makes, per variant.
+    ///
+    /// Kept as a method rather than inlined so the opt-out arm provably calls the *same*
+    /// `save_with_format` for both colour types, which is what the byte-identity tests compare
+    /// the embed arm against.
+    fn save_png(&self, path: &Path) -> image::ImageResult<()> {
+        match self {
+            Self::Rgb(image) => image.save_with_format(path, ImageFormat::Png),
+            Self::Rgba(image) => image.save_with_format(path, ImageFormat::Png),
+        }
+    }
+}
+
+impl<'a> From<&'a RgbImage> for WorkflowImage<'a> {
+    fn from(image: &'a RgbImage) -> Self {
+        Self::Rgb(image)
+    }
+}
+
+impl<'a> From<&'a RgbaImage> for WorkflowImage<'a> {
+    fn from(image: &'a RgbaImage) -> Self {
+        Self::Rgba(image)
+    }
+}
+
+/// Encode `image` to `path` as a PNG, embedding `share` as a compressed `iTXt` chunk — and its
 /// A1111 `parameters` rendering beside it — when there is one.
 ///
 /// `None` is not a degenerate case, it is the opt-out: it writes the image through the *same*
@@ -274,22 +357,23 @@ fn io_error(error: &std::io::Error) -> WorkflowChunkError {
 /// # Errors
 /// [`WorkflowChunkError::Io`] if the file cannot be written, [`WorkflowChunkError::Encode`] if
 /// serializing the envelope or encoding the PNG fails.
-pub fn write_workflow_chunk(
-    rgb: &RgbImage,
+pub fn write_workflow_chunk<'a>(
+    image: impl Into<WorkflowImage<'a>>,
     path: &Path,
     share: Option<&WorkflowShare>,
 ) -> Result<(), WorkflowChunkError> {
+    let image = image.into();
     let Some(share) = share else {
-        return rgb
-            .save_with_format(path, ImageFormat::Png)
+        return image
+            .save_png(path)
             .map_err(|error| WorkflowChunkError::Io {
                 detail: error.to_string(),
             });
     };
-    let chunks = embedded_chunks(share, (rgb.width(), rgb.height()))?;
+    let chunks = embedded_chunks(share, (image.width(), image.height()))?;
     let file = File::create(path).map_err(|error| io_error(&error))?;
     let mut sink = BufWriter::new(file);
-    encode_png_with_text(rgb, &mut sink, &chunks)?;
+    encode_png_with_text(image, &mut sink, &chunks)?;
     sink.flush().map_err(|error| io_error(&error))?;
     Ok(())
 }
@@ -465,16 +549,20 @@ fn parameters_chunk(text: String) -> TextChunk {
 /// deflate regimes see different settings: an incompressible one, where `png` falls back to storing
 /// rows and the filter is not consulted at all, and a smooth one that actually deflates, which is
 /// the only regime in which a filter divergence is visible.
-fn encode_png_with_text<W: Write>(
-    rgb: &RgbImage,
+fn encode_png_with_text<'a, W: Write>(
+    image: impl Into<WorkflowImage<'a>>,
     sink: W,
     chunks: &[TextChunk],
 ) -> Result<(), WorkflowChunkError> {
+    let image = image.into();
     let encode_error = |error: png::EncodingError| WorkflowChunkError::Encode {
         detail: error.to_string(),
     };
-    let mut encoder = png::Encoder::new(sink, rgb.width(), rgb.height());
-    encoder.set_color(png::ColorType::Rgb);
+    let mut encoder = png::Encoder::new(sink, image.width(), image.height());
+    // sc-24111: follows the buffer handed in rather than a constant. `Rgb` for every pre-existing
+    // caller (byte-identical output), `Rgba` when the render carries native transparency — the one
+    // line that used to make every generated PNG opaque no matter what produced it.
+    encoder.set_color(image.color());
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
     encoder.set_filter(png::Filter::Adaptive);
@@ -486,7 +574,7 @@ fn encode_png_with_text<W: Write>(
         }
     }
     writer
-        .write_image_data(rgb.as_raw())
+        .write_image_data(image.as_raw())
         .map_err(encode_error)?;
     writer.finish().map_err(encode_error)?;
     Ok(())

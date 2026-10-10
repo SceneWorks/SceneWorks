@@ -48,7 +48,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "ebc97be15522ff263f76897f430053953e010e94";
+pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "25bd55cdb6a56c78b07584a12150c9f5d46be439";
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;
@@ -652,6 +652,42 @@ fn persist_semantic_checkpoint(
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
+/// Decode the vision-policy JSON on the resident `model` and record the generation's
+/// `llm_kv_cache` event whichever way it ends: completed, or refused, canceled or failed by the
+/// engine (sc-20682, sc-20688).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn run_vision_generation(
+    model: &dyn gen_core::core_llm::TextLlm,
+    request: &gen_core::core_llm::TextLlmRequest,
+    job_id: &str,
+) -> WorkerResult<String> {
+    // sc-24029: the KV cache grows per token here too, and this closure is the only hook
+    // interleaved with the decode — MLX's freed-buffer cache is PROCESS-GLOBAL, so the
+    // clear is not thread-scoped and will also discard buffers a concurrent image render
+    // had cached (up to once per 16 streamed token events, plus once at decode end). The
+    // terminal clear fires when this function returns — on the output or on the error path
+    // alike.
+    let mut cache_bound = crate::mlx_decode_cache::DecodeCacheBound::mlx();
+    let generation = model.generate(request, &mut |event| {
+        if matches!(event, gen_core::core_llm::StreamEvent::Token { .. }) {
+            cache_bound.note_event();
+        }
+    });
+    crate::llm_kv_cache::KvCacheRecord::of(
+        crate::llm_kv_cache::NATIVE_LLM_ENGINE,
+        request.kv_compression,
+        &generation,
+        |output| output.kv_cache.as_ref(),
+    )
+    .emit(job_id);
+    generation
+        .map(|output| output.text)
+        .map_err(|error| WorkerError::Engine(format!("catalog vision inference failed: {error}")))
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -676,9 +712,18 @@ async fn generate_vision_json(
     let blocking_cancel = cancel.clone();
     let spec = gen_core::core_llm::LoadSpec {
         source: weights_dir.to_string_lossy().into_owned(),
-        quantize: None,
+        // Only a separable Prism GGUF load needs an explicit projector artifact. Every SceneWorks
+        // vision model is a snapshot directory whose projector is part of the model, so the
+        // default `projector_source: None` is the load this code has always performed — it does
+        // not turn vision off. Every other load option keeps its default too (dense weights, the
+        // backend's own decode defaults), so a load option the contract adds needs no edit here.
+        ..Default::default()
     };
     let requirements = ModelRequirements::default().with_constraint(Constraint::Json);
+    // sc-20682: the worker-wide compressed-KV opt-in (off unless the operator enabled it); a
+    // multimodal request always runs dense, with that reason, recorded as `llm_kv_cache`.
+    let kv_compression = crate::llm_kv_cache::worker_default_policy();
+    let job_id = job.id.clone();
     let generation = crate::refine_model_cache::with_cached_refiner(
         spec,
         requirements,
@@ -702,14 +747,10 @@ async fn generate_vision_json(
                 max_new_tokens: 512,
                 constraint: Some(Constraint::Json),
                 cancel: blocking_cancel,
+                kv_compression,
                 ..Default::default()
             };
-            model
-                .generate(&request, &mut |_| {})
-                .map(|output| output.text)
-                .map_err(|error| {
-                    WorkerError::Engine(format!("catalog vision inference failed: {error}"))
-                })
+            run_vision_generation(model, &request, &job_id)
         },
     );
     tokio::pin!(generation);
@@ -1678,6 +1719,33 @@ pub(crate) async fn run_catalog_analysis_job(
 mod tests {
     use super::*;
     use sceneworks_core::catalog_store::CatalogRecordFilter;
+
+    /// sc-20688: a vision decode the engine refuses still records its `llm_kv_cache` event, with
+    /// the requested policy, the outcome and the refusal.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn a_refused_vision_generation_records_its_kv_cache_event() {
+        use crate::llm_kv_cache::test_support::{events_for, RefusingLlm};
+        let request = gen_core::core_llm::TextLlmRequest {
+            kv_compression: gen_core::core_llm::KvCompressionPolicy::Qualified,
+            ..Default::default()
+        };
+        let job_id = "catalog-vision-refused";
+        let error = run_vision_generation(&RefusingLlm, &request, job_id).unwrap_err();
+        assert!(
+            matches!(&error, WorkerError::Engine(message) if message.contains("catalog vision inference failed")),
+            "{error:?}"
+        );
+        let events = events_for(job_id);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["engine"], crate::llm_kv_cache::NATIVE_LLM_ENGINE);
+        assert_eq!(events[0]["kvCache"]["policy"], "qualified");
+        assert_eq!(events[0]["kvCache"]["outcome"], "refused");
+        assert_eq!(events[0]["kvCache"]["reason"], "request_resource_exhausted");
+    }
 
     #[test]
     fn semantic_provenance_matches_linked_inference_revision() {

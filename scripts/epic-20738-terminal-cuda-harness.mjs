@@ -178,7 +178,12 @@ const DERIVED_DISPOSITION_PROVIDER_FAILED = "provider-failed-empty";
 const REQUEST_MEMORY_STRATEGY_KEYS = [
   "requestMemoryPresent", "stageResidency", "strategy", "streamTransformerBlocks",
 ];
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "75b4331ac83915f1c63cabc26d145ed612b75112035236517ead82b97fe20499";
+// Re-pinned after the main sync: `config/download-pattern-evidence.json` retains the YuE1
+// re-hosts, YuE2's three upstream m-a-p repos, and the Wan-VACE base/transformer entries:
+// 121 repo@revision keys including the two frozen importer authorities.
+// The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
+// which is why it is pinned here rather than recomputed.
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "9ac5343ea88c615289fee9e5ca9c65867b023e8a5b65a3c1ab8a4827b991b19d";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

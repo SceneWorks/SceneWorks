@@ -140,10 +140,9 @@ fn read_credential_secret_result(host: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Best-effort lookup retained for the macOS lazy credential socket, whose protocol
+/// Best-effort lookup for the lazy desktop credential bridge, whose protocol
 /// represents unavailable secrets as absent. Eager Linux worker reads use the
 /// fallible helpers below instead.
-#[cfg(target_os = "macos")]
 fn read_credential_secret(host: &str) -> Option<String> {
     read_credential_secret_result(host).ok().flatten()
 }
@@ -422,9 +421,8 @@ pub fn recorded_credential_hosts() -> Vec<String> {
 /// The secret token + scheme for a single recorded host, for the on-demand
 /// credential socket to serve when a worker download actually needs it (sc-5891).
 /// Gated on the non-secret `settings.json` metadata: if the host isn't recorded this
-/// returns `None` without reading the keychain. This is the single *lazy* keychain
-/// read that replaces the eager spawn-time reads on macOS.
-#[cfg(target_os = "macos")]
+/// returns `None` without reading the keychain. This is the single lazy OS-secret
+/// read used by the desktop API bridge on every platform.
 pub fn resolve_credential_secret(host: &str) -> Option<(String, CredentialScheme)> {
     let host = host.trim().to_ascii_lowercase();
     let settings = load_settings();
@@ -1242,7 +1240,9 @@ fn write_export_bytes(destination: &std::path::Path, image_bytes: &[u8]) -> Resu
     std::fs::write(destination, image_bytes).map_err(|error| error.to_string())
 }
 
-/// Save a browser-generated image through the native dialog. WebKitGTK and
+/// Save a browser-generated export through the native dialog: the Image Editor's
+/// PNGs and, via the web `saveExportFile` helper, JSON plan/pack/batch exports
+/// (sc-6554) — the bytes are written verbatim whatever they are. WebKitGTK and
 /// WKWebView have inconsistent `<a download>` behavior for blob URLs, while this
 /// path gives every desktop platform the intended filename and a real save
 /// destination. The explicit size ceiling prevents an untrusted webview payload
@@ -1254,10 +1254,10 @@ pub async fn save_image_export(
     suggested_filename: String,
 ) -> Result<Option<String>, String> {
     if image_bytes.is_empty() {
-        return Err("The exported image was empty.".to_owned());
+        return Err("The exported file was empty.".to_owned());
     }
     if image_bytes.len() > MAX_EXPORT_BYTES {
-        return Err("The exported image exceeds the 256 MB desktop limit.".to_owned());
+        return Err("The exported file exceeds the 256 MB desktop limit.".to_owned());
     }
 
     let destination = app

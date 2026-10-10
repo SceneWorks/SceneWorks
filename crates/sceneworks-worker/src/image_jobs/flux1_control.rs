@@ -341,6 +341,7 @@ async fn generate_flux1_dev_control_stream(
     };
     let mut spec = flux1_control_spec(weights_dir, control_weights, quant, adapters)
         .with_resolved_route(request.model.clone());
+    let pre_policy_spec = spec.clone();
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         FLUX1_DEV_CONTROL_ENGINE_ID,
         resolved_tier,
@@ -385,6 +386,28 @@ async fn generate_flux1_dev_control_stream(
         has_phases: false,
         conditioning_windows: None,
     };
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        FLUX1_DEV_CONTROL_ENGINE_ID,
+        &request.model,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            let plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                FLUX1_DEV_CONTROL_ENGINE_ID,
+                &request.model,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            );
+            match resolved_tier {
+                Some(tier) => plan.with_resolved_artifact_tier(Some(tier)),
+                None => Ok(plan),
+            }
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         FLUX1_DEV_CONTROL_ENGINE_ID,

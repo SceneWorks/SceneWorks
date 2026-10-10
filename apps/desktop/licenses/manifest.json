@@ -1,6 +1,6 @@
 {
-  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs stages the bundled-binary files (ffmpeg/onnxruntime/cuda) next to the corresponding binaries in the packaged app. Model entries (sc-5604) are notice-only — they record the upstream license + attribution for AI model weights SceneWorks re-hosts on its Hugging Face org and downloads at runtime; they are not staged as binaries. The `description` below is shown to end users — keep it user-facing.",
-  "description": "SceneWorks bundles the third-party binaries listed below, and redistributes the AI model weights listed below — downloaded on first use from the SceneWorks model repository on Hugging Face. The upstream attributions, license notices, and any written offers are reproduced here.",
+  "_comment": "Source of truth for the in-app About → Licenses screen (sc-3778). License text lives alongside each entry in this directory; build-sidecar.mjs stages the bundled-binary files (ffmpeg/onnxruntime/cuda) next to the corresponding binaries in the packaged app. Model entries (sc-5604) are notice-only — they record the upstream license + attribution for AI model weights SceneWorks downloads at runtime, whether from upstream or a SceneWorks re-host; they are not staged as binaries. The `description` below is shown to end users — keep it user-facing.",
+  "description": "SceneWorks bundles the third-party binaries listed below and records the licenses of AI model weights acquired at runtime, whether downloaded from upstream or from a SceneWorks repository. The upstream attributions, license notices, and any written offers are reproduced here.",
   "components": [
     {
       "id": "ffmpeg",
@@ -292,6 +292,61 @@
         {
           "label": "MIT License",
           "key": "acestep-v15-sft-cover-mit"
+        }
+      ]
+    },
+    {
+      "id": "yue",
+      "models": [
+        "yue_en_cot",
+        "yue_en_icl",
+        "yue_zh_cot",
+        "yue_zh_icl",
+        "yue_jp_kr_cot",
+        "yue_jp_kr_icl"
+      ],
+      "name": "YuE (Lyrics-to-Song)",
+      "publisher": "Multimodal Art Projection (M-A-P) · HKUST",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/multimodal-art-projection/YuE",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Lyrics-to-song music model (Audio Studio → Music): the six stage-1 7B checkpoints (m-a-p/YuE-s1-7B-anneal-{en,zh,jp-kr}-{cot,icl}) and the stage-2 1B upsampler (m-a-p/YuE-s2-1B-general). SceneWorks re-hosts safetensors copies on its Hugging Face org (SceneWorks/yue-s1-7b-anneal-*-candle, SceneWorks/yue-s2-1b-general-candle) — the bf16 weights plus q8 and q4 tiers quantized by SceneWorks — downloads only the selected tier on first use, and runs them natively (Candle) on every platform. Every re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed; upstream recommends (does not require) crediting outputs as \"Generated with YuE by HKUST/M-A-P\".",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
+          "key": "yue-license"
+        },
+        {
+          "label": "NOTICE",
+          "key": "yue-notice"
+        }
+      ]
+    },
+    {
+      "id": "xcodec-mini-infer",
+      "models": [],
+      "name": "xcodec_mini_infer (YuE codec + Vocos decoders)",
+      "publisher": "Multimodal Art Projection (M-A-P) · HKUST",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/m-a-p/xcodec_mini_infer",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Audio codec for the YuE music models (Audio Studio → Music): the xcodec codec with its HuBERT semantic branch, and the vocal and instrumental Vocos 44.1 kHz decoders. SceneWorks re-hosts a safetensors conversion of m-a-p/xcodec_mini_infer on its Hugging Face org (SceneWorks/xcodec-mini-infer), downloads it on first use as a pinned co-requisite of every YuE model, and runs it natively (Candle) on every platform. The re-host carries the upstream LICENSE and NOTICE; the NOTICE is reproduced here as Section 4(d) of the Apache License requires. Permissive — commercial use allowed.",
+      "documents": [
+        {
+          "label": "Apache License 2.0 (with the YuE license agreement & disclaimer)",
+          "key": "xcodec-mini-infer-license"
+        },
+        {
+          "label": "NOTICE",
+          "key": "xcodec-mini-infer-notice"
         }
       ]
     },
@@ -811,6 +866,45 @@
       ]
     },
     {
+      "id": "qwen-image-2-1",
+      "models": [
+        "qwen_image_2_1"
+      ],
+      "name": "Qwen-Image 2.1",
+      "publisher": "Hangzhou Tongyi Laboratory Technology Co., Ltd.",
+      "license": "Qwen Research License Agreement",
+      "_nonCommercialComment": "The licence NAME carries no 'non-commercial' marker, but §1(i) + §2(a) make it research/evaluation-only. The Simple UI badge used to be derived from the name alone, which badged this row 'Commercial OK'. This flag is the explicit declaration `licenseBadge` prefers, and it mirrors the catalog entry's own `nonCommercial: true` in config/manifests/builtin.models.jsonc.",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image-2.1",
+      "usage": "Text-to-image model. A SEPARATE component from the Apache-2.0 `qwen-image` entry above: Qwen-Image 2.1 is a different checkpoint under a different licence, and the two share no weights. The bf16 tier is the pinned upstream snapshot (Qwen/Qwen-Image-2.1 @790c92633540aa0cb11d9abf19eb46d861714758), downloaded directly into the user's own cache on first use; SceneWorks redistributes nothing there. The Q8 and Q4 tiers (sc-24112) ARE re-hosted by SceneWorks as quantized Derivatives at SceneWorks/qwen-image-2-1-mlx (@1691de01c24a070131e0a28bf4c065fd027f4fe9, subdirs q8/ and q4/), so §3 DOES attach to them: each derived bundle carries a copy of the Agreement (LICENSE), the §3(b) change record CHANGES.md (naming exactly which files were changed: the affine-quantized transformer/ and text_encoder/ components, with the tier and group size), a SHA256SUMS manifest of every file the converter wrote, and the verbatim attribution notice. No tier is ever embedded in a SceneWorks build or installer — scripts/check-no-nc-weights.mjs keeps that fatal. The licence is NON-COMMERCIAL — §1(i) defines \"Non-Commercial\" as research or evaluation purposes only, and §2(b) requires a separate commercial licence from Alibaba (model-business@notice.qwencloud.com). It restricts the Materials, not their outputs. §4(b) additionally requires \"Built with Qwen\" or \"Improved using Qwen\" in the documentation of any AI model trained or fine-tuned on these weights that is then distributed.",
+      "documents": [
+        {
+          "label": "Qwen RESEARCH LICENSE AGREEMENT",
+          "key": "qwen-image-2-1-research"
+        }
+      ]
+    },
+    {
+      "id": "qwen-image-2-1-pe",
+      "models": [
+        "qwen_image_2_1_pe_t2i",
+        "qwen_image_2_1_pe_i2i"
+      ],
+      "name": "Qwen-Image 2.1 Prompt Rewriters",
+      "publisher": "Hangzhou Tongyi Laboratory Technology Co., Ltd.",
+      "license": "Qwen Research License Agreement",
+      "_nonCommercialComment": "Same agreement, and therefore the same flag, as the `qwen-image-2-1` component above: the licence NAME carries no 'non-commercial' marker, but §1(i) + §2(a) make it research/evaluation-only, so `licenseBadge` needs this explicit declaration rather than a regex over the name. Mirrors each catalog entry's own `nonCommercial: true`.",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image-2.1-PE-T2I",
+      "usage": "OPTIONAL prompt-rewriting models for Qwen-Image 2.1 — one for text-to-image (Qwen/Qwen-Image-2.1-PE-T2I @f3ed7985c788ad75b3ab7223e0c4c51e2a43545b) and one for editing (Qwen/Qwen-Image-2.1-PE-I2I @72927bc08afc99b7888ceb7d7d51a12db3700bbd). They render no images: each turns a short brief into the long descriptive prompt the image model was trained on. Neither is downloaded automatically, and Qwen-Image 2.1 generates and edits fully without them. A SEPARATE component from the `qwen-image-2-1` weights above because they are different repositories, published for a different purpose, under the same agreement; SceneWorks pulls them from Qwen's own repository into the user's cache and re-hosts nothing, so the agreement's §3 redistribution obligations never attach to SceneWorks. The licence is NON-COMMERCIAL — §1(i) defines \"Non-Commercial\" as research or evaluation purposes only, and §2(b) requires a separate commercial licence from Alibaba (model-business@notice.qwencloud.com).",
+      "documents": [
+        {
+          "label": "Qwen RESEARCH LICENSE AGREEMENT",
+          "key": "qwen-image-2-1-research"
+        }
+      ]
+    },
+    {
       "id": "realvisxl",
       "models": [
         "realvisxl",
@@ -917,12 +1011,7 @@
       "license": "Apache-2.0",
       "homepage": "https://huggingface.co/Tongyi-MAI/Z-Image-Turbo",
       "usage": "Image generation + edit model (base / Turbo / Edit). SceneWorks downloads on first use converted copies of the upstream Apache-2.0 weights, re-hosted at SceneWorks/z-image-mlx and SceneWorks/z-image-turbo-mlx. Redistributed with attribution as permitted by Apache-2.0.",
-      "documents": [
-        {
-          "label": "Apache License 2.0",
-          "key": "z-image-apache"
-        }
-      ]
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "ltx-2.3-eros",
@@ -1226,7 +1315,7 @@
       "publisher": "Hugging Face",
       "license": "Apache-2.0",
       "homepage": "https://github.com/huggingface/candle",
-      "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source.",
+      "usage": "The native FLUX VAE contains a modified vendored copy of candle-transformers source. The native Candle backend also links a vendored candle-core 0.10.2 copy from Hugging Face Candle, with its CUDA graph parameter-cache cherry-picks and zeroed quantized-padding change documented in inference's VENDORED.md.",
       "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
@@ -1258,6 +1347,177 @@
       "homepage": "https://github.com/fpgaminer/joycaption",
       "usage": "The caption-type taxonomy, prompt template bodies and name option reproduced in the native captioners are near-verbatim copies of gradio-app/app.py (CAPTION_TYPE_MAP, NAME_OPTION) from fpgaminer/joycaption, which is Apache-2.0. This covers BOTH caption lanes: the Candle provider (crates/media/candle-gen/candle-gen-joycaption/src/prompt.rs) and the MLX provider (crates/media/mlx-gen/src/caption/joycaption.rs). SceneWorks MODIFIED the reproduced text: punctuation was normalized (em dash to hyphen, curly to straight quotes, backticks dropped) and upstream's \"Note any watermarks, signatures, or compression artifacts.\" sentence was folded into the \"Never mention...\" clause of the Straightforward bodies. The upstream repository ships no NOTICE file. This entry covers the reproduced PROMPT CONTENT only; the JoyCaption model WEIGHTS declare no license of their own and remain undetermined.",
       "documents": [{"label": "Apache License 2.0", "key": "joycaption-source-apache"}]
+    },
+    {
+      "id": "yue2",
+      "models": [
+        "yue2"
+      ],
+      "name": "YuE2 (YuE2-3B, YuE2-Vae, YuE2-Vae-legacy)",
+      "publisher": "Multimodal Art Projection (the YuE2 authors)",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/YuE2-3B",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "EXPERIMENTAL song-generation model, NONCOMMERCIAL USE ONLY. SceneWorks downloads the weights on first use directly from the upstream repositories at pinned revisions (m-a-p/YuE2-3B@1a96eca688d6ae5d7f0feb88573fec89920fcd19, m-a-p/YuE2-Vae@95535e72a97bc0f09b8ada125d26b4009428c0e8, m-a-p/YuE2-Vae-legacy@b54118f0fc462f08999d1ec07e88817f4ee3f770); it does NOT re-host them, and a q8 / q4 tier is derived on the user's machine from the downloaded original. All three are licensed under CC BY-NC 4.0: NonCommercial purposes only, with attribution when shared. Attribution: YuE2-3B, YuE2-Vae and YuE2-Vae-legacy, YuE2 by the YuE2 authors (Multimodal Art Projection), weights licensed under CC BY-NC 4.0 (https://creativecommons.org/licenses/by-nc/4.0/). The repositories' own third-party notices (Oobleck VAE and SnakeBeta code, MIT) are reproduced below. YuE2 is a separate model from YuE1; commercial use must use YuE1, which concerns the model weights only and clears no rights in user-provided lyrics, recordings or generated audio. The qwen.tiktoken tokenizer in the YuE2-3B repository has its own terms (Qwen tokenizer entry).",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0 (YuE2 weight licence)",
+          "key": "yue2-weights-cc-by-nc"
+        },
+        {
+          "label": "YuE2 third-party notices",
+          "key": "yue2-weights-third-party-notices"
+        },
+        {
+          "label": "MIT License (SnakeBeta, NVIDIA)",
+          "key": "yue2-weights-snakebeta-mit"
+        },
+        {
+          "label": "MIT License (stable-audio-tools)",
+          "key": "yue2-weights-stable-audio-tools-mit"
+        }
+      ]
+    },
+    {
+      "id": "sheetsage2-weights",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "SheetSage2 weights",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/SheetSage2/tree/eab522a8168e8b8b8c4856bf8609cd86198f01fe",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Conditional Song Lab cover component, downloaded only when the user sets up covers directly from m-a-p/SheetSage2 at eab522a8168e8b8b8c4856bf8609cd86198f01fe; never included in the YuE2 generation install. Weights are CC BY-NC 4.0, noncommercial only, with attribution. SceneWorks does not re-host these weights; re-hosting remains gated on a separate rights review.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "sheetsage2-weights-cc-by-nc"
+        }
+      ]
+    },
+    {
+      "id": "mert-v2-fullsong-weights",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "MERT-v2-FullSong weights",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/MERT-v2-FullSong/tree/d8ba1c745e733b3908ce6ad16ebeb17ac7600a42",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Conditional Song Lab cover component, downloaded only when the user sets up covers directly from m-a-p/MERT-v2-FullSong at d8ba1c745e733b3908ce6ad16ebeb17ac7600a42; never included in the YuE2 generation install. Weights are CC BY-NC 4.0, noncommercial only, with attribution. SceneWorks does not re-host these weights; re-hosting remains gated on a separate rights review.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "mert-v2-fullsong-weights-cc-by-nc"
+        }
+      ]
+    },
+    {
+      "id": "sheetsage2-port",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "Native SheetSage2 and MERT-v2-FullSong transcription port",
+      "publisher": "Multimodal Art Projection",
+      "license": "Non-Commercial (CC-BY-NC-4.0)",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/m-a-p/SheetSage2",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Native Rust/Candle transcription port for the Song Lab recording-to-score cover flow. The owner recorded CC BY-NC 4.0 noncommercial distribution with attribution on epic sc-22988 (2026-09-27). Modified from the upstream SheetSage2 and MERT-v2-FullSong implementation. This code entry is distinct from both weight entries; re-hosting weights remains gated.",
+      "documents": [
+        {
+          "label": "Creative Commons BY-NC 4.0",
+          "key": "sheetsage2-port-cc-by-nc"
+        }
+      ]
+    },
+    {
+      "id": "yue2-qwen-tiktoken",
+      "models": [],
+      "appliesToModels": [
+        "yue2"
+      ],
+      "name": "Qwen tokenizer (qwen.tiktoken) used by YuE2",
+      "publisher": "Alibaba Cloud (Tongyi Qianwen)",
+      "license": "Tongyi Qianwen License Agreement",
+      "homepage": "https://huggingface.co/Qwen/Qwen-7B",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "YuE2's text / ABC tokenizer file qwen.tiktoken, downloaded with the YuE2-3B weights from m-a-p/YuE2-3B. It is byte-identical to Qwen/Qwen-7B's qwen.tiktoken, so it carries the Tongyi Qianwen License Agreement rather than the CC BY-NC 4.0 weight licence (YuE2's model licence states it does not replace separately applicable licences for text tokenization files). The upstream YuE2-3B copy ships neither the Agreement nor its Notice; both are reproduced here from Qwen/Qwen-7B@ef3c5c9c57b252f3149c1408daf4d649ec8b6c85. Tongyi Qianwen is licensed under the Tongyi Qianwen LICENSE AGREEMENT, Copyright (c) Alibaba Cloud. All Rights Reserved.",
+      "documents": [
+        {
+          "label": "Tongyi Qianwen License Agreement",
+          "key": "yue2-qwen-tiktoken-license"
+        },
+        {
+          "label": "Tongyi Qianwen Notice",
+          "key": "yue2-qwen-tiktoken-notice"
+        }
+      ]
+    },
+    {
+      "id": "yue2-source",
+      "models": [],
+      "name": "YuE2 inference source (multimodal-art-projection/YuE)",
+      "publisher": "the YuE2 authors (multimodal-art-projection)",
+      "license": "Apache-2.0 (with MIT-licensed Oobleck VAE and SnakeBeta portions)",
+      "homepage": "https://github.com/multimodal-art-projection/YuE/tree/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e",
+      "usage": "SceneWorks' native YuE2 engine (the Rust / Candle crate candle-audio-yue2 in the SceneWorks inference runtime) is a port of the first-party YuE2 source at commit 92a73cc7652fcc1f937855e4b765e0a0edd7ff2e: its MoT language model, request protocol and tokenizer handling, acoustic flow matching and VAE decoders. That source is Apache-2.0; its Oobleck VAE (stable-audio-tools) and SnakeBeta (NVIDIA BigVGAN) code carries the MIT notices reproduced below. This entry covers that SOURCE only: the YuE2 model weights are CC BY-NC 4.0 (YuE2 entry), and the ported score tools have their own entry.",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "yue2-source-apache"
+        },
+        {
+          "label": "YuE third-party notices",
+          "key": "yue2-source-third-party-notices"
+        },
+        {
+          "label": "MIT License (SnakeBeta, NVIDIA)",
+          "key": "yue2-source-snakebeta-mit"
+        },
+        {
+          "label": "MIT License (stable-audio-tools)",
+          "key": "yue2-source-stable-audio-tools-mit"
+        }
+      ]
+    },
+    {
+      "id": "yue2-score-tools-source",
+      "models": [],
+      "name": "YuE2 music skill score tools (abc_tools.py)",
+      "publisher": "the YuE2 authors (multimodal-art-projection)",
+      "license": "Apache-2.0",
+      "homepage": "https://github.com/multimodal-art-projection/YuE/tree/92a73cc7652fcc1f937855e4b765e0a0edd7ff2e/skills/yue2-music",
+      "usage": "SceneWorks' YuE2 score inspection and editing (sceneworks-core yue2_score) is a native Rust port of the bounded two-voice ABC dialect helper skills/yue2-music/scripts/abc_tools.py and the rules in skills/yue2-music/references/abc-editing.md at YuE commit 92a73cc7652fcc1f937855e4b765e0a0edd7ff2e: its parser, accidental/tie interpretation, chord-quality and key vocabularies, structural error messages, chord stripping and sounding-note comparison. SceneWorks MODIFIED and extended it (section map, change contracts, structured edit operations, version records). Copyright (c) 2026 the YuE2 authors; the skill ships its own Apache-2.0 LICENSE and no NOTICE file. This entry covers that SOURCE only; the YuE2 model weights are CC BY-NC 4.0 and are not covered here.",
+      "documents": [{"label": "Apache License 2.0", "key": "yue2-score-tools-source-apache"}]
     },
     {
       "id": "sam3",
@@ -1343,6 +1603,24 @@
           "key": "dwpose-apache"
         }
       ]
+    },
+    {
+      "id": "starvector-1b",
+      "models": [
+        "starvector_1b",
+        "starvector_8b"
+      ],
+      "name": "StarVector image-to-SVG models (1B and 8B)",
+      "publisher": "StarVector authors",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/starvector",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Image-to-SVG vectorization from the immutable StarVector-1B 380ab95d25a8e9ab1dc825debe238b4953ae13b9 and StarVector-8B 518beea8dcb5f7a37c5911e92d1d62a76beee7f9 snapshots. SceneWorks downloads each immutable model card plus the exact native model, tokenizer, configuration and processor closures declared by the paired inference contract; it excludes and never executes either repository's remote Python module. Both model cards declare Apache-2.0, and there is no separate NOTICE file in either repository at these revisions.",
+      "documents": [{"label": "Apache License 2.0", "key": "z-image-apache"}]
     },
     {
       "id": "insightface",

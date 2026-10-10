@@ -78,6 +78,17 @@ jobs:
 
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
+      - name: Fetch the exact public inference terminal contract
+        run: |
+          set -euo pipefail
+          inference_root="$RUNNER_TEMP/starvector-pinned-inference"
+          echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
+          git init "$inference_root"
+          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
+          git -C "$inference_root" fetch --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+          git -C "$inference_root" checkout --detach FETCH_HEAD
+          test "$(git -C "$inference_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
+
       # The scaffold suite reads real inference source at both the current pin
       # and the packaged anchor revisions, just as check.yml's parity-scaffold does.
       - name: Fetch the pinned inference source for the anchor-closure suite
@@ -102,6 +113,7 @@ jobs:
         run: |
           npm run check
           npm run check:runpod:image-contract
+          npm run check:ci:runpod-publish
       - name: Fetch the pinned inference release
         env:
           CARGO_NET_OFFLINE: "false"
@@ -117,7 +129,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Derive OCI metadata
         id: metadata
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -128,30 +140,67 @@ jobs:
             type=raw,value=${{ steps.publication.outputs.release_tag }},enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=latest,enable=${{ steps.publication.outputs.release == 'true' }}
             type=raw,value=${{ steps.publication.outputs.manual_tag }},enable=${{ steps.publication.outputs.release != 'true' }}
-      - name: Build and publish combined RunPod image
-        id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      # Push one unique candidate digest, test that exact artifact, then promote
+      # its AMD64 manifest to release/manual tags without rebuilding it.
+      - name: Build and stage combined RunPod image
+        id: build_staging
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           file: docker/rust.Dockerfile
           target: runpod
           platforms: linux/amd64
           push: true
-          tags: ${{ steps.metadata.outputs.tags }}
+          tags: ${{ env.IMAGE_NAME }}:staging-${{ github.run_id }}-${{ github.run_attempt }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=runpod-amd64
           cache-to: type=gha,mode=max,scope=runpod-amd64
-
-      - name: Publish summary
+      - name: Pull and verify immutable staged RunPod image
+        id: verify_staging
         env:
-          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          STAGED_DIGEST: ${{ steps.build_staging.outputs.digest }}
         run: |
-          {
-            echo "### RunPod image published"
-            echo
-            echo '```text'
-            echo "${IMAGE_TAGS}"
-            echo "digest=${IMAGE_DIGEST}"
-            echo '```'
-          } >> "${GITHUB_STEP_SUMMARY}"
+          set -euo pipefail
+          test -n "$STAGED_DIGEST"
+          staged_ref="$IMAGE_NAME@$STAGED_DIGEST"
+          docker pull --platform linux/amd64 "$staged_ref"
+          node scripts/check-runpod-staged-image.mjs --image "$staged_ref" --revision "$GITHUB_SHA"
+      - name: Build standalone candle runtime from shared stages
+        id: build_candle_runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/rust.Dockerfile
+          target: rust-worker-candle
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: sceneworks-candle-smoke:ci
+      - name: Check standalone candle identities and bind writes
+        id: smoke_candle_runtime
+        timeout-minutes: 5
+        env:
+          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
+          SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: sceneworks-candle-smoke:ci
+          SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
+        run: bash scripts/check-docker-candle-runtime.sh
+      - name: Check staged combined-image Candle worker
+        id: smoke_published_runtime
+        timeout-minutes: 5
+        env:
+          SCENEWORKS_CANDLE_SMOKE_API_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
+          SCENEWORKS_CANDLE_SMOKE_WORKER_IMAGE: ${{ env.IMAGE_NAME }}@${{ steps.build_staging.outputs.digest }}
+          SCENEWORKS_CANDLE_SMOKE_DRIVER_DIR: /usr/local/cuda/compat
+          SCENEWORKS_CANDLE_SMOKE_WORKER_ENTRYPOINT: /usr/local/bin/sceneworks-rust-worker
+          SCENEWORKS_CANDLE_SMOKE_WORKER_USER: 1000:1000
+        run: bash scripts/check-docker-candle-runtime.sh
+      - name: Promote tested RunPod image without rebuilding
+        id: promote
+        if: success()
+        env:
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          STAGED_DIGEST: ${{ steps.build_staging.outputs.digest }}
+          PUBLISH_TAGS: ${{ steps.metadata.outputs.tags }}
+          STANDALONE_SMOKE_RESULT: ${{ steps.smoke_candle_runtime.outcome }}
+          PUBLISHED_SMOKE_RESULT: ${{ steps.smoke_published_runtime.outcome }}
+        run: node scripts/promote-runpod-image.mjs

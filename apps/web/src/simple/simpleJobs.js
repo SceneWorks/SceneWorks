@@ -211,11 +211,31 @@ export function buildSimpleImageRequest({
   loras: selectedLoras = [],
   quantTier = "",
   tierExplicit = false,
+  // sc-24113 — transparency, and the model it is judged against. Simple exposes the model, so it
+  // exposes the toggle; the CAPABILITY check happens in `buildImageJobRequest` -> `transparencyAdvanced`,
+  // the one place either shell decides whether the request field is emitted.
+  selectedModel = null,
+  transparentBackground = false,
+  // sc-24113 — the controls Simple's advanced fold added. Each defaults to the value that means
+  // "untouched", so a caller that passes none produces a byte-identical payload to before.
+  referenceAssetIds = [],
+  steps = "",
+  seed = "",
+  negativePrompt = "",
+  guidance = "",
+  width: widthOverride = null,
+  height: heightOverride = null,
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
     return null;
   }
+  // The free-size override wins per axis when the caller resolved one, mirroring the full studio's
+  // `resolutionOverride`. The caller has already validated it against the model's own envelope, so
+  // an illegal size never reaches here.
+  const width = Number.isFinite(widthOverride) && widthOverride > 0 ? widthOverride : size.width;
+  const height =
+    Number.isFinite(heightOverride) && heightOverride > 0 ? heightOverride : size.height;
   const editing = mode === "edit_image";
   // Only claim img2img on the text path AND on a model that advertises it — the flag is
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
@@ -246,8 +266,15 @@ export function buildSimpleImageRequest({
     promptToSend: prompt,
     submitIntent: prompt,
     resolution,
-    width: size.width,
-    height: size.height,
+    width,
+    height,
+    // sc-24113: the advanced fold's knobs, through the SAME builder the full studio uses
+    // (`stepsOverride` / `guidanceOverride` are its names for "" = use the model default).
+    referenceAssetIds,
+    stepsOverride: steps,
+    guidanceOverride: guidance,
+    negativePrompt,
+    seed,
     mode,
     model,
     count,
@@ -257,6 +284,8 @@ export function buildSimpleImageRequest({
     styleId: styleId || null,
     quantTier,
     tierExplicit,
+    selectedModel,
+    transparentBackground,
   });
 }
 
@@ -339,4 +368,45 @@ export function buildSimpleAudioRequest({ model, prompt, mode, voice, durationSe
     payload.voice = voice;
   }
   return payload;
+}
+
+// The reference list Simple hands Qwen's rewriter (sc-24114): EXACTLY the ordered list the render
+// conditions on — the armed reference then the extras, for a model with the ordered surface — so
+// the rewrite's `<imageN>` numbering names the pictures actually sent. A model without that surface
+// sends at most its one armed reference, and so does the rewriter.
+export function simpleRewriteReferenceIds({
+  supportsOrderedReferences,
+  orderedReferenceIds = [],
+  referenceAssetId = null,
+}) {
+  if (supportsOrderedReferences) return [...orderedReferenceIds];
+  return referenceAssetId ? [referenceAssetId] : [];
+}
+
+// Does this model get Simple's NATIVE-ENVELOPE surface (sc-24114)? — the model's own variation
+// ladder (`limits.count`) and the Advanced fold (steps, seed, negative prompt, guidance, free size,
+// ordered references). Keyed on the model declaring the native envelope sc-24113 introduced
+// (`hardMinSteps` / `minDimension` / `maxDimension` / `maxReferenceAssets`), so every other model —
+// including the existing Qwen entries, which declare `limits.count` but none of these — keeps
+// Simple exactly as it was: the historical [1,2,4,6] chips and no fold.
+export function simpleNativeControls(model) {
+  const limits = model?.limits;
+  if (!limits || typeof limits !== "object") return false;
+  return ["hardMinSteps", "minDimension", "maxDimension", "maxReferenceAssets"].some(
+    (key) => limits[key] != null,
+  );
+}
+
+// Where Simple lands a rewriter's aspect suggestion (sc-24114). The classic studio applies it
+// directly to its resolution control; Simple's chip list can be memory-gated to fewer presets, and
+// silently ignoring a suggestion the user accepted is the defect. So: a preset the chips offer is
+// selected as a chip; otherwise, on a model with the native free-size surface, it becomes the free
+// size (same grid, same envelope check the fold applies). `null` only for an unparseable value or a
+// model with neither surface.
+export function simpleRewriteResolutionTarget(value, { resolutions = [], nativeControls = false } = {}) {
+  if (typeof value !== "string" || !value) return null;
+  if (resolutions.includes(value)) return { resolution: value };
+  const match = /^(\d+)x(\d+)$/.exec(value.trim());
+  if (!match || !nativeControls) return null;
+  return { widthOverride: match[1], heightOverride: match[2] };
 }

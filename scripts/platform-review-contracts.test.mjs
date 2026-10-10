@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
 // capture plans, so the inventory below reads them directly.
@@ -44,6 +49,11 @@ test("RunPod validation provisions the same inference fixtures as PR scaffold ch
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
+  const terminalFetchName = "Fetch the exact public inference terminal contract";
+  const terminalFetch = workflowStep(publish, terminalFetchName);
+  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
+  assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
   assert.ok(dependencies.includes("npm ci --ignore-scripts"));
   assert.ok(publish.indexOf(dependencies) < publish.indexOf(fetch));
@@ -191,6 +201,13 @@ test("Windows runner prep falls back when its optional rustc wrapper is missing"
   );
 });
 
+test("Windows runner prep reads the toolchain pin from its selected checkout", async () => {
+  const action = await source(".github/actions/prepare-rust-runner/action.yml");
+  assert.match(action, /inputs:\s+workspace-directory:\s+description:[^\n]+\s+required: false\s+default: \./);
+  assert.match(action, /- name: Select & verify the real Rust toolchain bin[^\n]*\n\s+shell: powershell\n\s+working-directory: \$\{\{ inputs\.workspace-directory \}\}/);
+  assert.match(action, /Select-String -Path 'rust-toolchain\.toml'/);
+});
+
 test("Windows runner prep resolves rustup outside the job's CARGO_HOME", async () => {
   const action = await source(".github/actions/prepare-rust-runner/action.yml");
   // rustup lives in the profile that installed it. The runner services pin CARGO_HOME
@@ -254,11 +271,96 @@ test("Windows CUDA isolates Cargo dependency checkouts after toolchain discovery
     workflow,
     /Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue/,
   );
-  assert.match(workflow, /Join-Path \$env:RUNNER_TEMP 'cargo-home'/);
-  assert.match(
-    workflow,
-    /Add-Content -Path \$env:GITHUB_ENV -Value "CARGO_HOME=\$jobCargoHome"/,
-  );
+  for (const [name, suffix] of [["candle-worker", ""], ["imported-nvfp4-worker-smoke", " for the imported NVFP4 smoke"]]) {
+    const job = workflowJob(workflow, name);
+    const setup = workflowStep(job, "Set up Node for Cargo cache selection");
+    const select = workflowStep(job, `Isolate Cargo dependency checkout${suffix}`);
+    const fetchStep = workflowStep(job, `Fetch the pinned inference release${name === "candle-worker" ? "" : " for the imported NVFP4 smoke"}`);
+    assert.match(setup, /actions\/setup-node@820762786026740c76f36085b0efc47a31fe5020/);
+    assert.match(setup, /node-version: 22/);
+    assert.ok(job.indexOf(setup) < job.indexOf(select) && job.indexOf(select) < job.indexOf(fetchStep));
+    assert.match(select, /node scripts\/select-windows-cargo-cache\.mjs/);
+    assert.match(select, /if \(\$LASTEXITCODE -ne 0\) \{ throw/);
+    assert.doesNotMatch(select.split("\n").filter(line => !/^\s*#/.test(line)).join("\n"), /RUNNER_TEMP|USERPROFILE|continue-on-error/);
+    assert.match(fetchStep, /CARGO_NET_OFFLINE: "false"/);
+    assert.match(fetchStep, /run: cargo fetch --locked/);
+  }
+});
+
+test("Windows Cargo cache preserves only the matching service cache and remains stable across jobs", () => {
+  const root = "C:\\tools";
+  const caches = new Set();
+  for (let i = 1; i <= 4; i++) {
+    const runnerName = `cuda-windows${i === 1 ? "" : `-${i}`}`;
+    const cargoHome = `D:\\cargo-home-${i}`;
+    const selected = selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache: root });
+    assert.equal(selected.mode, "service-cache"); assert.equal(selected.cache, cargoHome);
+    caches.add(selected.cache);
+    assert.deepEqual(selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache: root }), selected);
+  }
+  assert.equal(caches.size, 4);
+});
+
+test("Windows Cargo cache rejects another listener's cache and shared or missing homes", () => {
+  for (const cargoHome of [undefined, "", "C:\\Users\\runner\\.cargo", "D:\\cargo-home-1", "relative", "\\\\server\\share", "D:\\cargo-home-2\nINJECT=value"]) {
+    const selected = selectWindowsCargoCache({ runnerName: "cuda-windows-2", cargoHome, runnerToolCache: "C:\\tools" });
+    assert.equal(selected.mode, "listener-cache");
+    assert.equal(selected.cache, "C:\\tools\\SceneWorks\\cargo\\cuda-windows-2");
+  }
+  const first = selectWindowsCargoCache({ runnerName: "cuda-windows", runnerToolCache: "C:\\tools" });
+  const second = selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache: "C:\\tools" });
+  assert.notEqual(first.cache, second.cache);
+});
+
+test("Windows Cargo cache fails closed on malformed listener or persistent root", () => {
+  for (const runnerName of [undefined, "", "../cuda", "cuda/windows", "cuda\\windows", "cuda\nHOME=shared", "a".repeat(65)]) {
+    assert.throws(() => selectWindowsCargoCache({ runnerName, runnerToolCache: "C:\\tools" }), /safe listener/);
+  }
+  for (const runnerToolCache of [undefined, "", "relative", "C:relative", "C:\\tools\\..\\shared", "C:\\tools.\\child", "C:\\tools\nOTHER=value", "\\\\server\\share"]) {
+    assert.throws(() => selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache }), /safe listener/);
+  }
+});
+
+test("Windows Cargo cache accepts repeated exact LF and CRLF lock sources, rejects ambiguous or malformed identity", () => {
+  const sha = "a".repeat(40), other = "b".repeat(40);
+  const line = `source = "git+https://github.com/SceneWorks/inference?rev=${sha}#${sha}"`;
+  for (const newline of ["\n", "\r\n"]) assert.equal(lockedInferenceRevision(`${line}${newline}${line}${newline}`), sha);
+  for (const lock of ["", line.replace(`#${sha}`, `#${other}`), `${line}\n${line.replaceAll(sha, other)}`, `${line}\nsource = "git+https://github.com/SceneWorks/inference?branch=main"`]) {
+    assert.throws(() => lockedInferenceRevision(lock), /one exact inference/);
+  }
+});
+
+test("Windows Cargo cache directory guard preserves content and rejects linked or non-directory paths", async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-guard-"));
+  try {
+    const cache = path.join(root, "listener", "cargo");
+    await ensurePhysicalCargoCache(cache);
+    await writeFile(path.join(cache, "preserve"), "existing cache");
+    await ensurePhysicalCargoCache(cache);
+    assert.equal(await readFile(path.join(cache, "preserve"), "utf8"), "existing cache");
+    const file = path.join(root, "file"); await writeFile(file, "preserve");
+    await assert.rejects(() => ensurePhysicalCargoCache(path.join(file, "child")), /physical persistent/);
+    const link = path.join(root, "linked"); await symlink(cache, link, process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(() => ensurePhysicalCargoCache(path.join(link, "child")), /physical persistent/);
+    assert.equal(await readFile(file, "utf8"), "preserve");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit from empty or unrelated caches", async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-git-"));
+  const git = promisify(execFile);
+  try {
+    assert.equal(await cachedInferenceRevision(root, "a".repeat(40)), false);
+    const db = path.join(root, "git", "db", "inference-123abc");
+    await mkdir(db, { recursive: true });
+    await git("git", ["init", "--bare", db]);
+    const empty = path.join(root, "empty"); await writeFile(empty, "");
+    const tree = (await git("git", ["--git-dir", db, "hash-object", "-t", "tree", "-w", empty])).stdout.trim();
+    assert.equal(await cachedInferenceRevision(root, tree), false);
+    const commit = (await git("git", ["--git-dir", db, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgSign=false", "commit-tree", tree, "-m", "fixture"])).stdout.trim();
+    assert.equal(await cachedInferenceRevision(root, commit), true);
+    assert.equal(await cachedInferenceRevision(root, "a".repeat(40)), false);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 // sc-22738 (run 34490358777). The memory-catalog campaign's candle job builds the SAME dependency
@@ -432,8 +534,8 @@ function dispatchInputs(workflow) {
   let current = null;
   for (const line of workflow.slice(start, end).split("\n")) {
     // Deliberately permissive: GitHub allows digits, case and hyphens in an input name, and this
-    // helper backs the "at most 10 inputs" cap check. A narrower pattern would silently skip an
-    // input and let a workflow GitHub rejects sail through as 10-or-fewer.
+    // helper backs the input-cap check. A narrower pattern would silently skip an input and let a
+    // workflow GitHub rejects sail through under the cap.
     const header = line.match(/^ {6}([A-Za-z0-9_-]+):$/);
     if (header) {
       current = header[1];
@@ -451,10 +553,10 @@ test("windows-candle provisioning is model-parameterized, not Krea-hardcoded", a
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
 
-  // GitHub rejects a workflow_dispatch with more than 10 inputs. The Krea inputs were RENAMED
-  // rather than shadowed by a parallel provision_* family precisely to stay under that cap;
-  // a future story that adds an input needs the headroom this preserves.
-  assert.ok(names.length <= 10, `workflow_dispatch allows at most 10 inputs, found ${names.length}`);
+  // GitHub rejects a workflow_dispatch with more than 25 inputs (the cap was 10 when the Krea
+  // inputs were RENAMED rather than shadowed; memory-catalog-campaign.yml now dispatches with 14,
+  // e.g. run 34790766133). One provisioning path is enforced below, independently of the cap.
+  assert.ok(names.length <= 25, `workflow_dispatch allows at most 25 inputs, found ${names.length}`);
 
   for (const gone of ["provision_krea_snapshot", "krea_repository", "krea_revision"]) {
     assert.ok(!names.includes(gone), `${gone} was renamed; two provisioning paths must not coexist`);
@@ -830,7 +932,7 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
   const workflow = await source(".github/workflows/windows-candle.yml");
   const at = workflow.indexOf("  imported-nvfp4-worker-smoke:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the imported NVFP4 smoke job");
-  const job = workflow.slice(at);
+  const job = jobBlock(workflow, at);
 
   assert.match(job, /^ {4}needs: candle-worker$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
@@ -849,6 +951,143 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
     /cargo test -p sceneworks-worker --features backend-candle --release imported_nvfp4_worker_gpu_smoke -- --ignored --nocapture --test-threads=1/,
   );
   assert.doesNotMatch(job, /continue-on-error:/);
+});
+
+// One job's text: from its header to the next top-level job header (or the end of the file), so a
+// job added after it is never read as part of it.
+function jobBlock(workflow, at) {
+  const rest = workflow.slice(at + 1);
+  const next = rest.search(/\n  [A-Za-z0-9_-]+:\n/);
+  return workflow.slice(at, next === -1 ? undefined : at + 1 + next + 1);
+}
+
+test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU 0", async () => {
+  const candle = await source(".github/workflows/windows-candle.yml");
+  const worker = jobBlock(candle, candle.indexOf("  candle-worker:\n"));
+  const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
+  assert.match(worker, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  const route = worker.match(/^ {6}CUDA_VISIBLE_DEVICES: \$\{\{ github\.event_name == 'workflow_dispatch' && '([01])' \|\| '([01])' \}\}$/m);
+  assert.ok(route, "ordinary worker must make the event-specific device choice explicit");
+  for (const [event, expected] of [["pull_request", "1"], ["push", "1"], ["workflow_dispatch", "0"]]) {
+    assert.equal(event === "workflow_dispatch" ? route[1] : route[2], expected, event);
+  }
+  assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
+
+  const desktop = await source(".github/workflows/desktop-windows.yml");
+  const pack = jobBlock(desktop, desktop.indexOf("  package-windows:\n"));
+  const select = stepBody(pack, "Select physical GPU 1 for main-push packaging");
+  const selectEvent = select.match(/if: \$\{\{ github\.event_name == '([^']+)' \}\}/)?.[1];
+  assert.equal(selectEvent, "push");
+  assert.match(select, /Add-Content -Path \$env:GITHUB_ENV -Value 'CUDA_DEVICE_ORDER=PCI_BUS_ID'/);
+  assert.match(select, /Add-Content -Path \$env:GITHUB_ENV -Value 'CUDA_VISIBLE_DEVICES=1'/);
+  assert.ok(pack.indexOf("Select physical GPU 1 for main-push packaging") <
+            pack.indexOf("uses: ./.github/actions/prepare-rust-runner"));
+  assert.equal("push" === selectEvent, true, "main push runs the selection step");
+  assert.equal("workflow_dispatch" === selectEvent, false, "manual packaging retains its prior environment");
+  for (const [name, job] of [["candle-worker", worker], ["imported", imported], ["package", pack]]) {
+    assert.doesNotMatch(job, /^\s+CUDA_VISIBLE_DEVICES:\s*["']?0["']?\s*$/m, name);
+    assert.doesNotMatch(job, /--gpu-id[= ]0\b/, name);
+  }
+});
+
+// SC-23002: the YuE2 terminal CUDA evidence job. Dispatch-only, one real-weights card shared with the
+// other GPU-measuring jobs, the release app built with backend-candle, the acceptance driver and the
+// profile campaign by default, receipts uploaded before the verdict -- and never the CC BY-NC audio.
+test("windows-candle runs the YuE2 terminal acceptance and profile only on dispatch, on the real-weights card", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  assert.ok(names.includes("run_yue2_terminal_cuda") && names.includes("inference_revision") && names.includes("yue2_acceptance_only") && names.includes("yue2_fp8_profile_only"));
+  assert.equal(defaults.run_yue2_terminal_cuda, "false");
+  assert.equal(defaults.yue2_acceptance_only, "false");
+  assert.equal(defaults.yue2_fp8_profile_only, "false");
+  const at = workflow.indexOf("  yue2-terminal-cuda:\n");
+  assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
+  const job = jobBlock(workflow, at);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda \}\}$/m);
+  assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
+  assert.match(job, /^ {6}cancel-in-progress: false$/m);
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
+  // A fresh per-run Hugging Face home: the shared runner hub is never cold-install evidence, so no
+  // line of code in this job names it or pins HF_HUB_CACHE.
+  const jobCode = job.split("\n").filter((line) => !/^\s*#/.test(line)).join("\n");
+  assert.doesNotMatch(jobCode, /huggingface\\hub/);
+  assert.doesNotMatch(jobCode, /HF_HUB_CACHE: /);
+  // The ordinary lane stands down for this dispatch: it would share the measured GPU.
+  const candleWorker = jobBlock(workflow, workflow.indexOf("  candle-worker:\n"));
+  assert.match(candleWorker, /^ {4}if: .*!\(github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda\)/m);
+  const ordinaryDispatchGuard = stepBody(candleWorker, "Refuse combined manual measurement profiles");
+  assert.match(ordinaryDispatchGuard, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
+  assert.match(ordinaryDispatchGuard, /RUN_YUE2_TERMINAL_CUDA: \$\{\{ inputs\.run_yue2_terminal_cuda \}\}/);
+  assert.match(ordinaryDispatchGuard, /if \(\$env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and \$env:RUN_YUE2_TERMINAL_CUDA -ne 'true'\) \{/);
+  assert.match(ordinaryDispatchGuard, /throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'/);
+  assert.match(ordinaryDispatchGuard, /throw 'yue2_fp8_profile_only requires run_yue2_terminal_cuda=true'/);
+  assert.match(ordinaryDispatchGuard, /yue2_fp8_profile_only and yue2_acceptance_only are mutually exclusive/);
+
+  const step = (name) => {
+    const start = job.indexOf(`      - name: ${name}\n`);
+    assert.ok(start >= 0, `the YuE2 terminal job must keep a step named ${name}`);
+    const next = job.indexOf("\n      - ", start + 1);
+    return job.slice(start, next === -1 ? undefined : next);
+  };
+  const validate = step("Validate the YuE2 terminal dispatch");
+  assert.match(validate, /throw 'the YuE2 terminal profile cannot share a dispatch with another measurement flag'/);
+  assert.match(validate, /inference_revision must equal the Cargo\.toml inference pin/);
+  assert.match(validate, /YuE2 acceptance-only and FP8-profile-only cannot share a dispatch/);
+  assert.match(step("Disable unstable sccache wrapper for the YuE2 terminal build"), /Add-Content -Path \$env:GITHUB_ENV -Value 'RUSTC_WRAPPER='/);
+  const inference = step("Check out the exact YuE2 terminal inference source");
+  assert.match(inference, /if: \$\{\{ !inputs\.yue2_acceptance_only \}\}/);
+  assert.match(inference, /repository: SceneWorks\/inference/);
+  assert.match(inference, /ref: \$\{\{ inputs\.inference_revision \}\}/);
+  assert.match(inference, /persist-credentials: false/);
+  const vcvars = /call "C:\\Program Files \(x86\)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64\.bat"\n {10}set NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64/;
+  const build = step("Build the release API with backend-candle");
+  assert.match(build, vcvars);
+  assert.match(build, /cargo build --release --locked -p sceneworks-rust-api --features backend-candle/);
+  const acceptance = step("Run the YuE2 terminal acceptance matrix (CUDA)");
+  assert.match(acceptance, /if: \$\{\{ !inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(acceptance, vcvars);
+  assert.match(acceptance, /node scripts\\yue2-acceptance\.mjs --platform cuda .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data" --hf-home "%YUE2_TERMINAL_STATE%\\hf-home" --api-bin target\\release\\sceneworks-rust-api\.exe/);
+  const profile = step("Run the YuE2 memory profile campaign (CUDA)");
+  assert.match(profile, /if: \$\{\{ !inputs\.yue2_acceptance_only && !inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(profile, vcvars);
+  // The profile resolves the acceptance run's installed weights from the same per-run HF home.
+  assert.match(profile, /set HF_HUB_CACHE=\n {10}set HUGGINGFACE_HUB_CACHE=\n {10}set HF_HOME=%YUE2_TERMINAL_STATE%\\hf-home\n/);
+  assert.match(profile, /node scripts\\yue2-memory-profile\.mjs run --backend cuda .*--inference-repo "%GITHUB_WORKSPACE%\\\.terminal\\inference" --data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
+  const fp8Install = step("Install YuE2 for the single FP8 profile case (not acceptance)");
+  assert.match(fp8Install, /if: \$\{\{ inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(fp8Install, /--profile-install-only .*--data-dir "%YUE2_TERMINAL_STATE%\\app-data"/);
+  const fp8Profile = step("Capture only the experimental FP8 CUDA profile case");
+  assert.match(fp8Profile, /steps\.yue2_fp8_install\.outcome == 'success'/);
+  assert.match(fp8Profile, /node scripts\\yue2-memory-profile\.mjs capture --case yue2:bf16:cuda:experimental-fp8-ar/);
+  const fp8Verify = step("Verify the single FP8 profile record");
+  assert.match(fp8Verify, /outcome\.status -ne 'completed'/);
+  assert.match(fp8Verify, /request\.arMode -ne 'experimentalFp8'/);
+  assert.match(fp8Verify, /outcome\.engineQuantization -ne 'fp8'/);
+  assert.match(fp8Verify, /weights\.hostBytes -lt 2147483648/);
+  assert.match(fp8Verify, /node scripts\\yue2-memory-profile\.mjs check \$recordPath/);
+  assert.match(job, /^ {6}YUE2_TERMINAL_STATE: 'E:\\/m);
+  // Receipts only: the app state (which holds the audio) is never an upload path, and audio is excluded.
+  const upload = step("Upload the YuE2 terminal records and receipts (no audio)");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /name: sc-23002-yue2-cuda\$\{\{ inputs\.yue2_acceptance_only && '-acceptance-only' \|\| inputs\.yue2_fp8_profile_only && '-fp8-profile-only' \|\| '' \}\}/);
+  assert.match(upload, /!\*\*\/\*\.wav/);
+  assert.doesNotMatch(upload, /YUE2_TERMINAL_STATE|app-data|E:\\/);
+  // The verdict follows receipt upload. The standard run requires both harnesses; an
+  // acceptance-only rerun explicitly reports that it has no new profile verdict.
+  const verdict = step("Enforce the YuE2 terminal verdict after receipt upload");
+  assert.ok(job.indexOf("Upload the YuE2 terminal records") < job.indexOf("Enforce the YuE2 terminal verdict"));
+  assert.match(verdict, /steps\.yue2_acceptance\.outcome/);
+  assert.match(verdict, /steps\.yue2_profile\.outcome/);
+  assert.match(verdict, /YUE2_ACCEPTANCE_ONLY: \$\{\{ inputs\.yue2_acceptance_only \}\}/);
+  assert.match(verdict, /YUE2_FP8_PROFILE_ONLY: \$\{\{ inputs\.yue2_fp8_profile_only \}\}/);
+  assert.match(verdict, /FP8_INSTALL_OUTCOME: \$\{\{ steps\.yue2_fp8_install\.outcome \}\}/);
+  assert.match(verdict, /FP8_PROFILE_OUTCOME: \$\{\{ steps\.yue2_fp8_profile\.outcome \}\}/);
+  assert.match(verdict, /FP8_VERIFY_OUTCOME: \$\{\{ steps\.yue2_fp8_verify\.outcome \}\}/);
+  assert.match(verdict, /Installation preparation is explicitly incomplete as acceptance/);
+  assert.match(verdict, /memory profile was intentionally skipped; use separately retained profile evidence/);
+  assert.match(verdict, /if \(\$env:ACCEPTANCE_OUTCOME -ne 'success' -or \(\$env:YUE2_ACCEPTANCE_ONLY -ne 'true' -and \$env:PROFILE_OUTCOME -ne 'success'\)\) \{/);
+  assert.match(verdict, /throw "YuE2 terminal evidence failed after upload/);
 });
 
 test("windows-candle provisioning can never degrade into a whole-repo fetch", async () => {
@@ -1334,6 +1573,37 @@ test("Docker cleanup relies on the configured host uid instead of a root contain
   const script = await source("scripts/check-docker-api-runtime.mjs");
   assert.doesNotMatch(script, /--entrypoint", "rm"/);
   assert.match(script, /SCENEWORKS_UID/);
+});
+
+test("standard server and web development images default to nonroot users", async () => {
+  const [rustDockerfile, webDockerfile] = await Promise.all([
+    source("docker/rust.Dockerfile"),
+    source("docker/web.Dockerfile"),
+  ]);
+  const stage = (dockerfile, name) => {
+    const heading = new RegExp(`^FROM [^\\r\\n]+ AS ${name}\\r?$`, "m").exec(dockerfile);
+    assert.ok(heading, `${name} Docker stage must exist`);
+    const start = heading.index + heading[0].length;
+    const end = dockerfile.indexOf("\nFROM ", start);
+    return dockerfile.slice(start, end === -1 ? undefined : end);
+  };
+
+  for (const name of ["rust-api", "rust-worker", "rust-worker-candle"]) {
+    const body = stage(rustDockerfile, name);
+    assert.match(body, /^ENV HOME=\/home\/sceneworks$/m, `${name} must set a writable home`);
+    const identity = name === "rust-worker-candle" ? /^USER 1000:1000$/m : /^USER sceneworks$/m;
+    assert.match(body, identity, `${name} must default to its nonroot service identity`);
+  }
+  assert.match(webDockerfile, /^ENV HOME=\/home\/node$/m);
+  assert.match(webDockerfile, /^USER node$/m);
+
+  for (const dockerfile of [rustDockerfile, webDockerfile]) {
+    assert.doesNotMatch(
+      dockerfile,
+      /\bchmod\s+(?:-R\s+)?(?:777|a\+w|o\+w)\b/,
+      "container hardening must not introduce broad writable permissions",
+    );
+  }
 });
 
 test("Rust Docker dependency layers include every memory-strategy adapter target", async () => {
@@ -3283,17 +3553,17 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
   );
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 5\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 6\] = \[([\s\S]*?)\n\];/.exec(adapter);
   assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
   const consts = new Map(
-    [...adapter.matchAll(/\bconst ([A-Z_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
+    [...adapter.matchAll(/\bconst ([A-Z0-9_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
   );
-  const members = [...table[1].matchAll(/provider_id: ([A-Z_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
+  const members = [...table[1].matchAll(/provider_id: ([A-Z0-9_]+),\s*tier_quant_reaches_the_loader: (true|false)/g)]
     .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
   assert.deepEqual(
     members.map((member) => member.providerId),
-    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo"],
-    "the five turnkey members, in table order",
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1"],
+    "the six turnkey members, in table order",
   );
   for (const member of members) {
     const entry = manifest.models.find((model) => model.id === member.providerId);
@@ -3311,7 +3581,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     );
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
-  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true"]);
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true"]);
 
   // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
   // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
@@ -3321,7 +3591,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
   // where it runs on the host that writes the arm and the mutation is killable before a push.
   const foldArm =
-    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, Some\(quant\)\) => \{([\s\S]*?)\n        \}/
+    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
       .exec(adapter);
   assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
   assert.match(
@@ -3332,7 +3602,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
   assert.match(
     adapter,
-    /\(KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID, None\) => spec,/,
+    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*None,\s*\) => spec,/,
     "the dense turnkey tier must bind no quant",
   );
   // The spec builder must be the pure function the Rust test can call — if the fold moves back

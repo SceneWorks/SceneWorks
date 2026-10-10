@@ -1365,6 +1365,9 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "moss_ttsd_v05",
         "openvoice_v2",
         "wan_2_2_vace_fun_14b",
+        // sc-23001: YuE2's floors are derived from its admission estimator, not measured.
+        "yue2",
+        // The six YuE entries left this set in sc-19387: their candle floors are CUDA-measured.
       ].sort(),
     );
     // MiniMax-H3 is no longer part of the unmeasured population: SC-20754 supplies its measured

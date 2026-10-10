@@ -41,6 +41,8 @@ rmcp = { version = "=2.2.0", features = ["transport-streamable-http-server"] }
 # linked into the one binary this crate is mounted into (apps/rust-api depends on both). The
 # alternative was a fourth hand-maintained copy of the rule, which is exactly how the API, the
 # Studio, this tool and the worker came to hold three different opinions about the same request.
+# sc-22988 adds one pure CONSTANT on the same terms: `yue2_score::REGENERATION_NOTICE`, the sentence
+# every YuE2 render answer must carry, read from its one home rather than copied.
 sceneworks-core = { path = "../sceneworks-core" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
