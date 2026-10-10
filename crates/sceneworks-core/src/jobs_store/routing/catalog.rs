@@ -470,6 +470,11 @@ impl MacFeatureSupport {
 #[serde(rename_all = "camelCase")]
 pub struct MacTrainingSupport {
     pub supported_kernels: Vec<String>,
+    /// The training kernels an off-Mac (candle) worker can run (sc-24161). The off-Mac twin of
+    /// `supported_kernels`: the client applies it only when `candle_gating_active`, so a target
+    /// whose kernel has no candle trainer is not offered on a host where the API would refuse it
+    /// at Start.
+    pub candle_supported_kernels: Vec<String>,
     pub lokr_on_wan_supported: bool,
 }
 
@@ -652,6 +657,10 @@ pub fn mac_capabilities(platform: &str, mac_gating_active: bool) -> MacCapabilit
         features,
         training: MacTrainingSupport {
             supported_kernels: MLX_ROUTED_TRAINING_KERNELS
+                .iter()
+                .map(|kernel| (*kernel).to_owned())
+                .collect(),
+            candle_supported_kernels: CANDLE_ROUTED_TRAINING_KERNELS
                 .iter()
                 .map(|kernel| (*kernel).to_owned())
                 .collect(),
@@ -855,9 +864,19 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // providers happen to declare [Q4, Q8] — `qwen_image_2_1_declares_each_lanes_tier_surface_without_merging_them`
     // is where a merge, rather than an agreement, would show up.
     //
-    // sc-24157 adds LoRA and PEFT LoKr as additive residuals over dense and packed projections.
-    // This is the composed quant+adapter route, not two independent capabilities that silently
-    // reject a packed tier with an adapter. LoHa remains a typed engine refusal on packed tiers.
+    // sc-24158 (epic 24107, E9): the row moves from quant-only to the combined `candle_quant_lora`
+    // column — the same shape as the 2512 `qwen_image` row above — because the ENGINE changed, not
+    // the wiring. The candle provider (inference sc-24157, `candle-gen-qwen-image-2-1/src/adapters.rs`)
+    // now installs user LoRA/LoKr as stacked additive residuals over the dense bf16 AND the packed
+    // q8/q4 DiT and declares `supports_lora`/`supports_lokr` true, so a tier select and an adapter
+    // compose. (LoHa folds into the dense weight only; on a packed tier it is the engine's typed
+    // `Unsupported`, raised at load preflight — an actionable job failure, not a routing verdict.)
+    // `candle_quant` goes false only because the combined column must not be duplicated into the
+    // standalone ones (`capability_table_encodes_superset_invariant`); quant routing is unchanged.
+    // Before this, a LoRA-carrying 2.1 text-to-image job was the typed `CandleImageRefusal::UserLora`
+    // and no Windows/Linux worker claimed it. (The worker's memory-route `lora` load profile for
+    // this provider is published in the engine capability dumps, so it landed with the epic's
+    // terminal pin bump and re-dump, sc-24163, rather than here — see `memory_route_registry`.)
     ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
@@ -2132,6 +2151,12 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     // Mage-Flow adapters and full base fine-tunes have native MLX and Candle trainers.
     "mage_flow_lora",
+    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the native `mlx-gen-qwen-image-2-1`
+    // trainer. The Candle twin (sc-24160) is in the candle set too.
+    "qwen_image_2_1_lora",
+    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
+    // edit mode. The Candle twin (sc-24162) is in the candle set too.
+    "qwen_image_2_1_edit_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2156,7 +2181,21 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     "wan_moe_lora",
     "anima_lora",
     "mage_flow_lora",
+    // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S12, sc-24160): the `candle-gen-qwen-image-2-1`
+    // trainer, registered under the same engine id (`qwen_image_2_1`) as the MLX one. Base-gated to
+    // `qwen_image_2_1` by [`training_job_is_candle_eligible`].
+    "qwen_image_2_1_lora",
+    // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
+    // in edit mode (`max_reference_images` 10), base-gated the same way.
+    "qwen_image_2_1_edit_lora",
 ];
+
+/// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
+/// non-macOS host for a kernel that is NOT candle-routed has no worker that will ever claim it, so the
+/// submit path refuses it up front instead of leaving it queued forever (sc-24159).
+pub fn training_kernel_is_candle_routed(kernel: &str) -> bool {
+    CANDLE_ROUTED_TRAINING_KERNELS.contains(&kernel)
+}
 
 /// Native-only training kernels — only a Rust worker can run them, so a generic worker descriptor
 /// must refuse the job (leaving it queued for a Rust worker) rather than claim it and fail with "no
@@ -2172,6 +2211,12 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     "anima_lora",
     "krea_control",
     "mage_flow_lora",
+    // Qwen Image 2.1 (sc-24159/sc-24160): native MLX + Candle trainers and no generic one, so a
+    // generic worker refuses it while the candle exception admits it (it is candle-routed).
+    "qwen_image_2_1_lora",
+    // Qwen Image 2.1 edit (sc-24161/sc-24162): native MLX + Candle trainers and no generic one, so
+    // a generic worker refuses it while the candle exception admits it (it is candle-routed).
+    "qwen_image_2_1_edit_lora",
 ];
 
 #[cfg(test)]
@@ -2391,6 +2436,7 @@ mod tests {
         "z_image_turbo",
         "z_image",
         "qwen_image",
+        // sc-24158: the candle 2.1 provider applies LoRA/LoKr on dense AND packed tiers.
         "qwen_image_2_1",
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
@@ -2435,8 +2481,9 @@ mod tests {
         // sc-14249: the whole SenseNova-U1 family, once `candle-gen-sensenova` gained the packed
         // q4/q8 load path (it was dense-f32-only, and only the bf16 tier was readable at all).
         //
-        // Qwen-Image 2.1 moved to the combined quant+adapter list after sc-24157 added additive
-        // LoRA/LoKr residuals to its dense and packed projections.
+        // sc-24112 added `qwen_image_2_1` here once `candle-gen-qwen-image-2-1` gained the packed
+        // load path (inference #1007); sc-24158 moved it to the combined quant+adapter list above
+        // once the same provider gained LoRA/LoKr on those tiers (inference sc-24157).
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
         "sensenova_u1_8b_infographic_v2",
@@ -2518,6 +2565,10 @@ mod tests {
         // kernel was in `MLX_ONLY_TRAINING_KERNELS` but in NO routed set, so every worker refused it
         // and Mage training jobs queued forever.
         "mage_flow_lora",
+        // sc-24159: Qwen Image 2.1 T2I LoRA/LoKr on the native MLX trainer.
+        "qwen_image_2_1_lora",
+        // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
+        "qwen_image_2_1_edit_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2533,6 +2584,10 @@ mod tests {
         "wan_moe_lora",
         "anima_lora",
         "mage_flow_lora",
+        // sc-24160: Qwen Image 2.1 T2I LoRA/LoKr on the native Candle trainer.
+        "qwen_image_2_1_lora",
+        // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
+        "qwen_image_2_1_edit_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
@@ -2542,6 +2597,11 @@ mod tests {
         "anima_lora",
         "krea_control",
         "mage_flow_lora",
+        // sc-24160: native-Rust-only (MLX + Candle trainers, no generic trainer), like Anima/Mage —
+        // so it stays here even though it is now candle-routed: a generic worker must still refuse it.
+        "qwen_image_2_1_lora",
+        // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
+        "qwen_image_2_1_edit_lora",
     ];
 
     #[test]

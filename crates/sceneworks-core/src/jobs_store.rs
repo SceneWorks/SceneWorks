@@ -48,9 +48,9 @@ pub use routing::catalog::{
     imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
-    mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,
-    ImportedProviderSurface, MacCapabilities, ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL,
-    MLX_ROUTED_TRAINING_KERNELS,
+    mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
+    video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
+    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, convert_artifact_required_here, mac_rust_supported,

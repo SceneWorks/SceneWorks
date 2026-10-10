@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from "react";
 import { KeywordTagEditor } from "./KeywordTagEditor.jsx";
-import { modelLoraFamilies, normalizeLoraFamily } from "../presetUtils.js";
+import { loraImportFamilyNote, modelLoraFamilies } from "../presetUtils.js";
 
 // In-studio LoRA import (studio-cleanup sc-15373). The Model Manager's Import LoRA form, lifted
 // into the studio's Add-LoRA picker so a user who has no compatible LoRA — the exact moment the
@@ -61,8 +61,7 @@ export function StudioLoraImportPanel({ models = [], activeProject, createLoraIm
       const loraId = job?.payload?.loraId;
       const resolvedFamily = job?.payload?.manifestEntry?.family;
       // Report the detected family in the same normalized vocabulary the dropdown uses.
-      const detectionNote =
-        !form.family && resolvedFamily ? ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.` : "";
+      const detectionNote = loraImportFamilyNote({ chosenFamily: form.family, resolvedFamily, isFileImport });
       patch({ sourceUrl: "", file: null, name: "", triggerKeywords: [], notes: "" });
       setFileInputKey((current) => current + 1);
       setMessage({

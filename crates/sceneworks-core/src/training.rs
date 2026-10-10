@@ -170,6 +170,14 @@ pub struct TrainingDatasetItem {
     /// the plan item. A control-branch kernel (`krea_control`) requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161, epic 24107): the source
+    /// image(s) the item's caption — its edit INSTRUCTION — edits or composes, in the order the
+    /// instruction names them ("Image 1" first). The item's own image (`path`) is the edit TARGET.
+    /// Empty for every captioned/control item (the default, and the only shape before sc-24161).
+    /// The order is semantic — the engine numbers the references — so it is stored and threaded
+    /// verbatim into the engine `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<TrainingDatasetReference>,
     pub display_name: String,
     pub caption: Caption,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -191,6 +199,24 @@ pub struct TrainingDatasetItem {
     pub added_at: String,
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+/// One stored reference image of an instruction-edit dataset item (sc-24161). Materialized into the
+/// dataset's own media dir exactly like the item image, so the dataset stays self-contained.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReference {
+    /// Source SceneWorks asset, when the reference was picked from the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// Path relative to the dataset root.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
 }
 
 /// Caption text and provenance for a dataset item.
@@ -418,6 +444,12 @@ pub struct TrainingPlanItem {
     /// `control_image_path`; a control-branch kernel requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// Absolute paths of an instruction-edit pair's ORDERED reference images (sc-24161) — empty for
+    /// a captioned/control item. For an edit pair `image_path` is the edit target and `caption` the
+    /// instruction. Threaded verbatim (order preserved) into the engine
+    /// `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_image_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -491,6 +523,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
+            qwen_image_2_1_lora_target(),
+            qwen_image_2_1_edit_lora_target(),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -530,6 +564,8 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let kolors_target = kolors_lora_target();
     let krea_target = krea_raw_lora_target();
     let anima_target = anima_base_lora_target();
+    let qwen_image_2_1_target = qwen_image_2_1_lora_target();
+    let qwen_image_2_1_edit_target = qwen_image_2_1_edit_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1113,6 +1149,84 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 30
                 })),
             ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity Qwen Image 2.1 style LoRA for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the target defaults carry the flow-match
+            // knobs, so these only pick capacity/LR for an edit-pair dataset.
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.balanced",
+                "Edit balanced",
+                &["edit"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 20-50 instruction-edit pairs (ordered references + target + instruction) on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.conservative",
+                "Edit conservative",
+                &["edit"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+                    "order": 20
+                })),
+            ),
         ],
         extra: ExtraFields::new(),
     }
@@ -1271,9 +1385,9 @@ where
     }
 }
 
-/// Build a Krea 2 LoRA preset. The flow-matching knobs (timestep sampling, Raw-base preview
-/// settings, gradient checkpointing, target modules) live on the target defaults, so the preset only
-/// overrides the optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/LR).
+/// Build a native flow-match image LoRA/LoKr preset (Krea 2 and Qwen Image 2.1 share this shape):
+/// the sampling + caching knobs live on the target defaults, so the preset overrides only the
+/// optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/steps/LR).
 fn krea_preset<F>(
     target: &TrainingTarget,
     id: &str,
@@ -2716,6 +2830,10 @@ pub enum TrainingPlanError {
     /// client. Kept structured so the API can return a field-specific error
     /// without scraping a human-facing sentence.
     TargetLimit(TrainingTargetLimitError),
+    /// The dataset's shape does not fit the target — an instruction-edit dataset (items carrying
+    /// ordered reference images, sc-24161) on a target that cannot train edits, a mixed or
+    /// over-cap edit dataset, or a plain dataset on an edit-only target. Human-facing reason.
+    InvalidDataset(String),
 }
 
 /// A target-advertised limit rejected while normalizing a training request.
@@ -2811,7 +2929,9 @@ impl std::fmt::Display for TrainingPlanError {
             Self::EmptyDataset => {
                 formatter.write_str("Training dataset has no items. Add at least one image.")
             }
-            Self::InvalidConfig(detail) => formatter.write_str(detail),
+            Self::InvalidConfig(detail) | Self::InvalidDataset(detail) => {
+                formatter.write_str(detail)
+            }
             Self::TargetLimit(error) => error.fmt(formatter),
         }
     }
@@ -2829,6 +2949,7 @@ pub fn build_training_plan(
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
     }
+    validate_dataset_shape_for_target(input.target, input.dataset)?;
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
         Some(word) if !word.is_empty() => vec![word.to_owned()],
@@ -2861,6 +2982,13 @@ pub fn build_training_plan(
                     .as_deref()
                     .map(|path| resolve_item_path(input.dataset_root, path))
                     .transpose()?,
+                // Instruction-edit pairs (sc-24161): the ordered references resolve exactly like
+                // the target image, in stored order — the order is semantic to the engine.
+                reference_image_paths: item
+                    .references
+                    .iter()
+                    .map(|reference| resolve_item_path(input.dataset_root, &reference.path))
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;
@@ -2984,6 +3112,155 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
+/// The target limit naming how many ORDERED reference images one instruction-edit item may carry
+/// (sc-24161). A scalar, not a numeric range, so the advertised-numeric-limit validator skips it
+/// and [`validate_dataset_shape_for_target`] enforces it against the dataset instead.
+pub const MAX_REFERENCE_IMAGES_LIMIT: &str = "maxReferenceImages";
+
+/// How many ordered reference images one instruction-edit training item may carry for `target`
+/// (`limits.maxReferenceImages`), or `0` when the target cannot train on edit pairs at all — every
+/// target before sc-24161. For Qwen Image 2.1 this mirrors the base model's own
+/// `limits.maxReferenceAssets` (10) and the engine trainer's `max_reference_images`; the contract
+/// tests pin all three together so the cap is never a second, drifting number.
+pub fn training_target_max_reference_images(target: &TrainingTarget) -> u32 {
+    target
+        .limits
+        .get(MAX_REFERENCE_IMAGES_LIMIT)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// Whether `target` trains on instruction-edit pairs (its reference cap is non-zero, sc-24161).
+pub fn training_target_trains_edit_pairs(target: &TrainingTarget) -> bool {
+    training_target_max_reference_images(target) > 0
+}
+
+/// The largest per-item reference count any shipped training target accepts — the dataset store's
+/// storage ceiling (a dataset is target-agnostic until a run picks a target, so the per-target cap
+/// is enforced at plan time; this only stops a dataset from holding references no target could use).
+pub fn max_training_reference_images() -> u32 {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .map(training_target_max_reference_images)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether a worker kernel trains instruction-edit pairs: some builtin target routed to it declares a
+/// non-zero reference cap (sc-24161). Kernel-keyed, not target-keyed, because a raw job / resolved
+/// plan is dispatched by kernel — and the T2I and edit kernels share one engine trainer, so the
+/// kernel is the only thing that says which mode a plan may train. A future edit kernel inherits
+/// this by declaring `limits.maxReferenceImages` on its target.
+pub fn training_kernel_trains_edit_pairs(kernel: &str) -> bool {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .any(|target| target.kernel == kernel && training_target_trains_edit_pairs(target))
+}
+
+/// The kernel-level edit-pair shape floor (sc-24161) for an already-resolved plan, given each item's
+/// reference count in order: an edit kernel needs references on EVERY item, any other kernel on
+/// NONE. Returns the human-facing refusal, or `None`. The worker applies it to every plan and the
+/// API's raw job route to every hand-built one, so a plan that bypassed the typed route's
+/// target-level check can never train an edit adapter under the T2I target (or T2I under the edit
+/// target) just because both kernels share the `qwen_image_2_1` engine trainer.
+pub fn edit_pair_kernel_shape_error(
+    kernel: &str,
+    reference_counts: impl IntoIterator<Item = usize>,
+) -> Option<String> {
+    let edit_kernel = training_kernel_trains_edit_pairs(kernel);
+    reference_counts
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, count)| match (edit_kernel, count) {
+            (true, 0) => Some(format!(
+                "Training kernel '{kernel}' trains instruction-edit pairs, but plan item {index} \
+                 has no referenceImagePaths."
+            )),
+            (false, count) if count > 0 => Some(format!(
+                "Training kernel '{kernel}' trains captioned images only, but plan item {index} \
+                 carries {count} referenceImagePaths (an instruction-edit pair)."
+            )),
+            _ => None,
+        })
+}
+
+/// The dataset-shape floor for a target (sc-24161), mirroring the engine's
+/// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
+///
+/// - a target that cannot train edits refuses any item carrying references (never a text-to-image
+///   adapter silently trained on the edit targets);
+/// - an edit target refuses a mixed dataset (every item needs 1..=cap references), an item with
+///   more references than the cap (the message names the cap), an item that is both an edit and a
+///   control pair, and an edit pair with an empty instruction caption.
+fn validate_dataset_shape_for_target(
+    target: &TrainingTarget,
+    dataset: &TrainingDataset,
+) -> Result<(), TrainingPlanError> {
+    let cap = training_target_max_reference_images(target);
+    let label = |item: &TrainingDatasetItem| {
+        if item.display_name.trim().is_empty() {
+            item.id.clone()
+        } else {
+            item.display_name.clone()
+        }
+    };
+    if cap == 0 {
+        if let Some(item) = dataset
+            .items
+            .iter()
+            .find(|item| !item.references.is_empty())
+        {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on captioned images only, but dataset item '{}' is an \
+                 instruction-edit pair (it carries reference images). Pick an edit training target \
+                 or remove the references.",
+                target.id,
+                label(item)
+            )));
+        }
+        return Ok(());
+    }
+    for item in &dataset.items {
+        let count = item.references.len();
+        if count == 0 {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on instruction-edit pairs: every dataset item needs at \
+                 least one reference image, but '{}' has none. Add its references (the target is \
+                 the item's image and the caption is the edit instruction), or use a \
+                 text-to-image target for a captioned dataset.",
+                target.id,
+                label(item)
+            )));
+        }
+        if count > cap as usize {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries {count} reference images, but {} accepts at most {cap} \
+                 reference images per edit.",
+                label(item),
+                target.name
+            )));
+        }
+        if item.control_image_path.is_some() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries both reference images (an edit pair) and a control \
+                 image (a control pair); an item is one or the other.",
+                label(item)
+            )));
+        }
+        if item.caption.text.trim().is_empty() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' is an edit pair with an empty instruction: its caption is the \
+                 edit instruction.",
+                label(item)
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
@@ -3072,6 +3349,22 @@ fn validate_advertised_numeric_limits(
 ) -> Result<(), TrainingPlanError> {
     for (field, advertised) in &target.limits {
         if !contains_json_number(advertised) {
+            continue;
+        }
+        // A dataset-shape limit, not a request field: the edit-pair reference cap (sc-24161) is
+        // enforced against the dataset by `validate_dataset_shape_for_target`. It must still be a
+        // non-negative integer, so a malformed advertisement is refused rather than read as 0.
+        if field == MAX_REFERENCE_IMAGES_LIMIT {
+            if advertised
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .is_none()
+            {
+                return Err(invalid_advertised_limit(
+                    field,
+                    "the reference-image cap must be a non-negative integer",
+                ));
+            }
             continue;
         }
         let values = advertised.as_array().ok_or_else(|| {
@@ -3376,6 +3669,190 @@ fn anima_base_lora_target() -> TrainingTarget {
         })),
         extra: ExtraFields::new(),
     }
+}
+
+/// The SceneWorks LoRA family a Qwen Image 2.1 adapter is labelled with (epic 24107 E10). Distinct
+/// from the 2512 `qwen-image` family on purpose: a 2.1 adapter is never offered to 2512 nor the
+/// reverse (`lora_family.rs`, sc-24156).
+pub const QWEN_IMAGE_2_1_LORA_FAMILY: &str = "qwen-image-2-1";
+
+/// The licence every Qwen Image 2.1 derivative — so every adapter trained from it — carries (epic
+/// 24107 E12). The API records it on the trained adapter's library entry.
+pub const QWEN_IMAGE_2_1_LICENSE: &str = "Qwen RESEARCH LICENSE AGREEMENT";
+
+/// The pinned licence text the 2.1 manifest entry links (same revision as its bf16 download).
+pub const QWEN_IMAGE_2_1_LICENSE_URL: &str =
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE";
+
+/// Qwen Image 2.1 text-to-image LoRA/LoKr training (epic 24107 S11, sc-24159).
+///
+/// Trains on the DENSE BF16 base only — the upstream `Qwen/Qwen-Image-2.1` diffusers snapshot, the
+/// same flat tree the catalog installs as the `bf16` tier. QLoRA against the SceneWorks q8/q4
+/// re-host (`SceneWorks/qwen-image-2-1-mlx`) is an epic non-goal, so a host with only a quantized
+/// tier installed is refused before the run with "install the bf16 tier" (the API's
+/// `TrainingTierMissing` arm), never a silent failure at load.
+///
+/// The `qwen_image_2_1_lora` kernel maps to the engine trainer registered under the inference
+/// generator id of the training base, `qwen_image_2_1` — the convention every native trainer follows
+/// (the worker's `engine_trainer_id_for`). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` (MLX trainer) and `CANDLE_ROUTED_TRAINING_KERNELS` (Candle trainer,
+/// sc-24160), and stays in the native-only `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses
+/// it. On candle the worker forces gradient checkpointing on (dense-backward OOM class).
+///
+/// Licensing (E12): the base is governed by the Qwen RESEARCH LICENSE AGREEMENT (non-commercial —
+/// research/evaluation use only) and an adapter trained from it is a derivative that inherits it.
+/// `ui.requiresLicenseAcknowledgment` makes the Training Studio show `ui.licenseNotice` and require
+/// an explicit acceptance before Start training; the API refuses a real run without
+/// `licenseAcknowledged: true`; and the trained adapter's library entry records the base model and
+/// `ui.license`.
+///
+/// No `loraTargetModules` default: the engine trainer's own default target set over the 2.1 adapter
+/// host applies (no other model's module list is borrowed). No training memory numbers are declared
+/// here either (E13) — the engine trainer's memory preflight owns that, from 2.1's own contract.
+fn qwen_image_2_1_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "qwen_image_2_1_lora".to_owned(),
+        name: "Qwen Image 2.1 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: QWEN_IMAGE_2_1_LORA_FAMILY.to_owned(),
+        base_model: "qwen_image_2_1".to_owned(),
+        // The bf16 tier IS the upstream snapshot (the converter refuses to emit a `bf16/` subdir), so
+        // the dense training base is this repo, flat — never the q8/q4 SceneWorks re-host.
+        base_model_repo: Some("Qwen/Qwen-Image-2.1".to_owned()),
+        kernel: "qwen_image_2_1_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            // MLX training aliases `adamw8bit` → AdamW (bitsandbytes 8-bit is CUDA-only); the label
+            // stays consistent with the other native image targets (the engine normalizes it).
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                // Latents and the Qwen3-VL caption features are cached once, then the text tower is
+                // dropped for the step loop.
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // 2.1 is an undistilled base trained over the full flow-match schedule, so noise
+                // sampling is neutral (no few-step high-noise tilt like the Turbo families).
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Previews render on the loaded base with 2.1's own catalog defaults (40 steps,
+                // guidance 1.0 — true CFG engages only with a negative prompt). Heavy, so a wide
+                // cadence by default.
+                "sampleEvery": 500,
+                "sampleSteps": 40,
+                "sampleGuidanceScale": 1.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both round-trip the 2.1 adapter host at inference (sc-24156).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"]
+        })),
+        ui: object(json!({
+            "label": "Qwen Image 2.1 LoRA",
+            "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image",
+            "license": QWEN_IMAGE_2_1_LICENSE,
+            "licenseUrl": QWEN_IMAGE_2_1_LICENSE_URL,
+            "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
+            "requiresLicenseAcknowledgment": true
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// How many ordered reference images one Qwen Image 2.1 instruction-edit training item may carry
+/// (sc-24161). The SAME fact as the base model's `limits.maxReferenceAssets` in the builtin manifest
+/// and the engine 2.1 trainer's `TrainerDescriptor::max_reference_images` — the contract tests pin
+/// the three together, so this is never a second, drifting number.
+pub const QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES: u32 = 10;
+
+/// Qwen Image 2.1 instruction-EDIT LoRA/LoKr training (epic 24107 S13, sc-24161).
+///
+/// The same dense bf16 base, licence gate, adapter family (`qwen-image-2-1`) and LoRA/LoKr network
+/// types as the text-to-image [`qwen_image_2_1_lora_target`], but trained on instruction-edit
+/// PAIRS: every dataset item is an edit TARGET image (the item image) + its edit INSTRUCTION (the
+/// item caption) + 1..=10 ORDERED reference images (`TrainingDatasetItem::references`). The cap
+/// (`limits.maxReferenceImages`) is enforced at plan time by `build_training_plan` (and again by the
+/// engine's `validate_edit_request` floor); a plain captioned dataset is refused here, and an edit
+/// dataset is refused by every non-edit target.
+///
+/// The `qwen_image_2_1_edit_lora` kernel maps to the SAME engine trainer as the T2I target,
+/// `qwen_image_2_1` (the engine trains edit mode when the items carry references, and stamps
+/// `trainingMode=edit` on the adapter). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` and `CANDLE_ROUTED_TRAINING_KERNELS` (the Candle edit trainer,
+/// sc-24162 — base-gated to `qwen_image_2_1`, LoRA/LoKr only), and stays in the native-only
+/// `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses it. On candle the worker forces
+/// gradient checkpointing on and loads the base at Bf16, exactly like the T2I kernel.
+fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
+    let mut target = qwen_image_2_1_lora_target();
+    target.id = "qwen_image_2_1_edit_lora".to_owned();
+    target.name = "Qwen Image 2.1 Edit LoRA".to_owned();
+    target.kernel = "qwen_image_2_1_edit_lora".to_owned();
+    // Previews keep the T2I target's cadence (`sampleEvery: 500`): both pinned engine trainers
+    // render an edit run's previews as EDITS, conditioned on the first dataset item's ordered
+    // references, so the samples show what the adapter does to an edit pair.
+    target.limits.insert(
+        MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
+        json!(QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES),
+    );
+    for (key, value) in [
+        ("label", json!("Qwen Image 2.1 Edit LoRA")),
+        (
+            "description",
+            json!(format!(
+                "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base \
+                 (install the bf16 tier). Each dataset item is an edit pair: the item image is the \
+                 edit target, its caption is the edit instruction, and it carries 1-{QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES} \
+                 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA \
+                 (candle/CUDA). Research/evaluation use \
+                 only under the Qwen RESEARCH licence."
+            )),
+        ),
+        ("recommendedFor", json!(["edit"])),
+        ("datasetKind", json!("editPairs")),
+    ] {
+        target.ui.insert(key.to_owned(), value);
+    }
+    target
+}
+
+/// Whether a training target's base model licence requires the user's explicit acceptance before
+/// a run starts (`ui.requiresLicenseAcknowledgment`, epic 24107 E12). The API's real-run gate and
+/// the Training Studio's Start gate both key off this one field.
+pub fn training_target_requires_license_acknowledgment(target: &TrainingTarget) -> bool {
+    target
+        .ui
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Build an Anima image LoRA/LoKr preset. The flow-match sampling + caching knobs live on the target

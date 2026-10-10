@@ -4,6 +4,7 @@ import { AdvancedSection } from "../../components/AdvancedSection.jsx";
 import { Icon } from "../../components/Icons.jsx";
 import { RequiredModelsNotice } from "../../components/RequiredModelsNotice.jsx";
 import { WorkPanel } from "../../components/WorkPanel.jsx";
+import { safeExternalUrl } from "../../urls.js";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
 import {
@@ -50,6 +51,8 @@ export function ConfigureJobPanel({
   setSelectedTargetId,
   trainingTargets,
   macTargetBlocked,
+  // Why a blocked target is blocked, as the option suffix (sc-24161: off-Mac vs on-Mac gates).
+  targetBlockedLabel = () => " — not on Mac (Cuda only)",
   updateSelectedPreset,
   updateQualityTier,
   selectedPreset,
@@ -89,6 +92,13 @@ export function ConfigureJobPanel({
   // into `configValidity` by the screen, which is what actually blocks Start training; this only
   // renders the offer. Empty for every LoRA target.
   missingControlModels = [],
+  // The licence the selected target's base imposes on what is trained from it
+  // (`trainingTargetLicense`, epic 24107 E12 — Qwen Image 2.1's Qwen RESEARCH licence), or null.
+  // Rendered as a notice with a required acceptance; whether it blocks Start is one of
+  // `configValidity`'s issues, folded in by the screen.
+  targetLicense = null,
+  licenseAcknowledged = false,
+  onLicenseAcknowledgedChange,
   controlModelDownloadJobs = [],
   onDownloadModel,
   onOpenModels,
@@ -171,7 +181,7 @@ export function ConfigureJobPanel({
                   return (
                     <option key={target.id} value={target.id} disabled={blocked}>
                       {target.ui?.label ?? target.name}
-                      {blocked ? " — not on Mac (Cuda only)" : ""}
+                      {blocked ? targetBlockedLabel(target) : ""}
                     </option>
                   );
                 })}
@@ -382,6 +392,27 @@ export function ConfigureJobPanel({
                 </div>
               </details>
             </section>
+          ) : null}
+
+          {targetLicense ? (
+            <div className="model-gated-notice training-license-notice" role="note" aria-label="Base model licence">
+              {targetLicense.notice ? <p className="model-license-terms">{targetLicense.notice}</p> : null}
+              {safeExternalUrl(targetLicense.url) ? (
+                <div className="model-gated-actions">
+                  <a href={safeExternalUrl(targetLicense.url)} target="_blank" rel="noreferrer noopener">
+                    Review license
+                  </a>
+                </div>
+              ) : null}
+              <label className="model-license-ack">
+                <input
+                  checked={licenseAcknowledged}
+                  onChange={(event) => onLicenseAcknowledgedChange?.(event.target.checked)}
+                  type="checkbox"
+                />
+                <span>Accept {targetLicense.name}; adapters inherit it.</span>
+              </label>
+            </div>
           ) : null}
 
           {isControlTarget ? (

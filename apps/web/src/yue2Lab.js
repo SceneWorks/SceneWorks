@@ -13,6 +13,7 @@
 
 import {
   YUE2_MODEL_ID,
+  installJobStatusLabel,
   licenseFromNotice,
   usagePolicyChips,
   yue2ExportStem,
@@ -22,6 +23,7 @@ import {
 
 export {
   YUE2_MODEL_ID,
+  installJobStatusLabel,
   licenseFromNotice,
   usagePolicyChips,
   yue2ExportStem,
@@ -823,20 +825,6 @@ export function yue2TierRows(model) {
               : "not installed",
     };
   });
-}
-
-// The status of a model-download job, in words. A derived-tier install (q8 / q4) is claimed only by
-// an audio-lane worker and may sit queued longer than a plain download, so it says so.
-export function installJobStatusLabel(job) {
-  const derived = Boolean(job?.payload?.localDerivation);
-  const status = String(job?.status ?? "");
-  if (derived && (status === "queued" || status === "pending")) {
-    return "queued — waits for an audio-lane worker to derive it";
-  }
-  if (derived && status === "running") {
-    return "deriving on this machine";
-  }
-  return status;
 }
 
 // Whether the decoder `option` (`standard` / `legacy`) is installed on this host — the catalog's

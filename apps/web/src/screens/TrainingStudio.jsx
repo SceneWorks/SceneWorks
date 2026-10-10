@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
+import { candleTrainingKernelBlocked } from "../candleGating.js";
 import { API_BASE_URL, isAbortError } from "../api.js";
 import { errorMessage } from "../errorMessage.js";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
@@ -17,14 +18,19 @@ import {
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
+  appendReferences,
   captionDraftsFromDataset,
   datasetHealth,
   datasetItemSelectionKey,
   datasetOwnedAssets,
   datasetPayload,
+  datasetReferenceAssets,
+  datasetReferenceCap,
   datasetSaveValidation,
   imageAssetName,
   normalizeDatasetAssetIds,
+  referenceDraftsDiffer,
+  referenceDraftsFromDataset,
   selectionAfterDuplicateRemoval,
 } from "../training/datasetHelpers.js";
 import {
@@ -52,7 +58,10 @@ import {
   samplePromptsFromTrigger,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
+  trainingLicenseAckKey,
+  trainingTargetLicense,
 } from "../training/trainingConfig.js";
+import { readLicenseAck, writeLicenseAck } from "../licenseAcknowledgment.js";
 import {
   mergeTrainedLoraOfferDecisions,
   rememberTrainedLoraOfferDecision,
@@ -454,6 +463,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // caption or imports a .txt sidecar, and threaded into the dataset payload on
   // save. Replaces the old importedCaptions + rename-caption draft split.
   const [captionDraftById, setCaptionDraftById] = useState({});
+  // Instruction-edit pairs (sc-24161): each item's ORDERED reference images, keyed by item
+  // selection id -> [reference selection id, ...]. Seeded from the saved dataset like captions and
+  // threaded into the save payload; the item image is the edit target and its caption the
+  // instruction. `editPairsMode` reveals the per-item reference rails for a dataset with none yet.
+  const [referenceDraftById, setReferenceDraftById] = useState({});
+  const [editPairsMode, setEditPairsMode] = useState(false);
   const [selectedDatasetId, setSelectedDatasetId] = useState("");
   const [renamePrefix, setRenamePrefix] = useState("");
   const [captionTriggerWords, setCaptionTriggerWords] = useState("");
@@ -485,7 +500,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
   customizedConfigFieldsRef.current = customizedConfigFields;
 
   const datasetAssets = useMemo(
-    () => datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+    () => [
+      ...datasetOwnedAssets(activeDataset, activeProject?.id, assets),
+      // Stored edit-pair references that are not library assets render (and re-save) through
+      // synthetic dataset-owned assets, exactly like dataset-owned items (sc-24161).
+      ...datasetReferenceAssets(activeDataset, activeProject?.id, assets),
+    ],
     [activeDataset, activeProject?.id, assets],
   );
   const imageAssets = useMemo(() => {
@@ -548,13 +568,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }),
     [activeDataset, captionDraftById],
   );
+  // Reference edits (add / remove / reorder, sc-24161) also make the dataset dirty.
+  const savedReferenceDrafts = useMemo(
+    () => referenceDraftsFromDataset(activeDataset, assets),
+    [activeDataset, assets],
+  );
+  const referencesDirty =
+    Boolean(activeDataset) && referenceDraftsDiffer(referenceDraftById, savedReferenceDrafts, selectedAssetIds);
   const dirty =
     Boolean(activeDataset) &&
     (draftName.trim() !== activeDataset.name ||
       associatedCharacterId !== (activeDataset.characterId ?? "") ||
       selectedAssetIds.length !== originalAssetIds.length ||
       selectedAssetIds.some((id, index) => id !== originalAssetIds[index]) ||
-      captionsDirty);
+      captionsDirty ||
+      referencesDirty);
   // Refresh awaits the catalog request. Read the current draft state after that
   // await so a rename begun while refresh is in flight is never overwritten by
   // the freshly loaded dataset object.
@@ -564,7 +592,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   activeDatasetIdRef.current = activeDataset?.id ?? "";
   useEffect(() => {
     datasetDraftRevisionRef.current += 1;
-  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById]);
+  }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById, referenceDraftById]);
   const completedParquetImport = useMemo(
     () =>
       jobs.find(
@@ -615,7 +643,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const firstTarget = trainingTargets[0] ?? null;
   // Mac UI gating (sc-3486): a target whose kernel has no native mlx-gen Rust trainer
   // (kolors_lora / lens_lora) can't train on a gated Mac — disable it and snap off it.
-  const macTargetBlocked = (target) => macTrainingKernelBlocked(macCapabilities, target?.kernel);
+  // sc-24161: off-Mac the twin gate disables a target whose kernel has no candle trainer — from
+  // the server's candle-routed set — so it is neither selectable nor drives the dataset editor's
+  // edit-pair affordances.
+  const targetBlockReason = (target) => {
+    if (macTrainingKernelBlocked(macCapabilities, target?.kernel)) return "mac";
+    if (candleTrainingKernelBlocked(macCapabilities, target?.kernel)) return "candle";
+    return null;
+  };
+  const macTargetBlocked = (target) => Boolean(targetBlockReason(target));
+  const targetBlockedLabel = (target) =>
+    targetBlockReason(target) === "candle" ? " — Apple Silicon only" : " — not on Mac (Cuda only)";
   // Model-availability gate (sc-5947): training needs a trainable target whose base model is
   // downloaded. A target's base counts as missing only when it's present in the catalog AND
   // installState === "missing" (so a thin test context with no `models` stays ready, and a real
@@ -650,6 +688,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => (jobs ?? []).filter((job) => job.type === "model_download"),
     [jobs],
   );
+  // The most ordered references one edit-pair item may carry across the trainable targets (the
+  // model's own `maxReferenceAssets`, capped by the target contract — Qwen Image 2.1: 10). 0 hides
+  // the dataset editor's edit-pair affordances (sc-24161).
+  const datasetReferenceLimit = datasetReferenceCap(usableTrainingTargets, models);
   const selectedTarget = useMemo(
     () => trainingTargets.find((target) => target.id === selectedTargetId) ?? firstTarget,
     [firstTarget, selectedTargetId, trainingTargets],
@@ -752,14 +794,31 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
   }, [models, selectedTarget?.outputKind, controlType]);
+  // A base whose licence binds the adapters trained from it (Qwen Image 2.1, epic 24107 E12) shows
+  // its notice in the panel and holds Start training until the user accepts it. The acceptance is
+  // remembered per target (fails closed when storage is unavailable) and asserted on the submit.
+  const selectedTargetLicense = trainingTargetLicense(selectedTarget);
+  const [licenseAcks, setLicenseAcks] = useState({});
+  const licenseTargetId = selectedTarget?.id ?? "";
+  const licenseAcknowledged = Boolean(
+    selectedTargetLicense &&
+      (licenseAcks[licenseTargetId] ?? readLicenseAck(trainingLicenseAckKey(licenseTargetId))),
+  );
+  const setLicenseAcknowledged = (acknowledged) => {
+    if (!licenseTargetId) return;
+    writeLicenseAck(trainingLicenseAckKey(licenseTargetId), acknowledged);
+    setLicenseAcks((acks) => ({ ...acks, [licenseTargetId]: acknowledged }));
+  };
   const configContext = useMemo(
     () => ({
       activeDataset,
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      licenseAcknowledged,
+      models,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels],
+    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, licenseAcknowledged, models],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -856,6 +915,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setRenamePrefix("");
     setCaptionTriggerWords("");
     setCaptionDraftById({});
+    setReferenceDraftById({});
+    setEditPairsMode(false);
     setCaptionSettings(defaultCaptionSettings);
     setSelectedPresetId("");
     setCustomizedConfigFields(new Set());
@@ -887,9 +948,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // Seed caption drafts from the (re)loaded dataset; switching datasets or
     // saving (which swaps activeDataset) resets edits to the persisted state.
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
     setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    // Seeded per (re)loaded dataset only — a catalog refresh must not wipe in-progress reference
+    // edits, so `assets` is read at seed time rather than tracked.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1363,6 +1428,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setAssociatedCharacterId("");
     setUploadedDatasetAssets([]);
     setSelectedDatasetId("");
+    setReferenceDraftById({});
+    setEditPairsMode(false);
   }
 
   // Starting a new dataset abandons the current draft — confirm before discarding unsaved
@@ -1393,6 +1460,55 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setSelectedAssetIds(normalizeDatasetAssetIds(activeDataset, assets));
     setAssociatedCharacterId(activeDataset.characterId ?? "");
     setCaptionDraftById(captionDraftsFromDataset(activeDataset));
+    setReferenceDraftById(referenceDraftsFromDataset(activeDataset, assets));
+  }
+
+  // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
+  function setItemReferences(selectionId, referenceIds) {
+    setDatasetMessage("");
+    setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
+  }
+
+  // Append picked references to an item, never past the reference cap — the picker cannot hand
+  // the item more than the model accepts, and the user is told how many did not fit.
+  function addItemReferences(selectionId, pickedIds) {
+    const { next, dropped } = appendReferences(referenceDraftById[selectionId] ?? [], pickedIds, {
+      cap: datasetReferenceLimit,
+      itemId: selectionId,
+    });
+    setItemReferences(selectionId, next);
+    if (dropped > 0) {
+      setDatasetMessage(
+        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
+      );
+    }
+  }
+
+  // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
+  // the same upload path dataset items use, so they re-save by project path like those do.
+  async function importItemReferences(selectionId, fileList) {
+    const files = Array.from(fileList ?? []).filter(isImageUpload);
+    if (!files.length) {
+      return;
+    }
+    setImportingAssets(true);
+    setDatasetError("");
+    try {
+      const imported = [];
+      for (const file of files) {
+        const asset = await uploadDatasetItem(file);
+        if (asset?.id) {
+          const datasetAsset = { ...asset, datasetOnly: true };
+          imported.push(datasetAsset.id);
+          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
+        }
+      }
+      addItemReferences(selectionId, imported);
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setImportingAssets(false);
+    }
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1625,7 +1741,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     // `baseOverride` lets a follow-up save (e.g. dedupe's second persist) act on a just-saved dataset
     // whose React state hasn't flushed yet — without it, `activeDataset`/`assetsById` are stale and a
     // re-materialized item key can miss `assetsById`, silently dropping kept images. Rebuild the
-    // asset map from the override so every kept item resolves.
+    // item and reference asset maps from the override so every kept item and ordered reference
+    // resolves under the server-assigned keys returned by the first save.
     const base = baseOverride ?? activeDataset;
     const baseAssetsById = baseOverride
       ? new Map([
@@ -1634,13 +1751,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
             asset.id,
             asset,
           ]),
+          ...datasetReferenceAssets(baseOverride, activeProject?.id, assets).map((asset) => [
+            asset.id,
+            asset,
+          ]),
         ])
       : assetsById;
+    const baseReferenceDraftById = baseOverride
+      ? referenceDraftsFromDataset(baseOverride, assets)
+      : referenceDraftById;
     const payload = datasetPayload({
       activeDataset: base,
       assetsById: baseAssetsById,
       associatedCharacterId,
       captionDraftById,
+      referenceDraftById: baseReferenceDraftById,
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
@@ -1970,6 +2095,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         outputName: snapshot.outputName,
         dryRun,
         config: snapshot.config,
+        // Only reachable once the licence notice was accepted (configValidity holds Start until
+        // then); the API refuses an unacknowledged real run against a licence-bound base.
+        ...(selectedTargetLicense ? { licenseAcknowledged: licenseAcknowledged === true } : {}),
       });
       setConfigSnapshot(snapshot);
       setConfigMessage(`Queued training job ${job?.id ?? ""}`.trim() + ". Track it in the Queue.");
@@ -2069,6 +2197,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   removeUnavailableAsset, onImportParquet: importParquetDataset,
                   onDeleteDataset: handleDeleteDataset, deletingDataset,
                 }}
+                editPairSession={{
+                  referenceCap: datasetReferenceLimit, referenceDraftById, setItemReferences,
+                  addItemReferences, importItemReferences, editPairsMode, setEditPairsMode,
+                }}
                 captionSession={{
                   captionDraftById, onPreview, updateCaption, captioning, addDialogOpen,
                   selectedAssetIds, addAssets, handleImport, captionDialog,
@@ -2101,6 +2233,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
+                  targetLicense={selectedTargetLicense}
+                  licenseAcknowledged={licenseAcknowledged}
+                  onLicenseAcknowledgedChange={setLicenseAcknowledged}
                   controlModelDownloadJobs={trainingDownloadJobs}
                   onDownloadModel={createModelDownloadJob}
                   onOpenModels={() => setActiveView("Models")}
@@ -2115,6 +2250,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setSelectedTargetId={setSelectedTargetId}
                   trainingTargets={trainingTargets}
                   macTargetBlocked={macTargetBlocked}
+                  targetBlockedLabel={targetBlockedLabel}
                   updateSelectedPreset={updateSelectedPreset}
                   updateQualityTier={updateQualityTier}
                   selectedPreset={selectedPreset}

@@ -1936,21 +1936,97 @@ fn qwen_image_2_1_routes_the_same_text_to_image_contract_to_candle() {
         );
     }
 
-    // The current provider applies LoRA and PEFT LoKr residuals on dense and packed tiers. Both
-    // are admitted by the same production scheduler gate, including with an explicit tier select.
-    for adapter in ["lora", "lokr"] {
-        for bits in [0, 4, 8] {
+    // An adapter is CLAIMED off-Mac (sc-24158, E9). The candle provider applies user LoRA/LoKr as
+    // stacked additive residuals over the dense bf16 AND the packed q8/q4 DiT (inference sc-24157),
+    // so the row sits in the combined `candle_quant_lora` column like the 2512 `qwen_image` row: a
+    // LoRA alone, and a LoRA composed with a tier select, both reach the candle lane. Before this
+    // the lane refused it as `CandleImageRefusal::UserLora`, and a Windows/Linux-only install had no
+    // worker that would claim a LoRA-carrying 2.1 job at all.
+    for payload in [
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lokr" }] }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 4 } }),
+        json!({ "prompt": "p", "loras": [{ "networkType": "lora" }], "advanced": { "mlxQuantize": 8 } }),
+    ] {
+        assert!(
+            image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
+            "the candle lane must claim a LoRA-carrying 2.1 job: {payload}"
+        );
+        assert_eq!(
+            candle_image_first_refusal("qwen_image_2_1", &object(payload.clone())),
+            None,
+            "{payload}"
+        );
+        let mut job_payload = object(payload.clone());
+        job_payload.insert("model".to_owned(), json!("qwen_image_2_1"));
+        let job = image_generate_job(Value::Object(job_payload));
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+            "a candle worker must claim the LoRA job: {payload}"
+        );
+    }
+
+    // sc-24163 (E9 review): the adapter composes with the 1-10 ordered-reference EDIT lane too,
+    // not only text-to-image — a LoRA/LoKr edit, alone and with a q8/q4 tier select, is claimed
+    // by the bespoke `QwenImage21Edit` lane and by a candle worker, under BOTH job types the API
+    // stamps for an edit (`image_edit` for the Image Editor, `image_generate` for the rest).
+    let ids = |n: usize| -> Vec<String> { (1..=n).map(|i| format!("ref_{i}")).collect() };
+    // The Mac twin first: an MLX worker claims the same LoRA-carrying edit (the adapter is never
+    // a routing refusal on MLX; the engine applies it over the edit render).
+    let mlx_edit = json!({
+        "model": "qwen_image_2_1",
+        "prompt": "p",
+        "mode": "edit_image",
+        "referenceAssetIds": ids(2),
+        "loras": [{ "networkType": "lora" }],
+    });
+    assert!(
+        worker_supports_job(
+            &mlx_worker(&["gpu", "image_generate", "image_edit"]),
+            &image_edit_job(mlx_edit.clone())
+        ),
+        "an MLX worker must claim the LoRA-carrying 2.1 edit: {mlx_edit}"
+    );
+    for references in [1usize, 3, 10] {
+        for (loras, advanced) in [
+            (json!([{ "networkType": "lora" }]), json!({})),
+            (json!([{ "networkType": "lokr" }]), json!({})),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 8 }),
+            ),
+            (
+                json!([{ "networkType": "lora" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+            (
+                json!([{ "networkType": "lokr" }]),
+                json!({ "mlxQuantize": 4 }),
+            ),
+        ] {
             let payload = json!({
-                "model": "qwen_image_2_1", "prompt": "p",
-                "loras": [{ "id": "probe", "networkType": adapter }],
-                "advanced": { "mlxQuantize": bits }
+                "model": "qwen_image_2_1",
+                "prompt": "put the hat from image 2 on image 1",
+                "mode": "edit_image",
+                "referenceAssetIds": ids(references),
+                "loras": loras,
+                "advanced": advanced,
             });
-            assert!(
-                image_request_candle_eligible("qwen_image_2_1", &object(payload.clone())),
-                "{adapter} with Q{bits} must reach the Candle provider"
-            );
-            let job = image_generate_job(payload);
-            assert!(worker_supports_job(&gpu_worker(CANDLE_CAPS), &job));
+            for job in [
+                image_edit_job(payload.clone()),
+                image_generate_job(payload.clone()),
+            ] {
+                assert_eq!(
+                    image_job_candle_lane(&job),
+                    Some(CandleImageLane::QwenImage21Edit),
+                    "{payload}"
+                );
+                assert!(image_job_is_candle_eligible(&job), "{payload}");
+                assert!(
+                    worker_supports_job(&gpu_worker(CANDLE_CAPS), &job),
+                    "a candle worker must claim the adapter-carrying 2.1 edit: {payload}"
+                );
+            }
         }
     }
 

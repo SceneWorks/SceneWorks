@@ -2125,6 +2125,12 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
             base_model == "mage_flow_base"
                 && (is_adapter || network_type.eq_ignore_ascii_case("full"))
         }
+        // Qwen Image 2.1 (sc-24160): LoRA/LoKr on the dense 2.1 base only — a plan naming the
+        // distinct 2512 `qwen_image` (or its Edit model) never reaches the 2.1 trainer.
+        // sc-24162: the instruction-edit kernel trains on the same Candle trainer, same gate.
+        "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => {
+            base_model == "qwen_image_2_1" && is_adapter
+        }
         // Existing native families keep their established admission. Their trainers perform the
         // final typed validation; Krea ControlNet deliberately has no adapter-kind selector.
         _ => true,

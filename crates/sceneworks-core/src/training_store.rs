@@ -19,8 +19,9 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    caption_with_trigger_words, Caption, CaptionSource, TrainingDataset, TrainingDatasetItem,
-    TrainingDatasetStatus, TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
+    caption_with_trigger_words, max_training_reference_images, Caption, CaptionSource,
+    TrainingDataset, TrainingDatasetItem, TrainingDatasetReference, TrainingDatasetStatus,
+    TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
 
 const DATASET_MANIFEST_NAME: &str = "dataset.sceneworks.training-dataset.json";
@@ -113,10 +114,28 @@ pub struct TrainingDatasetItemInput {
     pub height: Option<u32>,
     #[serde(default)]
     pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161): each is a library
+    /// `assetId` or a project-relative `path`, materialized into the dataset like the item image.
+    /// The item image is the edit target and its caption the edit instruction. Order is kept.
+    #[serde(default)]
+    pub references: Vec<TrainingDatasetReferenceInput>,
     /// Forward-compatible per-item training inputs. LTX-2.5 uses
     /// `ltxPreparedBundlePath`; ordinary image datasets leave this empty.
     #[serde(flatten)]
     pub extra: ExtraFields,
+}
+
+/// One reference image of an instruction-edit dataset item (sc-24161) — the same source contract as
+/// an item: a library `assetId`, else a project-relative `path`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReferenceInput {
+    #[serde(default)]
+    pub asset_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 /// A trusted server-side source used to materialize bytes that do not yet live
@@ -1609,6 +1628,11 @@ fn materialize_external_item(
     }
     ensure_supported_item_mime(&source_path, modality)?;
     let item = input.item;
+    if !item.references.is_empty() {
+        return Err(ProjectStoreError::BadRequest(
+            "Catalog-materialized dataset items cannot carry edit reference images".to_owned(),
+        ));
+    }
     let source_kind = crate::media_convert::sniff_image_kind_at(&source_path).ok_or_else(|| {
         ProjectStoreError::BadRequest("Verified dataset source was not an image".to_owned())
     })?;
@@ -1644,6 +1668,7 @@ fn materialize_external_item(
         asset_id: None,
         path: relative_path,
         control_image_path,
+        references: Vec::new(),
         display_name: item
             .display_name
             .unwrap_or_else(|| input_display_name(&source_path)),
@@ -1684,41 +1709,54 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
-    let source = resolve_item_source(project_path, project_id, &input, modality)?;
-    // sc-6143: normalize a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) to lossless PNG
-    // as it lands in the dataset. Uploads are normalized at import, but a dataset built from a library
-    // asset or a project-relative path copies the bytes verbatim — so without this an AVIF reaches the
-    // dataset's `images/` and breaks BOTH actual training (the trainer reads dataset images straight
-    // through the engine, with no decode backstop) and the Dataset Doctor. Format is sniffed by content,
-    // never the extension; a file we cannot sniff (e.g. SVG) passes through with its original extension.
-    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
-    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
-    let extension = if needs_transcode {
-        ".png".to_owned()
-    } else {
-        source
-            .path
-            .extension()
-            .and_then(|value| value.to_str())
-            .filter(|value| !value.is_empty())
-            .map(|value| format!(".{}", value.to_ascii_lowercase()))
-            .unwrap_or_else(|| ".bin".to_owned())
-    };
-    let relative_path = format!("images/{item_id}{extension}");
-    let target_path = media_dir.join(format!("{item_id}{extension}"));
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent)?;
+    let reference_ceiling = max_training_reference_images() as usize;
+    if input.references.len() > reference_ceiling {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Dataset item '{item_id}' carries {} reference images, but training accepts at most {reference_ceiling} reference images per edit item",
+            input.references.len()
+        )));
     }
-    if needs_transcode {
-        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
-        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
-            ProjectStoreError::BadRequest(format!(
-                "Could not convert {} image to a supported format: {error}",
-                kind.label()
-            ))
-        })?;
-    } else {
-        fs::copy(&source.path, &target_path)?;
+    let source = resolve_item_source(project_path, project_id, &input, modality)?;
+    let (relative_path, target_path) = store_item_media(&source, media_dir, "", &item_id)?;
+    // Instruction-edit pairs (sc-24161): every ordered reference lands under `images/refs/`, named
+    // by item id + 1-based ordinal, so the stored order is the order given and a later rename of the
+    // item image (`images/<stem>.<ext>`) can never collide with a reference file.
+    let mut references = Vec::with_capacity(input.references.len());
+    for (index, reference) in input.references.iter().enumerate() {
+        let reference_source = resolve_media_source(
+            project_path,
+            project_id,
+            reference.asset_id.as_deref(),
+            reference.path.as_deref(),
+            modality,
+            "Dataset item reference",
+        )?;
+        let (reference_path, reference_target) = store_item_media(
+            &reference_source,
+            media_dir,
+            "refs/",
+            &format!("{item_id}_ref{}", index + 1),
+        )?;
+        let (mut width, mut height) = (reference_source.width, reference_source.height);
+        if width.is_none() || height.is_none() {
+            if let Some((file_w, file_h)) =
+                crate::media_convert::image_dimensions(&reference_target)
+            {
+                width = width.or(Some(file_w));
+                height = height.or(Some(file_h));
+            }
+        }
+        references.push(TrainingDatasetReference {
+            asset_id: reference_source.asset_id,
+            path: reference_path,
+            display_name: reference
+                .display_name
+                .clone()
+                .filter(|name| !name.trim().is_empty())
+                .or(Some(reference_source.display_name)),
+            width,
+            height,
+        });
     }
     let control_image_path = validated_control_image_path(input.control_image_path)?;
     let caption = input.caption.unwrap_or_default();
@@ -1742,6 +1780,7 @@ fn materialize_item(
         asset_id: source.asset_id,
         path: relative_path,
         control_image_path,
+        references,
         display_name: input.display_name.unwrap_or(source.display_name),
         caption: Caption {
             text: caption.text,
@@ -1814,6 +1853,9 @@ pub fn repoint_item(item: &TrainingDatasetItem, source: RepointSource) -> Traini
         // The condition was rendered from the OLD pixels — the new bytes invalidate it exactly
         // like tier0_scalars/quality_ack, so clear it (a re-point should re-render). epic 10159.
         control_image_path: None,
+        // An edit pair's references are the edit's SOURCES, independent of the target's pixels, so
+        // a re-pointed (e.g. upscaled) target keeps them (sc-24161).
+        references: item.references.clone(),
         display_name: item.display_name.clone(),
         caption: item.caption.clone(),
         width: source.width,
@@ -1853,33 +1895,54 @@ fn resolve_item_source(
     input: &TrainingDatasetItemInput,
     modality: &TrainingModality,
 ) -> ProjectStoreResult<ItemSource> {
-    if let Some(asset_id) = input.asset_id.as_deref().filter(|value| !value.is_empty()) {
+    resolve_media_source(
+        project_path,
+        project_id,
+        input.asset_id.as_deref(),
+        input.path.as_deref(),
+        modality,
+        "Dataset item",
+    )
+}
+
+/// Resolve one dataset media source — a library `asset_id`, else a project-relative `path` — to a
+/// verified in-project file. Shared by item images and their edit-pair references (sc-24161);
+/// `label` names which one a refusal is about.
+fn resolve_media_source(
+    project_path: &Path,
+    project_id: &str,
+    asset_id: Option<&str>,
+    path: Option<&str>,
+    modality: &TrainingModality,
+    label: &str,
+) -> ProjectStoreResult<ItemSource> {
+    if let Some(asset_id) = asset_id.filter(|value| !value.is_empty()) {
         return resolve_asset_source(project_path, project_id, asset_id, modality);
     }
-    let relative_path = input
-        .path
-        .as_deref()
+    let relative_path = path
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| {
-            ProjectStoreError::BadRequest("Dataset item assetId or path is required".to_owned())
+            ProjectStoreError::BadRequest(format!("{label} assetId or path is required"))
         })?;
     if !is_safe_relative_path(relative_path) {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     let root = fs::canonicalize(project_path)?;
     let path = fs::canonicalize(project_path.join(relative_path)).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
-            ProjectStoreError::NotFound("Dataset item file not found".to_owned())
+            ProjectStoreError::NotFound(format!("{label} file not found"))
         } else {
             ProjectStoreError::Io(error)
         }
     })?;
     if !path.starts_with(&root) || !path.is_file() {
-        return Err(ProjectStoreError::BadRequest(
-            "Invalid dataset item path".to_owned(),
-        ));
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Invalid {} path",
+            label.to_ascii_lowercase()
+        )));
     }
     ensure_supported_item_mime(&path, modality)?;
     Ok(ItemSource {
@@ -1889,6 +1952,55 @@ fn resolve_item_source(
         width: None,
         height: None,
     })
+}
+
+/// Copy (or, for a valid-but-unsupported format, transcode to PNG) one resolved source into the
+/// dataset media dir as `<media_dir>/<subdir><stem><ext>`, returning its dataset-root-relative path
+/// (`images/<subdir><stem><ext>`) and absolute location.
+///
+/// sc-6143: a valid-but-unsupported image (AVIF/HEIC/HEIF/TIFF/BMP/GIF) is normalized to lossless
+/// PNG as it lands in the dataset. Uploads are normalized at import, but a dataset built from a
+/// library asset or a project-relative path copies the bytes verbatim — so without this an AVIF
+/// reaches the dataset's `images/` and breaks BOTH actual training (the trainer reads dataset
+/// images straight through the engine, with no decode backstop) and the Dataset Doctor. Format is
+/// sniffed by content, never the extension; a file we cannot sniff (e.g. SVG) passes through with
+/// its original extension.
+fn store_item_media(
+    source: &ItemSource,
+    media_dir: &Path,
+    subdir: &str,
+    stem: &str,
+) -> ProjectStoreResult<(String, PathBuf)> {
+    let source_kind = crate::media_convert::sniff_image_kind_at(&source.path);
+    let needs_transcode = source_kind.is_some_and(|kind| !kind.is_natively_supported());
+    let extension = if needs_transcode {
+        ".png".to_owned()
+    } else {
+        source
+            .path
+            .extension()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .map(|value| format!(".{}", value.to_ascii_lowercase()))
+            .unwrap_or_else(|| ".bin".to_owned())
+    };
+    let relative_path = format!("images/{subdir}{stem}{extension}");
+    let target_path = media_dir.join(format!("{subdir}{stem}{extension}"));
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if needs_transcode {
+        let kind = source_kind.expect("needs_transcode implies a sniffed kind");
+        crate::media_convert::transcode_to_png(&source.path, &target_path).map_err(|error| {
+            ProjectStoreError::BadRequest(format!(
+                "Could not convert {} image to a supported format: {error}",
+                kind.label()
+            ))
+        })?;
+    } else {
+        fs::copy(&source.path, &target_path)?;
+    }
+    Ok((relative_path, target_path))
 }
 
 fn resolve_asset_source(
@@ -2327,6 +2439,7 @@ mod tests {
             asset_id: None,
             path: format!("images/{id}.png"),
             control_image_path: None,
+            references: Vec::new(),
             display_name: id.to_owned(),
             caption: Caption {
                 text: String::new(),
@@ -2417,6 +2530,7 @@ mod tests {
                         width: None,
                         height: None,
                         control_image_path: None,
+                        references: Vec::new(),
                         extra: Default::default(),
                     }],
                 },

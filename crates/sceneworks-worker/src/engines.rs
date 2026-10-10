@@ -2472,6 +2472,7 @@ mod tests {
             supports_full_finetune: false,
             // Not an instruction-edit trainer.
             max_reference_images: 0,
+            techniques: gen_core::TrainingTechniques::NONE,
         }
     }
     fn stub_candle_trainer_load(

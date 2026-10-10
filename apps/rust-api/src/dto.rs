@@ -1536,6 +1536,10 @@ pub(crate) struct LoraUpdateRequest {
     pub(crate) trigger_words: Option<Vec<String>>,
     #[serde(default)]
     pub(crate) notes: Option<String>,
+    /// User-assigned architecture family (sc-24163). Accepted ONLY when the adapter file's own
+    /// header does not resolve a family — a detected family always wins.
+    #[serde(default)]
+    pub(crate) family: Option<String>,
 }
 
 /// Query params identifying a single catalog LoRA across scopes, shared by the

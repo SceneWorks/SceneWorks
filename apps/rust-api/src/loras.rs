@@ -355,6 +355,8 @@ pub(crate) async fn delete_lora(
 /// after import — the capability scoped under epic 1092 / story 1168 but never
 /// shipped. Only the fields present in the request change. Built-in entries are
 /// read-only (their manifest is compiled in); import a copy to annotate them.
+/// `family` assigns an architecture family to a LoRA whose file does not resolve one
+/// (sc-24163) — see [`resolve_lora_family_assignment`].
 pub(crate) async fn update_lora(
     State(state): State<AppState>,
     Path(lora_id): Path<String>,
@@ -407,15 +409,42 @@ pub(crate) async fn update_lora(
         }
         // sc-10452: no manifest backs an external row, so there is nothing to write to.
         crate::external_loras::EXTERNAL_SCOPE => {
-            return Err(ApiError::bad_request(
+            return Err(ApiError::bad_request(if body.family.is_some() {
                 "LoRAs discovered in an external model folder are read-only. \
-                 Import a copy to add trigger keywords or notes.",
-            ));
+                 Import a copy to choose its family."
+            } else {
+                "LoRAs discovered in an external model folder are read-only. \
+                 Import a copy to add trigger keywords or notes."
+            }));
         }
         _ => return Err(ApiError::bad_request("Unsupported LoRA scope")),
     };
     let trigger_words = body.trigger_words.clone();
     let notes = body.notes.clone();
+    let family = match body.family.as_deref() {
+        Some(requested) => {
+            let models = model_catalog(&state).await?;
+            let lora_for_header = lora.clone();
+            let lora_id_for_header = lora_id.clone();
+            let requested = requested.to_owned();
+            // The header read touches disk; keep it off the async worker threads.
+            Some(
+                tokio::task::spawn_blocking(move || {
+                    resolve_lora_family_assignment(
+                        &lora_id_for_header,
+                        &lora_for_header,
+                        &requested,
+                        &models,
+                    )
+                })
+                .await
+                .map_err(|err| {
+                    ApiError::internal(format!("LoRA family validation task failed: {err}"))
+                })??,
+            )
+        }
+        None => None,
+    };
     let updated = mutate_manifest_entries(&state, &manifest_path, "loras", move |entries| {
         let mut updated = None;
         let entries = entries
@@ -428,6 +457,21 @@ pub(crate) async fn update_lora(
                         }
                         if let Some(notes) = notes.as_ref() {
                             object.insert("notes".to_owned(), Value::String(notes.clone()));
+                        }
+                        if let Some(family) = family.as_ref() {
+                            // `lora_families` reads these list fields BEFORE `family`, so a stale
+                            // one would shadow the assignment; the assigned family is the whole
+                            // answer now.
+                            for shadow in ["families", "compatibleFamilies", "modelFamilies"] {
+                                object.remove(shadow);
+                            }
+                            if let Some(compatibility) = object
+                                .get_mut("compatibility")
+                                .and_then(Value::as_object_mut)
+                            {
+                                compatibility.remove("families");
+                            }
+                            object.insert("family".to_owned(), Value::String(family.clone()));
                         }
                         object.insert("updatedAt".to_owned(), Value::String(now_rfc3339()));
                     }
@@ -445,6 +489,73 @@ pub(crate) async fn update_lora(
         context: None,
         code: None,
     })
+}
+
+/// Validates a user family assignment for a stored LoRA (sc-24163, epic 24107 E10).
+///
+/// An adapter whose header does not resolve a family (inconclusive keys, or the bare ai-toolkit
+/// `qwen_image` stamp on keys that fit both 2.1 and 2512) is surfaced as unresolved and the USER
+/// picks. The header still wins whenever it DOES resolve: a detected family is never overridden,
+/// so assigning one is refused with the detected family named. The requested family must be one a
+/// catalog model declares, and the LoRA must be installed with a readable safetensors header —
+/// "unresolved" is a verdict about an inspected file, never about a missing one
+/// (`lora_family_not_inspectable`). Returns the canonical token to store.
+pub(crate) fn resolve_lora_family_assignment(
+    lora_id: &str,
+    lora: &Value,
+    requested: &str,
+    models: &[Value],
+) -> Result<String, ApiError> {
+    let normalized = normalize_lora_family(requested.trim());
+    if normalized.is_empty() {
+        return Err(ApiError::bad_request("LoRA family must not be empty"));
+    }
+    let known = known_lora_families(models);
+    if !known.iter().any(|family| family == &normalized) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "Unknown LoRA family '{}'. Choose one of: {}",
+                requested.trim(),
+                known.join(", ")
+            ),
+            code: Some("lora_family_unknown"),
+            context: None,
+        });
+    }
+    // Only an INSPECTED file can be declared unresolved. With no installed, readable safetensors
+    // header (not installed yet, download unfinished, not a .safetensors) nothing has been
+    // checked: an assignment now could contradict the file once it lands, and the job gate and
+    // this route would then refuse it with no way back. So inspection must happen first.
+    let not_inspectable = || ApiError {
+        status: StatusCode::BAD_REQUEST,
+        detail: format!(
+            "LoRA {lora_id} has no installed safetensors file to inspect yet, so its family \
+             cannot be assigned. Install it or let its download finish first."
+        ),
+        code: Some("lora_family_not_inspectable"),
+        context: None,
+    };
+    if lora.get("installState").and_then(Value::as_str) != Some("installed") {
+        return Err(not_inspectable());
+    }
+    let Some(header) = validate_lora_safetensors_header(lora_id, lora)? else {
+        return Err(not_inspectable());
+    };
+    if let Some(detected) = detect_lora_family(&header) {
+        let detected = normalize_lora_family(&detected);
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            detail: format!(
+                "LoRA {lora_id} is detected from its file as a {detected} adapter; a detected \
+                 family cannot be reassigned. Only a LoRA whose family is unresolved can be \
+                 assigned one."
+            ),
+            code: Some("lora_family_detected"),
+            context: Some(json!({ "detectedFamily": detected })),
+        });
+    }
+    Ok(normalized)
 }
 
 /// Best-effort trigger-keyword suggestions for a LoRA, read live from the
@@ -1559,8 +1670,14 @@ pub(crate) fn validate_lora_specs_for_model(
                 .iter()
                 .any(|model_family| model_family == family)
         }) {
+            // Name BOTH sides (sc-24156): sibling families such as `qwen-image` (2512) and
+            // `qwen-image-2-1` share a model name, so "not compatible" alone leaves the user
+            // guessing which adapter belongs to which model.
             return Err(ApiError::bad_request(format!(
-                "LoRA {lora_id} is not compatible with model {model_id}"
+                "LoRA {lora_id} is not compatible with model {model_id}: the LoRA is a {} adapter, \
+                 and {model_id} loads {} adapters",
+                families.join(" / "),
+                model_families.join(" / ")
             )));
         }
         // ── Declared-partition gating (sc-19563), the FAMILY-AGNOSTIC arm ──────────────────────
@@ -3456,5 +3573,291 @@ mod base_model_gating_tests {
             meta.is_empty(),
             "an adapter that declares no rank/alpha/type must record none: {meta:?}"
         );
+    }
+
+    // ---- Qwen-Image 2.1 vs 2512 (sc-24156, epic 24107 E10) ----------------------------------
+
+    /// The two SHIPPED Qwen rows, read out of the embedded `builtin.models.jsonc` — the exact
+    /// bytes the API seeds and serves — so the test fails if either advertisement drifts.
+    fn shipped_qwen_models() -> Vec<Value> {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc embedded");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin.models.jsonc parses");
+        let models: Vec<Value> = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .filter(|model| {
+                matches!(
+                    model["id"].as_str(),
+                    Some("qwen_image") | Some("qwen_image_2_1")
+                )
+            })
+            .cloned()
+            .collect();
+        assert_eq!(models.len(), 2, "both shipped Qwen rows are present");
+        models
+    }
+
+    /// 2.1 and 2512 adapters never cross, in either direction, and the refusal names BOTH
+    /// families — on the declared-family path (catalog stamp) AND the detected-family path (the
+    /// file's own trainer stamp), because the latter fires first whenever the file is readable.
+    #[test]
+    fn qwen_image_2_1_and_2512_loras_never_cross_and_the_refusal_names_both_families() {
+        let models = shipped_qwen_models();
+        let qwen_2_1 = models
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .unwrap();
+        assert_eq!(
+            qwen_2_1["loraCompatibility"]["families"],
+            json!(["qwen-image-2-1"])
+        );
+
+        // Declared-family path (no file header).
+        for (lora_family, model_id, model_family) in [
+            ("qwen-image", "qwen_image_2_1", "qwen-image-2-1"),
+            ("qwen-image-2-1", "qwen_image", "qwen-image"),
+        ] {
+            let lora = json!({
+                "id": "cross_style", "installState": "installed", "families": [lora_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a cross-version Qwen LoRA must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("a {lora_family} adapter"))
+                    && detail.contains(&format!("loads {model_family} adapters")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Detected-family path: the file itself carries the trainer stamp.
+        for (stamp, detected, model_id, model_family) in [
+            (
+                "Qwen-Image-2512",
+                "qwen-image",
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+            ),
+            (
+                "qwen_image_2_1",
+                "qwen-image-2-1",
+                "qwen_image",
+                "qwen-image",
+            ),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                &format!(r#"{{"ss_base_model_version":"{stamp}"}}"#),
+                &["transformer_blocks.0.attn.to_q.lora_A.weight".to_owned()],
+            );
+            // The catalog record claims the TARGET's family; the header must still win.
+            let lora = json!({
+                "id": "stamped_style",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [model_family],
+            });
+            let error =
+                validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                    .expect_err("a file stamped for the other Qwen version must be refused");
+            assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+            let detail = error.detail.clone();
+            assert!(
+                detail.contains(&format!("appears to be a {detected} LoRA"))
+                    && detail.contains(&format!("({model_family})")),
+                "the refusal must name both families: {detail}"
+            );
+        }
+
+        // Same-version adapters still pass on both models.
+        for (family, model_id) in [
+            ("qwen-image-2-1", "qwen_image_2_1"),
+            ("qwen-image", "qwen_image"),
+        ] {
+            let lora = json!({
+                "id": "own_style", "installState": "installed", "families": [family],
+            });
+            validate_lora_specs_for_model(&models, &[], model_id, &[lora], true, "LoRA")
+                .unwrap_or_else(|error| panic!("{family} LoRA on {model_id}: {error:?}"));
+        }
+    }
+
+    /// sc-24163 (round 2): a family is assigned only after the file was INSPECTED. An installed
+    /// row with no readable safetensors header (no path, or a non-safetensors file) is refused as
+    /// not inspectable — never treated as "unresolved".
+    #[test]
+    fn family_assignment_needs_an_inspected_header() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("legacy.ckpt"), b"not safetensors").unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        let adapter = tmp.path().join("adapter.safetensors");
+        write_adapter(&adapter, r#"{"ss_base_model_version":"qwen_image"}"#, &keys);
+        let adapter = adapter.to_str().unwrap();
+        for lora in [
+            json!({ "id": "no_path", "installState": "installed" }),
+            json!({
+                "id": "ckpt_only",
+                "installState": "installed",
+                "installedPath": tmp.path().join("legacy.ckpt").to_str().unwrap(),
+            }),
+            // A readable file whose install has not completed is not yet the installed adapter.
+            json!({ "id": "downloading", "installState": "missing", "installedPath": adapter }),
+        ] {
+            let error =
+                resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap_err();
+            assert_eq!(error.code, Some("lora_family_not_inspectable"), "{lora}");
+        }
+        // The inspected, installed, unresolved file is the one case that is accepted.
+        let lora =
+            json!({ "id": "inspected", "installState": "installed", "installedPath": adapter });
+        assert_eq!(
+            resolve_lora_family_assignment("x", &lora, "qwen-image-2-1", &models).unwrap(),
+            "qwen-image-2-1"
+        );
+    }
+
+    /// sc-24163 (E10 review): a file whose header does NOT resolve a family — the bare ai-toolkit
+    /// `qwen_image` stamp on attention-only keys within 2.1's 32-block depth — is gated on the
+    /// user-DECLARED family alone. "The header must still win" only applies when the header
+    /// resolves; an unresolved header must not block a user who declares `qwen-image-2-1`.
+    #[test]
+    fn header_unresolved_qwen_adapter_is_gated_on_the_user_declared_family() {
+        let models = shipped_qwen_models();
+        let tmp = tempfile::tempdir().unwrap();
+        let keys: Vec<String> = (0..32)
+            .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+            .collect();
+        write_adapter(
+            &tmp.path().join("adapter.safetensors"),
+            r#"{"ss_base_model_version":"qwen_image"}"#,
+            &keys,
+        );
+        let header = validate_lora_safetensors_header(
+            "generic_stamp",
+            &json!({ "installedPath": tmp.path().to_str().unwrap() }),
+        )
+        .unwrap()
+        .expect("the header is readable");
+        assert_eq!(
+            detect_lora_family(&header),
+            None,
+            "precondition: the generic stamp on 2.1-compatible keys is header-unresolved"
+        );
+        let lora = |family: &str| {
+            json!({
+                "id": "generic_stamp",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": [family],
+            })
+        };
+
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image-2-1")],
+            true,
+            "LoRA",
+        )
+        .expect("a header-unresolved adapter declared qwen-image-2-1 loads on 2.1");
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect("the same file declared qwen-image loads on 2512");
+
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "qwen_image_2_1",
+            &[lora("qwen-image")],
+            true,
+            "LoRA",
+        )
+        .expect_err("declared qwen-image is refused on 2.1");
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(
+            error.detail.contains("a qwen-image adapter")
+                && error.detail.contains("loads qwen-image-2-1 adapters"),
+            "the refusal must name both families: {}",
+            error.detail
+        );
+    }
+
+    /// A version-explicit 2.1 stamp cannot override tensor depth that only the 60-block 2512
+    /// architecture owns. This stays a positive 2512 detection so automatic import and manual
+    /// family assignment both reject the contradiction instead of accepting a claimed 2.1 family.
+    #[test]
+    fn qwen_2_1_stamp_with_2512_depth_is_refused_before_manual_assignment() {
+        let models = shipped_qwen_models();
+        for key in [
+            "transformer.transformer_blocks.32.attn.to_q.lora_A.weight",
+            "lora_unet_transformer_blocks_59_attn_to_out_0.lora_down.weight",
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            write_adapter(
+                &tmp.path().join("adapter.safetensors"),
+                r#"{"ss_base_model_version":"qwen_image_2_1"}"#,
+                &[key.to_owned()],
+            );
+            let lora = json!({
+                "id": "contradictory_depth",
+                "installState": "installed",
+                "installedPath": tmp.path().to_str().unwrap(),
+                "families": ["qwen-image-2-1"],
+            });
+
+            let header = validate_lora_safetensors_header("contradictory_depth", &lora)
+                .unwrap()
+                .expect("header is readable");
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("qwen-image"));
+
+            let assignment = resolve_lora_family_assignment(
+                "contradictory_depth",
+                &lora,
+                "qwen-image-2-1",
+                &models,
+            )
+            .expect_err("detected 2512 depth cannot be manually assigned to 2.1");
+            assert_eq!(assignment.code, Some("lora_family_detected"));
+            assert!(
+                assignment.detail.contains("qwen-image"),
+                "{}",
+                assignment.detail
+            );
+
+            let load = validate_lora_specs_for_model(
+                &models,
+                &[],
+                "qwen_image_2_1",
+                &[lora],
+                true,
+                "LoRA",
+            )
+            .expect_err("a 2512-depth adapter must not load on Qwen-Image 2.1");
+            assert!(
+                load.detail.contains("qwen-image") && load.detail.contains("qwen-image-2-1"),
+                "{}",
+                load.detail
+            );
+        }
     }
 }

@@ -841,8 +841,8 @@ pub fn diffusers_class_name_to_family(class_name: &str) -> Option<String> {
 /// Returns the detected LoRA architecture family or `None` if the header
 /// is ambiguous, empty, or matches no known signature with confidence.
 pub fn detect_lora_family(header: &Value) -> Option<String> {
-    if let Some(family) = detect_metadata_family(header) {
-        return Some(family);
+    if let Some(stamp) = detect_metadata_family(header) {
+        return reconcile_qwen_metadata_with_keys(stamp, &collect_tensor_keys(header));
     }
     let keys = collect_tensor_keys(header);
     if keys.is_empty() {
@@ -1193,7 +1193,173 @@ fn detect_unique_key_family(keys: &[String]) -> Option<String> {
     }) {
         return Some("minimax-h3".to_owned());
     }
+    if keys.iter().any(|key| is_qwen_image_2_1_key(key)) {
+        return Some("qwen-image-2-1".to_owned());
+    }
     None
+}
+
+/// Lets tensor keys overrule a Qwen-Image metadata label that names the WRONG Qwen-Image
+/// (sc-24158, E10). Every other family's metadata passes through unchanged.
+///
+/// Metadata normally wins outright, but the Qwen labels are not version-precise: ai-toolkit's
+/// `QwenImageModel.get_base_model_version()` returns the generic `"qwen_image"` for every Qwen
+/// subclass, so a 2.1 adapter trained there is stamped exactly like a 2512 one. Where the keys
+/// carry architecture-exclusive evidence, it decides:
+///
+/// * metadata `qwen-image` + any 2.1-only key ([`is_qwen_image_2_1_key`]) → `qwen-image-2-1`. Those
+///   modules do not exist on the 2512 DiT, so the label cannot be right.
+/// * metadata `qwen-image-2-1` + 2512-only evidence ([`keys_evidence_qwen_image_2512`]) →
+///   `qwen-image`. A 2.1 model has exactly 32 blocks, so either a 2512-only module or block 32..59
+///   makes the 2.1 label impossible. Keeping this a detected family is load-bearing: the API must
+///   reject the contradictory file instead of treating it as unresolved and allowing a manual 2.1
+///   assignment to bypass inspection.
+///
+/// * the bare generic `qwen_image` stamp (no version in it) + no 2512-only evidence (no 2512-only
+///   module, no block index `>= 32`) → `None`. The stamp cannot tell the two apart and neither can
+///   the keys, so the user declares the family. A version-explicit stamp (`Qwen-Image-2512`,
+///   `Qwen/Qwen-Image`, a diffusers pipeline class, a SceneWorks `family` stamp) is not generic.
+///
+/// Otherwise (no contradicting key, a version-explicit stamp), the label stands.
+fn reconcile_qwen_metadata_with_keys(stamp: MetadataFamily, keys: &[String]) -> Option<String> {
+    let MetadataFamily {
+        family,
+        generic_qwen_label,
+    } = stamp;
+    match family.as_str() {
+        "qwen-image" if keys.iter().any(|key| is_qwen_image_2_1_key(key)) => {
+            Some("qwen-image-2-1".to_owned())
+        }
+        // sc-24163 (E10): the bare ai-toolkit `qwen_image` stamp names no version, and 2.1 and 2512
+        // share every attention key, so an attention-only adapter carrying it is as likely 2.1 as
+        // 2512. Only keys that exist on the 2512 DiT alone — a 2512-only module, or a block index
+        // past 2.1's 32-block depth — let the generic label resolve to `qwen-image`; otherwise it is
+        // unresolved and the user declares the family, instead of a confident 2512 label that
+        // hard-rejects a genuine 2.1 adapter from its own model.
+        "qwen-image" if generic_qwen_label && !keys_evidence_qwen_image_2512(keys) => None,
+        "qwen-image-2-1" if keys_evidence_qwen_image_2512(keys) => Some("qwen-image".to_owned()),
+        _ => Some(family),
+    }
+}
+
+/// Whether the tensor keys carry evidence that exists only on the 2512 Qwen-Image DiT: a
+/// 2512-only module ([`is_qwen_image_2512_key`]) or a `transformer_blocks.<n>` index at or past
+/// [`QWEN_IMAGE_2_1_BLOCK_COUNT`] (2.1 has 32 blocks, 2512 has 60).
+fn keys_evidence_qwen_image_2512(keys: &[String]) -> bool {
+    keys.iter().any(|key| is_qwen_image_2512_key(key))
+        || transformer_block_indices(keys)
+            .iter()
+            .next_back()
+            .is_some_and(|max| *max >= QWEN_IMAGE_2_1_BLOCK_COUNT)
+}
+
+/// Whether one tensor key carries a module that exists on the **2512** Qwen-Image DiT (and its
+/// Edit siblings) but never on Qwen-Image 2.1: the dual-stream joint-attention projections
+/// (`attn.add_{q,k,v}_proj`, `attn.to_add_out`), the `img_mlp.net.*` / `txt_mlp.*` MLPs and the
+/// per-block `img_mod` / `txt_mod` modulation. Checked against both published transformer key sets.
+/// Only consulted to contradict a `qwen-image-2-1` metadata label (see
+/// [`reconcile_qwen_metadata_with_keys`]); it is NOT a positive detector, because Mage-Flow and
+/// SD3 share several of these names.
+fn is_qwen_image_2512_key(key: &str) -> bool {
+    const DOTTED: [&str; 8] = [
+        ".attn.add_q_proj.",
+        ".attn.add_k_proj.",
+        ".attn.add_v_proj.",
+        ".attn.to_add_out.",
+        ".img_mlp.net.",
+        ".txt_mlp.",
+        ".img_mod.",
+        ".txt_mod.",
+    ];
+    const FLATTENED: [&str; 8] = [
+        "_attn_add_q_proj",
+        "_attn_add_k_proj",
+        "_attn_add_v_proj",
+        "_attn_to_add_out",
+        "_img_mlp_net_",
+        "_txt_mlp_",
+        "_img_mod_",
+        "_txt_mod_",
+    ];
+    DOTTED.iter().any(|needle| key.contains(needle))
+        || FLATTENED.iter().any(|needle| key.contains(needle))
+}
+
+/// Module-path prefixes that LoRA exporters put in front of a DiT's own module names: the
+/// diffusers/PEFT `transformer.` (optionally under PEFT's `base_model.model.`), the ComfyUI /
+/// ai-toolkit `diffusion_model.` (optionally under `model.`), and the kohya / LyCORIS flattened
+/// `lora_unet_` / `lora_transformer_` / `lycoris_` heads. Longest first, so the nested spellings
+/// strip completely. Used to anchor a *top-level* module name (see [`is_qwen_image_2_1_key`]).
+const LORA_MODULE_PREFIXES: &[&str] = &[
+    "base_model.model.diffusion_model.",
+    "base_model.model.transformer.",
+    "model.diffusion_model.",
+    "base_model.model.",
+    "diffusion_model.",
+    "transformer.",
+    "lora_transformer_",
+    "lora_unet_",
+    "lycoris_",
+];
+
+/// Whether one tensor key carries a module that exists only in the **Qwen-Image 2.1** DiT
+/// (sc-24158, epic 24107).
+///
+/// 2.1 (`QwenImage21Transformer2DModel`, 32 single-stream blocks over a Qwen3 tower) and the 2512
+/// Qwen-Image (`QwenImageTransformer2DModel`, 60 dual-stream blocks) share `transformer_blocks.<n>.
+/// attn.to_{q,k,v,out.0}`, `img_in`, `proj_out`, `norm_out.linear` and the timestep embedder, so
+/// none of those say which one an adapter was trained on. What 2.1 has and 2512 never does
+/// (checked against both published `transformer/diffusion_pytorch_model.safetensors.index.json`
+/// key sets):
+///
+/// * the gated per-block MLP — `img_mlp.gate_layer` / `img_mlp.proj` / `img_mlp.out`, where 2512
+///   spells its MLP `img_mlp.net.0.proj` / `img_mlp.net.2` (and adds a `txt_mlp` 2.1 lacks);
+/// * the two-layer text input projection `txt_in.in_layer` / `txt_in.out_layer` (2512's `txt_in`
+///   is a single Linear);
+/// * the shared top-level `modulation.1` Linear (2512 modulates per block via `img_mod.1` /
+///   `txt_mod.1`).
+///
+/// No other family we detect uses these names either: Hunyuan's MLP is `img_mlp.fc{1,2}` and its
+/// `txt_in` is an `individual_token_refiner`; FLUX's `in_layer`s live under `time_in` / `vector_in`
+/// / `guidance_in`. `modulation.1` is a **substring** of the `adaLN_modulation.1` Linear that
+/// Z-Image, FLUX.2 and Bernini carry, so the global names are anchored to the start of the module
+/// path (after [`LORA_MODULE_PREFIXES`]) rather than matched with `contains`; the block-level MLP
+/// names are bounded by `.` on both sides (dotted) or by the flattened `_…` + `.`/`_` (kohya).
+///
+/// One key is enough — the 2.1 analogue of the Krea/Anima unique-key arms. Without it a
+/// metadata-less 2.1 LoRA that trains the MLP lands in the dual-stream MmDit bucket (its `.img_mlp.`
+/// satisfies the bucket's dual-stream group) where [`disambiguate_mm_dit`] sees a 32-block span and
+/// returns `None`. An **attention-only** 2.1 LoRA carries none of these names and is genuinely
+/// indistinguishable by keys from a sparse 2512 adapter, so it is deliberately left unresolved
+/// (the user picks) — never auto-labelled `qwen-image`.
+fn is_qwen_image_2_1_key(key: &str) -> bool {
+    const BLOCK_DOTTED: [&str; 3] = [".img_mlp.gate_layer.", ".img_mlp.proj.", ".img_mlp.out."];
+    const BLOCK_FLATTENED: [&str; 3] = ["_img_mlp_gate_layer", "_img_mlp_proj", "_img_mlp_out"];
+    const GLOBAL_DOTTED: [&str; 3] = ["txt_in.in_layer.", "txt_in.out_layer.", "modulation.1."];
+    const GLOBAL_FLATTENED: [&str; 3] = ["txt_in_in_layer", "txt_in_out_layer", "modulation_1"];
+
+    if BLOCK_DOTTED.iter().any(|needle| key.contains(needle)) {
+        return true;
+    }
+    let flattened_boundary = |rest: &str| rest.starts_with('.') || rest.starts_with('_');
+    if BLOCK_FLATTENED.iter().any(|needle| {
+        key.match_indices(needle)
+            .any(|(position, matched)| flattened_boundary(&key[position + matched.len()..]))
+    }) {
+        return true;
+    }
+    let module = LORA_MODULE_PREFIXES
+        .iter()
+        .find_map(|prefix| key.strip_prefix(prefix))
+        .unwrap_or(key);
+    GLOBAL_DOTTED
+        .iter()
+        .any(|needle| module.starts_with(needle))
+        || GLOBAL_FLATTENED.iter().any(|needle| {
+            module
+                .strip_prefix(needle)
+                .is_some_and(|rest| rest.starts_with('.'))
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1875,6 +2041,14 @@ const MARGIN_DEN: usize = 2;
 /// blocks, and false hard rejections are worse than an inconclusive result.
 const QWEN_MIN_BLOCK_INDEX: usize = 39;
 
+/// Qwen-Image 2.1's DiT depth (`transformer/config.json` `num_layers: 32`) — block indices `0..=31`.
+/// A 2.1 adapter that trains only attention carries no 2.1-unique key (see
+/// [`is_qwen_image_2_1_key`]); the only thing keeping it off the 2512 `qwen-image` label is that
+/// its block span can never reach [`QWEN_MIN_BLOCK_INDEX`]. Pinned at compile time (sc-24158) so
+/// lowering the 2512 threshold into 2.1's range cannot silently relabel 2.1 adapters as 2512.
+const QWEN_IMAGE_2_1_BLOCK_COUNT: usize = 32;
+const _: () = assert!(QWEN_MIN_BLOCK_INDEX >= QWEN_IMAGE_2_1_BLOCK_COUNT);
+
 /// Mage-Flow's published NR-MMDiT depth (`transformer/config.json` `depth: 12`, identical across
 /// all six repos) — block indices `0..=11` and nothing above. See [`disambiguate_mm_dit`].
 const MAGE_FLOW_BLOCK_COUNT: usize = 12;
@@ -1988,7 +2162,35 @@ fn parse_block_index(key: &str) -> Option<usize> {
     None
 }
 
-fn detect_metadata_family(header: &Value) -> Option<String> {
+/// A family read from adapter metadata, plus whether the stamp that produced it was the bare,
+/// version-less Qwen-Image label ai-toolkit writes for every Qwen subclass (see
+/// [`reconcile_qwen_metadata_with_keys`]).
+struct MetadataFamily {
+    family: String,
+    generic_qwen_label: bool,
+}
+
+impl MetadataFamily {
+    fn exact(family: String) -> Self {
+        Self {
+            family,
+            generic_qwen_label: false,
+        }
+    }
+}
+
+/// True when a metadata value is ONLY the generic Qwen-Image name (`qwen_image`, `qwen-image`,
+/// `Qwen-Image`, `QwenImage`) with no org, version or variant in it.
+fn is_generic_qwen_image_label(value: &str) -> bool {
+    let collapsed: String = value
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|ch| ch.to_ascii_lowercase())
+        .collect();
+    collapsed == "qwenimage"
+}
+
+fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
     let metadata = header.get("__metadata__")?.as_object()?;
     // SceneWorks-native provenance first: our own trainers stamp the adapter header with a canonical
     // `family` token (`krea_2`, `z-image`, …) and a `baseModel` training-base id (`krea_2_raw`, …),
@@ -2005,7 +2207,7 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Some(canonical_lora_family(family));
+        return Some(MetadataFamily::exact(canonical_lora_family(family)));
     }
     // `ss_network_module` is a code namespace, not a free-form base-model label: only the exact
     // trainer module is architecture evidence. A lookalike must remain unsupported rather than
@@ -2015,7 +2217,7 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
         .and_then(Value::as_str)
         .is_some_and(|module| module.trim() == MINIMAX_H3_TRAINER_NETWORK_MODULE)
     {
-        return Some("minimax-h3".to_owned());
+        return Some(MetadataFamily::exact("minimax-h3".to_owned()));
     }
     for key in [
         "baseModel",
@@ -2028,7 +2230,10 @@ fn detect_metadata_family(header: &Value) -> Option<String> {
             continue;
         };
         if let Some(family) = metadata_value_to_family(value) {
-            return Some(family);
+            return Some(MetadataFamily {
+                generic_qwen_label: family == "qwen-image" && is_generic_qwen_image_label(value),
+                family,
+            });
         }
     }
     None
@@ -2070,6 +2275,64 @@ fn contains_delimited_token(haystack: &str, needle: &str) -> bool {
         let end = position + matched.len();
         let trailing = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
         leading && trailing
+    })
+}
+
+/// True when a lower-cased metadata value names Qwen-Image **2.1** rather than the 2512 Qwen-Image.
+///
+/// The value is split into ASCII-alphanumeric TOKENS (every other character is a separator, so
+/// `-`, `_`, `.`, `/`, `:`, `(`, `)`, whitespace all behave alike). The family name is either the
+/// token pair `qwen`, `image…` or one `qwenimage…` token (the diffusers class `QwenImage21Pipeline`,
+/// `qwenimage2.1`). The version follows, with an optional `v`, as either ONE token beginning `21`
+/// (`qwen-image-21`, `Qwen-Image v21`, `…21pipeline`) or the token pair `2`, `1…`
+/// (`qwen-image-2.1`, `Qwen-Image v2.1`, `qwen-image:2.1`, `Qwen Image (2.1)`, `qwen-image-2.1.0`,
+/// `qwen-image-2-1-mlx`). In both shapes the digit check is WITHIN the token holding the `1`: a digit
+/// right after it is a different version, so `qwen-image-2.10` (`2`,`10`) and `qwen-image-2-1024px`
+/// (`2`,`1024px`) stay out, while `2.1.0` (`2`,`1`,`0`) is 2.1. `qwen-image-2512` never reads as
+/// 2.1. Tokenizing (rather than concatenating every alphanumeric, the first sc-24158 cut) is what
+/// keeps a trailing patch level like `.0` from gluing onto the `1` and dropping the value onto the
+/// 2512 `qwen-image` arm. The 2.1 PE rewriters (`qwen_image_2_1_pe_*`) are LLM checkpoints that never
+/// carry a LoRA, so matching them here is harmless.
+fn is_qwen_image_2_1_metadata(normalized: &str) -> bool {
+    /// `1` not followed by another digit.
+    fn is_minor_one(token: &str) -> bool {
+        token
+            .strip_prefix('1')
+            .is_some_and(|tail| !tail.starts_with(|ch: char| ch.is_ascii_digit()))
+    }
+    /// The version starting at `head` (the remainder of the token that held the family name) and
+    /// continuing into `rest` (the following tokens).
+    fn is_version_2_1(head: &str, rest: &[&str]) -> bool {
+        let (first, rest) = if head.is_empty() {
+            match rest.split_first() {
+                Some((first, rest)) => (*first, rest),
+                None => return false,
+            }
+        } else {
+            (head, rest)
+        };
+        let first = first.strip_prefix('v').unwrap_or(first);
+        if let Some(tail) = first.strip_prefix('2') {
+            if tail.is_empty() {
+                return rest.first().is_some_and(|next| is_minor_one(next));
+            }
+            return is_minor_one(tail);
+        }
+        false
+    }
+    let tokens: Vec<&str> = normalized
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    (0..tokens.len()).any(|index| {
+        if let Some(head) = tokens[index].strip_prefix("qwenimage") {
+            return is_version_2_1(head, &tokens[index + 1..]);
+        }
+        tokens[index] == "qwen"
+            && tokens.get(index + 1).is_some_and(|next| {
+                next.strip_prefix("image")
+                    .is_some_and(|head| is_version_2_1(head, &tokens[index + 2..]))
+            })
     })
 }
 
@@ -2172,6 +2435,14 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     }
     if normalized.contains("zimage") || normalized.contains("z-image") {
         return Some("z-image".to_owned());
+    }
+    // Qwen-Image 2.1 (sc-24156, epic 24107) BEFORE the generic qwen+image arm below, which would
+    // otherwise swallow `qwen_image_2_1` / `Qwen-Image-2.1` into the 2512 `qwen-image` family. The
+    // two are different DiTs (2.1 is ~7.1B over a Qwen3 tower, 2512 ~20B over Qwen2.5-VL), so an
+    // adapter for one never loads on the other (E10): a mislabel here hard-routes a 2.1 LoRA onto
+    // the 2512 model and hard-rejects it from its own.
+    if is_qwen_image_2_1_metadata(&normalized) {
+        return Some("qwen-image-2-1".to_owned());
     }
     if normalized.contains("qwen") && normalized.contains("image") {
         return Some("qwen-image".to_owned());
@@ -3753,6 +4024,496 @@ mod tests {
             detect_lora_family(&Value::Object(object)).as_deref(),
             Some("z-image")
         );
+    }
+
+    /// sc-24156 (E10): Qwen-Image 2.1 metadata resolves to its OWN family, ahead of the generic
+    /// qwen+image arm, while every 2512 / Edit spelling stays `qwen-image`. The two DiTs are
+    /// unrelated, so a 2.1 adapter mislabelled `qwen-image` would be offered on — and refused
+    /// from — the wrong model.
+    #[test]
+    fn qwen_image_2_1_metadata_resolves_to_its_own_family_not_2512() {
+        for value in [
+            "qwen_image_2_1",
+            "qwen-image-2-1",
+            "qwen-image-2.1",
+            "Qwen-Image-2.1",
+            "Qwen/Qwen-Image-2.1",
+            "qwen_image_2.1",
+            "Qwen Image 2.1",
+            "qwenimage2.1",
+            "QwenImage21Pipeline",
+            "qwen-image-2.1-edit",
+            "SceneWorks/qwen-image-2-1-mlx",
+            // sc-24158: separators outside `- _ . / space` and a `v` version prefix.
+            "Qwen-Image v2.1",
+            "qwen-image:2.1",
+            "Qwen Image (2.1)",
+            // A trailing patch level is still 2.1 (tokenized, not concatenated).
+            "qwen-image-2.1.0",
+            "Qwen-Image v2.1.0",
+        ] {
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some("qwen-image-2-1"),
+                "{value:?} names Qwen-Image 2.1"
+            );
+        }
+        for value in [
+            "qwen-image",
+            "qwen_image",
+            "Qwen/Qwen-Image-2512",
+            "qwen-image-2512",
+            "Qwen-Image-Edit-2509",
+            "Qwen-Image-Edit-2511",
+            "qwen_image_flow",
+            "QwenImagePipeline",
+            // A digit after the `21` is not 2.1.
+            "qwen-image-2-1024px",
+            "qwen-image-2.10",
+            "Qwen-Image v2.10",
+        ] {
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some("qwen-image"),
+                "{value:?} is the 2512 Qwen-Image family"
+            );
+        }
+        // Whole-header, through the trainer stamp the importer actually reads.
+        for (stamp, expected) in [
+            ("qwen_image_2_1", "qwen-image-2-1"),
+            ("Qwen-Image-2512", "qwen-image"),
+        ] {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "__metadata__".to_owned(),
+                json!({ "ss_base_model_version": stamp }),
+            );
+            object.insert(
+                "transformer_blocks.0.attn.to_q.lora_A.weight".to_owned(),
+                json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+            );
+            assert_eq!(
+                detect_lora_family(&Value::Object(object)).as_deref(),
+                Some(expected),
+                "{stamp:?}"
+            );
+        }
+        // And the families never cross at the compatibility gate, in either direction.
+        assert_eq!(canonical_lora_family("qwen_image_2_1"), "qwen-image-2-1");
+        assert_eq!(
+            accepted_lora_families("qwen-image-2-1"),
+            vec!["qwen-image-2-1"]
+        );
+        assert_eq!(accepted_lora_families("qwen-image"), vec!["qwen-image"]);
+        let lora_2512 = json!({ "id": "q2512", "family": "qwen-image" });
+        let lora_21 = json!({ "id": "q21", "family": "qwen-image-2-1" });
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_2512),
+            Some("qwen-image-2-1"),
+            "q2512",
+            Some("qwen_image_2_1")
+        )
+        .is_err());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_21),
+            Some("qwen-image"),
+            "q21",
+            Some("qwen_image")
+        )
+        .is_err());
+        assert!(validate_lora_compatibility(
+            std::slice::from_ref(&lora_21),
+            Some("qwen-image-2-1"),
+            "q21",
+            Some("qwen_image_2_1")
+        )
+        .is_ok());
+    }
+
+    /// sc-24163 (E10 review): the bare ai-toolkit `qwen_image` stamp carries no version, so an
+    /// adapter whose keys fit BOTH 2.1 and 2512 (attention only, every block index < 32) is
+    /// unresolved — the user declares the family. 2512 evidence (a 2512-only module or a block index
+    /// past 2.1's 32-block depth) or a version-explicit stamp still resolves to `qwen-image`.
+    #[test]
+    fn generic_qwen_image_stamp_without_2512_evidence_is_unresolved() {
+        fn header(fields: Value, keys: &[String]) -> Value {
+            let mut object = serde_json::Map::new();
+            object.insert("__metadata__".to_owned(), fields);
+            for key in keys {
+                object.insert(
+                    key.clone(),
+                    json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+                );
+            }
+            Value::Object(object)
+        }
+        let attention = |blocks: std::ops::Range<usize>| -> Vec<String> {
+            blocks
+                .flat_map(|block| {
+                    ["to_q", "to_k", "to_v", "to_out.0"].map(|proj| {
+                        format!("transformer.transformer_blocks.{block}.attn.{proj}.lora_A.weight")
+                    })
+                })
+                .collect()
+        };
+        // Generic stamp, full 2.1 attention span (0..=31): unresolved, in every generic spelling.
+        for stamp in ["qwen_image", "qwen-image", "Qwen-Image", "QwenImage"] {
+            for field in ["ss_base_model_version", "modelspec.architecture"] {
+                assert_eq!(
+                    detect_lora_family(&header(json!({ field: stamp }), &attention(0..32))),
+                    None,
+                    "{field}={stamp:?} attention-only 0..32 must be unresolved"
+                );
+            }
+        }
+        // Generic stamp + a block index >= 32 (2512's 60-block depth) -> qwen-image.
+        for blocks in [0..33, 32..33, 0..60] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    json!({ "ss_base_model_version": "qwen_image" }),
+                    &attention(blocks.clone())
+                ))
+                .as_deref(),
+                Some("qwen-image"),
+                "generic stamp, blocks {blocks:?}"
+            );
+        }
+        // Generic stamp + a 2512-only module (all indices < 32) -> qwen-image.
+        for module in [
+            "transformer.transformer_blocks.3.attn.add_q_proj.lora_A.weight",
+            "transformer.transformer_blocks.3.img_mlp.net.0.proj.lora_A.weight",
+            "transformer.transformer_blocks.3.txt_mlp.net.2.lora_A.weight",
+            "transformer.transformer_blocks.3.img_mod.1.lora_A.weight",
+            "lora_unet_transformer_blocks_3_attn_add_k_proj.lora_down.weight",
+        ] {
+            let mut keys = attention(0..4);
+            keys.push(module.to_owned());
+            assert_eq!(
+                detect_lora_family(&header(
+                    json!({ "ss_base_model_version": "qwen_image" }),
+                    &keys
+                ))
+                .as_deref(),
+                Some("qwen-image"),
+                "{module:?}"
+            );
+        }
+        // Version-explicit 2512 stamps keep `qwen-image` on attention-only keys.
+        for fields in [
+            json!({ "ss_base_model_version": "Qwen-Image-2512" }),
+            json!({ "ss_base_model_version": "Qwen/Qwen-Image-2512" }),
+            json!({ "modelspec.architecture": "Qwen/Qwen-Image" }),
+            json!({ "baseModel": "qwen_image_2512" }),
+            json!({ "ss_base_model_version": "Qwen-Image-Edit-2509" }),
+            json!({ "family": "qwen-image" }),
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(fields.clone(), &attention(0..4))).as_deref(),
+                Some("qwen-image"),
+                "{fields}"
+            );
+        }
+    }
+
+    /// sc-24158 (E10): tensor keys overrule a Qwen-Image metadata label that names the wrong
+    /// Qwen-Image. ai-toolkit stamps the generic `qwen_image` on every Qwen subclass, so a 2.1
+    /// adapter carrying 2.1-only modules is 2.1 whatever the stamp says; a `qwen-image-2-1` label on
+    /// 2512-only modules is a contradiction and stays unresolved.
+    #[test]
+    fn qwen_image_keys_overrule_a_contradicting_qwen_metadata_label() {
+        fn header(stamp: &str, keys: &[&str]) -> Value {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "__metadata__".to_owned(),
+                json!({ "ss_base_model_version": stamp }),
+            );
+            for key in keys {
+                object.insert(
+                    (*key).to_owned(),
+                    json!({"dtype": "BF16", "shape": [8, 1024], "data_offsets": [0, 16384]}),
+                );
+            }
+            Value::Object(object)
+        }
+        // Generic stamp + a 2.1-only key → 2.1, in both the dotted and flattened spelling.
+        for key in [
+            "transformer_blocks.0.img_mlp.gate_layer.lora_A.weight",
+            "lora_unet_transformer_blocks_0_img_mlp_gate_layer.lora_down.weight",
+            "transformer.txt_in.in_layer.lora_A.weight",
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    "qwen_image",
+                    &["transformer_blocks.0.attn.to_q.lora_A.weight", key]
+                ))
+                .as_deref(),
+                Some("qwen-image-2-1"),
+                "{key:?}"
+            );
+        }
+        // A 2.1 label on 2512-only modules is contradicted by the architecture and resolves to
+        // 2512. The API needs that positive detection to refuse a manual 2.1 assignment.
+        for key in [
+            "transformer_blocks.0.attn.add_q_proj.lora_A.weight",
+            "transformer_blocks.0.img_mlp.net.0.proj.lora_A.weight",
+            "transformer_blocks.0.txt_mlp.net.2.lora_A.weight",
+            "transformer_blocks.0.img_mod.1.lora_A.weight",
+            "lora_unet_transformer_blocks_0_attn_add_k_proj.lora_down.weight",
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    "qwen_image_2_1",
+                    &["transformer_blocks.0.attn.to_q.lora_A.weight", key]
+                )),
+                Some("qwen-image".to_owned()),
+                "{key:?}"
+            );
+        }
+        // Depth is equally decisive: 2.1 has blocks 0..31, while 2512 owns 32..59. Cover both
+        // diffusers dotted and kohya/LyCORIS flattened spellings, including sparse exports.
+        for key in [
+            "transformer.transformer_blocks.32.attn.to_q.lora_A.weight",
+            "transformer_blocks.59.attn.to_out.0.lora_A.weight",
+            "lora_unet_transformer_blocks_32_attn_to_q.lora_down.weight",
+            "lycoris_transformer_blocks_59_attn_to_out_0.lokr_w1",
+        ] {
+            assert_eq!(
+                detect_lora_family(&header(
+                    "qwen_image_2_1",
+                    &["transformer_blocks.0.attn.to_q.lora_A.weight", key]
+                )),
+                Some("qwen-image".to_owned()),
+                "explicit 2.1 stamp must lose to impossible depth in {key:?}"
+            );
+        }
+        assert_eq!(
+            detect_lora_family(&header(
+                "qwen_image_2_1",
+                &["transformer.transformer_blocks.31.attn.to_q.lora_A.weight"]
+            )),
+            Some("qwen-image-2-1".to_owned()),
+            "the last valid 2.1 block must keep the explicit 2.1 family"
+        );
+        // No architecture-exclusive key (attention only): a version-explicit label stands; the
+        // generic `qwen_image` stamp does not (see the sc-24163 test below).
+        let attention = ["transformer_blocks.0.attn.to_q.lora_A.weight"];
+        assert_eq!(
+            detect_lora_family(&header("Qwen-Image-2512", &attention)).as_deref(),
+            Some("qwen-image")
+        );
+        assert_eq!(
+            detect_lora_family(&header("qwen_image_2_1", &attention)).as_deref(),
+            Some("qwen-image-2-1")
+        );
+        // Agreeing evidence is untouched: 2512 label + 2512 keys, 2.1 label + 2.1 keys.
+        assert_eq!(
+            detect_lora_family(&header(
+                "qwen_image",
+                &["transformer_blocks.0.attn.add_q_proj.lora_A.weight"]
+            ))
+            .as_deref(),
+            Some("qwen-image")
+        );
+        assert_eq!(
+            detect_lora_family(&header(
+                "qwen_image_2_1",
+                &["transformer_blocks.0.img_mlp.gate_layer.lora_A.weight"]
+            ))
+            .as_deref(),
+            Some("qwen-image-2-1")
+        );
+        // Other families' metadata is never rewritten by Qwen keys.
+        assert_eq!(
+            detect_lora_family(&header(
+                "flux",
+                &["transformer_blocks.0.img_mlp.gate_layer.lora_A.weight"]
+            ))
+            .as_deref(),
+            Some("flux")
+        );
+    }
+
+    /// Every `transformer_blocks.<n>.<module>.<suffix>` key for blocks `0..blocks`, under `prefix`.
+    fn qwen_block_keys(prefix: &str, blocks: usize, modules: &[&str], suffix: &str) -> Vec<String> {
+        (0..blocks)
+            .flat_map(|block| {
+                modules.iter().map(move |module| {
+                    format!("{prefix}transformer_blocks.{block}.{module}{suffix}")
+                })
+            })
+            .collect()
+    }
+
+    /// Kohya-flattened twin of [`qwen_block_keys`]: dots in the module path become `_`.
+    fn qwen_block_keys_flattened(prefix: &str, blocks: usize, modules: &[&str]) -> Vec<String> {
+        (0..blocks)
+            .flat_map(|block| {
+                modules.iter().map(move |module| {
+                    format!(
+                        "{prefix}transformer_blocks_{block}_{}.lora_down.weight",
+                        module.replace('.', "_")
+                    )
+                })
+            })
+            .collect()
+    }
+
+    fn detect_keys(keys: &[String]) -> Option<String> {
+        let refs: Vec<&str> = keys.iter().map(String::as_str).collect();
+        detect_lora_family(&header_from_keys(&refs))
+    }
+
+    const QWEN_2_1_ATTENTION: [&str; 4] = ["attn.to_q", "attn.to_k", "attn.to_v", "attn.to_out.0"];
+    const QWEN_2_1_MLP: [&str; 3] = ["img_mlp.gate_layer", "img_mlp.proj", "img_mlp.out"];
+
+    /// sc-24158 (E10): a metadata-less Qwen-Image 2.1 LoRA is recognised by its 2.1-only module
+    /// names in every exporter spelling — diffusers/PEFT dotted (with and without the
+    /// `transformer.` / `diffusion_model.` / `base_model.model.` heads) and kohya/LyCORIS flattened.
+    /// Before this the dotted MLP keys landed in the dual-stream MmDit bucket and the 32-block span
+    /// fell through `disambiguate_mm_dit` as `None`.
+    #[test]
+    fn metadata_less_qwen_image_2_1_keys_resolve_to_qwen_image_2_1() {
+        let mut modules = QWEN_2_1_ATTENTION.to_vec();
+        modules.extend(QWEN_2_1_MLP);
+        for prefix in [
+            "",
+            "transformer.",
+            "diffusion_model.",
+            "base_model.model.",
+            "base_model.model.transformer.",
+        ] {
+            for suffix in [".lora_A.weight", ".lora_down.weight", ".lokr_w1"] {
+                let keys = qwen_block_keys(prefix, 32, &modules, suffix);
+                assert_eq!(
+                    detect_keys(&keys).as_deref(),
+                    Some("qwen-image-2-1"),
+                    "{prefix:?} … {suffix:?}"
+                );
+            }
+            // A sparse adapter: ONE gate-layer key is enough (the Krea/Anima unique-key precedent).
+            let sparse = vec![format!(
+                "{prefix}transformer_blocks.7.img_mlp.gate_layer.lora_A.weight"
+            )];
+            assert_eq!(detect_keys(&sparse).as_deref(), Some("qwen-image-2-1"));
+        }
+        for prefix in ["lora_unet_", "lora_transformer_", "lycoris_"] {
+            let keys = qwen_block_keys_flattened(prefix, 32, &modules);
+            assert_eq!(
+                detect_keys(&keys).as_deref(),
+                Some("qwen-image-2-1"),
+                "{prefix:?}"
+            );
+            let sparse = vec![format!(
+                "{prefix}transformer_blocks_0_img_mlp_gate_layer.lora_down.weight"
+            )];
+            assert_eq!(detect_keys(&sparse).as_deref(), Some("qwen-image-2-1"));
+        }
+        // The 2.1-only GLOBAL modules (two-layer `txt_in`, shared top-level `modulation.1`) are
+        // markers on their own, in every spelling — e.g. an attention LoRA that also trains them.
+        for global in ["txt_in.in_layer", "txt_in.out_layer", "modulation.1"] {
+            let flat = global.replace('.', "_");
+            for key in [
+                format!("{global}.lora_A.weight"),
+                format!("transformer.{global}.lora_A.weight"),
+                format!("diffusion_model.{global}.lora_down.weight"),
+                format!("base_model.model.{global}.lora_A.weight"),
+                format!("lora_unet_{flat}.lora_down.weight"),
+                format!("lycoris_{flat}.lokr_w1"),
+            ] {
+                let mut keys =
+                    qwen_block_keys("transformer.", 32, &QWEN_2_1_ATTENTION, ".lora_A.weight");
+                keys.push(key.clone());
+                assert_eq!(
+                    detect_keys(&keys).as_deref(),
+                    Some("qwen-image-2-1"),
+                    "{key:?}"
+                );
+            }
+        }
+    }
+
+    /// sc-24158: the 2.1 markers never claim a 2512 adapter or a lookalike from another family.
+    /// 2512's MLP is `img_mlp.net.0.proj` / `img_mlp.net.2` and it has no `txt_in.in_layer` /
+    /// top-level `modulation.1`; `modulation.1` is a substring of `adaLN_modulation.1` (Z-Image,
+    /// FLUX.2), so the global markers must be anchored, and FLUX's `time_in.in_layer` is not
+    /// `txt_in.in_layer`.
+    #[test]
+    fn qwen_image_2512_keys_still_resolve_to_qwen_image_not_2_1() {
+        let modules_2512 = [
+            "attn.to_q",
+            "attn.to_k",
+            "attn.to_v",
+            "attn.to_out.0",
+            "attn.add_q_proj",
+            "attn.add_k_proj",
+            "attn.add_v_proj",
+            "attn.to_add_out",
+            "img_mlp.net.0.proj",
+            "img_mlp.net.2",
+            "txt_mlp.net.0.proj",
+            "txt_mlp.net.2",
+            "img_mod.1",
+            "txt_mod.1",
+        ];
+        for prefix in ["", "transformer.", "diffusion_model."] {
+            let keys = qwen_block_keys(prefix, 60, &modules_2512, ".lora_A.weight");
+            assert!(!keys.iter().any(|key| is_qwen_image_2_1_key(key)));
+            assert_eq!(
+                detect_keys(&keys).as_deref(),
+                Some("qwen-image"),
+                "{prefix:?}"
+            );
+        }
+        let flattened = qwen_block_keys_flattened("lora_unet_", 60, &modules_2512);
+        assert!(!flattened.iter().any(|key| is_qwen_image_2_1_key(key)));
+        assert_eq!(detect_keys(&flattened).as_deref(), Some("qwen-image"));
+        // 2512 attention-only, but its joint-attention `add_*` projections (absent from 2.1) put
+        // it in the MmDit bucket and the block span reaches past anything 2.1 has: `qwen-image`
+        // is a legitimate key-based conclusion.
+        let attention_2512 = qwen_block_keys(
+            "transformer.",
+            60,
+            &[
+                "attn.to_q",
+                "attn.to_k",
+                "attn.to_v",
+                "attn.add_q_proj",
+                "attn.add_k_proj",
+            ],
+            ".lora_A.weight",
+        );
+        assert_eq!(detect_keys(&attention_2512).as_deref(), Some("qwen-image"));
+        for lookalike in [
+            "diffusion_model.final_layer.adaLN_modulation.1.lora_A.weight",
+            "lora_unet_final_layer_adaLN_modulation_1.lora_down.weight",
+            "layers.0.adaLN_modulation.1.lora_A.weight",
+            "time_in.in_layer.lora_A.weight",
+            "lora_unet_time_in_in_layer.lora_down.weight",
+            "double_blocks.0.img_mlp.0.lora_A.weight",
+            "transformer_blocks.0.img_mlp.net.0.proj.lora_A.weight",
+            "lora_unet_transformer_blocks_0_img_mlp_net_0_proj.lora_down.weight",
+            "txt_in.lora_A.weight",
+            "transformer_blocks.0.img_mod.1.lora_A.weight",
+        ] {
+            assert!(!is_qwen_image_2_1_key(lookalike), "{lookalike:?}");
+        }
+    }
+
+    /// sc-24158 (E10): an attention-only metadata-less adapter over ≤32 blocks carries nothing
+    /// that separates Qwen-Image 2.1 from a sparse 2512 adapter, so it stays family-UNRESOLVED
+    /// (the user picks) — never auto-labelled `qwen-image`.
+    #[test]
+    fn attention_only_qwen_shaped_lora_within_32_blocks_is_unresolved() {
+        for prefix in ["", "transformer.", "diffusion_model."] {
+            let keys = qwen_block_keys(prefix, 32, &QWEN_2_1_ATTENTION, ".lora_A.weight");
+            assert_eq!(detect_keys(&keys), None, "{prefix:?}");
+        }
+        let flattened = qwen_block_keys_flattened("lora_unet_", 32, &QWEN_2_1_ATTENTION);
+        assert_eq!(detect_keys(&flattened), None);
+        // Even a 60-block attention-only span with NO 2512-only module is not claimed: the bare
+        // `attn.to_*` layout is shared by Krea and other single-stream DiTs.
+        let deep = qwen_block_keys("transformer.", 60, &QWEN_2_1_ATTENTION, ".lora_A.weight");
+        assert_eq!(detect_keys(&deep), None);
     }
 
     /// A Mage adapter is offered on Mage models and nowhere else: the detected token is the

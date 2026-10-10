@@ -602,9 +602,14 @@ const RULES: &[MemoryRouteRule] = &[
     // (what the matrix and the campaign key on) stays the request's own mode, while the provider
     // receives the one mode it implements.
     //
-    // `PLAIN` and not `PLAIN_LORA`: the provider declares `supports_lora`/`supports_lokr` false on
-    // both lanes and refuses an adapter with a typed Unsupported, so the lora profile is not
-    // reachable at all — it is absent rather than exempted.
+    // `PLAIN_LORA` (sc-24163): the pinned providers apply LoRA/LoKr (MLX sc-24156, Candle
+    // sc-24157) and the pinned engine reports `supports_lora=true`, and since sc-24158 the routing
+    // catalog sends a LoRA-carrying 2.1 job to Candle (`candle_quant_lora`). Until the terminal pin
+    // bump these rows stayed `PLAIN` (sc-24158) because they are published as
+    // `memoryRouteWitnesses` in the checked-in engine capability dumps and the macOS lane's
+    // fresh-dump check reds on any witness the pinned dump lacks; the `lora` profile moved here
+    // together with that re-dump and the `lora` overlay/profile on the manifest's hand-authored
+    // contract rows.
     //
     // `requires_sequential_selection: false`: Resident is reachable with no sequential selection;
     // only the staged rung asks for one. `legacy_shaping: false`: this coordinate is
@@ -615,7 +620,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
         modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN,
+        load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
@@ -624,7 +629,7 @@ const RULES: &[MemoryRouteRule] = &[
         provider: "qwen_image_2_1",
         tiers: BF16_Q4_Q8,
         modes: QWEN_IMAGE_2_1_MODES,
-        load_profiles: PLAIN,
+        load_profiles: PLAIN_LORA,
         requires_sequential_selection: false,
         legacy_shaping: false,
     },

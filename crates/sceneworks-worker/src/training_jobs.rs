@@ -11,7 +11,7 @@
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
 //! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
-//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`)
+//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`/`qwen_image_2_1_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
 //! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
@@ -102,6 +102,18 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
     // real run (both call this), so both reject the same forged filename before any join.
     safe_weight_filename(&plan.output.file_name, "Training fileName")?;
+    // sc-24161: the T2I and edit kernels share one engine trainer (cap 10), so the engine floor
+    // alone cannot tell an edit adapter trained under the T2I target from the intended one. The
+    // kernel decides: an edit kernel needs references on every item, any other kernel on none.
+    if let Some(message) = sceneworks_core::training::edit_pair_kernel_shape_error(
+        &plan.target.kernel,
+        plan.dataset
+            .items
+            .iter()
+            .map(|item| item.reference_image_paths.len()),
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -112,6 +124,19 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         )?;
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
+        }
+        // An instruction-edit pair's ordered references (sc-24161) are dataset images too: confined
+        // under the dataset root and required on disk, exactly like the target.
+        for reference in &item.reference_image_paths {
+            let reference_path = resolve_dataset_item_path(
+                settings,
+                &plan.dataset.root_path,
+                reference,
+                "Training dataset referenceImagePaths",
+            )?;
+            if !reference_path.exists() {
+                missing.push(reference_path.display().to_string());
+            }
         }
         // Resolve and validate the prepared-bundle contract here, but do not hash the source.
         // `preflight_training_run` materializes each distinct bundle exactly once into a private
@@ -908,14 +933,27 @@ fn training_request_from_plan(
                         )
                     })
                     .transpose()?,
+                subject_mask_path: None,
                 model_options: prepared_inputs.resolve_model_options(
                     settings,
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
-                // Instruction-edit references (sc-24161, inference Qwen Image 2.1 LoRA): this tree's
-                // dataset plan carries none yet, so every item trains captioned/control-only.
-                reference_image_paths: Vec::new(),
+                // Instruction-edit pairs (sc-24161): the ORDERED references resolve under the
+                // dataset root exactly like the target image, in plan order — the engine numbers
+                // them, so the order is semantic. Empty for every captioned/control item.
+                reference_image_paths: item
+                    .reference_image_paths
+                    .iter()
+                    .map(|path| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            path,
+                            "Training dataset referenceImagePaths",
+                        )
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
@@ -951,6 +989,11 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
+    // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
+    gen_core::train::validate_edit_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -1329,6 +1372,15 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
+        // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
+        // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
+        // the 2.1 trainer over a different architecture.
+        "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
+        // Qwen Image 2.1 instruction-edit LoRA/LoKr (epic 24107 S13, sc-24161): the SAME engine
+        // trainer — it trains edit mode when the items carry ordered references. Base-gated like
+        // the T2I kernel so no other base can load the 2.1 trainer.
+        "qwen_image_2_1_edit_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -1409,6 +1461,24 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .unwrap_or(default)
+}
+
+/// The `LoadSpec.precision` a trainer is loaded with. Generally it tracks `train_dtype` (the MLX
+/// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
+/// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
+/// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
+/// load at Bf16 or it dies at load. The engine id is shared by the MLX and Candle (sc-24160) 2.1
+/// trainers, so the one rule covers both native backends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
+    if engine_id != "qwen_image_2_1" && train_dtype.trim().eq_ignore_ascii_case("f32") {
+        Precision::Fp32
+    } else {
+        Precision::Bf16
+    }
 }
 
 /// Normalize the advanced `mixedPrecision` string onto the engine's `train_dtype`
@@ -1501,6 +1571,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // `false`, and the shared dry/real preflight rejects a forged `true` plan before load.
         gradient_checkpointing: advanced_bool(advanced, "gradientCheckpointing", false),
         full_finetune,
+        // Current inference accepts an optional adapter path for resumed/continued training.
+        // SceneWorks creates a fresh adapter for this route, so preserve that contract explicitly.
+        training_adapter: None,
         trigger_word: config.trigger_word.clone(),
         // sc-5637 — preview-sample cadence. The SceneWorks config + UI always supply these (presets
         // set `sampleEvery`/`sampleSteps`/`sampleGuidanceScale`; the submit derives `samplePrompts`
@@ -1546,6 +1619,9 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+        // New optional inference techniques remain disabled until SceneWorks exposes and validates
+        // their product inputs. Every established field above stays explicitly mapped.
+        ..Default::default()
     }
 }
 
@@ -1573,7 +1649,8 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
 /// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
-/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and both Wan A14B MoE variants. The dense
+/// candle-trainable big-DiT families: Z-Image, LTX-2.3, both Wan A14B MoE variants, and Qwen Image
+/// 2.1 (sc-24160). The dense
 /// Wan TI2V-5B trainer can honor the submitted value and is not forced. Krea 2 Raw is a 12B DiT
 /// (epic 7565 P4, sc-8614) —
 /// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
@@ -1596,6 +1673,10 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
             plan.target.base_model.as_str(),
             "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b"
         ),
+        // Qwen Image 2.1 (sc-24160) trains LoRA/LoKr over its dense bf16 multi-billion-parameter
+        // MMDiT — the same frozen-weight-gradient OOM class, so force checkpointing on.
+        // sc-24162: the instruction-edit kernel trains the same MMDiT (plus reference tokens).
+        "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => true,
         _ => false,
     }
 }
@@ -1839,8 +1920,8 @@ pub(crate) async fn run_training_execution(
     //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
-    // forces gradient checkpointing on for them (Z-Image and both Wan A14B variants) regardless of
-    // the plan value.
+    // forces gradient checkpointing on for them (see `candle_requires_gradient_checkpointing`)
+    // regardless of the plan value.
     // On macOS this is the identity. See its doc comment for the why.
     let sample_config = prepared_run.request.config.clone();
     let total_steps = prepared_run.request.config.steps;
@@ -1869,16 +1950,8 @@ pub(crate) async fn run_training_execution(
             // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
             // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
             // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if request
-                .config
-                .train_dtype
-                .trim()
-                .eq_ignore_ascii_case("f32")
-            {
-                Precision::Fp32
-            } else {
-                Precision::Bf16
-            };
+            // Qwen Image 2.1 is pinned to Bf16 on BOTH native backends (`training_load_precision`).
+            let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
             let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
             spec.precision = load_precision;
             // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
@@ -3130,6 +3203,145 @@ mod tests {
         );
     }
 
+    /// sc-24161: the worker maps a plan's instruction-edit items onto engine `TrainingItem`s whose
+    /// `reference_image_paths` carry the references IN PLAN ORDER (resolved under the dataset root,
+    /// target = item image, instruction = caption), and a plain plan still builds items with no
+    /// references at all. A reference escaping the dataset root is refused, like the target.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_edit_references_in_order_and_plain_items_carry_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        let target = dataset_root.join("images").join("item_0001.png");
+        std::fs::write(&target, b"target").expect("write target");
+        // Deliberately NOT lexical order: the stored order is semantic and must survive verbatim.
+        let ordered = [
+            "item_0001_ref3.png",
+            "item_0001_ref1.png",
+            "item_0001_ref2.png",
+        ];
+        for name in ordered {
+            std::fs::write(refs_dir.join(name), name.as_bytes()).expect("write reference");
+        }
+
+        let mut value = plan_json(
+            &data_dir,
+            "qwen_image_2_1_edit_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        );
+        value["dataset"]["items"][0]["caption"] = json!("put the hat from image 2 on image 1");
+        value["dataset"]["items"][0]["referenceImagePaths"] = json!(ordered
+            .iter()
+            .map(|name| format!("images/refs/{name}"))
+            .collect::<Vec<_>>());
+        let plan = parse(value);
+        validate_training_plan(&settings, &plan).expect("edit plan validates");
+        let mut prepared_inputs = PreparedTrainingInputs::default();
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+            .expect("edit plan maps to a request");
+        let item = &request.items[0];
+        assert!(item.is_edit_pair());
+        assert_eq!(item.image_path, target.canonicalize().unwrap());
+        assert_eq!(item.caption, "put the hat from image 2 on image 1");
+        assert_eq!(
+            item.reference_image_paths,
+            ordered
+                .iter()
+                .map(|name| refs_dir.join(name).canonicalize().unwrap())
+                .collect::<Vec<_>>(),
+            "references must reach the engine in plan order"
+        );
+        assert_eq!(item.control_image_path, None);
+
+        // A plain T2I plan builds captioned items with NO references.
+        let plain = parse(plan_json(
+            &data_dir,
+            "qwen_image_2_1_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        ));
+        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs)
+            .expect("plain plan maps to a request");
+        assert!(request.items.iter().all(|item| !item.is_edit_pair()));
+        assert!(request.items[0].reference_image_paths.is_empty());
+
+        // A missing reference is reported like a missing target image, and one escaping the dataset
+        // root is refused outright.
+        let mut missing = plan.clone();
+        missing.dataset.items[0]
+            .reference_image_paths
+            .push("images/refs/absent.png".to_owned());
+        let error = validate_training_plan(&settings, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+        let mut escaping = plan.clone();
+        let outside = data_dir.join("outside.png");
+        std::fs::write(&outside, b"outside").expect("write outside");
+        escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
+        assert!(training_request_from_plan(&settings, &escaping, &mut prepared_inputs).is_err());
+        prepared_inputs.close().expect("close prepared inputs");
+    }
+
+    /// sc-24161 review: both 2.1 kernels map to the one `qwen_image_2_1` engine trainer, so the
+    /// worker itself refuses a plan whose edit shape contradicts its KERNEL — references under the
+    /// T2I kernel (would train an edit adapter as a T2I target) and a reference-less item under the
+    /// edit kernel (would train T2I as an edit target) — whatever route queued it.
+    #[test]
+    fn worker_refuses_plans_whose_edit_shape_contradicts_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let image = data_dir.join("datasets").join("ds-1").join("a.png");
+        let plan_for = |kernel: &str, refs: &[Value]| {
+            let mut value = plan_json(
+                &data_dir,
+                kernel,
+                "qwen_image_2_1",
+                "lora",
+                &[&image.display().to_string(), &image.display().to_string()],
+            );
+            value["dataset"]["items"][1]["referenceImagePaths"] = json!(refs);
+            parse(value)
+        };
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_lora") && error.contains("captioned images only"),
+            "{error}"
+        );
+        // Item 0 has no references under the edit kernel (item 1 does): mixed is refused too.
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_edit_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_edit_lora") && error.contains("item 0"),
+            "{error}"
+        );
+        // A plain T2I plan passes the shape floor (it then reports the missing images instead).
+        let error = validate_training_plan(&settings, &plan_for("qwen_image_2_1_lora", &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+    }
+
     /// A complete resolved plan as the API serializes it, parameterized by the
     /// fields the worker glue reads. `baseModelPath` is a path that does not exist,
     /// so `baseModelInstalled` is false unless a test overrides it.
@@ -3327,6 +3539,33 @@ mod tests {
         ));
         let ltx = finalize_training_config(map_training_config(&ltx_plan.config), &ltx_plan);
         assert_eq!(ltx.train_dtype, "f32", "candle LTX training requires f32");
+        // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
+        // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
+        // left alone (unlike LTX's f32 normalization).
+        // sc-24162: the instruction-edit kernel is forced too.
+        for (kernel, network_type) in [
+            ("qwen_image_2_1_lora", "lora"),
+            ("qwen_image_2_1_lora", "lokr"),
+            ("qwen_image_2_1_edit_lora", "lora"),
+            ("qwen_image_2_1_edit_lora", "lokr"),
+        ] {
+            let mut value = plan_json(
+                dir.path(),
+                kernel,
+                "qwen_image_2_1",
+                network_type,
+                &[&image],
+            );
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
+            value["config"]["advanced"]["mixedPrecision"] = json!("bf16");
+            let plan = parse(value);
+            let config = finalize_training_config(map_training_config(&plan.config), &plan);
+            assert!(
+                config.gradient_checkpointing,
+                "{kernel} {network_type} forces gradient checkpointing on candle"
+            );
+            assert_eq!(config.train_dtype, "bf16", "{kernel}/{network_type}");
+        }
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
             !finalized_checkpointing("sdxl_lora", "sdxl"),
@@ -3665,6 +3904,34 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
+        // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
+        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
+        for dtype in ["f32", "F32", "bf16"] {
+            assert!(
+                matches!(
+                    training_load_precision("qwen_image_2_1", dtype),
+                    Precision::Bf16
+                ),
+                "{dtype}"
+            );
+        }
+        // Every other trainer keeps tracking train_dtype.
+        assert!(matches!(
+            training_load_precision("lens", "f32"),
+            Precision::Fp32
+        ));
+        assert!(matches!(
+            training_load_precision("lens", "bf16"),
+            Precision::Bf16
+        ));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
         let ltx_2_5_trainer = if cfg!(target_os = "macos") {
             "ltx_2_5"
@@ -3712,6 +3979,24 @@ mod tests {
             // the generation-only conditioning path (the Edit variants need reference tokens).
             ("mage_flow_lora", "mage_flow_edit_base", None),
             ("mage_flow_lora", "mage_flow_turbo", None),
+            // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
+            // The distinct 2512 `qwen_image` / Edit models never resolve to it.
+            (
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_lora", "qwen_image", None),
+            ("qwen_image_2_1_lora", "qwen_image_edit", None),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the SAME engine trainer in edit mode,
+            // base-gated the same way.
+            (
+                "qwen_image_2_1_edit_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_edit_lora", "qwen_image", None),
+            ("qwen_image_2_1_edit_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -3791,6 +4076,271 @@ mod tests {
             };
             assert!(supported, "{target_id}/{network_type} is not implemented");
         }
+    }
+
+    /// The pinned inference checkout's Qwen-Image 2.1 tiny snapshot (configs, tokenizer and
+    /// header-sized synthetic safetensors — no real weights). Located through `cargo metadata`
+    /// because a git dependency's source directory is not exposed at compile time; the fixture
+    /// lives in the same inference checkout as the pinned `sceneworks-gen-core` crate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn pinned_qwen_image_2_1_tiny_snapshot() -> PathBuf {
+        // Filtered to this build's own target (exported by build.rs) so cargo needs only the
+        // packages this build already fetched (an unfiltered resolve would want the macOS-only
+        // graph's sources too).
+        const HOST: &str = env!("SW_HOST_TARGET");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_owned());
+        let output = std::process::Command::new(cargo)
+            .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+            .args(["--filter-platform", HOST])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+        let gen_core_manifest = metadata["packages"]
+            .as_array()
+            .expect("metadata packages")
+            .iter()
+            .find(|package| {
+                package["name"] == "sceneworks-gen-core"
+                    && package["source"]
+                        .as_str()
+                        .is_some_and(|source| source.starts_with("git+"))
+            })
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("the pinned sceneworks-gen-core git package");
+        // <checkout>/crates/contracts/gen-core/Cargo.toml -> <checkout>
+        let checkout = Path::new(gen_core_manifest)
+            .ancestors()
+            .nth(4)
+            .expect("inference checkout root");
+        let snapshot = checkout
+            .join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
+        assert!(
+            snapshot.join("transformer").join("config.json").is_file(),
+            "pinned Qwen-Image 2.1 tiny snapshot missing at {}",
+            snapshot.display()
+        );
+        snapshot
+    }
+
+    /// sc-24163: SceneWorks' advanced map for `qwen_image_2_1_lora` — the target's own defaults and
+    /// every shipped preset, for each advertised network type — is accepted END TO END by the
+    /// pinned Candle 2.1 trainer: the plan goes through the real `map_training_config` +
+    /// `finalize_training_config` (via the shared dry/real preflight, which also runs the
+    /// registry-descriptor floors), and the resulting request then passes the engine trainer's
+    /// own `validate`, loaded through the engine registry from a weights-free tiny snapshot.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_builtin_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("qwen_image_2_1_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 target ships presets");
+        let network_types: Vec<String> = target.limits["networkTypes"]
+            .as_array()
+            .expect("networkTypes")
+            .iter()
+            .map(|value| value.as_str().expect("network type").to_owned())
+            .collect();
+        assert_eq!(network_types, ["lora", "lokr"]);
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in &network_types {
+                let mut serialized = plan_json(
+                    dir.path(),
+                    &target.kernel,
+                    &target.base_model,
+                    network_type,
+                    &[&image],
+                );
+                serialized["target"]["targetId"] = json!(target.id);
+                serialized["target"]["family"] = json!(target.family);
+                let mut config = serde_json::to_value(config).expect("config serializes");
+                config["advanced"]["networkType"] = json!(network_type);
+                serialized["config"] = config;
+                let plan = parse(serialized);
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * network_types.len());
+    }
+
+    /// sc-24161/sc-24162: the instruction-EDIT target's defaults and every shipped edit preset, for
+    /// each network type, with an EDIT-PAIR plan (ordered references + target + instruction), pass
+    /// the shared preflight AND the pinned Candle 2.1 trainer's own weights-free `validate` — the
+    /// references reach the engine in plan order, with the shipped preview cadence (sc-24163: the
+    /// engine renders edit previews conditioned on the first item's references). Its negative
+    /// twins: the same request with the references stripped is accepted by the engine as T2I and
+    /// refused by the SceneWorks kernel floor; with more references than the trainer's cap it is
+    /// refused naming the cap.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_edit_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+        let ref_names: Vec<String> = (1..=11).map(|index| format!("x_ref{index}.png")).collect();
+        for name in &ref_names {
+            std::fs::write(refs_dir.join(name), b"png").expect("reference");
+        }
+        let refs = |count: usize| -> Vec<String> {
+            ref_names[..count]
+                .iter()
+                .rev()
+                .map(|name| format!("images/refs/{name}"))
+                .collect()
+        };
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("qwen_image_2_1_edit_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 edit target ships presets");
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+        assert_eq!(trainer.descriptor().max_reference_images, 10);
+
+        let plan_for = |config: &sceneworks_core::training::TrainingConfig,
+                        network_type: &str,
+                        references: Vec<String>| {
+            let mut serialized = plan_json(
+                dir.path(),
+                &target.kernel,
+                &target.base_model,
+                network_type,
+                &[&image],
+            );
+            serialized["target"]["targetId"] = json!(target.id);
+            serialized["target"]["family"] = json!(target.family);
+            serialized["dataset"]["items"][0]["caption"] =
+                json!("put the hat from image 2 on image 1");
+            serialized["dataset"]["items"][0]["referenceImagePaths"] = json!(references);
+            let mut config = serde_json::to_value(config).expect("config serializes");
+            config["advanced"]["networkType"] = json!(network_type);
+            // The UI always submits a prompt pool (prefilled from the trigger phrase).
+            config["advanced"]["samplePrompts"] = json!(["make the hat red"]);
+            serialized["config"] = config;
+            parse(serialized)
+        };
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in ["lora", "lokr"] {
+                let plan = plan_for(config, network_type, refs(3));
+                let prepared = preflight_training_run(&settings, &plan).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                let item = &prepared.request.items[0];
+                assert_eq!(
+                    item.reference_image_paths
+                        .iter()
+                        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                    ["x_ref3.png", "x_ref2.png", "x_ref1.png"],
+                    "{label}/{network_type}: references reach the engine in plan order"
+                );
+                // Previews ON with the T2I cadence (sc-24163), reaching the engine request.
+                assert_eq!(
+                    (
+                        prepared.request.config.sample_every,
+                        prepared.request.config.sample_prompts.as_slice(),
+                    ),
+                    (500, ["make the hat red".to_owned()].as_slice()),
+                    "{label}/{network_type}: edit previews reach the engine"
+                );
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+
+                // Negative twins against the same pinned engine floor.
+                let mut stripped = prepared.request.clone();
+                stripped.items[0].reference_image_paths.clear();
+                assert!(
+                    gen_core::train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
+                    "a plain request is a T2I request to the engine — the KERNEL floor refuses it"
+                );
+                let mut over = prepared.request.clone();
+                over.items[0].reference_image_paths = (1..=11)
+                    .map(|index| refs_dir.join(format!("x_ref{index}.png")))
+                    .collect();
+                let error = trainer.validate(&over).unwrap_err().to_string();
+                assert!(
+                    error.contains("at most 10"),
+                    "{label}/{network_type}: {error}"
+                );
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * 2);
+
+        // The kernel floor: the edit kernel refuses the reference-less plan the engine would accept.
+        let error =
+            preflight_training_run(&settings, &plan_for(&target.defaults, "lora", Vec::new()))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("qwen_image_2_1_edit_lora"), "{error}");
     }
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -4895,12 +5445,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5009,12 +5561,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5126,12 +5680,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5281,12 +5837,14 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            ..Default::default()
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5472,6 +6030,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],
@@ -5713,6 +6272,7 @@ mod tests {
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
                 reference_image_paths: Vec::new(),
             }],

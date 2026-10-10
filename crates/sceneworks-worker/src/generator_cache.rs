@@ -2727,6 +2727,9 @@ mod tests {
 
     #[test]
     fn prepared_directory_members_participate_in_cache_identity() {
+        use std::fs::{File, FileTimes};
+        use std::time::{Duration, SystemTime};
+
         let root = tempfile::tempdir().expect("temp dir");
         let transformer = root.path().join("transformer");
         std::fs::create_dir(&transformer).expect("create transformer dir");
@@ -2734,6 +2737,18 @@ mod tests {
         let weights = transformer.join("diffusion_pytorch_model.safetensors");
         std::fs::write(&config, b"{\"kind\":\"mage\"}").expect("write config");
         std::fs::write(&weights, b"weights-v1").expect("write weights");
+        let initial_mtime = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let replacement_mtime = initial_mtime + Duration::from_secs(120);
+        let set_weights_mtime = |mtime| {
+            File::options()
+                .write(true)
+                .open(&weights)
+                .expect("open weights for timestamp fixture")
+                .set_times(FileTimes::new().set_modified(mtime))
+                .expect("set weights timestamp");
+        };
+        set_weights_mtime(initial_mtime);
+        let original_metadata = std::fs::metadata(&weights).expect("original metadata");
 
         let make_spec = || {
             let mut spec = LoadSpec::new(WeightsSource::Dir(transformer.clone()));
@@ -2752,6 +2767,16 @@ mod tests {
         }
 
         std::fs::write(&weights, b"weights-v2").expect("replace child in place");
+        // Preserve the same-size overwrite while making the metadata change deterministic:
+        // two immediate writes can share both mtime and ctime on a coarse clock.
+        set_weights_mtime(replacement_mtime);
+        let replacement_metadata = std::fs::metadata(&weights).expect("replacement metadata");
+        assert_eq!(original_metadata.len(), replacement_metadata.len());
+        assert_ne!(
+            original_metadata.modified().expect("original mtime"),
+            replacement_metadata.modified().expect("replacement mtime"),
+            "the same-size replacement fixture must have a distinct mtime"
+        );
         let key_v2 = LoadIdentity::try_from_load_spec("mage_flow_base", &make_spec())
             .expect("replacement directory identity");
         assert_ne!(

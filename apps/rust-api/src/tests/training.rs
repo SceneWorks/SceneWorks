@@ -5417,3 +5417,614 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
         "a torn checkpoint must not register a user model"
     );
 }
+
+/// Materialize a resolvable HF-cache snapshot for `repo` (refs/main → `revision`), returning its dir.
+fn seed_hf_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> std::path::PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+    snapshot
+}
+
+fn qwen_image_2_1_training_target() -> sceneworks_core::training::TrainingTarget {
+    crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("Qwen Image 2.1 training target")
+}
+
+/// sc-24159: 2.1 trains the dense bf16 base only (QLoRA is an epic non-goal). Its bf16 tier is the
+/// upstream `Qwen/Qwen-Image-2.1` snapshot and its q8/q4 tiers a SEPARATE SceneWorks re-host, so a
+/// host that installed only a quantized tier must hear "install the bf16 tier", not "not installed".
+#[test]
+fn qwen_image_2_1_training_needs_the_bf16_tier_not_a_quantized_one() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = qwen_image_2_1_training_target();
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Missing,
+        "nothing installed is the generic install message"
+    );
+
+    // Only the q4 generation tier from the re-host.
+    let rehost = seed_hf_snapshot(&data_dir, "SceneWorks/qwen-image-2-1-mlx", "rehost-rev");
+    std::fs::create_dir_all(rehost.join("q4").join("transformer")).expect("q4 tier");
+    let status = training_base_model_status(&data_dir, &target);
+    assert_eq!(status, TrainingBaseStatus::TrainingTierMissing);
+    let message = training_base_unavailable_message(status, &target.base_model)
+        .expect("a quantized-only install blocks a real run");
+    assert!(
+        message.contains("bf16") && message.contains("qwen_image_2_1"),
+        "the refusal must say to install the bf16 tier: {message}"
+    );
+
+    // The dense upstream snapshot is the training base, resolved flat (no `bf16/` subdir).
+    let dense = seed_hf_snapshot(&data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        dense.display().to_string(),
+        "training reads the dense upstream snapshot, never the q8/q4 re-host"
+    );
+}
+
+/// Pin the split-repo map to the manifest so the quantized-only detection cannot drift from what
+/// the catalog actually installs: the 2.1 quantized repos are exactly the manifest's non-bf16 tier
+/// repos, and the target's dense repo is exactly its `bf16` tier repo.
+#[test]
+fn quantized_generation_repos_match_the_manifest_tiers() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use std::collections::BTreeSet;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).expect("manifest parses");
+    let downloads = catalog["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == json!("qwen_image_2_1"))
+        .and_then(|model| model["downloads"].as_array())
+        .expect("qwen_image_2_1 downloads")
+        .clone();
+    let repos_for = |bf16: bool| -> BTreeSet<String> {
+        downloads
+            .iter()
+            .filter(|download| (download["variant"] == json!("bf16")) == bf16)
+            .filter_map(|download| download["repo"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let target = qwen_image_2_1_training_target();
+    assert_eq!(
+        repos_for(true),
+        BTreeSet::from([target.base_model_repo.clone().expect("dense repo")])
+    );
+    assert_eq!(
+        repos_for(false),
+        crate::training::quantized_generation_repos("qwen_image_2_1")
+            .iter()
+            .map(|repo| (*repo).to_owned())
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+/// sc-24159 (epic 24107 E12): the research-only restriction is shown before a 2.1 run starts, and the
+/// API is the backstop — a real run without the acknowledgment is refused with the same code as the
+/// pre-download gate. With it, the run queues and the adapter's library entry records the base model,
+/// the `qwen-image-2-1` family and the Qwen RESEARCH licence.
+#[tokio::test]
+async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the_adapter() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let dense = seed_hf_snapshot(&settings.data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Qwen set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "qwnStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = qwen_image_2_1_training_target();
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let body_with = |acknowledged: Option<bool>, dry_run: bool| {
+        let mut body = json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Qwen Style",
+            "dryRun": dry_run
+        });
+        if let Some(acknowledged) = acknowledged {
+            body["licenseAcknowledged"] = json!(acknowledged);
+        }
+        body
+    };
+    let body_for = |acknowledged: Option<bool>| body_with(acknowledged, false);
+
+    // The acceptance travels with an accepted job (so retry/duplicate re-validate), and is never
+    // stamped onto one that did not assert it — flipping that stored dry run to a real run through
+    // duplicate is refused by the raw-job gate.
+    let (status, acked_dry) =
+        request(app.clone(), "POST", &jobs_path, body_with(Some(true), true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{acked_dry}");
+    assert_eq!(acked_dry["payload"]["licenseAcknowledged"], json!(true));
+    // E12 on every host: the adapter entry this job would register records base, family, licence.
+    let dry_entry = &acked_dry["payload"]["manifestEntry"];
+    assert_eq!(dry_entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(dry_entry["family"], "qwen-image-2-1");
+    assert_eq!(dry_entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    let (status, bare_dry) = request(app.clone(), "POST", &jobs_path, body_with(None, true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{bare_dry}");
+    assert!(bare_dry["payload"].get("licenseAcknowledged").is_none());
+    let bare_id = bare_dry["id"].as_str().expect("job id");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{bare_id}/duplicate"),
+        json!({ "payloadChanges": { "dryRun": false } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("license_acknowledgment_required"));
+
+    for acknowledged in [None, Some(false)] {
+        let (status, body) = request(app.clone(), "POST", &jobs_path, body_for(acknowledged)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{acknowledged:?}: {body}");
+        assert_eq!(body["code"], json!("license_acknowledgment_required"));
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("Qwen RESEARCH LICENSE AGREEMENT"),
+            "the refusal names the licence: {detail}"
+        );
+    }
+
+    // sc-24160: both native backends train 2.1, so an accepted real run queues on every host (the
+    // off-Mac host refusal no longer applies to it).
+    let (status, job) = request(app.clone(), "POST", &jobs_path, body_for(Some(true))).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["licenseAcknowledged"], json!(true));
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    assert_eq!(
+        entry["licenseUrl"],
+        json!(sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL)
+    );
+}
+
+/// sc-24159: off-Mac only candle workers train, so a real run for a kernel with no candle trainer is
+/// refused at submit rather than queued forever. Generic over the candle-routed kernel list; sc-24160
+/// added the 2.1 candle lane, so Qwen Image 2.1 is now submittable off-Mac too.
+#[test]
+fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
+    let targets = crate::builtin_training_targets().targets;
+    let qwen = qwen_image_2_1_training_target();
+    // sc-24160: the Candle trainer lifts the off-Mac refusal for 2.1.
+    assert!(
+        crate::training::training_host_unavailable_message(&qwen, false).is_none(),
+        "Qwen Image 2.1 has a candle trainer — it must be submittable off-Mac"
+    );
+    // The gate itself stays live for any kernel without a candle trainer.
+    let mut mlx_only = qwen.clone();
+    mlx_only.kernel = "hypothetical_mlx_only_lora".to_owned();
+    let message = crate::training::training_host_unavailable_message(&mlx_only, false)
+        .expect("a kernel with no candle trainer is refused off-Mac");
+    assert!(
+        message.contains("Apple Silicon") && message.contains(&mlx_only.name),
+        "{message}"
+    );
+    assert!(crate::training::training_host_unavailable_message(&mlx_only, true).is_none());
+    // sc-24162: the 2.1 instruction-EDIT kernel has its Candle trainer too, so it is submittable
+    // off-Mac like its T2I sibling.
+    let edit = targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target ships");
+    assert!(
+        crate::training::training_host_unavailable_message(edit, false).is_none(),
+        "the edit kernel has a candle trainer — it must be submittable off-Mac"
+    );
+    // Every candle-routed target stays submittable off-Mac.
+    for target in targets.iter().filter(|target| {
+        sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)
+    }) {
+        assert!(
+            crate::training::training_host_unavailable_message(target, false).is_none(),
+            "{}",
+            target.id
+        );
+    }
+}
+
+/// sc-24159: the raw `POST /api/v1/jobs` route cannot queue a licence-bound training plan around the
+/// typed route's gate — whether the plan names the target by id or only by kernel — while an
+/// acknowledged payload (what the typed route stores) and an explicit dry run still pass.
+#[tokio::test]
+async fn raw_jobs_route_enforces_the_training_licence_gate() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |target_id: &str, extra: Value| {
+        let mut payload = json!({
+            "dryRun": false,
+            "plan": { "target": {
+                "targetId": target_id,
+                "kernel": "qwen_image_2_1_lora",
+                "baseModel": "qwen_image_2_1"
+            } }
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": payload })
+    };
+    for body in [
+        raw("qwen_image_2_1_lora", json!({})),
+        raw("forged_target", json!({})),
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": false }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}: {response}");
+        assert_eq!(response["code"], json!("license_acknowledgment_required"));
+    }
+    for body in [
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": true }),
+        ),
+        raw("qwen_image_2_1_lora", json!({ "dryRun": true })),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_ne!(
+            response["code"],
+            json!("license_acknowledgment_required"),
+            "{body}: {response}"
+        );
+    }
+}
+
+/// sc-24161 review: the raw route refuses a hand-built plan whose edit-pair shape contradicts its
+/// kernel at submit — references under the T2I kernel, a reference-less item under the edit kernel —
+/// while a consistent plan passes this gate.
+#[tokio::test]
+async fn raw_jobs_route_refuses_edit_shape_kernel_mismatches() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |kernel: &str, items: Value| {
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": {
+            "dryRun": true,
+            "plan": {
+                "target": { "targetId": kernel, "kernel": kernel, "baseModel": "qwen_image_2_1" },
+                "dataset": { "items": items }
+            }
+        } })
+    };
+    let with_refs =
+        json!({ "imagePath": "/x/a.png", "caption": "edit", "referenceImagePaths": ["/x/r.png"] });
+    let plain = json!({ "imagePath": "/x/b.png", "caption": "plain" });
+    for (body, needle) in [
+        (
+            raw("qwen_image_2_1_lora", json!([with_refs.clone()])),
+            "captioned images only",
+        ),
+        (
+            raw(
+                "qwen_image_2_1_edit_lora",
+                json!([with_refs.clone(), plain.clone()]),
+            ),
+            "item 1",
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(needle),
+            "{body}: {response}"
+        );
+    }
+    for body in [
+        raw("qwen_image_2_1_edit_lora", json!([with_refs.clone()])),
+        raw("qwen_image_2_1_lora", json!([plain.clone()])),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert!(
+            !response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("referenceImagePaths"),
+            "{body}: {response}"
+        );
+    }
+}
+
+/// A target with no licence restriction is untouched by the gate, and its adapters carry no licence
+/// fields (the existing library entries keep their exact shape).
+#[test]
+fn unrestricted_targets_need_no_licence_acknowledgment() {
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z-image target");
+    assert!(
+        crate::training::training_license_acknowledgment_error(&target, &Default::default())
+            .is_none()
+    );
+    assert!(crate::training::trained_adapter_license_fields(&target).is_empty());
+}
+
+/// Upload `count` distinct image assets into `project_id`, returning their ids in upload order.
+async fn upload_distinct_assets(
+    app: &axum::Router,
+    project_id: &str,
+    stem: &str,
+    count: usize,
+) -> Vec<String> {
+    let mut ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("{stem}{index}.PNG"),
+            "image/png",
+            format!("png-bytes-{stem}-{index}").as_bytes(),
+        )
+        .await;
+        assert!(status.is_success(), "upload {stem}{index}: {asset}");
+        ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    ids
+}
+
+/// sc-24161: an instruction-edit dataset item stores its ORDERED references (target = item image,
+/// instruction = caption), a full-replacement save re-materializes them in the new order, and a dry
+/// run against the 2.1 edit target threads them into the plan in exactly that order — with the
+/// adapter recorded as an edit adapter. The API refuses an item above the reference cap (naming the
+/// cap), an edit dataset on a text-to-image target, and a plain dataset on the edit target.
+#[tokio::test]
+async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_over_cap() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Edit Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let targets = upload_distinct_assets(&app, &project_id, "Target", 2).await;
+    let refs = upload_distinct_assets(&app, &project_id, "Ref", 11).await;
+    let datasets_path = format!("/api/v1/projects/{project_id}/training/datasets");
+    let instruction = "Put the hat from image 2 on the person in image 1";
+
+    // Deliberately not upload order: the stored order is semantic.
+    let order = [&refs[2], &refs[0], &refs[1]];
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Hat edits",
+            "items": [{
+                "assetId": targets[0],
+                "caption": { "text": instruction },
+                "references": order.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let stored = dataset["items"][0]["references"]
+        .as_array()
+        .expect("stored references")
+        .clone();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        order.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        "references keep the order they were given"
+    );
+    for (index, reference) in stored.iter().enumerate() {
+        let path = reference["path"].as_str().expect("reference path");
+        assert!(
+            path.starts_with("images/refs/") && path.contains(&format!("_ref{}", index + 1)),
+            "reference {index} is materialized into the dataset: {path}"
+        );
+    }
+
+    // A full-replacement save (what the studio sends) re-orders them; GET returns the new order.
+    let reversed = [&refs[1], &refs[0], &refs[2]];
+    let mut items = dataset["items"].as_array().expect("items").clone();
+    items[0]["references"] = json!(reversed
+        .iter()
+        .map(|id| json!({ "assetId": id }))
+        .collect::<Vec<_>>());
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        &format!("{datasets_path}/{dataset_id}"),
+        json!({ "items": items }),
+    )
+    .await;
+    assert!(status.is_success(), "{updated}");
+    let (_, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("{datasets_path}/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        fetched["items"][0]["references"]
+            .as_array()
+            .expect("fetched references")
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        reversed.iter().map(|id| id.as_str()).collect::<Vec<_>>()
+    );
+
+    let edit = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let dry_run = |target: &sceneworks_core::training::TrainingTarget, dataset_id: &str| {
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Hat Edit",
+            "dryRun": true
+        })
+    };
+    let (status, job) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &dataset_id)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let plan_item = &job["payload"]["plan"]["dataset"]["items"][0];
+    assert_eq!(plan_item["caption"], json!(instruction));
+    let plan_refs = plan_item["referenceImagePaths"]
+        .as_array()
+        .expect("plan carries the ordered references")
+        .iter()
+        .map(|path| std::path::PathBuf::from(path.as_str().expect("path string")))
+        .collect::<Vec<_>>();
+    assert_eq!(plan_refs.len(), 3);
+    for (index, path) in plan_refs.iter().enumerate() {
+        assert!(path.is_absolute() && path.is_file(), "{}", path.display());
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&format!("_ref{}", index + 1))),
+            "plan reference {index} out of order: {}",
+            path.display()
+        );
+    }
+    // Byte identity: the plan's first reference is the asset the user put FIRST (refs[1]).
+    assert_eq!(
+        std::fs::read(&plan_refs[0]).expect("read first reference"),
+        b"png-bytes-Ref-1".to_vec()
+    );
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_edit_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["trainingMode"], "edit");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+
+    // An edit dataset on the text-to-image target is refused (never T2I trained on edit targets).
+    let t2i = qwen_image_2_1_training_target();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&t2i, &dataset_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("captioned images only"),
+        "{body}"
+    );
+
+    // A plain captioned dataset on the edit target is refused.
+    let (_, plain) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Plain",
+            "items": [{ "assetId": targets[1], "caption": { "text": "a portrait" } }]
+        }),
+    )
+    .await;
+    let plain_id = plain["id"].as_str().expect("plain dataset id").to_owned();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &plain_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at least one reference image"),
+        "{body}"
+    );
+
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Too many",
+            "items": [{
+                "assetId": targets[1],
+                "caption": { "text": instruction },
+                "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("11 reference images") && detail.contains("at most 10"),
+        "the refusal names the count and the cap: {detail}"
+    );
+}

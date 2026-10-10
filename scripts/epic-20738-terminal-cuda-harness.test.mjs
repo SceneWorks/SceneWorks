@@ -3288,7 +3288,7 @@ test("continuation freezes census, downloads once, and JIT stages exact authorit
           derivedSidecarRoot: path.join(scratch, "derived-candle-device-cache"),
           missingStore: path.join(scratch, "persistent-missing-file"),
           expectedNonModelPaths: [
-            { kind: "cargoTarget", path: path.resolve(sceneworks, "target") },
+            { kind: "cargoTarget", path: path.resolve(process.env.CARGO_TARGET_DIR ?? path.join(sceneworks, "target")) },
             { kind: "cargoHome", path: path.resolve(process.env.CARGO_HOME ?? path.join(process.env.USERPROFILE ?? scratch, ".cargo")) },
             { kind: "campaignOutput", path: output },
             { kind: "pythonVenv", path: path.dirname(path.dirname(path.resolve("python"))) },

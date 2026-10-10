@@ -4,10 +4,12 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
+import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
 // capture plans, so the inventory below reads them directly.
@@ -742,6 +744,104 @@ test("macos-mlx fetches the Release prebuilt before its release-built calibratio
   }
 });
 
+test("the mlx memory campaign fetches the Release prebuilt for its release-built adapter", async () => {
+  // sc-24163: the same trap as above on the campaign lane -- run 34616773217 died in "Build the MLX
+  // memory adapter" on nax-macos-2 because the fetch took the script's Debug default while the
+  // adapter builds `--release`.
+  const mlx = workflowJob(await source(CAMPAIGN_WORKFLOW), "mlx");
+  const fetch = workflowStep(mlx, "Fetch prebuilt MLX (sc-21382)");
+  assert.match(fetch, /scripts\/fetch-prebuilt-mlx\.sh --build-type Release --github-env/);
+  assert.doesNotMatch(fetch, /scripts\/fetch-prebuilt-mlx\.sh --github-env/);
+  // No Release asset falls back to the source build by CLEARING the variables.
+  assert.match(fetch, /echo "PMETAL_MLX_PREBUILT_DIR=" >> "\$GITHUB_ENV"/);
+  assert.match(fetch, /echo "PMETAL_METALLIB_PATH=" >> "\$GITHUB_ENV"/);
+  const build = workflowStep(mlx, "Build the MLX memory adapter");
+  assert.ok(mlx.indexOf(fetch) < mlx.indexOf(build), "the Release fetch must precede the build");
+  assert.match(build, /cargo build --release --locked -p sceneworks-memory-adapter/);
+});
+
+const campaignBash = process.platform === "win32" ? "C:/Program Files/Git/bin/bash.exe" : "bash";
+
+test("the mlx memory campaign clears stale prebuilt paths only for an absent Release asset", async () => {
+  const fetch = workflowStep(workflowJob(await source(CAMPAIGN_WORKFLOW), "mlx"), "Fetch prebuilt MLX (sc-21382)");
+  const body = fetch.split("        run: |\n")[1].split("\n").map((line) => line.replace(/^ {10}/, "")).join("\n");
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "campaign-release-"));
+  const bash = promisify(execFile);
+  try {
+    await writeFile(path.join(root, "fixture-fetch.sh"), 'if [ "$FIXTURE_FETCH_RC" = 0 ]; then\n  printf "%s\\n" PMETAL_MLX_PREBUILT_DIR=Release PMETAL_METALLIB_PATH=Release.metallib >> "$GITHUB_ENV"\nfi\nexit "$FIXTURE_FETCH_RC"\n');
+    const script = `set -e\n${body.replace("scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env", "bash ./fixture-fetch.sh --build-type Release --github-env")}`;
+    for (const rc of [0, 1, 2]) {
+      const output = path.join(root, `env-${rc}`);
+      await writeFile(output, "PMETAL_MLX_PREBUILT_DIR=Debug\nPMETAL_METALLIB_PATH=Debug.metallib\n");
+      const run = () => bash(campaignBash, ["-c", script], {
+        cwd: root, env: { ...process.env, GITHUB_ENV: output.replaceAll("\\", "/"), FIXTURE_FETCH_RC: String(rc) },
+      });
+      if (rc === 2) await assert.rejects(run, (error) => error.code === 2);
+      else await run();
+      const lines = (await readFile(output, "utf8")).trim().split("\n");
+      assert.deepEqual(lines.slice(-2), rc === 0
+        ? ["PMETAL_MLX_PREBUILT_DIR=Release", "PMETAL_METALLIB_PATH=Release.metallib"]
+        : rc === 1 ? ["PMETAL_MLX_PREBUILT_DIR=", "PMETAL_METALLIB_PATH="]
+          : ["PMETAL_MLX_PREBUILT_DIR=Debug", "PMETAL_METALLIB_PATH=Debug.metallib"]);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("persistent Qwen weights are an opt-in MLX step before both catalog passes", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  const mlx = workflowJob(workflow, "mlx");
+  const bind = workflowStep(mlx, "Bind the persistent Qwen weights");
+  assert.match(bind, /if: \$\{\{ inputs\.qwen_persistent_weights \}\}/);
+  assert.match(bind, /run: node scripts\/ci\/memory-catalog\/bind-qwen-persistent-cache\.mjs/);
+  assert.ok(mlx.indexOf(bind) < mlx.indexOf("- name: Plan the walk"));
+  assert.ok(mlx.indexOf(bind) < mlx.indexOf("- name: Walk the catalog"));
+  assert.doesNotMatch(workflowJob(workflow, "candle"), /bind-qwen-persistent-cache|qwen_persistent_weights/);
+  assert.match(workflow, /qwen_persistent_weights:\n[\s\S]*?type: boolean\n        default: false/);
+});
+
+test("persistent Qwen cache binding preserves existing snapshots and rejects unrelated scope", async () => {
+  const home = await mkdtemp(path.join(await realpath(tmpdir()), "qwen-persistent-"));
+  const githubEnv = path.join(home, "github-env");
+  const env = { HOME: home, GITHUB_ENV: githubEnv, BACKEND: "mlx", MODELS_INPUT: "qwen_image_2_1" };
+  try {
+    const root = await bindQwenPersistentCache(env);
+    assert.equal(root, path.join(home, "sceneworks-rw-weights", "hub"));
+    const snapshot = path.join(root, "models--Qwen--Qwen-Image-2.1", "snapshots", "790c92633540aa0cb11d9abf19eb46d861714758");
+    await mkdir(snapshot, { recursive: true });
+    await writeFile(path.join(snapshot, "preserve"), "immutable fixture");
+    await bindQwenPersistentCache({ ...env, ANCHORS_INPUT: "qwen_image_2_1:q4:mlx,qwen_image_2_1:bf16:mlx" });
+    assert.equal(await readFile(path.join(snapshot, "preserve"), "utf8"), "immutable fixture");
+    assert.equal(await readFile(githubEnv, "utf8"), `HF_CACHE_INPUT=${root}\nHF_CACHE_INPUT=${root}\n`);
+    for (const invalid of [
+      { BACKEND: "candle" }, { MODELS_INPUT: "" }, { MODELS_INPUT: "qwen_image_2_1 flux" },
+      { HF_CACHE_INPUT: "/Volumes/Models/huggingface/hub" }, { ANCHORS_INPUT: "flux:q4:mlx" },
+      { ANCHORS_INPUT: "qwen_image_2_1:q4:candle" }, { HOME: "relative" },
+    ]) await assert.rejects(() => bindQwenPersistentCache({ ...env, ...invalid }));
+    const linkedHome = path.join(home, "linked-home");
+    await mkdir(linkedHome);
+    await symlink(path.join(home, "sceneworks-rw-weights"), path.join(linkedHome, "sceneworks-rw-weights"), process.platform === "win32" ? "junction" : "dir");
+    await assert.rejects(() => bindQwenPersistentCache({ ...env, HOME: linkedHome }), /physical directory/);
+    assert.equal(await readFile(path.join(snapshot, "preserve"), "utf8"), "immutable fixture");
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
+test("Hugging Face roots retain a single unterminated path and the final separated entry", async () => {
+  const bash = promisify(execFile);
+  const script = 'source scripts/ci/memory-catalog/common.sh; hf_cache_roots';
+  for (const [input, expected] of [
+    ["/internal/hub", "/internal/hub\n"],
+    [" /first hub ; /last hub ", "/first hub\n/last hub\n"],
+    ["/first\n/last", "/first\n/last\n"],
+    ["", "/default/hub\n"],
+  ]) {
+    const { stdout } = await bash(campaignBash, ["-c", script], {
+      cwd: fileURLToPath(new URL("../", import.meta.url)),
+      env: { ...process.env, HF_CACHE_INPUT: input, SCENEWORKS_MEMORY_CAMPAIGN_HF_CACHE: "", DEFAULT_HF_CACHE: "/default/hub" },
+    });
+    assert.equal(stdout.replaceAll("\r", ""), expected);
+  }
+});
+
 test("windows-candle captures and schema-checks the SC-21714 Krea anchor record", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const capture = stepBody(
@@ -926,6 +1026,93 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
   );
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
+});
+
+test("macos-mlx routes an explicit Mac2 final PR and merge push without changing manual routing", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const naxWorker = workflow.slice(workflow.indexOf("  nax-worker:"));
+  const expression = naxWorker.match(/^ {4}runs-on: \$\{\{ (.+) \}\}$/m)?.[1];
+  assert.ok(expression, "nax-worker must expose one evaluable runs-on expression");
+
+  const evaluate = (candidate, github, inputs = {}) =>
+    Function(
+      "github",
+      "inputs",
+      "fromJSON",
+      "startsWith",
+      `return (${candidate});`,
+    )(
+      github,
+      inputs,
+      JSON.parse,
+      (value, prefix) => String(value).toLowerCase().startsWith(String(prefix).toLowerCase()),
+    );
+  const event = (eventName, payload = {}) => ({
+    event_name: eventName,
+    event: {
+      pull_request: { title: "", ...payload.pull_request },
+      head_commit: { message: "", ...payload.head_commit },
+    },
+  });
+  const generic = ["self-hosted", "macOS", "ARM64", "nax"];
+  const mac2 = ["self-hosted", "macOS", "ARM64", "rw-mage"];
+  const weights = ["self-hosted", "macOS", "ARM64", "nax", "weights"];
+
+  const validate = (candidate) => {
+    assert.deepEqual(
+      evaluate(candidate, event("pull_request", { pull_request: { title: "[Mac2] sc-24107" } })),
+      mac2,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("push", { head_commit: { message: "[Mac2] sc-24107: merge" } })),
+      mac2,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("pull_request", { pull_request: { title: "sc-24107" } })),
+      generic,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("push", { head_commit: { message: "Merge pull request" } })),
+      generic,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("workflow_dispatch"), { run_memory_calibration: true }),
+      weights,
+    );
+    assert.deepEqual(
+      evaluate(candidate, event("workflow_dispatch"), { run_five_rung_reference: true }),
+      weights,
+    );
+    assert.deepEqual(evaluate(candidate, event("workflow_dispatch")), generic);
+  };
+  assert.doesNotThrow(() => validate(expression));
+
+  for (const [name, mutant] of [
+    [
+      "PR title opt-in removed",
+      expression.replace("startsWith(github.event.pull_request.title, '[Mac2]')", "false"),
+    ],
+    [
+      "merge subject opt-in removed",
+      expression.replace("startsWith(github.event.head_commit.message, '[Mac2]')", "false"),
+    ],
+    [
+      "Mac2 target weakened to generic nax",
+      expression.replace(
+        '["self-hosted","macOS","ARM64","rw-mage"]',
+        '["self-hosted","macOS","ARM64","nax"]',
+      ),
+    ],
+    [
+      "manual calibration rerouted to Mac2",
+      expression.replace(
+        '["self-hosted","macOS","ARM64","nax","weights"]',
+        '["self-hosted","macOS","ARM64","rw-mage"]',
+      ),
+    ],
+  ]) {
+    assert.throws(() => validate(mutant), undefined, `${name} must be killed by the routing cases`);
+  }
 });
 
 test("windows-candle runs the imported NVFP4 worker acceptance on the real-weights host", async () => {

@@ -3,9 +3,10 @@ use std::path::{Path, PathBuf};
 
 use sceneworks_core::training::{
     build_training_plan, builtin_training_targets, BuildTrainingPlan, LoraTrainingRequest,
-    TrainingConfig, TrainingDataset, TrainingModality, TrainingOutputKind, TrainingPlan,
-    TrainingPlanError, TrainingPresetRegistry, TrainingProvenance, TrainingTargetLimitError,
-    TrainingTargetRegistry, TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
+    TrainingConfig, TrainingDataset, TrainingDatasetReference, TrainingModality,
+    TrainingOutputKind, TrainingPlan, TrainingPlanError, TrainingPresetRegistry,
+    TrainingProvenance, TrainingTargetLimitError, TrainingTargetRegistry,
+    TRAINING_CONTRACT_SCHEMA_VERSION, TRAINING_PLAN_VERSION,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -149,6 +150,11 @@ fn builtin_targets_gate_network_types() {
             "sd3_5_large_lora",
             "sd3_5_medium_lora",
             "anima_base_lora",
+            // Qwen Image 2.1 (sc-24159): the native MLX trainer builds LoRA and LoKr over the 2.1
+            // adapter host, which applies both at inference (sc-24156).
+            "qwen_image_2_1_lora",
+            // sc-24161: the instruction-edit twin trains the same adapter kinds in edit mode.
+            "qwen_image_2_1_edit_lora",
             // T2V-14B retains its existing Candle LoKr path. The single-DiT TI2V-5B and I2V-14B
             // generated-matrix obligations remain LoRA-only.
             "wan_t2v_14b_lora",
@@ -160,6 +166,409 @@ fn builtin_targets_gate_network_types() {
             // trainer exists, so it could only ever claim-then-fail; restoring it is sc-15320).
             "mage_flow_base_lora"
         ]
+    );
+}
+
+/// sc-24159 (epic 24107 S11): the Qwen Image 2.1 T2I target trains the DENSE bf16 base only (the
+/// upstream `Qwen/Qwen-Image-2.1` snapshot — never the q8/q4 re-host; QLoRA is a non-goal), labels its
+/// adapters `qwen-image-2-1` (never the 2512 `qwen-image` family), and carries the research-licence
+/// gate the Training Studio and API enforce before a run starts.
+#[test]
+fn qwen_image_2_1_target_trains_dense_bf16_under_the_research_licence() {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("qwen_image_2_1_lora target registered");
+    assert_eq!(target.base_model, "qwen_image_2_1");
+    assert_eq!(target.kernel, "qwen_image_2_1_lora");
+    assert_eq!(target.family, "qwen-image-2-1");
+    assert_eq!(
+        target.family,
+        sceneworks_core::training::QWEN_IMAGE_2_1_LORA_FAMILY
+    );
+    assert!(matches!(target.output_kind, TrainingOutputKind::Lora));
+    assert_eq!(
+        target.base_model_repo.as_deref(),
+        Some("Qwen/Qwen-Image-2.1"),
+        "trains the dense upstream bf16 snapshot, never the SceneWorks q8/q4 re-host"
+    );
+    assert_eq!(target.defaults.advanced["mixedPrecision"], "bf16");
+    assert_eq!(
+        target.limits["networkTypes"],
+        serde_json::json!(["lora", "lokr"])
+    );
+    // E13: no training footprint is declared here (never borrowed from Krea/2512); the engine
+    // trainer's memory preflight owns it.
+    for key in [
+        "memory",
+        "minMemoryGb",
+        "trainingMemoryGb",
+        "peakMemoryBytes",
+    ] {
+        assert!(target.limits.get(key).is_none(), "{key}");
+        assert!(target.ui.get(key).is_none(), "{key}");
+    }
+    // E12: the research-only restriction is declared on the contract the studio and API read.
+    assert!(sceneworks_core::training::training_target_requires_license_acknowledgment(target));
+    assert_eq!(
+        target.ui["license"],
+        sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE
+    );
+    assert_eq!(
+        target.ui["licenseUrl"],
+        sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL
+    );
+    let notice = target.ui["licenseNotice"].as_str().expect("licence notice");
+    for phrase in [
+        "Qwen RESEARCH LICENSE AGREEMENT",
+        "research or evaluation",
+        "derivative",
+    ] {
+        assert!(
+            notice.contains(phrase),
+            "licence notice must state {phrase:?}"
+        );
+    }
+    // Every other target is unrestricted, so the gate binds 2.1 alone (its T2I target and, since
+    // sc-24161, its instruction-edit twin on the same base).
+    for other in registry
+        .targets
+        .iter()
+        .filter(|other| other.base_model != target.base_model)
+    {
+        assert!(
+            !sceneworks_core::training::training_target_requires_license_acknowledgment(other),
+            "{}",
+            other.id
+        );
+    }
+
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let qwen_presets: Vec<_> = presets
+        .presets
+        .iter()
+        .filter(|preset| preset.target_id == target.id)
+        .collect();
+    assert_eq!(qwen_presets.len(), 3);
+    assert_eq!(
+        qwen_presets
+            .iter()
+            .filter(|preset| preset.ui.get("default") == Some(&Value::Bool(true)))
+            .count(),
+        1,
+        "exactly one default preset"
+    );
+    for preset in qwen_presets {
+        sceneworks_core::training::validate_training_config_for_target(target, &preset.config)
+            .unwrap_or_else(|error| panic!("{} violates its target: {error}", preset.id));
+        assert_eq!(
+            preset.config.advanced["mixedPrecision"], "bf16",
+            "{}",
+            preset.id
+        );
+    }
+}
+
+/// sc-24161 (epic 24107 S13): the Qwen Image 2.1 instruction-EDIT target shares everything that
+/// makes the T2I target safe — dense bf16 base, `qwen-image-2-1` family, LoRA + LoKr, the research
+/// licence gate — and adds an edit-pair reference cap that is the SAME fact as the base model's
+/// manifest `limits.maxReferenceAssets` (never a second number). It is the only target that trains
+/// edit pairs, and it has its own kernel (the worker maps it to the shared `qwen_image_2_1` trainer).
+#[test]
+fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_model_limit() {
+    use sceneworks_core::training::{
+        max_training_reference_images, training_target_max_reference_images,
+        training_target_requires_license_acknowledgment, validate_training_config_for_target,
+        QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES,
+    };
+    let registry = builtin_training_targets();
+    let find = |id: &str| {
+        registry
+            .targets
+            .iter()
+            .find(|target| target.id == id)
+            .unwrap_or_else(|| panic!("{id} registered"))
+    };
+    let t2i = find("qwen_image_2_1_lora");
+    let edit = find("qwen_image_2_1_edit_lora");
+    assert_eq!(edit.kernel, "qwen_image_2_1_edit_lora");
+    assert_ne!(edit.kernel, t2i.kernel, "edit training has its own kernel");
+    for (field, left, right) in [
+        ("base_model", &edit.base_model, &t2i.base_model),
+        ("family", &edit.family, &t2i.family),
+    ] {
+        assert_eq!(left, right, "{field}");
+    }
+    assert_eq!(edit.base_model_repo, t2i.base_model_repo, "dense bf16 only");
+    assert_eq!(edit.defaults.advanced["mixedPrecision"], "bf16");
+    // sc-24163 (E11): both pinned engine trainers render edit previews conditioned on the first
+    // item's references, so the edit target and every edit preset keep the T2I preview cadence.
+    assert_eq!(t2i.defaults.advanced["sampleEvery"], json!(500));
+    assert_eq!(
+        edit.defaults.advanced["sampleEvery"],
+        t2i.defaults.advanced["sampleEvery"]
+    );
+    let edit_presets: Vec<_> = sceneworks_core::training::builtin_training_presets()
+        .presets
+        .into_iter()
+        .filter(|preset| preset.target_id == edit.id)
+        .collect();
+    assert!(!edit_presets.is_empty(), "the edit target ships presets");
+    for preset in &edit_presets {
+        assert_eq!(
+            preset.config.advanced["sampleEvery"],
+            json!(500),
+            "{}: edit presets preview at the T2I cadence",
+            preset.id
+        );
+    }
+    assert_eq!(edit.limits["networkTypes"], json!(["lora", "lokr"]));
+    assert!(training_target_requires_license_acknowledgment(edit));
+    for key in ["license", "licenseUrl", "licenseNotice"] {
+        assert_eq!(edit.ui[key], t2i.ui[key], "{key}");
+    }
+
+    // The cap is the model's own `limits.maxReferenceAssets` from the builtin manifest.
+    let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+    let model_cap = catalog["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|model| model["id"] == json!("qwen_image_2_1"))
+        .and_then(|model| model["limits"]["maxReferenceAssets"].as_u64())
+        .expect("qwen_image_2_1 declares maxReferenceAssets");
+    assert_eq!(u64::from(QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES), model_cap);
+    assert_eq!(
+        training_target_max_reference_images(edit),
+        QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES
+    );
+    assert_eq!(
+        max_training_reference_images(),
+        QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES
+    );
+    // It is the ONLY edit-capable target; every other target trains captioned images only.
+    for other in registry
+        .targets
+        .iter()
+        .filter(|target| target.id != edit.id)
+    {
+        assert_eq!(
+            training_target_max_reference_images(other),
+            0,
+            "{}",
+            other.id
+        );
+    }
+
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let edit_presets: Vec<_> = presets
+        .presets
+        .iter()
+        .filter(|preset| preset.target_id == edit.id)
+        .collect();
+    assert!(edit_presets.len() >= 2);
+    assert_eq!(
+        edit_presets
+            .iter()
+            .filter(|preset| preset.ui.get("default") == Some(&Value::Bool(true)))
+            .count(),
+        1,
+        "exactly one default preset"
+    );
+    for preset in edit_presets {
+        validate_training_config_for_target(edit, &preset.config)
+            .unwrap_or_else(|error| panic!("{} violates its target: {error}", preset.id));
+        assert_eq!(
+            preset.config.advanced["mixedPrecision"], "bf16",
+            "{}",
+            preset.id
+        );
+    }
+}
+
+fn edit_dataset(reference_counts: &[usize]) -> TrainingDataset {
+    let mut dataset = dataset_fixture();
+    let template = dataset.items[0].clone();
+    dataset.items = reference_counts
+        .iter()
+        .enumerate()
+        .map(|(index, count)| {
+            let mut item = template.clone();
+            item.id = format!("item_{index:04}");
+            item.display_name = format!("edit {index}");
+            item.path = format!("images/item_{index:04}.png");
+            item.control_image_path = None;
+            item.caption.text = "replace the sky with image 2".to_owned();
+            item.caption.trigger_words = Vec::new();
+            // Deliberately reverse-numbered so stored order != lexical order.
+            item.references = (0..*count)
+                .rev()
+                .map(|ref_index| TrainingDatasetReference {
+                    asset_id: None,
+                    path: format!("images/refs/item_{index:04}_ref{ref_index}.png"),
+                    display_name: None,
+                    width: None,
+                    height: None,
+                })
+                .collect();
+            item
+        })
+        .collect();
+    dataset
+}
+
+fn plan_for(target_id: &str, dataset: &TrainingDataset) -> Result<TrainingPlan, TrainingPlanError> {
+    let registry = builtin_training_targets();
+    let target = registry
+        .targets
+        .iter()
+        .find(|target| target.id == target_id)
+        .expect("target registered");
+    build_training_plan(BuildTrainingPlan {
+        job_id: "job_edit",
+        target,
+        dataset,
+        config: target.defaults.clone(),
+        preset: None,
+        lora_id: "lora_edit",
+        base_model_path: "/models/qwen".to_owned(),
+        dataset_root: Path::new("/data/training/ds_edit"),
+        output_dir: Path::new("/data/loras/lora_edit"),
+        file_name: "edit.safetensors".to_owned(),
+        created_at: "2026-10-02T00:00:00Z".to_owned(),
+    })
+}
+
+/// sc-24161: the plan threads every edit item's references into `referenceImagePaths` in STORED
+/// order (resolved under the dataset root), and the plan-time floor mirrors the engine's
+/// `validate_edit_request`: a non-edit target refuses an edit dataset, and the edit target refuses a
+/// mixed dataset, an over-cap item (naming the cap), a control+edit item, and an empty instruction.
+#[test]
+fn edit_plans_keep_reference_order_and_refuse_bad_shapes() {
+    let dataset = edit_dataset(&[3, 1]);
+    let plan = plan_for("qwen_image_2_1_edit_lora", &dataset).expect("edit plan resolves");
+    let root = Path::new("/data/training/ds_edit");
+    assert_eq!(
+        plan.dataset.items[0].reference_image_paths,
+        [
+            "item_0000_ref2.png",
+            "item_0000_ref1.png",
+            "item_0000_ref0.png"
+        ]
+        .iter()
+        .map(|name| root
+            .join("images")
+            .join("refs")
+            .join(name)
+            .display()
+            .to_string())
+        .collect::<Vec<_>>()
+    );
+    assert_eq!(plan.dataset.items[1].reference_image_paths.len(), 1);
+    assert_eq!(
+        plan.dataset.items[0].caption,
+        "replace the sky with image 2"
+    );
+    // The plan round-trips the field under its wire name, and a plain plan omits it entirely.
+    let wire = serde_json::to_value(&plan).unwrap();
+    assert_eq!(
+        wire["dataset"]["items"][0]["referenceImagePaths"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    let plain = plan_for("qwen_image_2_1_lora", &dataset_fixture()).expect("plain plan");
+    assert!(plain
+        .dataset
+        .items
+        .iter()
+        .all(|item| item.reference_image_paths.is_empty()));
+    assert!(serde_json::to_value(&plain).unwrap()["dataset"]["items"][0]
+        .get("referenceImagePaths")
+        .is_none());
+
+    let refused = |target: &str, dataset: &TrainingDataset| match plan_for(target, dataset) {
+        Err(TrainingPlanError::InvalidDataset(detail)) => detail,
+        other => panic!("{target} must refuse with InvalidDataset, got {other:?}"),
+    };
+    // Every non-edit target refuses an edit dataset.
+    for target in builtin_training_targets().targets.iter().filter(|target| {
+        sceneworks_core::training::training_target_max_reference_images(target) == 0
+            && target.modality == TrainingModality::Image
+    }) {
+        let detail = refused(&target.id, &edit_dataset(&[1]));
+        assert!(
+            detail.contains("captioned images only"),
+            "{}: {detail}",
+            target.id
+        );
+    }
+    let detail = refused("qwen_image_2_1_edit_lora", &edit_dataset(&[2, 0]));
+    assert!(detail.contains("at least one reference image"), "{detail}");
+    let detail = refused("qwen_image_2_1_edit_lora", &dataset_fixture());
+    assert!(detail.contains("at least one reference image"), "{detail}");
+    let detail = refused("qwen_image_2_1_edit_lora", &edit_dataset(&[10, 11]));
+    assert!(
+        detail.contains("11 reference images") && detail.contains("at most 10"),
+        "{detail}"
+    );
+    plan_for("qwen_image_2_1_edit_lora", &edit_dataset(&[10, 1])).expect("exactly the cap is fine");
+    let mut control = edit_dataset(&[1]);
+    control.items[0].control_image_path = Some("controls/item.png".to_owned());
+    let detail = refused("qwen_image_2_1_edit_lora", &control);
+    assert!(detail.contains("control"), "{detail}");
+    let mut blank = edit_dataset(&[1]);
+    blank.items[0].caption.text = "   ".to_owned();
+    let detail = refused("qwen_image_2_1_edit_lora", &blank);
+    assert!(detail.contains("empty instruction"), "{detail}");
+    // A reference path escaping the dataset root is refused like the target's.
+    let mut escaping = edit_dataset(&[1]);
+    escaping.items[0].references[0].path = "../outside.png".to_owned();
+    assert!(plan_for("qwen_image_2_1_edit_lora", &escaping).is_err());
+}
+
+/// sc-24161 review: the kernel-level edit floor the worker and the raw route share. Keyed off the
+/// targets' declared reference caps, so only the 2.1 edit kernel is an edit kernel.
+#[test]
+fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
+    use sceneworks_core::training::{
+        edit_pair_kernel_shape_error, training_kernel_trains_edit_pairs,
+    };
+    assert!(training_kernel_trains_edit_pairs(
+        "qwen_image_2_1_edit_lora"
+    ));
+    for target in builtin_training_targets().targets {
+        if target.kernel != "qwen_image_2_1_edit_lora" {
+            assert!(
+                !training_kernel_trains_edit_pairs(&target.kernel),
+                "{}",
+                target.kernel
+            );
+        }
+    }
+    assert_eq!(
+        edit_pair_kernel_shape_error("qwen_image_2_1_edit_lora", [1, 10]),
+        None
+    );
+    assert_eq!(
+        edit_pair_kernel_shape_error("qwen_image_2_1_lora", [0, 0]),
+        None
+    );
+    let error = edit_pair_kernel_shape_error("qwen_image_2_1_edit_lora", [2, 0]).expect("mixed");
+    assert!(error.contains("item 1"), "{error}");
+    let error = edit_pair_kernel_shape_error("qwen_image_2_1_lora", [0, 3]).expect("t2i refs");
+    assert!(
+        error.contains("captioned images only") && error.contains("3"),
+        "{error}"
     );
 }
 
@@ -1522,7 +1931,13 @@ fn build_plan_for_target(
     target: &sceneworks_core::training::TrainingTarget,
     config: TrainingConfig,
 ) -> Result<TrainingPlan, TrainingPlanError> {
-    let dataset = dataset_fixture();
+    // An instruction-edit target (sc-24161) only accepts edit-pair datasets, so its numeric
+    // boundaries are probed against one; every other target keeps the captioned fixture.
+    let dataset = if sceneworks_core::training::training_target_max_reference_images(target) > 0 {
+        edit_dataset(&[1])
+    } else {
+        dataset_fixture()
+    };
     build_training_plan(BuildTrainingPlan {
         job_id: "job_target_limit",
         target,

@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision 25bd55cd: 745 provenance candidates and 104 production-Rust crate prefixes. The new vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The new speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Other candidate changes reflect the current inference main source inventory; historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
-  "auditDigest": "3e4090fb200d833b9661535d745ea10b541b9a53cf5f8f3541a9a4ade4bfe95e",
+  "_comment": "Audit inventory rescanned at inference revision 004cee41 (verified inference main): 754 provenance candidates and 108 production-Rust crate prefixes. This pin includes epic sc-24432 global decode speedups (speculative engine and proposers, cross-turn prefix cache, MLX pipelined decode, DeltaNet Metal, Candle CUDA graphs and decode_attention, MoE device routing), epic sc-20669 fused compressed KV cache, the YuE2 repairs, and epic sc-24107 Qwen-Image 2.1 LoRA/LoKr edit training and safety fixes. The vendored candle-core contains upstream 1e6aa85e plus the CUDA-graph parameter cache; the mlx-rs fork pin remains 48ff5e78. Existing compliance classifications and open items remain advisory under sc-19751. Generated source inventories and digests bind this exact source; historical capability captures and measurements retain their original provenance. This source audit makes no measurement currency claim.",
+  "inferenceRevision": "004cee41f380ff263796ad90277e5f6224d73ae3",
+  "auditDigest": "6fd81f2e70df4b0aaa93f9630b829b9146b2e09bff24cb7b20bcdef740096a97",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "004cee41f380ff263796ad90277e5f6224d73ae3",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 745,
-    "populationSha256": "d37d590c3b64b27157fec35bedb9144dd13e54aa56992d529b6be92a75c37143"
+    "matchedFiles": 754,
+    "populationSha256": "5621a94500a1594a3087676efe750196b3833bb4901a4194a015afbe7675dcea"
   },
   "portedSourceAreas": [
     {
@@ -943,10 +943,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "25bd55cdb6a56c78b07584a12150c9f5d46be439",
+    "revision": "004cee41f380ff263796ad90277e5f6224d73ae3",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 104,
-    "cratePopulationSha256": "5e4ba59e61486beb49342068681d613d19d3d47eb3332360d0f2503540230f21"
+    "cratePrefixes": 108,
+    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
   },
   "crateDispositions": [
     {
@@ -1034,6 +1034,28 @@
       "prefix": "crates/media/mlx-gen/mlx-gen-joycaption",
       "disposition": "first-party-original",
       "evidence": "Thin consumer seam (story 7265): descriptor, provider registration, and gen-core contract adaptation only — `src/lib.rs` and `src/model.rs`, no `prompt.rs`. Re-verified at the pinned revision (sc-15191 review): this crate contains NO upstream JoyCaption strings; it calls `mlx_gen::caption::joycaption::{capabilities, build_prompt}`. The upstream-derived prompt map for the MLX lane lives in `crates/media/mlx-gen/src/caption/joycaption.rs` — the SAME reproduced `CAPTION_TYPE_MAP` content audited on the `crates/media/candle-gen/candle-gen-joycaption` entry — and that path is covered by the `joycaption-source` ported-source area (which names it directly since sc-15443 made it marker-bearing), not by this disposition. The JoyCaption model implementation lives in mlx-llm's `mlx-joycaption` provider, outside this repository."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "ai-toolkit-perceptual-source",
+      "evidence": "Native Candle implementation of the ViTPose+ proportion, HybrIK beta-shape and Sapiens normal architectures and comparison formulas identified by gen-core/src/train/body.rs and docs/migration/body-losses-reference/manifest.json as ai-toolkit-perceptual fork 6e01a6e3a75dab3d4567fe885e148df9161daba7 (toolkit/body_id.py,body_shape.py,normal_id.py). This is an upstream-derived architecture/formula port, not first-party-original. The newly mapped ai-toolkit-perceptual-source About component retains the exact fork MIT license, Copyright (c) 2024 Ostris, LLC, and source provenance. This classification covers these native source implementations only; it makes no claim about optional ViTPose+,HybrIK,Sapiens checkpoint terms or redistribution. AB scanner has no marker-bearing file in this crate, so classification is explicit rather than inferred from absence of markers. Final-pin implementation must preserve the component and notice wiring and verify the source has not changed from the inspected AB blobs."
+    },
+    {
+      "prefix": "crates/media/candle-gen/candle-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored Candle TrainingConfig-to-PerceptualPath builder: typed decoder selection, loss-arm registration, config validation, optional-model loader calls, memory-footprint aggregation and scheduling orchestration. Its only production source is src/lib.rs. The model architectures and loss formulas execute in the separate core/depth/face/body crates it calls, not here. The upstream-gating comment describes the behavior used to enable a delegated face scorer, not copied upstream source or content. No embedded third-party source/data was found. This seam classification does not replace the source or model terms of its dependencies."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-body",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "component": "ai-toolkit-perceptual-source",
+      "evidence": "Native MLX implementation of the ViTPose+ proportion, HybrIK beta-shape and Sapiens normal architectures and comparison formulas identified by gen-core/src/train/body.rs and docs/migration/body-losses-reference/manifest.json as ai-toolkit-perceptual fork 6e01a6e3a75dab3d4567fe885e148df9161daba7 (toolkit/body_id.py,body_shape.py,normal_id.py). This is an upstream-derived architecture/formula port, not first-party-original. The newly mapped ai-toolkit-perceptual-source About component retains the exact fork MIT license, Copyright (c) 2024 Ostris, LLC, and source provenance. This classification covers these native source implementations only; it makes no claim about optional ViTPose+,HybrIK,Sapiens checkpoint terms or redistribution. AB scanner has no marker-bearing file in this crate, so classification is explicit rather than inferred from absence of markers. Final-pin implementation must preserve the component and notice wiring and verify the source has not changed from the inspected AB blobs."
+    },
+    {
+      "prefix": "crates/media/mlx-gen/mlx-gen-perceptual",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored MLX TrainingConfig-to-PerceptualPath builder: typed decoder selection, loss-arm registration, config validation, optional-model loader calls, memory-footprint aggregation and scheduling orchestration. Its only production source is src/lib.rs. The model architectures and loss formulas execute in the separate core/depth/face/body crates it calls, not here. The upstream-gating comment describes the behavior used to enable a delegated face scorer, not copied upstream source or content. No embedded third-party source/data was found. This seam classification does not replace the source or model terms of its dependencies."
     }
   ]
 }
