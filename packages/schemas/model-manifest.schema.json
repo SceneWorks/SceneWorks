@@ -1918,6 +1918,10 @@
               "supportsNegativePrompt": {
                 "type": "boolean",
                 "description": "Does the engine accept a negative prompt? An engine with no steerable unconditional branch has nothing for a negative prompt to do — `resolve_negative_prompt` returns None for any model whose descriptor advertises `supports_negative_prompt: false`. ABSENT MEANS TRUE. When false, Image Studio hides its Negative prompt field, never seeds `ui.defaultNegativePrompt` into it, and sends an empty one."
+              },
+              "negativePromptRequiresGuidance": {
+                "type": "boolean",
+                "description": "Is the negative prompt the classifier-free-guidance unconditional, so it only exists while CFG is on (guidance != 1.0)? True for an engine that REFUSES a non-empty negative prompt at guidance 1.0 (Iris-3B, sc-25679) rather than silently ignoring it. ABSENT MEANS FALSE. When true, Image Studio disables its Negative prompt field and sends an empty one whenever the effective guidance is 1.0, and the worker's image lane drops the negative prompt at guidance 1.0 instead of forwarding a request the engine refuses."
               }
             }
           },

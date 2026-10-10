@@ -32,6 +32,7 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
+import { maxStepsForModel, negativePromptInertAtGuidance } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
   QWEN_IMAGE_2_1_MODEL_ID,
@@ -272,6 +273,9 @@ export function SimpleImageStudio() {
   // controls. Simple hid them from every model; that was a surface decision, not a capability one.
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // sc-25679: the negative prompt is the CFG unconditional for a model declaring
+  // `image.negativePromptRequiresGuidance` (Iris-3B), whose engine refuses one at guidance 1.0.
+  const negativePromptCfgOff = negativePromptInertAtGuidance(selectedModel, guidance);
 
   // The model's own free-size envelope, shared with the full studio so the two shells cannot
   // disagree about what is legal. For a model that declares nothing this is the blanket
@@ -405,7 +409,8 @@ export function SimpleImageStudio() {
         // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
         steps: nativeControls ? steps : "",
         seed: nativeControls ? seed : "",
-        negativePrompt: nativeControls && supportsNegativePrompt ? negativePrompt : "",
+        negativePrompt:
+          nativeControls && supportsNegativePrompt && !negativePromptCfgOff ? negativePrompt : "",
         guidance: nativeControls && supportsGuidance ? guidance : "",
         width: dimensionEval.width,
         height: dimensionEval.height,
@@ -724,7 +729,7 @@ export function SimpleImageStudio() {
               id="su-image-steps"
               // The MODEL's floor, not a hardcoded 1 — the enqueue gate refuses below it.
               min={String(minStepsForModel(selectedModel))}
-              max="80"
+              max={String(maxStepsForModel(selectedModel))}
               onChange={(event) => setSteps(event.target.value)}
               placeholder={String(selectedModel?.defaults?.steps ?? "")}
               type="number"
@@ -763,9 +768,14 @@ export function SimpleImageStudio() {
               <label htmlFor="su-image-negative">Negative prompt</label>
               <textarea
                 className="su-textarea"
+                disabled={negativePromptCfgOff}
                 id="su-image-negative"
                 onChange={(event) => setNegativePrompt(event.target.value)}
-                placeholder="What must NOT appear"
+                placeholder={
+                  negativePromptCfgOff
+                    ? "Applies only with guidance above 1.0 for this model"
+                    : "What must NOT appear"
+                }
                 value={negativePrompt}
               />
             </div>

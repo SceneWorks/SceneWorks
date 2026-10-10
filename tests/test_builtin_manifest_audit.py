@@ -3610,7 +3610,14 @@ def test_guidance_taking_image_models_declare_nothing():
     `advanced.guidanceScale` as `true_cfg` (base.rs `uses_true_cfg`/`resolve_true_cfg`). Declaring
     an `image` block for Chroma would break a working knob."""
     models = _image_models_by_id()
-    declared = {model_id for model_id, model in models.items() if model.get("image") is not None}
+    # Only the two AXIS keys hide a control; `negativePromptRequiresGuidance` (sc-25679) keeps both
+    # axes live and is policed by its own guard below.
+    axis_keys = {"supportsGuidance", "supportsNegativePrompt"}
+    declared = {
+        model_id
+        for model_id, model in models.items()
+        if axis_keys & set(model.get("image") or {})
+    }
     expected = IMAGE_MODELS_WITHOUT_EITHER_AXIS | IMAGE_MODELS_WITHOUT_NEGATIVE_ONLY
     assert declared == expected, (
         "unexpected `image` declarations — every other image entry must stay silent so it keeps "
@@ -3620,6 +3627,24 @@ def test_guidance_taking_image_models_declare_nothing():
         assert models[model_id].get("image") is None, (
             f"{model_id} takes both axes (Chroma via true_cfg) and must declare no `image` block"
         )
+
+
+def test_negative_prompt_requires_guidance_keeps_both_axes_live():
+    """sc-25679: `image.negativePromptRequiresGuidance` says the negative prompt IS the CFG
+    unconditional (the engine refuses one at guidance 1.0). It only makes sense on an engine that
+    has BOTH axes, so a declaring entry must not also declare either axis absent; Iris-3B declares
+    it because `mlx-gen-iris` refuses a negative prompt with CFG off."""
+    models = _image_models_by_id()
+    declaring = {
+        model_id
+        for model_id, model in models.items()
+        if (model.get("image") or {}).get("negativePromptRequiresGuidance") is True
+    }
+    assert "iris_3b" in declaring
+    for model_id in sorted(declaring):
+        block = models[model_id]["image"]
+        assert block.get("supportsGuidance") is not False, model_id
+        assert block.get("supportsNegativePrompt") is not False, model_id
 
 
 def test_cfg_free_image_models_carry_no_default_negative_prompt():

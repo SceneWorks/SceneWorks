@@ -2557,15 +2557,27 @@ mod tests {
                 // The blanket bounds still apply — the gate narrows the GRID check, not the range.
                 assert!(image_dimension_error(&id, 200, 1024, &entry, 256, 4096).is_some());
             } else {
-                // A model that declares the full envelope DOES get the grid enforced.
-                assert_eq!(
-                    id, "qwen_image_2_1",
-                    "a new envelope-declaring model appeared"
+                // A model that declares the full envelope DOES get its declared grid enforced
+                // (shape, not a population: qwen_image_2_1 at 32 px, iris_3b at 16 px, ...).
+                assert!(
+                    declares_envelope,
+                    "{id} declares a stride without its envelope"
                 );
-                assert!(declares_envelope);
-                let message = image_dimension_error(&id, 1000, 1000, &entry, 256, 4096)
-                    .expect("2.1 enforces its declared grid");
-                assert!(message.contains("32-pixel grid"), "{message}");
+                let multiple = model["limits"]["requiresDimensionsMultipleOf"]
+                    .as_u64()
+                    .expect("integer stride") as u32;
+                let off_grid = 1024 + multiple / 2;
+                let message = image_dimension_error(&id, off_grid, 1024, &entry, 256, 4096)
+                    .unwrap_or_else(|| panic!("{id} enforces its declared grid"));
+                assert!(
+                    message.contains(&format!("{multiple}-pixel grid")),
+                    "{id}: {message}"
+                );
+                assert_eq!(
+                    image_dimension_error(&id, 1024, 1024, &entry, 256, 4096),
+                    None,
+                    "{id} admits an on-grid size"
+                );
             }
         }
     }

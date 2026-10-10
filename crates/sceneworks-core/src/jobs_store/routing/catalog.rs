@@ -1090,6 +1090,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     ModelCaps::new("anima_base", true, true, false, true, false),
     ModelCaps::new("anima_aesthetic", true, true, false, true, false),
     ModelCaps::new("anima_turbo", true, true, false, true, false),
+    // Iris-3B generation (sc-25679, epic 25678): native MLX only (`mlx-gen-iris`, `mac_only`). Plain
+    // text-to-image with no quant tier and no adapters; no Candle twin at this pin, so every candle
+    // column is false and an off-Mac request stays unclaimed.
+    ModelCaps::new("iris_3b", true, false, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2310,6 +2314,7 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
+        "iris_3b",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[

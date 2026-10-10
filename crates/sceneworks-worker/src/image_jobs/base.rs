@@ -4871,7 +4871,8 @@ fn reconcile_resolved_tier_quant(
     (load_quant, actual_bits)
 }
 
-/// Resolve denoise steps: `advanced.steps` (clamped 1..=80) else the family default.
+/// Resolve denoise steps: `advanced.steps` (clamped 1..=max(80, family default)) else the family
+/// default.
 /// Shared by the MLX path and the candle lane (sc-5096).
 #[cfg(any(
     target_os = "macos",
@@ -4886,8 +4887,21 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
                 .as_u64()
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
-        .map(|steps| (steps as u32).clamp(1, 80))
+        // The historical 80-step ceiling, raised to the model's own default where that is higher
+        // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
+        // than silently clamped below what the model ships with.
+        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
         .unwrap_or(model.default_steps())
+}
+
+/// The largest `advanced.steps` the generic image lane forwards: the historical 80, or the model's
+/// own default when that is higher. Mirrored by Image Studio's Steps input (`maxStepsForModel`).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn max_requested_steps(default_steps: u32) -> u32 {
+    default_steps.max(80)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -9816,7 +9830,15 @@ async fn generate_stream(
     // True-CFG families (Chroma) carry the CFG scale in `true_cfg`, not `guidance` (which their
     // engine rejects); `None` for every other family. The recipe records the effective CFG knob.
     let model_true_cfg = resolve_true_cfg(request, &model);
-    let negative_prompt = resolve_negative_prompt(request, &model);
+    // A model whose negative prompt IS the CFG unconditional (`image.negativePromptRequiresGuidance`,
+    // Iris-3B) refuses one at guidance 1.0, where it has no effect anyway — drop it there.
+    let negative_prompt = iris::gate_negative_prompt_on_guidance(
+        &request.model_manifest_entry,
+        guidance,
+        resolve_negative_prompt(request, &model),
+    );
+    // Iris has no scheduler axis and refuses `scheduler_shift` by name (sc-25679).
+    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift);
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
@@ -9946,6 +9968,15 @@ async fn generate_stream(
         // on descriptor.id). Inert on macOS: the MLX SDXL turnkey is self-contained (no `required_components`).
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+        // Iris-3B (sc-25679): the generation task's Qwen3-VL text encoder, from the shared task
+        // contract (its descriptor advertises no `required_components`). Cache-only; no-op otherwise.
+        spec = iris::attach_iris_generation_components(
+            spec,
+            engine_id,
+            &request.model,
+            &request.model_manifest_entry,
+            settings,
+        )?;
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
         // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;

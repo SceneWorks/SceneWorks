@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:ed980ed31af484971767bd8cb5a1c765ddd326017715fd62f0c72aeb3701e35c",
+    "sceneWorksRevision": "source-tree:355bf9e3d3bf6cc3df74dc0de87f7232c0fd8a69bdb0b76cd54f1dfcd5654807",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "eaffbd5fb74ab2a06f5be0f3c6a13736a0fcf9cbf1b595d02faeaa8c8e9d6cda"
+        "sha256": "f51c2a57c8931ba6ceb6e842d5aeb7143b858c85901eeee5a5d4526fba241097"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "4497573fd198feed181420aa5044904e55dc9778411812238e2615e769e529cf"
+        "sha256": "65e32045e3c7212603bef8373678efdbbca048caffd86b39a499d958a2255a56"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -17,15 +17,15 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "a773a90dabc859003c460c5b0cc305fda2e39a3585c4a7caa73d13c33e9b328d"
+        "sha256": "4b4e58c8ef7f5de0d32591b8b16a062aabd2ec0e6577eefc116c53b0cee05add"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "2a9b5538edf9049e3f321442cf814053607acd51643272d42016e2f5bc155d91"
+        "sha256": "1d5cdb2d6e8258ef0e5f32d1e0fdfcd16d0b4637106f18362543beee60eb5d26"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "e5cd6e58f038fe536ec5e77b8a14282ceabd0875fe3dc7b1e0f70a00fc910988"
+        "sha256": "b219505bb4d6150fd9a10e33c0cdadf0b63a7c8500f9368929db763a010b2c46"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "3f92b83e4fa787a71e5641f07bbb731c32e98221b8f634891dffb50cb8593c81"
+        "sha256": "905b479c807414428cda0aa1b85d1b73eae6a6c48e798c5627675d7ab8b25435"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "bc9f5d6ccec4a6bd118df30ecde969b8a2e61c6b823c848219a76b1c7f0b594f"
+        "sha256": "a85100132f8f058c57589f8c90b09f048a740a8c154f72ab5248228d142a6edd"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "b37fe7c3eae89e22371813fdbc3b91faee6a7905bba93cf1f34b14496f5209d2"
+        "sha256": "310040ffed30a2bf79f32215196b0f81a1d1eeed0bdbf0c0b33e55bd8f953b2d"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 65,
+    "catalogEntries": 66,
     "catalogEntriesByModality": {
-      "image": 54,
+      "image": 55,
       "video": 11
     },
-    "cells": 9570,
+    "cells": 9580,
     "publishedCells": 3855,
-    "elidedCells": 5715,
+    "elidedCells": 5725,
     "elidedByState": {
-      "Implemented": 1214,
-      "Missing": 4501
+      "Implemented": 1218,
+      "Missing": 4507
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 48,
-    "mlxStagedStaticCoverageDenominator": 54,
+    "mlxStagedStaticCoverage": 49,
+    "mlxStagedStaticCoverageDenominator": 55,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -163,7 +163,7 @@
       }
     ],
     "anchors": 250,
-    "analyticOnlyCells": 99,
+    "analyticOnlyCells": 100,
     "anchoredCells": 3855,
     "staleAnchors": 250,
     "attestedAnchors": 0,
@@ -1733,6 +1733,48 @@
           ],
           "overlays": [
             "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "iris_3b",
+      "name": "Iris 3B",
+      "modality": "image",
+      "familyGroup": 25678,
+      "family": "iris",
+      "resolvedRoute": "iris_3b",
+      "resolvedRoutes": {
+        "mlx": "iris_3b"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx"
+      ],
+      "owningFamilyStories": {
+        "mlx": 25678
+      },
+      "owningModelStories": {
+        "mlx": 25679
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "default"
+          ],
+          "modes": [
+            "text_to_image"
+          ],
+          "overlays": [
             "lora",
             "none"
           ],
@@ -13110,6 +13152,66 @@
           "lora": 0,
           "none": 0
         }
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 0,
+      "states": {
+        "Missing": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 2,
+      "states": {
+        "Implemented": 2
+      }
+    },
+    {
+      "modelId": "iris_3b",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 2,
+      "published": 0,
+      "elided": 2,
+      "implemented": 2,
+      "states": {
+        "Implemented": 2
       }
     },
     {
@@ -242722,6 +242824,7 @@
       "illustrious_xl_v2:sdxl:candle:q8:text_to_image:none:staged_residency"
     ],
     "instantid_realvisxl": [],
+    "iris_3b": [],
     "kolors": [
       "kolors:kolors:mlx:bf16:character_image:control:resident",
       "kolors:kolors:mlx:bf16:character_image:control:staged_residency",

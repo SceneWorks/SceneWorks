@@ -18906,6 +18906,8 @@ mod tests {
         // span is exactly what the generator's regex reads.
         let swept = [
             "sdxl",
+            // Iris-3B (sc-25679): `supports_sequential_offload` — encoder, drop, then backbone.
+            "iris_3b",
             "z_image",
             "z_image_control",
             "z_image_turbo",

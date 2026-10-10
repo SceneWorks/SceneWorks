@@ -178,3 +178,23 @@ export function guidanceDefaultFromModel(model) {
   const value = Number(model?.defaults?.guidanceScale);
   return Number.isFinite(value) ? value : null;
 }
+
+// The Steps input's ceiling (sc-25679): the historical 80, raised to the model's own default when
+// that is higher — Iris-3B ships 100 steps. Mirrors the worker's `max_requested_steps`, which clamps
+// `advanced.steps` to the same bound, so the form never offers a count the worker would cut down.
+export const BASE_MAX_STEPS = 80;
+
+export function maxStepsForModel(model) {
+  return Math.max(BASE_MAX_STEPS, stepsDefaultFromModel(model) ?? 0);
+}
+
+// Is the negative prompt inert for this model at this guidance (sc-25679)? A model declaring
+// `image.negativePromptRequiresGuidance` treats the negative prompt as the CFG unconditional, so at
+// guidance 1.0 (CFG off) its engine refuses one. `guidanceOverride` is the Studio's raw override
+// ("" = use the model default). Absent declaration = never inert.
+export function negativePromptInertAtGuidance(model, guidanceOverride) {
+  if (model?.image?.negativePromptRequiresGuidance !== true) return false;
+  const override = guidanceOverride === "" || guidanceOverride == null ? Number.NaN : Number(guidanceOverride);
+  const effective = Number.isFinite(override) ? override : guidanceDefaultFromModel(model);
+  return effective === 1;
+}

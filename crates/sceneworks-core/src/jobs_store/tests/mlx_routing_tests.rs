@@ -2140,3 +2140,35 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
         }
     }
 }
+
+/// sc-25679: Iris-3B generation routes to MLX only as plain text-to-image. Every carrier the
+/// `iris_3b` engine has no input for (source/reference/mask/control/pose, user LoRAs, a quant tier)
+/// keeps the job off the lane instead of reaching an engine that refuses it by name.
+#[test]
+fn iris_routes_plain_text_to_image_only() {
+    assert!(MLX_ROUTED_MODELS.contains(&"iris_3b"));
+    let eligible = |payload: Value| image_request_mlx_eligible("iris_3b", &object(payload));
+    assert!(eligible(
+        json!({ "model": "iris_3b", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "iris_3b",
+        "advanced": { "steps": 100, "guidanceScale": 3.0, "resolution": "512x512" }
+    })));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "loras": [{ "id": "l" }] }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "nvfp4" } }),
+    ] {
+        assert!(!eligible(refused.clone()), "{refused}");
+    }
+    let support = model_mac_support("iris_3b", "image", Some("iris"));
+    assert!(support.supported);
+    assert!(!support.features.edit && !support.features.reference && !support.features.pose);
+}

@@ -209,7 +209,7 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // The union includes the YuE1 re-hosts, YuE2 upstream repos, and Wan-VACE entries. The
   // Illustrious file censuses below did not move; assert them beside the digest.
   assert.equal(current.downloadEvidenceSha256,
-    "9ac5343ea88c615289fee9e5ca9c65867b023e8a5b65a3c1ab8a4827b991b19d");
+    "56e2d56a23ddc4981c1c8ee63ea1cd6a8617b445616b1a0812976b6abfb8cd01");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

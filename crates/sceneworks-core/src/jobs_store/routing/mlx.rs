@@ -96,6 +96,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
             mage_flow_edit_mlx_eligible(payload)
         }
+        "iris_3b" => iris_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -461,6 +462,18 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
         || has_nonempty_array(payload, "controls")
         || has_nonempty_array(payload, "controlnets")
         || has_nonempty_nested_array(payload, "advanced", "poses"))
+}
+
+/// Iris-3B generation (sc-25679) is plain text-to-image: the `iris_3b` engine takes no source,
+/// reference, mask, control, pose or adapter, and has no quant tier — it refuses `LoadSpec::quantize`
+/// and `adapters` by name. Any such carrier keeps the job off MLX (an `mlx_unsupported` affordance)
+/// instead of reaching an engine that would refuse it.
+pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    mage_flow_mlx_eligible(payload)
+        && !has_nonempty_or_malformed_array(payload, "loras")
+        && !["mlxQuantize", "quantTier"]
+            .iter()
+            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

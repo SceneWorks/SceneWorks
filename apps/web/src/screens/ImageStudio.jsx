@@ -211,6 +211,8 @@ import {
   guidanceDefaultFromModel,
   guidanceMethodDefaultFromModel,
   guidanceMethodOptionsFromModel,
+  maxStepsForModel,
+  negativePromptInertAtGuidance,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -1436,6 +1438,11 @@ export function ImageStudio() {
   // these two for the same reason (`showGuidance` / `showNegative`).
   const supportsGuidance = selectedModel?.image?.supportsGuidance !== false;
   const supportsNegativePrompt = selectedModel?.image?.supportsNegativePrompt !== false;
+  // sc-25679: a model whose negative prompt IS the CFG unconditional
+  // (`image.negativePromptRequiresGuidance`, Iris-3B) refuses one with CFG off. The field stays
+  // visible (the axis exists — raise Guidance and it applies) but is DISABLED and not sent while
+  // the effective guidance is 1.0: a transient inertness, the Wan-Lightning precedent above.
+  const negativePromptCfgOff = negativePromptInertAtGuidance(selectedModel, guidanceOverride);
   const hiresFixModelCapable = Boolean(
     supportsImg2img || selectedModel?.family === "sdxl",
   );
@@ -2415,7 +2422,7 @@ export function ImageStudio() {
       // preset stack composed or a replayed recipe restored — the field is hidden for it, so
       // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
       // discards anyway) would be a ghost input recorded on this job's recipe.
-      negativePrompt: supportsNegativePrompt
+      negativePrompt: supportsNegativePrompt && !negativePromptCfgOff
         ? stackActive
           ? composedStack.negativePrompt
           : negativePrompt
@@ -3946,7 +3953,7 @@ export function ImageStudio() {
                     is byte-identical. Mirrors VideoStudio, which has read this key since sc-19426. */}
                 <input
                   min={String(minStepsForModel(selectedModel))}
-                  max="80"
+                  max={String(maxStepsForModel(selectedModel))}
                   onChange={(event) => setStepsOverride(event.target.value)}
                   placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
                   type="number"
@@ -4331,7 +4338,16 @@ export function ImageStudio() {
               {supportsNegativePrompt ? (
                 <label className="prompt-field">
                   Negative prompt
-                  <textarea onChange={(event) => setNegativePrompt(event.target.value)} value={negativePrompt} />
+                  <textarea
+                    disabled={negativePromptCfgOff}
+                    onChange={(event) => setNegativePrompt(event.target.value)}
+                    value={negativePrompt}
+                  />
+                  {negativePromptCfgOff ? (
+                    <span className="field-hint">
+                      The negative prompt only applies with guidance above 1.0 for this model.
+                    </span>
+                  ) : null}
                 </label>
               ) : null}
             </div>

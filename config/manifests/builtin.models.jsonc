@@ -5863,6 +5863,114 @@
       }
     },
     {
+      // Iris-3B (epic sc-25678, story sc-25679) — the GENERATION task of speridlabs/iris-3b: a
+      // pixel-space (no VAE) flow-matching DiT conditioned on 12 intermediate layers of
+      // Qwen3-VL-4B-Instruct, served natively by inference's `mlx-gen-iris` (`iris_3b`).
+      //
+      // TASK IDENTITY (E4). The upstream repo ships THREE task backbones side by side — generation
+      // at the root, `depth/` and `upscaler/` — and only generation conditions on text. This entry
+      // is the generation task alone: its primary download fetches exactly the root `config.yaml` +
+      // `model.safetensors` (never `depth/*` / `upscaler/*`), and the Qwen3-VL encoder is a
+      // SEPARATE `coRequisite` component tagged `componentId: "text_encoder"`, so the depth and
+      // restoration tasks can be their own catalog entries that install and run without it.
+      // The worker stages that component as `LoadSpec::components["text_encoder"]`
+      // (gen_core::iris::TEXT_ENCODER_COMPONENT) from the pinned snapshot; it never downloads at
+      // generation time.
+      //
+      // CONTROL SURFACE (E3). The engine honours prompt, negative prompt (the CFG unconditional),
+      // size on a 16-px grid (16..=2048), count <= 8, seed, steps and guidance (= upstream
+      // cfg_scale). It refuses sampler/scheduler names, schedule shift, quantization and adapters
+      // by name, so the entry declares no sampler/scheduler menu, no tier axis and no LoRA family.
+      // A negative prompt only exists under CFG: at guidance 1.0 the engine refuses one, so the
+      // entry declares `image.negativePromptRequiresGuidance` and both the UI and worker drop it.
+      "id": "iris_3b",
+      "name": "Iris 3B",
+      "family": "iris",
+      "type": "image",
+      "adapter": "mlx_iris",
+      // The provider is MLX-only (`mac_only: true`); there is no Candle twin at this pin.
+      "macOnly": true,
+      "capabilities": ["text_to_image"],
+      "image": {
+        "negativePromptRequiresGuidance": true
+      },
+      "downloads": [
+        // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
+        // FP32 on disk; the engine casts to bf16 at load. EXACT bytes of the two pinned files.
+        {
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "default": true,
+          "files": ["config.yaml", "model.safetensors"],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 11950114087,
+          "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // The generation task's Qwen3-VL-4B-Instruct text encoder (Apache-2.0), pinned to the
+        // revision the backbone was trained against: config, tokenizer and the two bf16 shards.
+        // EXACT bytes of the listed files at the pinned revision.
+        {
+          "provider": "huggingface",
+          "repo": "Qwen/Qwen3-VL-4B-Instruct",
+          "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "files": [
+            "config.json",
+            "generation_config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "model.safetensors.index.json",
+            "model-*.safetensors"
+          ],
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 8882829131
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/speridlabs/iris-3b"
+      },
+      "gated": false,
+      "defaults": {
+        // Release sampling defaults (gen_core::iris::DEFAULT_STEPS / DEFAULT_CFG_SCALE / DEFAULT_SIZE).
+        "resolution": "1024x1024",
+        "steps": 100,
+        "guidanceScale": 3.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "768x768", "512x512"],
+        "count": [1, 2, 4, 8],
+        "minDimension": 16,
+        "maxDimension": 2048,
+        "requiresDimensionsMultipleOf": 16
+      },
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "mlx": {
+        // Conservative DECLARED floor (no measurement campaign): bf16 backbone (~6 GB) + Qwen3-VL-4B
+        // (~8.9 GB) resident plus pixel-space activations; the engine bring-up observed ~20 GB at
+        // 512² and ~22.6 GB at 1024². Replaced by measured evidence at the epic-end campaign.
+        "minMemoryGb": 32
+      },
+      "ui": {
+        "label": "Iris 3B",
+        "description": "Speridlabs Iris-3B text-to-image: a 3B pixel-space flow-matching DiT (no VAE) conditioned on Qwen3-VL-4B. Native MLX on Apple Silicon; 100-step FlowDPM-Solver++ at CFG 3.0 by default. Downloads ~12 GB backbone + ~8.9 GB text encoder; needs ~32 GB unified memory.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Iris 3B Prompt Guide",
+          "path": "/prompt-guides/iris-3b.md",
+          "sources": [
+            { "label": "Iris-3B model card", "url": "https://huggingface.co/speridlabs/iris-3b" },
+            { "label": "Iris-3B code", "url": "https://github.com/speridlabs/iris-3b" }
+          ]
+        }
+      }
+    },
+    {
       "id": "flux_schnell",
       // Which generation AXES this engine actually has (sc-15299), the image-lane sibling of the
       // `video` sub-block sc-8445 added for Krea Realtime. FLUX.1 [schnell] is the 4-step timestep-distilled student: the `flux1_schnell`

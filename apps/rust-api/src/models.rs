@@ -6902,6 +6902,84 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-25679 (E4): Iris-3B's GENERATION task is the backbone root files plus ONE hard
+    /// `text_encoder` component (Qwen3-VL-4B-Instruct at its pinned revision). The primary fetches
+    /// only the root `config.yaml` + `model.safetensors` — never the `depth/` / `upscaler/` task
+    /// backbones — and the entry stays not-installed (a repairable partial install) until the
+    /// encoder snapshot is present, so Image Studio never advertises a half-installed generator.
+    #[test]
+    fn iris_generation_install_state_gates_on_its_text_encoder_component() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let model = builtin_models_entry("iris_3b");
+
+        let co_requisites = model_co_requisite_downloads(&model);
+        assert_eq!(
+            co_requisites.len(),
+            1,
+            "generation has exactly one component"
+        );
+        let encoder = &co_requisites[0];
+        assert_eq!(
+            encoder.get("componentId").and_then(Value::as_str),
+            Some("text_encoder")
+        );
+        assert_eq!(
+            encoder.get("repo").and_then(Value::as_str),
+            Some("Qwen/Qwen3-VL-4B-Instruct")
+        );
+
+        let context = model_download_context(&model).unwrap().unwrap();
+        assert_eq!(context.repo, "speridlabs/iris-3b");
+        assert_eq!(context.files, ["config.yaml", "model.safetensors"]);
+        let backbone = huggingface_repo_cache_path(data_dir, &context.repo)
+            .unwrap()
+            .join("snapshots/7445443349bc9abe3c96f01ff793e2098ca012b3");
+        std::fs::create_dir_all(&backbone).unwrap();
+        for file in &context.files {
+            std::fs::write(backbone.join(file), b"weights").unwrap();
+        }
+        let partial = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !partial.installed,
+            "backbone without its encoder is not installed"
+        );
+        assert!(
+            partial.cache_incomplete,
+            "a missing encoder is a repairable partial install"
+        );
+
+        let revision = encoder.get("revision").and_then(Value::as_str).unwrap();
+        let snapshot = huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct")
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        for file in string_array_field(encoder, "files") {
+            let path = snapshot.join(seeded_file_path(&file));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"weights").unwrap();
+        }
+        // The shard index is validated, so it must name the shard the glob seeded.
+        let shard = seeded_file_path("model-*.safetensors");
+        std::fs::write(
+            snapshot.join("model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({ "weight_map": { "w": shard } })).unwrap(),
+        )
+        .unwrap();
+        let installed = install_state_for(Some(context), &model, data_dir);
+        assert!(
+            installed.installed,
+            "backbone + encoder is installed: incomplete={} missing={:?} path={:?}",
+            installed.cache_incomplete, installed.missing_required_files, installed.installed_path
+        );
+        assert!(
+            installed.missing_required_files.is_empty(),
+            "{:?}",
+            installed.missing_required_files
+        );
+    }
+
     /// sc-13681 / sc-13686: each MOSS TTS entry advertises its RVQ codec as a HARD component
     /// coRequisite (`moss_ttsd_v05` → XY_Tokenizer, `moss_tts_realtime` → MOSS-Audio-Tokenizer). Because
     /// install-state gates on hard coRequisites, a MOSS entry stays not-installed until the codec
