@@ -278,6 +278,17 @@ function techniqueRows(modelKey, opts) {
       aux: [m.x0Decoder, "instantid_face_stack", "mp_facemesh_v2"],
       needsMasks: true,
     },
+    {
+      // The two Z-Image winners on the independent likeness score: do buckets and masking stack?
+      id: "buckets_mask",
+      label: "Resolution buckets + subject mask (bg 0.1)",
+      labelSuffix: "subject mask (bg 0.1)",
+      advanced: { subjectMaskLoss: true, subjectMaskBackgroundWeight: 0.1, subjectMaskSubjectWeight: 1.0 },
+      bucketLadder: true,
+      limits: ["supportsResolutionBuckets", "supportsSubjectMaskLoss"],
+      aux: [],
+      needsMasks: true,
+    },
   ];
 }
 
@@ -971,7 +982,8 @@ function rowAdvanced(row, ctx, resolved) {
 }
 
 function rowLabel(row, ctx) {
-  return row.bucketLadder ? ladderLabel(ctx.ladder) : row.label;
+  if (!row.bucketLadder) return row.label;
+  return row.labelSuffix ? `${ladderLabel(ctx.ladder)} + ${row.labelSuffix}` : ladderLabel(ctx.ladder);
 }
 
 function configFor(ctx, advanced) {
