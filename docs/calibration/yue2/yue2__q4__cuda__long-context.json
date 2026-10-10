@@ -1,0 +1,173 @@
+{
+  "schema": "sceneworks-yue2-memory-profile-record-v2",
+  "caseId": "yue2:q4:cuda:long-context",
+  "lane": "candle:yue2",
+  "backend": "cuda",
+  "identity": {
+    "model": {
+      "id": "yue2",
+      "repo": "m-a-p/YuE2-3B",
+      "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+      "tier": "q4",
+      "weightsSha256": "df443371ec5b39b3b53525bf4cb8fc36e78c3597899e35d2aef585415fb4a9a6",
+      "weightsBytes": 2658814800,
+      "conversion": "yue2-ggml-tier-v1"
+    },
+    "decoder": {
+      "choice": "standard",
+      "componentId": "vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8"
+    },
+    "engine": {
+      "lane": "candle:yue2",
+      "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+      "closureDigest": "927461189947deb4323538d30c42c62c5cad6f4a788f095fa18039fda7c0b688",
+      "digestVersion": "inference-closure-digest v4"
+    },
+    "sceneworks": {
+      "revision": "26a149e7b9f33b6d5471e2ff4f74bd68fa0a79c8",
+      "dirty": false
+    }
+  },
+  "hardware": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+    "memoryBytes": 102641958912,
+    "computeCap": "12.0",
+    "driver": "596.36",
+    "os": "Windows_NT 10.0.26200"
+  },
+  "request": {
+    "name": "long-context",
+    "planning": "off",
+    "style": "cinematic orchestral rock, male vocal, strings, piano, big drums",
+    "lyrics": "[verse]\nOver the ridge where the old roads end\nI carried the fire, I carried my friend\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside\n\n[bridge]\nAnd the night is long but the night will turn\n\n[chorus]\nRise with the morning, rise with the tide\nNothing is lost that we carry inside",
+    "seed": 831002,
+    "cfgScale": 1.01,
+    "semanticSampling": {
+      "minTokens": 16000,
+      "maxTokens": 16000
+    }
+  },
+  "admission": {
+    "caseId": "yue2:q4:cuda:long-context",
+    "outcome": "admitted",
+    "estimate": {
+      "tier": "q4",
+      "backend": "cuda",
+      "evidence": "measured_weights_estimate_pending_terminal_calibration",
+      "controls": {
+        "stageResidency": false,
+        "attentionChunkSize": 100663296,
+        "decodeTileEdge": 224
+      },
+      "weights": {
+        "deviceBytes": 2658856736,
+        "hostBytes": 0
+      },
+      "stages": {
+        "acoustic": {
+          "deviceBytes": 6746107680,
+          "hostBytes": 0,
+          "totalBytes": 6746107680
+        },
+        "decode": {
+          "deviceBytes": 11990167328,
+          "hostBytes": 0,
+          "totalBytes": 11990167328
+        },
+        "load": {
+          "deviceBytes": 2658856736,
+          "hostBytes": 2658742400,
+          "totalBytes": 5317599136
+        },
+        "semantic": {
+          "deviceBytes": 6915598112,
+          "hostBytes": 0,
+          "totalBytes": 6915598112
+        }
+      }
+    }
+  },
+  "measured": {
+    "sampler": "nvidia-smi memory.used",
+    "stages": {
+      "load": {
+        "peakBytes": 3217031168,
+        "samples": 13
+      },
+      "semantic": {
+        "peakBytes": 7742685184,
+        "samples": 4329
+      },
+      "acoustic": {
+        "peakBytes": 7742685184,
+        "samples": 1025
+      },
+      "decode": {
+        "peakBytes": 7742685184,
+        "samples": 24
+      }
+    },
+    "peakBytes": 7742685184
+  },
+  "outcome": {
+    "status": "completed",
+    "caseId": "yue2:q4:cuda:long-context",
+    "outcome": "completed",
+    "audioSeconds": 639.9986666666666,
+    "rms": 0.05158921703696251,
+    "truncated": {
+      "abc": false,
+      "semantic": true
+    },
+    "stageSeconds": {
+      "acoustic": 268.3220114707947,
+      "decode": 6.221813440322876,
+      "load": 3.4975168704986572,
+      "semantic": 1140.9117436408997
+    },
+    "engineTiming": {
+      "abc": {},
+      "semantic": {
+        "seconds": 1129.5477525,
+        "prefill_seconds": 0.2074317,
+        "output_tokens": 16000,
+        "content_tokens": 16000,
+        "prefix_tokens": 119,
+        "cfg_branches": 2,
+        "execution": "candle"
+      },
+      "nar_seconds": 279.3885422,
+      "vae_seconds": 6.258571,
+      "load": {
+        "resolve_verify_and_load_seconds": 3.1580058
+      },
+      "e2e_seconds": 1415.4878248
+    },
+    "runIdentity": "52d27e1e0b1f8f140235e13f4caafddd61f510c854afbdd397423b1dbed2403a",
+    "planIdentity": "a8eb1b83539d19d503fab2f740099e52f872caea7f94ba17715e34115848cedd",
+    "decoder": {
+      "component": "yue2_vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+      "decoder_release": "standard",
+      "config_sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970",
+      "weights_sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    "latent": {
+      "schema": 1,
+      "sha256": "3515c2f7c12b8bb340dada34a5891aa9169cbfae10e89d9deb15bcbb2a72e4b5",
+      "shape": [
+        16000,
+        64
+      ],
+      "dtype": "F32",
+      "source": {
+        "kind": "synthesis",
+        "stage_identity": "8da9bc85a28babf408981e71255a0428320a5bafdf7dd476df3912a51b6523a3"
+      }
+    }
+  },
+  "capturedAt": "2026-09-28T00:11:27.914Z"
+}

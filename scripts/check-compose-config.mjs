@@ -4,10 +4,13 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 
 async function composeConfig(envFile) {
+  const env = { ...process.env };
+  delete env.SCENEWORKS_UID;
+  delete env.SCENEWORKS_GID;
   const result = spawnSync(
     "docker",
     ["compose", "--env-file", envFile, "config", "--format", "json"],
-    { encoding: "utf8", shell: false },
+    { encoding: "utf8", shell: false, env },
   );
   if (result.status !== 0) {
     throw new Error(result.stderr || result.stdout || "docker compose config failed");
@@ -97,6 +100,7 @@ function assertRuntimeDefaults(config, label, options = {}) {
     [worker, "candle worker"],
     [rustWorker, "rust worker"],
   ]) {
+    assertEqual(service?.environment?.HOME, "/sceneworks/data", `${label} ${serviceLabel} writable home`);
     assertEqual(
       service?.environment?.SCENEWORKS_CREDENTIALS_DIR,
       "/sceneworks/credentials",
@@ -127,6 +131,7 @@ function assertCredentialsBindOutsideRepo(config, label) {
 const tempRoot = await mkdtemp(path.join(os.tmpdir(), "sceneworks-compose-config-"));
 const emptyEnv = path.join(tempRoot, "empty.env");
 const lanEnv = path.join(tempRoot, "lan.env");
+const idsEnv = path.join(tempRoot, "ids.env");
 
 try {
   await writeFile(emptyEnv, "", "utf8");
@@ -135,12 +140,17 @@ try {
     "SCENEWORKS_API_PUBLISH_HOST=0.0.0.0\nSCENEWORKS_API_PORT=18010\n",
     "utf8",
   );
+  await writeFile(idsEnv, "SCENEWORKS_UID=1234\nSCENEWORKS_GID=2345\n", "utf8");
   assertRuntimeDefaults(await composeConfig(emptyEnv), "compose defaults");
   assertRuntimeDefaults(await composeConfig(".env.example"), ".env.example");
   assertRuntimeDefaults(await composeConfig(lanEnv), "compose LAN override", {
     apiPublishHost: "0.0.0.0",
     apiPort: "18010",
   });
+  const ids = await composeConfig(idsEnv);
+  for (const name of ["api", "worker", "rust-worker"]) {
+    assertEqual(ids.services?.[name]?.user, "1234:2345", `${name} UID/GID override`);
+  }
   console.log("SceneWorks compose config check passed.");
 } finally {
   await rm(tempRoot, { recursive: true, force: true });

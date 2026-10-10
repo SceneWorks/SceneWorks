@@ -1,0 +1,67 @@
+{
+  // The sc-22715 EVALUATION labeled set for the PLANNER's takes (epic 22708): SH010 and SH020 of
+  // the plan `film-harness plan` generated from the checked-in brief on 2026-09-14 (Anubis-Mini-8B
+  // bf16 MLX), rendered on MiniMax-H3 q4 (`~/SceneWorks/film-harness-evidence/sc-22715/
+  // evaluation-2026-09-14/planner/run`). Hand-labeled under the rubric in that directory's
+  // `RUBRIC.md`; notes in `manual/SCORES.md`. Same rules as `real-takes.jsonc`: media outside the
+  // repository, a missing frame is a refusal.
+  //
+  // The planner's shots are longer (6.58 s / 7.29 s) and its prose asks the camera to "follow",
+  // so one take carries several framings: P-SH010 goes wide → doorway mid-shot → close-up of the
+  // parcel in hand, P-SH020 wide → the courier's feet → the bench. That is what makes two of the
+  // labels below `unobserved`: a room question over ALL frames cannot be answered from a close-up
+  // of a parcel or of a floor, and the cut question's neighbour frame (P-SH010's last) is that
+  // close-up, so a "pegboard" comparison against it says nothing — a reviewer that reports a
+  // verdict there is overclaiming, exactly as `sh040_cut` in the sibling set.
+  "schemaVersion": 1,
+  "id": "courier-review-eval-2026-09-14-planner",
+  "version": 1,
+  "description": "Hand labels for the sc-22715 evaluation's planner-plan takes (MiniMax-H3 q4 MLX, 576x320, 24 fps).",
+  "mediaRoot": "~/SceneWorks/film-harness-evidence/sc-22715/evaluation-2026-09-14/frames/planner",
+  "reviewPlan": "../courier-workshop/review.jsonc",
+
+  "cases": [
+    {
+      "id": "planner_sh010_a1",
+      "shotId": "SH010",
+      "label": "correct",
+      "description": "Frame 1 a cluttered workshop in hard low sun with the door open centre-frame; frame 2 a mid shot of a courier in a bright blue jacket holding a small red box in the doorway; frame 3 a close-up of the parcel in his hands in the dark interior. Rubric 10/12, accepted.",
+      "frames": [
+        { "file": "SH010-a1-1.png", "timestampSeconds": 0.527 },
+        { "file": "SH010-a1-2.png", "timestampSeconds": 3.292 },
+        { "file": "SH010-a1-3.png", "timestampSeconds": 6.188 }
+      ],
+      "expected": {
+        "sh010_location": "unobserved",
+        "sh010_courier": "match",
+        "sh010_courier_jacket": "match",
+        "sh010_parcel": "match",
+        "sh010_parcel_custody": "match",
+        "sh010_action": "unobserved"
+      }
+    },
+    {
+      "id": "planner_sh020_a1",
+      "shotId": "SH020",
+      "label": "wrong_jacket_parcel_set_down_early",
+      "description": "Frame 1 a man in a BLACK jacket carrying a red parcel through a bright white-walled workshop; frame 2 his feet on a sawdust floor beside a tool tray; frame 3 he stands at a bench under a window with the red parcel already set down on it. Rubric 4/12, rejected.",
+      "frames": [
+        { "file": "SH020-a1-1.png", "timestampSeconds": 0.583 },
+        { "file": "SH020-a1-2.png", "timestampSeconds": 3.646 },
+        { "file": "SH020-a1-3.png", "timestampSeconds": 6.854 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH010-a1-3.png", "timestampSeconds": 6.188 }
+      ],
+      "expected": {
+        "sh020_location": "unobserved",
+        "sh020_courier": "match",
+        "sh020_courier_jacket": "mismatch",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "mismatch",
+        "sh020_action": "match",
+        "sh020_cut": "unobserved"
+      }
+    }
+  ]
+}

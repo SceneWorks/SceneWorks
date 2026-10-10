@@ -46,6 +46,7 @@ function ClipBlock({ item, duration, selected, ai, onSelect, onSelectKey }) {
             />
           ))
         : null}
+      {item.filmHarness?.shotId ? <span className="ve-clip-shot">{item.filmHarness.shotId}</span> : null}
       <span className="ve-clip-name">{item.displayName}</span>
     </button>
   );
@@ -79,6 +80,7 @@ export function Timeline({
   onAddAudioTrack,
   markers = [],
   onSelectMarker,
+  pendingShots = [],
 }) {
   const laneRef = useRef(null);
   const rulerDragRef = useRef(null);
@@ -327,6 +329,18 @@ export function Timeline({
                   onSelectKey={onSelectKey}
                   selected={selectedItemId === item.id}
                 />
+              ))}
+              {/* Film shots still rendering or queued for this timeline: where they will land.
+                  Not clips — nothing to select, trim, or save until the take is delivered. */}
+              {pendingShots.map((shot) => (
+                <div
+                  className={`ve-clip-pending ${shot.state}`}
+                  key={shot.id}
+                  style={{ left: `${duration > 0 ? (shot.start / duration) * 100 : 0}%`, width: `${duration > 0 ? (shot.seconds / duration) * 100 : 0}%` }}
+                  title={`${shot.id} ${shot.state}`}
+                >
+                  <span>{shot.id} · {shot.state}</span>
+                </div>
               ))}
               {transitions.map((trans) => (
                 <div className="ve-transition" key={trans.id} style={{ left: `${trans.leftPct}%` }} title={trans.type}>

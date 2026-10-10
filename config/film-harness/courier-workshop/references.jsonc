@@ -1,0 +1,49 @@
+{
+  // Approved reference pack for the courier/workshop/red-parcel fixture (epic 22708, sc-22710).
+  // Each entry has an explicit role the plan's shots address; the images are deterministic
+  // placeholder plates written by `film-harness fixture-images` (576x320, one flat colour with a
+  // bench line — see `FIXTURE_REFERENCES` in apps/rust-api/src/film_harness.rs). Replace a file
+  // with a real approved plate and bump `version`; the roles and the plan do not change.
+  // 2 (sc-24024): pack entries may carry a `locator` — the phrase that picks one subject out of an
+  // image SEVERAL roles share ("the woman on the left"). Every role here has a plate to itself, so
+  // none declares one; the bump is the schema's, not this document's.
+  "schemaVersion": 2,
+  "id": "courier-workshop-refs",
+  // 2 (sc-23404): the three dialogue roles became synthesized lines instead of placeholder tones,
+  // and SH060's line moved to its own `recipient_reveal_line` role so each of the three placements
+  // speaks its own text.
+  "version": 2,
+  "description": "Placeholder plates for the courier/workshop/red-parcel sequence.",
+  "references": [
+    { "role": "courier", "kind": "character", "file": "references/courier.png", "description": "The courier: blue jacket, carries the parcel." },
+    { "role": "recipient", "kind": "character", "file": "references/recipient.png", "description": "The recipient: grey work apron, rolled sleeves." },
+    { "role": "red_parcel", "kind": "prop", "file": "references/red_parcel.png", "description": "Small bright red cardboard parcel." },
+    { "role": "workshop_location", "kind": "location", "file": "references/workshop_location.png", "description": "Cluttered woodworking workshop, door camera-left." },
+    { "role": "workbench_table", "kind": "prop", "file": "references/workbench_table.png", "description": "Long wooden workbench, sawdust, centre of frame." },
+    { "role": "house_style", "kind": "style", "file": "references/house_style.png", "description": "Warm late-afternoon light, film grain, natural colour." },
+    { "role": "workshop_plate", "kind": "plate", "file": "references/workshop_plate.png", "description": "Wide keyframe plate of the workshop used as the first frame of the image-conditioned shots." }
+  ],
+  // Approved sound (sc-22712). Sound roles live in the same namespace as reference roles but are
+  // placed through different slots — a `dialogue` role goes on a shot's `dialogueClip`, and the
+  // `ambience`/`music` roles go on the plan's `sound` beds. They are never conditioning.
+  //
+  // The two BEDS are deterministic placeholder tones written by `film-harness fixture-sound`
+  // (`FIXTURE_SOUNDS` in apps/rust-api/src/film_harness.rs): mono 8 kHz PCM-16 triangle waves at one
+  // frequency each, so the two bed buses stay trivially distinguishable by ear when checking the
+  // POC export. They are 32s — long enough to play under the whole six-shot sequence without a gap,
+  // which is the point of placing them once instead of per shot.
+  //
+  // The three DIALOGUE entries carry `text` instead of a file (sc-23404): the run speaks each line
+  // through `POST /api/v1/audio/jobs` during `ensure_sound`, writes the WAV into `sound/` under a
+  // name derived from the role and the line's sha, and imports it on the dialogue bus exactly as it
+  // imports a recorded clip. Each line is the one the shot's own `dialogue` INTENT already states,
+  // so the film says out loud what the plan says it says. Replace a `text` with a `file` pointing at
+  // a real recording and bump `version`; nothing else changes.
+  "sound": [
+    { "role": "courier_line", "kind": "dialogue", "voice": "am_michael", "text": "Delivery. I'll leave it on the bench.", "description": "The courier's line in SH020." },
+    { "role": "recipient_line", "kind": "dialogue", "voice": "am_eric", "text": "Huh. That's not mine.", "description": "The recipient's line in SH050, quietly, as he notices the parcel." },
+    { "role": "recipient_reveal_line", "kind": "dialogue", "voice": "am_eric", "text": "Oh. Oh, that's lovely.", "description": "The recipient's line in SH060, as the lid lifts." },
+    { "role": "workshop_room_tone", "kind": "ambience", "file": "sound/workshop_room_tone.wav", "description": "Continuous workshop room tone (100 Hz, 32s)." },
+    { "role": "main_theme", "kind": "music", "file": "sound/main_theme.wav", "description": "Continuous music bed (250 Hz, 32s)." }
+  ]
+}

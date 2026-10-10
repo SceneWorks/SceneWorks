@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="300" height="300" viewBox="0 0 300 300">
+  <defs>
+    <path id="a" d="M100,100 L130,100 L110,180 L90,180 L100,100 Z M100,90 L80,200 L120,200 L100,90 Z"/>
+  </defs>
+  <g fill="none" fill-rule="evenodd">
+    <use fill="#000" transform="translate(100 130)" xlink:href="#a"/>
+    <use fill="#FFF" stroke="#000" stroke-width="3" transform="translate(100 130)" xlink:href="#a"/>
+  </g>
+</svg>

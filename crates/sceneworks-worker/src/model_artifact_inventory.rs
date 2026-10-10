@@ -118,7 +118,11 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         },
     },
     ModelConsumerInventoryEntry {
-        source_files: &["crates/sceneworks-worker/src/audio_jobs.rs"],
+        source_files: &[
+            "crates/sceneworks-worker/src/audio_jobs.rs",
+            "crates/sceneworks-worker/src/yue2_jobs.rs",
+            "crates/sceneworks-worker/src/yue2_transcription.rs",
+        ],
         categories: &[Category::Audio, Category::Primary, Category::CoRequisite],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::WorkerSnapshot,
@@ -143,6 +147,13 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
         categories: &[Category::CaptioningUtility, Category::Primary],
         resolution: Resolution::SharedContract {
             entrypoint: TypedResolverEntrypoint::ManagedModelPath,
+        },
+    },
+    ModelConsumerInventoryEntry {
+        source_files: &["crates/sceneworks-worker/src/vector_jobs.rs"],
+        categories: &[Category::Image, Category::Primary],
+        resolution: Resolution::SharedContract {
+            entrypoint: TypedResolverEntrypoint::ReceiptProvenance,
         },
     },
     ModelConsumerInventoryEntry {
@@ -487,6 +498,8 @@ mod tests {
         "crates/sceneworks-worker/src/wan_i2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_t2v_14b_tier_build.rs",
         "crates/sceneworks-worker/src/wan_ti2v_5b_tier_build.rs",
+        // sc-23001: the YuE2 memory-profile capture entrypoint (an #[ignore]d test module).
+        "crates/sceneworks-worker/src/yue2_memory_profile.rs",
     ];
 
     fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {

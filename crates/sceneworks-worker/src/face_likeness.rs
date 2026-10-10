@@ -426,12 +426,14 @@ impl FaceLikenessScorer {
     /// kps / dataset-face provision) and embed the source face once. Runs `!Send` MLX work — call
     /// inside `spawn_blocking`.
     pub(crate) fn load_mlx(weights_dir: &std::path::Path, source: &Image) -> WorkerResult<Self> {
-        use runtime_macos::media::weights::Weights;
-        let scrfd = Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE))
-            .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
-        let arcface =
-            Weights::from_file(weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE))
-                .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
+        let scrfd = crate::image_jobs::read_weights(
+            weights_dir.join(crate::image_jobs::INSTANTID_SCRFD_FILE),
+        )
+        .map_err(|error| WorkerError::Engine(format!("SCRFD weights: {error}")))?;
+        let arcface = crate::image_jobs::read_weights(
+            weights_dir.join(crate::image_jobs::INSTANTID_ARCFACE_FILE),
+        )
+        .map_err(|error| WorkerError::Engine(format!("ArcFace weights: {error}")))?;
         let analysis = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
             .map_err(|error| WorkerError::Engine(format!("face stack load: {error}")))?;
         Self::with_backend(FaceBackend::Mlx(analysis), source)

@@ -1,0 +1,31 @@
+/* SceneWorks — non-color primitives (verbatim from SceneWorks apps/web styles.css).
+   Radius scale, density/spacing scale, control heights, motion, and shell width.
+   Kept color-free; colors + shadows live in colors.css. */
+:root {
+  /* Radius */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-pill: 999px;
+
+  /* Density */
+  --gap-1: 6px;
+  --gap-2: 10px;
+  --gap-3: 14px;
+  --gap-4: 20px;
+  --gap-5: 28px;
+  --pad-tile: 14px;
+  --pad-panel: 20px;
+  --row-h: 40px;
+  --control-h: 38px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1); /* @kind other */
+  --t-fast: 120ms; /* @kind other */
+  --t-med: 220ms; /* @kind other */
+
+  /* App-shell sidebar width */
+  --side-w: 232px;
+}

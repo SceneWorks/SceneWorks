@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
+import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
@@ -9,7 +11,12 @@ import {
   licenseAcknowledgmentBlocked,
 } from "../licenseAcknowledgment.js";
 import { modelLoraFamilies } from "../presetUtils.js";
-import { blanketFloorGb, declaredFloorHostGb, installedFloorHostGb } from "../tierSuggestion.js";
+import {
+  blanketFloorGb,
+  declaredFloorHostGb,
+  installedFloorHostGb,
+  lightestInstallableTier,
+} from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
@@ -194,8 +201,23 @@ export function SimpleModelManager() {
       {rows.length ? (
         rows.map((row) => {
           const downloading = activeDownloads.has(row.id);
+          // sc-24108: Simple takes no acknowledgment — `download()` hands a gated model off to the
+          // Models screen — but "renders no licence UI" was never meant to mean the RESTRICTIONS
+          // are invisible here. A research-only model listed beside Apache-2.0 ones with nothing
+          // to tell them apart is the gap this closes. Read-only: name, link, collapsed notice.
+          const licenseTerms =
+            row.kind === "model" && (row.entry?.licenseNotice || row.entry?.licenseUrl) ? (
+              <ModelLicenseSummary
+                className="su-license-note"
+                licenseName={licenseComponentForModel(row.id)?.license}
+                licenseNotice={row.entry.licenseNotice}
+                licenseUrl={row.entry.licenseUrl}
+                nonCommercial={row.entry.nonCommercial === true}
+              />
+            ) : null;
           return (
-            <div className="su-row" key={row.id}>
+            <React.Fragment key={row.id}>
+            <div className="su-row">
               <span aria-hidden="true" className="su-row-glyph">
                 <Icon.Model size={20} />
               </span>
@@ -223,6 +245,8 @@ export function SimpleModelManager() {
                 </button>
               )}
             </div>
+            {licenseTerms}
+            </React.Fragment>
           );
         })
       ) : (
@@ -305,6 +329,6 @@ export function needsLabel(model, tierOptions) {
       return `from ${entry} GB`;
     }
   }
-  const floor = blanketFloorGb(model, tierOptions?.backend);
+  const floor = blanketFloorGb(model, tierOptions?.backend, lightestInstallableTier(model));
   return floor === null ? null : `needs ${floor} GB`;
 }

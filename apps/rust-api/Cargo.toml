@@ -4,9 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+# A second binary (`film-harness`, sc-22710) lives beside the API; keep `cargo run -p
+# sceneworks-rust-api` resolving to the API itself.
+default-run = "sceneworks-rust-api"
 
 [dependencies]
 axum = { version = "0.7", features = ["multipart"] }
+base64 = "0.22"
 fs2 = "0.4"
 futures-util = "0.3"
 glob = "0.3"
@@ -62,10 +66,12 @@ embed-web = ["dep:rust-embed", "dep:mime_guess"]
 backend-candle = ["sceneworks-worker/backend-candle"]
 
 [dev-dependencies]
+# Advance only a fixture runtime clock at verified job boundaries in cancellation tests.
+tokio = { version = "1.40", features = ["test-util"] }
 # Construct SQLite BUSY errors directly in the API error-contract test without
 # adding rusqlite to the production API dependency surface.
 rusqlite = { version = "0.32", features = ["bundled"] }
-parquet = { version = "53.4", default-features = false, features = ["snap"] }
+parquet = { version = "60.0", default-features = false, features = ["snap"] }
 # Real MCP streamable-HTTP client for the /mcp round-trip test (sc-10233); same
 # pinned version as crates/sceneworks-mcp — client features are additive.
 rmcp = { version = "=2.2.0", features = ["client", "transport-streamable-http-client-reqwest"] }

@@ -920,7 +920,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 
     let (frames, fps) = match output {
         GenerationOutput::Video { frames, fps, .. } => (frames, fps),
-        GenerationOutput::Images(_) => {
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
             return Err(format!(
                 "{} returned images, not a video clip",
                 arm.provider

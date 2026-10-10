@@ -1,0 +1,184 @@
+{
+  "schema": "sceneworks-yue2-memory-profile-record-v2",
+  "caseId": "yue2:bf16:metal:default",
+  "lane": "candle:yue2",
+  "backend": "metal",
+  "identity": {
+    "model": {
+      "id": "yue2",
+      "repo": "m-a-p/YuE2-3B",
+      "revision": "1a96eca688d6ae5d7f0feb88573fec89920fcd19",
+      "tier": "bf16",
+      "weightsSha256": null,
+      "weightsBytes": null,
+      "conversion": null
+    },
+    "decoder": {
+      "choice": "standard",
+      "componentId": "vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8"
+    },
+    "engine": {
+      "lane": "candle:yue2",
+      "inferenceRevision": "99a60541a73706fb67b4e78f44458774423ffb8e",
+      "closureDigest": "927461189947deb4323538d30c42c62c5cad6f4a788f095fa18039fda7c0b688",
+      "digestVersion": "inference-closure-digest v4"
+    },
+    "sceneworks": {
+      "revision": "b934d5dc41fdf48e7fd975892345948301a7fa36",
+      "dirty": false
+    }
+  },
+  "hardware": {
+    "memoryBytes": 137438953472,
+    "chip": "Apple M5 Max",
+    "os": "Darwin 25.6.0"
+  },
+  "request": {
+    "name": "default",
+    "planning": "full",
+    "style": "indie pop, bright female vocal, acoustic guitar, warm bass, steady drums, 104 bpm",
+    "lyrics": "[verse]\nMorning light on the window frame\nCoffee cooling, I call your name\nStreets are waking one by one\nWe were never meant to run\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know\n\n[verse]\nPaper boats on a river of rain\nEvery ending begins again\nWalk me home through the evening glow\nTell me things I already know\n\n[chorus]\nHold on, hold on to the sound\nEvery heartbeat comes back around\nHold on, hold on, don't let go\nThis is the only song we know",
+    "seed": 831001
+  },
+  "admission": {
+    "caseId": "yue2:bf16:metal:default",
+    "outcome": "admitted",
+    "estimate": {
+      "tier": "bf16",
+      "backend": "metal",
+      "evidence": "estimate_pending_terminal_calibration",
+      "controls": {
+        "stageResidency": false,
+        "attentionChunkSize": 100663296,
+        "decodeTileEdge": 224
+      },
+      "weights": {
+        "deviceBytes": 7261368448,
+        "hostBytes": 0
+      },
+      "stages": {
+        "acoustic": {
+          "deviceBytes": 10986441856,
+          "hostBytes": 0,
+          "totalBytes": 10986441856
+        },
+        "decode": {
+          "deviceBytes": 16268327040,
+          "hostBytes": 0,
+          "totalBytes": 16268327040
+        },
+        "load": {
+          "deviceBytes": 7261368448,
+          "hostBytes": 0,
+          "totalBytes": 7261368448
+        },
+        "plan": {
+          "deviceBytes": 7983450240,
+          "hostBytes": 0,
+          "totalBytes": 7983450240
+        },
+        "semantic": {
+          "deviceBytes": 9237244032,
+          "hostBytes": 0,
+          "totalBytes": 9237244032
+        }
+      }
+    }
+  },
+  "measured": {
+    "sampler": "memory-calibration-watchdog phys_footprint",
+    "stages": {
+      "load": {
+        "peakBytes": 8298733104,
+        "samples": 4
+      },
+      "plan": {
+        "peakBytes": 8555486864,
+        "samples": 9
+      },
+      "semantic": {
+        "peakBytes": 9858817968,
+        "samples": 27
+      },
+      "acoustic": {
+        "peakBytes": 9898319648,
+        "samples": 33
+      },
+      "decode": {
+        "peakBytes": 11347779384,
+        "samples": 2
+      }
+    },
+    "peakBytes": 11347779384
+  },
+  "outcome": {
+    "status": "completed",
+    "caseId": "yue2:bf16:metal:default",
+    "outcome": "completed",
+    "audioSeconds": 86.19866666666667,
+    "rms": 0.1767924278974533,
+    "truncated": {
+      "abc": false,
+      "semantic": false
+    },
+    "stageSeconds": {
+      "acoustic": 69.40501594543457,
+      "decode": 3.8823819160461426,
+      "load": 9.608674049377441,
+      "plan": 18.625051021575928,
+      "semantic": 57.45114207267761
+    },
+    "engineTiming": {
+      "abc": {
+        "seconds": 24.220113834,
+        "prefill_seconds": 6.10939725,
+        "output_tokens": 768,
+        "content_tokens": 767,
+        "prefix_tokens": 193,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "semantic": {
+        "seconds": 55.130107417,
+        "prefill_seconds": 0.444203667,
+        "output_tokens": 2156,
+        "content_tokens": 2155,
+        "prefix_tokens": 962,
+        "cfg_branches": 1,
+        "execution": "candle"
+      },
+      "nar_seconds": 68.01220725,
+      "vae_seconds": 7.912495125,
+      "load": {
+        "resolve_verify_and_load_seconds": 3.494552042
+      },
+      "e2e_seconds": 155.424576667
+    },
+    "runIdentity": "5005ebbf3d4399b2c1ad624374e59319b37f1d8dd1d6148874f144efff1a7f13",
+    "planIdentity": "475e72bd65b7e35608aa3fa9e9630e396cf9590a852788e74ee9842e5d9c2412",
+    "decoder": {
+      "component": "yue2_vae",
+      "repo": "m-a-p/YuE2-Vae",
+      "revision": "95535e72a97bc0f09b8ada125d26b4009428c0e8",
+      "decoder_release": "standard",
+      "config_sha256": "f0191bb9694009956de44e0c361a6f1334760be4c8f848e599bde242a54a0970",
+      "weights_sha256": "807ce9d5149fa27c5ad3e6582058469852e908f6c5acc8c8aa338e7ab7751346"
+    },
+    "latent": {
+      "schema": 1,
+      "sha256": "1da7031e406f4cc1d9e3a5c38eb85f51034679acf97f8141eb14dbc109318786",
+      "shape": [
+        2155,
+        64
+      ],
+      "dtype": "F32",
+      "source": {
+        "kind": "synthesis",
+        "stage_identity": "1c686f9fc82456c102f604ce7ac63fa1307171f1b8fc6bf2aa4cc5550f493e94"
+      }
+    }
+  },
+  "capturedAt": "2026-09-28T09:05:10.029Z"
+}

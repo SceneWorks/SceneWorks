@@ -206,6 +206,52 @@ describe("SceneWorks app shell", () => {
     expect(container.textContent).not.toContain("Waiting for an available GPU worker.");
   });
 
+  it("submits the chosen compute policy when Queue duplicates a pre-policy YuE2 job", async () => {
+    const legacy = {
+      id: "old-yue2", type: "audio_generate", status: "completed", attempts: 1,
+      projectId: "project-1", projectName: "Project 1", requestedGpu: "auto",
+      payload: {
+        model: "yue2", yue2: {
+          kind: "create", lyrics: "[verse]\\nla", runId: "yue2run_old", precision: "default",
+        },
+      },
+      createdAt: "2026-05-19T09:00:00Z", updatedAt: "2026-05-19T09:00:00Z",
+    };
+    let duplicateBody;
+    global.fetch.mockImplementation((url, options = {}) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/health")) return Promise.resolve(response({ status: "ok", authRequired: false }));
+      if (path.endsWith("/access")) return Promise.resolve(response({ authRequired: false }));
+      if (path.endsWith("/projects")) return Promise.resolve(response([{ id: "project-1", name: "Project 1" }]));
+      if (path.endsWith("/workers")) return Promise.resolve(response([]));
+      if (path.endsWith("/jobs/old-yue2/duplicate")) {
+        duplicateBody = JSON.parse(options.body);
+        return Promise.resolve(response({ ...legacy, id: "new-yue2" }));
+      }
+      if (path.endsWith("/jobs")) return Promise.resolve(response([legacy]));
+      return Promise.resolve(response([]));
+    });
+    root = createRoot(container);
+    await act(async () => root.render(<App />));
+    await settle();
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Queue").click();
+    });
+    await settle();
+    const choice = document.body.querySelector('select[aria-label="Compute precision for duplicate"]');
+    const duplicate = [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Duplicate");
+    expect(duplicate.disabled).toBe(true);
+    await act(async () => {
+      choice.value = "bf16";
+      choice.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await act(async () => duplicate.click());
+    await settle();
+    expect(duplicateBody.payloadChanges.yue2.computePolicy).toBe("bf16");
+    expect(duplicateBody.payloadChanges.yue2).not.toHaveProperty("precision");
+    expect(duplicateBody.payloadChanges).toHaveProperty("duplicatedAt");
+  });
+
   it("keeps fresher SSE job state when a post-action refresh returns stale data", async () => {
     const failedJob = {
       id: "job-failed",

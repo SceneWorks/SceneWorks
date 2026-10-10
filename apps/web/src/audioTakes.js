@@ -1,5 +1,6 @@
 import { terminalStatuses } from "./jobTypes.js";
 import { jobAudioResultAssets } from "./jobResultAssets.js";
+import { usagePolicyChips, yue2TakeFilename } from "./yue2Policy.js";
 
 // Shared, pure derivations behind the Audio Studio redesign (epic 14361). The take grid,
 // the play deck and the Simple UI surfaces all read a run's mode, model, settings chips and
@@ -15,7 +16,55 @@ export const AUDIO_MODE_LABELS = Object.freeze({
   sfx: "Sound FX",
   music: "Music",
   voiceclone: "Voice Clone",
+  yue2: "YuE2 · Experimental",
 });
+
+// A YuE2 song (sc-23000): submitted through its own route by the experimental Song Lab, never by a
+// standard mode. Recognised by the job's `yue2` block, the recorded model id or the asset's
+// `extra.yue2` provenance, so the shared results surfaces label it as the experimental,
+// noncommercial model it is — instead of guessing a standard mode from its knobs — and never offer
+// a "Run again" that would resubmit it to the generic audio route (which refuses it).
+export function isYue2AudioRun(job, asset = null) {
+  return Boolean(
+    job?.payload?.yue2 ||
+      job?.payload?.model === "yue2" ||
+      asset?.extra?.yue2 ||
+      asset?.recipe?.model === "yue2",
+  );
+}
+
+// The version / experimental / noncommercial / licence chips a YuE2 run carries on the shared
+// surfaces, read from its recorded usage policy (the lab's own chip vocabulary).
+function yue2PolicyChips(policy, model) {
+  return usagePolicyChips(policy, model);
+}
+
+// The name a take downloads under: a YuE2 take gets the licence-marked export stem, never its style
+// text; every other clip keeps its display name.
+export function audioDownloadName(asset, job = null) {
+  if (isYue2AudioRun(job, asset)) {
+    return yue2TakeFilename(asset, job?.payload?.usagePolicy ?? null);
+  }
+  return asset?.displayName ?? "";
+}
+
+// A YuE2 take whose score plan or song hit its token budget is cut short — it can sound finished
+// but is not. Its own provenance (`extra.yue2.truncated`) says so; this is the sentence every take
+// surface shows beside a "Truncated" badge. Null for a complete take and for any other clip.
+export function audioTakeTruncation(asset) {
+  if (!isYue2AudioRun(null, asset)) {
+    return null;
+  }
+  const truncated = asset?.extra?.yue2?.truncated;
+  if (!truncated || typeof truncated !== "object") {
+    return null;
+  }
+  const phases = [truncated.abc === true ? "score plan" : null, truncated.semantic === true ? "song" : null].filter(
+    Boolean,
+  );
+  const budget = phases.length > 1 ? "hit their token budgets" : "hit its token budget";
+  return phases.length ? `Truncated: the ${phases.join(" and ")} ${budget}, so this take is cut short.` : null;
+}
 
 // m:ss clock for every transport read-out. Clamps NaN/negative to 0:00.
 export function formatClock(seconds) {
@@ -119,6 +168,34 @@ export function audioRunModelName(job, models = []) {
   return match?.name ?? match?.ui?.label ?? id;
 }
 
+// A segmented-song render (YuE, sc-19384) persists its vocal / instrumental stems as child assets
+// of the mix (`extra.audioStem` names the stem, `extra.mixAssetId` the mix). The take grid shows the
+// MIX as the take and offers each stem as a download on that card (sc-19385), so fold every stem
+// whose mix is among the run's takes out of the take list. A stem whose mix is gone (discarded)
+// stays an ordinary take rather than vanishing.
+export function foldAudioStems(takes) {
+  const list = Array.isArray(takes) ? takes : [];
+  const ids = new Set(list.map((asset) => asset?.id));
+  const stems = {};
+  const kept = [];
+  for (const asset of list) {
+    const mixId = asset?.extra?.mixAssetId;
+    const stem = asset?.extra?.audioStem;
+    if (stem && stem !== "mix" && mixId && ids.has(mixId)) {
+      (stems[mixId] ??= []).push(asset);
+    } else {
+      kept.push(asset);
+    }
+  }
+  return { takes: kept, stems };
+}
+
+// Display label for a stem asset ("vocals" → "Vocals").
+export function audioStemLabel(asset) {
+  const stem = String(asset?.extra?.audioStem ?? "");
+  return stem ? stem.charAt(0).toUpperCase() + stem.slice(1) : "Stem";
+}
+
 // True while a run is still producing — the in-flight strip's gate.
 export function audioJobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
@@ -129,20 +206,24 @@ export function audioJobIsRunning(job) {
 // (with no takes yet) so the caller can pin them above the completed groups.
 export function audioRunGroups(jobs, assets, models = []) {
   return (Array.isArray(jobs) ? jobs : []).map((job) => {
-    const takes = jobAudioResultAssets(job, assets);
+    const { takes, stems } = foldAudioStems(jobAudioResultAssets(job, assets));
     const model = (models ?? []).find((item) => item?.id === job?.payload?.model) ?? null;
-    const mode = audioJobMode(job, model);
+    const yue2 = isYue2AudioRun(job);
+    const mode = yue2 ? "yue2" : audioJobMode(job, model);
     return {
       job,
       id: job.id,
       mode,
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
-      chips: audioRunChips(job),
+      chips: yue2
+        ? [...yue2PolicyChips(job?.payload?.usagePolicy, model), ...audioRunChips(job)]
+        : audioRunChips(job),
       takes,
+      stems,
       running: audioJobIsRunning(job),
       createdAt: job.createdAt ?? job.startedAt ?? null,
-      replayable: Boolean(job.payload),
+      replayable: Boolean(job.payload) && !yue2,
     };
   });
 }
@@ -201,21 +282,25 @@ export function audioAssetRunGroups(assets, models = [], coveredAssetIds = new S
     const payload = assetRunPayload(asset);
     const job = { id: `run:${key}`, status: "completed", createdAt: asset.createdAt ?? null, payload };
     const model = (models ?? []).find((item) => item?.id === payload.model) ?? null;
-    const mode = audioJobMode(job, model);
+    const yue2 = isYue2AudioRun(job, asset);
+    const mode = yue2 ? "yue2" : audioJobMode(job, model);
     const group = {
       job,
       id: job.id,
       mode,
       modeLabel: AUDIO_MODE_LABELS[mode] ?? mode,
       modelName: audioRunModelName(job, models),
-      chips: audioRunChips(job),
+      chips: yue2
+        ? [...yue2PolicyChips(asset?.extra?.usagePolicy, model), ...audioRunChips(job)]
+        : audioRunChips(job),
       takes: [asset],
       running: false,
       createdAt: asset.createdAt ?? null,
       // A voice clone can't be replayed without re-picking its reference clip, and a run
       // whose model is gone can't be replayed at all — so those groups hide "Run again"
-      // rather than offering a button that would fail.
-      replayable: mode !== "voiceclone" && Boolean(model),
+      // rather than offering a button that would fail. A YuE2 song replays only from the Song
+      // Lab (its own route), never through the generic audio route.
+      replayable: mode !== "voiceclone" && !yue2 && Boolean(model),
     };
     byRun.set(key, group);
     groups.push(group);
@@ -225,6 +310,7 @@ export function audioAssetRunGroups(assets, models = [], coveredAssetIds = new S
   // takes oldest-first or Take 1 would label the last clip rendered.
   for (const group of groups) {
     group.takes.sort((a, b) => Date.parse(a.createdAt ?? 0) - Date.parse(b.createdAt ?? 0));
+    Object.assign(group, foldAudioStems(group.takes));
   }
   return groups;
 }
@@ -260,6 +346,7 @@ export function audioAssetMetaLine(asset, run = null) {
     .filter(Boolean)
     .join(" ");
   return [
+    audioTakeTruncation(asset) ? "Truncated" : null,
     run?.modelName || asset?.recipe?.model || null,
     settings.voice ?? null,
     settings.language ?? null,

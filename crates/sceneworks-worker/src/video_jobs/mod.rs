@@ -76,13 +76,14 @@ mod prelude {
     };
     #[allow(unused_imports)]
     pub(super) use super::{
-        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, fresh_asset_id,
-        heartbeat, huggingface_snapshot_dir, json, now_rfc3339, picture_bound_seconds,
-        resolve_video_seed, run_ffmpeg, safe_download_dir, shutdown_requested, task_join_error,
-        update_job, video_progress, write_poster_frame, ApiClient, AudioTrack, BTreeMap,
-        CancelJoinGuard, DecodedVideo, Duration, FfmpegContext, Instant, JobSnapshot, JobStatus,
-        JsonObject, Path, PathBuf, ProgressStage, ProjectStore, RgbFrame, Settings, Uuid, Value,
-        VideoRequest, WorkerError, WorkerResult, WorkerStatus, CANCEL_MESSAGE,
+        backend_label, cancel_requested_peek, check_cancel, faststart_mp4, format_picture_bound,
+        fresh_asset_id, heartbeat, huggingface_snapshot_dir, json, now_rfc3339,
+        picture_bound_seconds, resolve_video_seed, run_ffmpeg, safe_download_dir,
+        shutdown_requested, task_join_error, update_job, video_progress, write_poster_frame,
+        ApiClient, AudioTrack, BTreeMap, CancelJoinGuard, DecodedVideo, Duration, FfmpegContext,
+        Instant, JobSnapshot, JobStatus, JsonObject, Path, PathBuf, ProgressStage, ProjectStore,
+        RgbFrame, Settings, Uuid, Value, VideoRequest, WorkerError, WorkerResult, WorkerStatus,
+        CANCEL_MESSAGE,
     };
     #[cfg(any(
         target_os = "macos",
@@ -1667,12 +1668,16 @@ async fn encode_inner(
 /// `seedvr2::seedvr2_audio_mux_args` (cfg-gated to the lanes that ship it, so it is named rather
 /// than linked). Their argument vectors legitimately differ — the upscale
 /// maps a source clip's optional audio and writes `+faststart` in the same pass — but the BOUND is
-/// one policy and is computed in exactly one place. The rationale, and the measurements behind the
-/// choice of `-t` over `-shortest` and over no flag at all, live on [`audio_mux_args`].
+/// one policy, spelled once by [`format_picture_bound`] (SeedVR2 feeds it its measured length,
+/// sc-24391). The measurements behind `-t` over `-shortest` live on [`audio_mux_args`].
 ///
 /// `fps.max(1)` mirrors `encode_inner`'s own clamp rather than dividing by zero.
 pub(crate) fn picture_bound_seconds(frame_count: usize, fps: u32) -> String {
-    let seconds = frame_count as f64 / f64::from(fps.max(1));
+    format_picture_bound(frame_count as f64 / f64::from(fps.max(1)))
+}
+
+/// The one spelling of the bound, to the microsecond; SeedVR2 passes its measured length (sc-24391).
+pub(crate) fn format_picture_bound(seconds: f64) -> String {
     format!("{seconds:.6}")
 }
 
@@ -1752,48 +1757,6 @@ fn audio_mux_args(
         "0".to_owned(),
         out.to_string_lossy().into_owned(),
     ]
-}
-
-/// Write f32 PCM to a canonical 16-bit WAV. Signals already within `[-1, 1]` retain their original
-/// amplitude; only over-range input is peak-normalized to prevent clipping. `pub(crate)` so the
-/// pure-audio job path reuses it (sc-13404).
-pub(crate) fn write_wav_pcm16(audio: &AudioTrack, path: &Path) -> WorkerResult<()> {
-    let peak = audio
-        .samples
-        .iter()
-        .fold(0.0f32, |max, &sample| max.max(sample.abs()));
-    let scale = i16::MAX as f32 / peak.max(1.0);
-    let mut pcm = Vec::with_capacity(audio.samples.len() * 2);
-    for &sample in &audio.samples {
-        let value = (sample * scale)
-            .round()
-            .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
-        pcm.extend_from_slice(&value.to_le_bytes());
-    }
-
-    let channels = audio.channels.max(1);
-    let bits_per_sample = 16u16;
-    let block_align = channels * bits_per_sample / 8;
-    let byte_rate = audio.sample_rate * block_align as u32;
-    let data_len = pcm.len() as u32;
-
-    let mut buffer = Vec::with_capacity(44 + pcm.len());
-    buffer.extend_from_slice(b"RIFF");
-    buffer.extend_from_slice(&(36 + data_len).to_le_bytes());
-    buffer.extend_from_slice(b"WAVE");
-    buffer.extend_from_slice(b"fmt ");
-    buffer.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    buffer.extend_from_slice(&1u16.to_le_bytes()); // audio format = PCM
-    buffer.extend_from_slice(&channels.to_le_bytes());
-    buffer.extend_from_slice(&audio.sample_rate.to_le_bytes());
-    buffer.extend_from_slice(&byte_rate.to_le_bytes());
-    buffer.extend_from_slice(&block_align.to_le_bytes());
-    buffer.extend_from_slice(&bits_per_sample.to_le_bytes());
-    buffer.extend_from_slice(b"data");
-    buffer.extend_from_slice(&data_len.to_le_bytes());
-    buffer.extend_from_slice(&pcm);
-    std::fs::write(path, buffer)?;
-    Ok(())
 }
 
 /// Best-effort `+faststart` remux (moov atom to the front so WKWebView can start
@@ -1881,8 +1844,8 @@ async fn write_poster_frame(media_path: &Path) {
 /// without measuring the clip, so the record cannot silently fall back to a prediction. That is a
 /// compile error rather than a test we would have to remember to write.
 ///
-/// Mirrors [`run_video_upscale_job`], which has always recorded its real `out_count` and
-/// `out_count / out_fps`.
+/// Mirrors [`run_video_upscale_job`], which records its real `out_count` and the picture length of
+/// the source timing it measured (sc-24391).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct EncodedClip {
     /// `decoded.frames.len()` — `encode_inner` writes exactly one PNG per entry, so this IS the
@@ -2111,6 +2074,8 @@ fn video_progress(
 // a self-contained media pipeline — the property
 // `video_jobs_remains_split_into_real_engine_modules` bounds, and which sc-18650's ffmpeg
 // normalization would otherwise have pushed past its line budget.
+mod wav;
+pub(crate) use wav::{write_wav_pcm16, write_wav_pcm16_with_info};
 pub(crate) mod reference_audio;
 pub(crate) use reference_audio::resolve_reference_audio_conditioning;
 pub(crate) mod seedvr2;
@@ -2489,5 +2454,6 @@ where
 // `pub(crate)` so `media_jobs`' own ffmpeg-backed tests can reuse `tests::ffmpeg_reachable` —
 // the ONE place that turns "no ffmpeg on this lane" into an assert when the lane declared one
 // (sc-19549). A second copy of that predicate is a second way for a lane to silently skip.
+
 #[cfg(test)]
 pub(crate) mod tests;

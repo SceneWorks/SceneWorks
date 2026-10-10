@@ -132,6 +132,10 @@ export const MODEL_STORIES = {
   z_image: { mlx: 15457, candle: 16170 },
   z_image_edit: { mlx: 15458, candle: 15862 },
   qwen_image: { mlx: 15459, candle: 15865 },
+  // Qwen-Image 2.1 (epic 24107): one engine id on two backends, each owned by the story that
+  // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
+  // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
+  qwen_image_2_1: { mlx: 24108, candle: 24109 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -1278,6 +1282,18 @@ export function parseBackendTierOverrides(instantIdSource) {
   return new Map([["instantid_realvisxl:candle", [candleDense]], ...CONVERTER_TIER_OVERRIDES]);
 }
 
+// `instantid.rs` is a large production route, but the matrix consumes exactly one fact from it:
+// the backend-tier override map above. Fingerprint that parsed contract instead of every unrelated
+// implementation detail in the route. Sorting the keys makes the projection stable without hiding
+// tier order, which is itself part of the generated catalog axes.
+function backendTierOverridesRevisionBody(overrides) {
+  return JSON.stringify(
+    [...overrides.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, tiers]) => [key, [...tiers]]),
+  );
+}
+
 function modesFor(model) {
   const modes = (model.capabilities ?? []).filter((capability) => GENERATION_CAPABILITIES.has(capability));
   return modes.length ? sortedUnique(modes) : ["catalog_default"];
@@ -1894,8 +1910,8 @@ export function implementationVerdict({
  *
  * Nothing else may enter: not a record, not a plan row, not a geometry, not a campaign, not a
  * currency digest. Anchor CURRENCY is reported on the cell beside the state (sc-22511 makes it a
- * report, never a gate) and deliberately does not move it — a staled loader closure means the
- * anchor needs re-extraction, not that the rung stopped existing.
+ * report, never a gate) and deliberately does not move it — a staled loader closure reports
+ * historical provenance, not that the rung stopped existing.
  *
  * The state vocabulary that replaces Missing / Implemented-unverified / Runtime-verified / Verified:
  *
@@ -2525,8 +2541,10 @@ export const SOURCE_PATHS = Object.freeze({
 // `matrixSourceRevision` is generated provenance written back into the manifest's calibration
 // bindings. Including that value in the source-tree hash creates an impossible fixed point:
 // regenerating the matrix rotates the value, certification writes the new value into the
-// manifest, and the next regeneration rotates it again. Keep every binding field that affects
-// eligibility in the semantic hash, but replace only this self-stamped provenance value.
+// manifest, and the next regeneration rotates it again. A terminal candidate is likewise outside
+// this generator's capability and memory inputs: it records a campaign pin and source closure but
+// cannot move a matrix cell. Keep every field that can affect a cell in the semantic hash, while
+// replacing these provenance-only subtrees.
 function manifestRevisionBody(body) {
   const parsed = JSON.parse(stripJsoncComments(body));
   const visit = (value) => {
@@ -2535,11 +2553,75 @@ function manifestRevisionBody(body) {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
         key,
-        key === "matrixSourceRevision" ? "source-tree:<generated>" : visit(child),
+        key === "matrixSourceRevision"
+          ? "source-tree:<generated>"
+          : key === "terminalCandidate"
+            ? "<terminal-candidate-provenance>"
+            : visit(child),
       ]),
     );
   };
   return JSON.stringify(visit(parsed));
+}
+
+// Currency reads only `models[*].digest` (see `indexLoaderClosures`). The closure file's top-level
+// inference pin, entry-point inventory and source-file inventory are provenance for how those
+// digests were produced; if every content-derived digest is unchanged, they cannot move a cell and
+// must not invalidate the matrix. Sort the projection so JSON member order is also inert.
+function anchorLoaderClosureRevisionBody(body) {
+  const parsed = JSON.parse(body);
+  return JSON.stringify(
+    Object.fromEntries(
+      Object.entries(parsed.models ?? {})
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, entry.digest ?? null]),
+    ),
+  );
+}
+
+// The fingerprint is a staleness tripwire for the PUBLISHED contract, not a source-control receipt.
+// If the complete published document is byte-for-byte unchanged apart from `generatedFrom`, carry
+// its existing provenance rather than making a source-only refactor or pin record invalidate it.
+// Any cell, anchor-currency, census, claim or model-slice change breaks this equality and records the
+// newly derived fingerprint.
+async function carryGeneratedFromForUnchangedContract(matrix) {
+  let previous;
+  try {
+    previous = JSON.parse(await readFile(path.join(ROOT, OUTPUT_JSON), "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return matrix;
+    throw error;
+  }
+  const withoutGeneratedFrom = ({ generatedFrom: _generatedFrom, ...contract }) => contract;
+  const provenanceOnlySources = new Set([
+    "manifest",
+    "anchorLoaderClosures",
+    "anchorExtractor",
+    // The InstantID source is projected to the exact backend-tier facts the matrix consumes. During
+    // the transition from the old whole-file fingerprint, carry the prior provenance whenever that
+    // projected contract leaves the published document byte-identical.
+    "instantId",
+  ]);
+  const currentSources = matrix.generatedFrom?.sources ?? {};
+  const previousSources = previous.generatedFrom?.sources ?? {};
+  const sourceNames = new Set([...Object.keys(currentSources), ...Object.keys(previousSources)]);
+  for (const name of sourceNames) {
+    const current = currentSources[name];
+    const recorded = previousSources[name];
+    if (
+      current?.path !== recorded?.path ||
+      (!provenanceOnlySources.has(name) && current?.sha256 !== recorded?.sha256)
+    ) {
+      return matrix;
+    }
+  }
+  if (
+    JSON.stringify(withoutGeneratedFrom(previous)) ===
+    JSON.stringify(withoutGeneratedFrom(matrix))
+  ) {
+    return { ...matrix, generatedFrom: previous.generatedFrom };
+  }
+  return matrix;
 }
 
 /**
@@ -2582,6 +2664,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
       name,
       name === "manifest"
         ? manifestRevisionBody(bodies[name])
+        : name === "anchorLoaderClosures"
+          ? anchorLoaderClosureRevisionBody(bodies[name])
         : semanticSourceBody(relative, bodies[name]),
     ]),
   );
@@ -2626,6 +2710,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
   const stagedResidencyEngines = parseMlxStagedResidencyEngines(mlxFitBody);
   const candleBespokeStagedLanes = parseCandleBespokeStagedLanes(bodies.memoryRouteRegistry);
   const backendTierOverrides = parseBackendTierOverrides(bodies.instantId);
+  revisionBodies.instantId = backendTierOverridesRevisionBody(backendTierOverrides);
   const routeLaneTiers = parseRouteRegistryLaneTiers(bodies.memoryRouteRegistry);
   assertOutOfMatrixEntriesAreStillUnroutable(manifest.models, (model) =>
     resolveRoute(model, routes, videoRoutes, backendScopes(model, routedBackends)),
@@ -2727,8 +2812,8 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
               id: anchor.id,
               tier: anchor.tier,
               source: `config/memory-anchors.json#${anchor.id}`,
-              // sc-22511: REPORTED, never gated. A staled loader closure means the anchor needs
-              // re-extraction; it does not mean the rung stopped existing, so it may not — and by
+              // sc-22511: REPORTED, never gated. A staled loader closure reports historical provenance
+              // for optional review; it does not mean the rung stopped existing, so it may not — and by
               // `cellState`'s signature cannot — move the state.
               current:
                 loaderClosures.get(`${anchor.modelId}:${anchor.backend}`) ===
@@ -3001,7 +3086,7 @@ export async function buildMatrix({ sourceOverrides = {}, cellFilter = null, pub
     ]),
   );
   assertPublishedDocumentIsClosed(matrix, cells.length);
-  return matrix;
+  return carryGeneratedFromForUnchangedContract(matrix);
 }
 
 export function renderMarkdown(matrix) {
@@ -3043,9 +3128,9 @@ export function renderMarkdown(matrix) {
     "",
     `sc-22513 (epic 22505, E5): a cell's \`state\` is a PURE FUNCTION of three facts published on the cell itself — \`implementation\` (does the code implement this rung on this route), \`anchor\` (does the store hold a measured anchor for this model x tier x backend lane) and \`derivationDefined\` (is the analytic derivation wired for this lane). Nothing else may enter it: no calibration record, no plan row, no measured geometry, no campaign, no currency digest. The per-geometry \`memoryCharacterization\` claim, the \`Verified\`/\`Runtime verified\` promotion and the per-record calibration join are GONE; the historical corpora they read are retained as validation data for the derivation, never as gates.`,
     "",
-    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a staled loader closure means the anchor needs re-extraction, not that the rung stopped existing (sc-22511).`,
+    `An anchor's CURRENCY (\`anchor.current\`, from \`config/anchor-loader-closures.json\`) is reported beside the state and deliberately does not move it — a differing loader closure is advisory provenance, never a CI failure or an automatic requirement to remeasure (sc-23692).`,
     "",
-    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation is bounded to the one revision it names: the next pin bump that moves the loader closure past it stales the anchor again.",
+    "sc-22667: a current anchor also states HOW it is current. `anchor.currencyAttestation` is `null` when its key was derived at the record's own measurement revision; otherwise it is the reviewed attestation from `config/anchor-currency-attestations.json` — the closure diff from the measurement revision to the attested one was read file by file and is accounting-only, or a re-measure on the same hardware witnessed the behaviour unchanged (`class`, `why`, `witness`). An attestation records the review at the revision it names. Later pin or closure changes may report historical currency, but require no renewal and do not block CI.",
     "",
     `sc-18099: \`cells\` is a SUBSET. ${matrix.summary.publicationPredicate} The counts on this page, \`summary\`, and the per-(entry, backend, rung) \`coverage\` census in the JSON artifact are all derived from every resolved coordinate, published or not, and \`models[].axes\` publishes the axes those coordinates span so an unimplemented lane stays distinguishable from an absent one.`,
     "",
@@ -3053,7 +3138,7 @@ export function renderMarkdown(matrix) {
     "",
     "sc-18815: the `Modality` column exists because the universe is no longer one modality. Video entries carry no per-entry ownership story — epic 18803 does not slice video that way, so `Model story` is `—` rather than a story id that could not close the cell.",
     "",
-    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers behind the widened margin — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
+    "sc-22513: an `Anchored` / `Anchored/underived` rollup carries `(stale)` when EVERY anchor backing that (entry, backend) is non-current. It is a currency REPORT, not a state — the lane still serves its measured numbers with unchanged runtime admission — but without it a lane whose evidence has all staled reads identically to one measured at the live loader closure. A lane with even one current anchor is unmarked.",
     "",
     "| Catalog entry | Modality | Backend | Route | Family story | Model story | Staged residency |",
     "| --- | --- | --- | --- | --- | ---: | --- |",
@@ -3120,7 +3205,7 @@ export function renderMarkdown(matrix) {
     }`;
     const attested = anchor.currencyAttestation;
     const current = !anchor.current
-      ? "no — re-extract"
+      ? "no — advisory"
       : attested
         ? `yes — attested ${attested.class} ${attested.measuredRevision.slice(0, 8)}→${attested.attestedRevision.slice(0, 8)} (${attested.story})`
         : "yes";

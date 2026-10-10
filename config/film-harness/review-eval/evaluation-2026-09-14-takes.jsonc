@@ -1,0 +1,211 @@
+{
+  // The sc-22715 EVALUATION labeled set (epic 22708): the six MiniMax-H3 q4 takes of the
+  // hand-authored courier plan rendered on 2026-09-14 (`~/SceneWorks/film-harness-evidence/
+  // sc-22715/evaluation-2026-09-14/hand-film/run`), plus the two `request-repair` replacements,
+  // hand-labeled frame by frame under the rubric in that directory's `RUBRIC.md` and the per-shot
+  // notes in `manual/SCORES.md`. Same shape and same rules as `real-takes.jsonc` beside this
+  // file: the media is NOT in the repository, `mediaRoot` names the evidence directory, and a
+  // missing frame is a refusal.
+  //
+  // Frames are the rubric's own three per take (8 %, 50 %, 94 % of the take), which are also the
+  // review plan's declared sampling positions, so the reviewer and the human looked at the same
+  // pictures. `adjacentFrames` is the previous SELECTED take's last frame, which is what the
+  // export cut against at the time of the review.
+  //
+  // Labels are what a CORRECT reviewer should report per question — not what the model said, and
+  // not what the plan intended. Three of them are deliberately uncomfortable:
+  //   * `sh020_courier` / `sh020_parcel` are `mismatch` because the take's first frame (0.41 s)
+  //     shows an empty room — the courier and the parcel have not entered yet — and `frames: all`
+  //     asks about every sampled frame. That is a true fact about the take.
+  //   * `sh040_cut` is `unobserved`: the take it cuts from (SH030) is a close-up of the bench with
+  //     no wall in frame, so a pegboard question cannot be answered on the neighbour's side. A
+  //     reviewer that answers "no" on both sides and reports a clean cut is OVERCLAIMING: the two
+  //     takes are in fact different rooms.
+  //   * `sh060_apron_sleeve` is `unobserved`: the recipient's forearms are bare (sleeves rolled),
+  //     so there is no sleeve colour to read in any frame.
+  "schemaVersion": 1,
+  "id": "courier-review-eval-2026-09-14",
+  "version": 1,
+  "description": "Hand labels for the sc-22715 evaluation takes (MiniMax-H3 q4 MLX, 576x320, 5.17 s, 24 fps) and their replacements.",
+  "mediaRoot": "~/SceneWorks/film-harness-evidence/sc-22715/evaluation-2026-09-14/frames/hand-film",
+  "reviewPlan": "../courier-workshop/review.jsonc",
+
+  "cases": [
+    {
+      "id": "eval_sh010_a1",
+      "shotId": "SH010",
+      "label": "correct",
+      "description": "Empty panelled workshop, pegboard of tools, long bench centre, door camera-left; the door opens and a man in a dark blue jacket steps into the doorway with a small red parcel; bench clear. Rubric 12/12, accepted.",
+      "frames": [
+        { "file": "SH010-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH010-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH010-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh010_location": "match",
+        "sh010_courier": "match",
+        "sh010_courier_jacket": "match",
+        "sh010_parcel": "match",
+        "sh010_parcel_custody": "match",
+        "sh010_action": "match"
+      }
+    },
+    {
+      "id": "eval_sh020_a1",
+      "shotId": "SH020",
+      "label": "different_workshop_and_late_entry",
+      "description": "Frame 1 is a wide of a DIFFERENT workshop (lumber shop, machinery, no pegboard) with nobody in it; frames 2 and 3 show a courier in a bright blue jacket and grey beanie at a bench holding a flat red envelope. Rubric 7/12, rejected (cut 0).",
+      "frames": [
+        { "file": "SH020-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH020-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH020-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH010-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh020_location": "match",
+        "sh020_courier": "mismatch",
+        "sh020_courier_jacket": "unobserved",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "match",
+        "sh020_action": "match",
+        "sh020_cut": "mismatch"
+      }
+    },
+    {
+      "id": "eval_sh020_a2",
+      "shotId": "SH020",
+      "label": "replacement_plate_head_parcel_lost_from_view",
+      "description": "The request-repair replacement (seed 22712). Frame 1 (0.41 s) is the flat brown conditioning plate itself — a mountain silhouette, no room, no person; frame 2 a man in a dark blue work jacket, back to camera, carrying a red parcel box to a rough wooden bench in front of a pegboard of tools; frame 3 he stands at the bench with the parcel out of view. Rubric 8/12, accepted with a 1.0 s head trim.",
+      "frames": [
+        { "file": "SH020-a2-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH020-a2-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH020-a2-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH010-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh020_location": "mismatch",
+        "sh020_courier": "mismatch",
+        "sh020_courier_jacket": "unobserved",
+        "sh020_parcel": "mismatch",
+        "sh020_parcel_custody": "unobserved",
+        "sh020_action": "match",
+        "sh020_cut": "match"
+      }
+    },
+    {
+      "id": "eval_sh030_a1",
+      "shotId": "SH030",
+      "label": "correct",
+      "description": "Hands in dark blue sleeves lower a small red parcel box onto a sawdust-scarred wooden bench and withdraw; the box rests alone in the last frame. Rubric 11/12, accepted.",
+      "frames": [
+        { "file": "SH030-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH030-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH030-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH020-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh030_bench": "match",
+        "sh030_sleeve": "match",
+        "sh030_parcel": "match",
+        "sh030_parcel_custody": "match",
+        "sh030_action": "match",
+        "sh030_cut": "match"
+      }
+    },
+    {
+      "id": "eval_sh040_a1",
+      "shotId": "SH040",
+      "label": "correct_action_different_room",
+      "description": "A man in a bright blue jacket leaves a red parcel on a wooden bench, walks out through the door camera-left and closes it; the room is a THIRD workshop (green-tiled walls, strip light, tools on hooks, no pegboard). Rubric 9/12, accepted with the room noted.",
+      "frames": [
+        { "file": "SH040-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH040-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH040-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH030-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh040_location": "match",
+        "sh040_parcel": "match",
+        "sh040_parcel_custody": "match",
+        "sh040_action": "match",
+        "sh040_cut": "unobserved"
+      }
+    },
+    {
+      "id": "eval_sh050_a1",
+      "shotId": "SH050",
+      "label": "correct_action_parcel_became_gift_box",
+      "description": "Whitewashed-brick workshop with a pegboard of tools and a long bench; a woman in a grey apron, sleeves rolled, enters through the door camera-left and stops at the bench looking down at a red parcel that is now a ribboned gift box. Rubric 9/12, rejected (cut 0 against SH040's tiled room).",
+      "frames": [
+        { "file": "SH050-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH050-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH050-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH040-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh050_location": "match",
+        "sh050_recipient": "match",
+        "sh050_recipient_apron": "match",
+        "sh050_parcel": "match",
+        "sh050_parcel_custody": "match",
+        "sh050_action": "match",
+        "sh050_cut": "mismatch"
+      }
+    },
+    {
+      "id": "eval_sh050_a2",
+      "shotId": "SH050",
+      "label": "replacement_action_unfinished_room_jump",
+      "description": "The request-repair replacement (seed 22715). A pegboard workshop, long bench centre with a red ribboned parcel, door open camera-left; a woman in a grey apron wipes her hands on a rag, walks in, and at the last frame is still mid-room walking toward the bench. Rubric 8/12 with cut 0 against SH040's tiled room; rejected, no third attempt.",
+      "frames": [
+        { "file": "SH050-a2-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH050-a2-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH050-a2-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH040-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh050_location": "match",
+        "sh050_recipient": "match",
+        "sh050_recipient_apron": "match",
+        "sh050_parcel": "match",
+        "sh050_parcel_custody": "match",
+        "sh050_action": "mismatch",
+        "sh050_cut": "mismatch"
+      }
+    },
+    {
+      "id": "eval_sh060_a1",
+      "shotId": "SH060",
+      "label": "correct_bare_forearms",
+      "description": "A woman's bare hands and forearms, grey apron at frame left, tear open a red paper-wrapped parcel on a sawdust-strewn wooden bench; last frame the wrapping is folded back around a pale inner box. Rubric 10/12, accepted.",
+      "frames": [
+        { "file": "SH060-a1-1.png", "timestampSeconds": 0.413 },
+        { "file": "SH060-a1-2.png", "timestampSeconds": 2.583 },
+        { "file": "SH060-a1-3.png", "timestampSeconds": 4.857 }
+      ],
+      "adjacentFrames": [
+        { "file": "SH050-a2-3.png", "timestampSeconds": 4.857 }
+      ],
+      "expected": {
+        "sh060_bench": "match",
+        "sh060_apron_sleeve": "unobserved",
+        "sh060_parcel": "match",
+        "sh060_parcel_custody": "match",
+        "sh060_action": "match",
+        "sh060_cut": "match"
+      }
+    }
+  ]
+}

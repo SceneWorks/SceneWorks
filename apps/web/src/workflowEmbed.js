@@ -174,6 +174,10 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.textStyleGain", L_SETTINGS],
   ["advanced.imageGuidanceScale", L_SETTINGS],
   ["advanced.enhancePrompt", L_PASSES],
+  // sc-24113. Grouped with the PASSES rather than the settings: like the PiD decoder beside it, it
+  // selects what comes out of the decode — the model's alpha channel kept rather than composited
+  // over white — not a sampling parameter.
+  ["advanced.transparentBackground", L_PASSES],
   ["advanced.usePid", L_PASSES],
   ["advanced.decoder", L_PASSES],
   ["advanced.pidTarget", L_PASSES],

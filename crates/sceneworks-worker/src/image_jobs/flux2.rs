@@ -346,6 +346,7 @@ fn flux2_edit_resolved_quant(
     reconcile_resolved_tier_quant(
         requested_for_reconcile,
         weights_dir,
+        &request.model_manifest_entry,
         !dense_text_encoder,
         model_id,
         job_id,
@@ -773,7 +774,17 @@ async fn generate_flux2_edit_stream(
     let load_quant = quant;
     let mut spec = load_spec(weights_dir.clone(), load_quant, adapters, None);
     if engine_id != "flux2_dev_edit" {
-        spec = spec.with_resolved_route(request.model.clone());
+        // macOS: the MLX provider crate maps the catalog model onto this route (`product_load`),
+        // refusing a model the route does not serve rather than recording it as resolved.
+        #[cfg(target_os = "macos")]
+        let resolved_route = runtime_macos::providers::flux2::product_load::resolved_route(
+            engine_id,
+            &request.model,
+        )
+        .map_err(|error| crate::classify_engine_error("FLUX.2 edit resolved route", error.into()))?;
+        #[cfg(not(target_os = "macos"))]
+        let resolved_route = request.model.as_str();
+        spec = spec.with_resolved_route(resolved_route);
         if let Some(pid) = pid_weights {
             spec = spec.with_pid(pid.checkpoint, pid.gemma);
         }
@@ -805,6 +816,7 @@ async fn generate_flux2_edit_stream(
     // carries its request-context rows. Gating this whole block on the engine id meant the dev edit
     // lane never reached request-scoped evaluation at all, so a single-reference dev edit — which
     // the provider's calibrated ≥2-reference contract does not cover — ran with NO admission.
+    let pre_policy_spec = spec.clone();
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         engine_id,
         resolved_tier,
@@ -865,6 +877,25 @@ async fn generate_flux2_edit_stream(
         use_pid,
         has_phases: false,
     };
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        engine_id,
+        &request.model,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                engine_id,
+                &request.model,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            )
+            .with_resolved_artifact_tier(resolved_tier)
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         engine_id,
@@ -1372,6 +1403,7 @@ async fn generate_flux2_dev_control_stream(
         use_pid: false,
         has_phases: false,
     };
+    let pre_policy_spec = spec.clone();
     spec = crate::memory_route_registry::evaluate_declared_mlx_load_shape_for_request(
         FLUX2_DEV_CONTROL_ENGINE_ID,
         resolved_tier,
@@ -1422,6 +1454,28 @@ async fn generate_flux2_dev_control_stream(
         use_pid: false,
         has_phases: false,
     };
+    let (spec, memory_plan) = release_declared_sequential_for_request(
+        FLUX2_DEV_CONTROL_ENGINE_ID,
+        &request.model,
+        &pre_policy_spec,
+        spec,
+        memory_plan,
+        &memory_inputs,
+        |spec| {
+            let plan = crate::mlx_fit_gate::MlxRequestPlan::for_spec_and_manifest(
+                FLUX2_DEV_CONTROL_ENGINE_ID,
+                &request.model,
+                spec,
+                Some(&request.model_manifest_entry),
+                None,
+            );
+            match resolved_tier {
+                Some(tier) => plan.with_resolved_artifact_tier(Some(tier)),
+                None => Ok(plan),
+            }
+        },
+    )
+    .await?;
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
         job.id.clone(),
         FLUX2_DEV_CONTROL_ENGINE_ID,

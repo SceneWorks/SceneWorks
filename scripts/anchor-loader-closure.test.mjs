@@ -253,21 +253,17 @@ test("the closure is the loader's own crates, not the repository", { skip }, () 
 });
 
 /**
- * THE PIN-BUMP CASE, and it is not hypothetical: the anchors were measured at `MEASURED_AT`, the
- * repository has moved to `PIN` since, and the loader's source did not. Under the old crate-level
- * unit that revision change alone rotated the currency term; under this one the key is identical,
- * which is E9's claim — an anchor predating an unrelated change stays authoritative.
+ * THE PIN-BUMP CASE. The real trees may also contain loader edits, so this test holds the measured
+ * loader closure byte-identical while allowing the revision and every unrelated file to move.
+ * A revision-only change must leave the content-derived key unchanged.
  */
 test("a pin bump with unchanged loader source leaves the key unchanged", { skip }, (t) => {
   // Off CI a local clone that does not carry the measurement revision cannot ask this, and says so
   // by name. On CI `requireMeasurementRevision` throws instead of skipping.
   if (!requireMeasurementRevision(t)) return;
   assert.notEqual(MEASURED_AT, PIN, "the two revisions must actually differ");
-  // The claim is about the KEY, not about whether this particular pin happened to leave the
-  // loader alone — sc-22414's coherence guard (670dc1f4) moved it, by design, and E9 says that
-  // stales the anchor. So the pin bump under test is the tree at `PIN` with the loader's own
-  // closure held at its MEASURED_AT content: every other file in the repository — and the
-  // revision itself — has moved, and the key must not notice.
+  // The claim is about the key, not whether this particular real pin also edited loader content.
+  // Hold the loader closure at its measured bytes while every unrelated file and the revision move.
   const measured = keyAt(MEASURED_AT);
   const measuredTree = gitTree(repo, MEASURED_AT);
   const pinTree = gitTree(repo, PIN);
@@ -279,15 +275,19 @@ test("a pin bump with unchanged loader source leaves the key unchanged", { skip 
       .filter((file) => pinTree.contentId(file) !== measuredTree.contentId(file))
       .map((file) => [file, bodies.get(file)]),
   );
-  assert.ok(Object.keys(held).length > 0, "this pin moved at least one loader file");
   const bumped = keyAt(PIN, held);
   assert.deepEqual(bumped.files, measured.files, "the held closure walks to the same files");
   assert.equal(bumped.digest, measured.digest);
-  // Teeth: the same bump WITHOUT holding the loader still is a real loader move at this pin, and
-  // the key says so — the other half of E9, asserted against the real tree rather than assumed.
-  if (keyAt(PIN).digest !== measured.digest) {
-    assert.notDeepEqual(keyAt(PIN).files, measured.files, "a moved key names its moved files");
-  }
+
+  // Teeth independent of what happened between these two concrete revisions: changing bytes in
+  // a loader file must rotate the key even when the real pin bump happened to be revision-only.
+  const current = keyAt(PIN);
+  const loader = current.files.find((file) => file.endsWith(".rs"));
+  assert.ok(loader, "the loader closure contains Rust source");
+  const editedLoader = keyAt(PIN, {
+    [loader]: edited(pinTree, loader, "pub const SC_22511_LOADER_CONTENT_EDIT: u64 = 1;"),
+  });
+  assert.notEqual(editedLoader.digest, current.digest);
 });
 
 test("a sibling model's edit leaves the key unchanged", { skip }, () => {
@@ -533,30 +533,9 @@ test("every packaged anchor's key is the derivation at ITS OWN measurement revis
   );
   assert.ok(store.exceededBounds.length > 0, "the packaged store carries a measured lower bound");
 
-  // AND IT IS NOT THE PIN'S DIGEST. If the recorded half were derived at the pin, currency would
-  // compare a value with itself and report "current" through every loader change there is. The
-  // packaged store carries anchors whose loaders HAVE moved since they were measured, and they must
-  // read as stale.
-  const stale = store.anchors.filter(
-    (anchor) =>
-      anchor.source.loaderClosureDigest !==
-      config.models[`${anchor.modelId}:${anchor.backend}`].digest,
-  );
-  assert.ok(
-    stale.length > 0,
-    "no packaged anchor is stale — the recorded key is being derived at the pin, not at its " +
-      "measurement, and currency has become a tautology",
-  );
-  // And no UNATTESTED anchor reads current unless its measurement revision's closure really equals
-  // the pin's: currency by attestation is the only other way to be current, and it is declared.
-  //
-  // sc-22738: AN ANCHOR MEASURED AT THE PIN ITSELF SATISFIES THAT, it does not violate it. Its
-  // measurement revision's closure IS the pin's, so reading current is trivially true rather than
-  // tautological — and a re-measure at the current pin is the normal product of a rerun campaign,
-  // not a defect. This loop used to refuse one outright, which made the suite red the moment a
-  // campaign captured fresh evidence at the pin. The tautology it was reaching for — every anchor
-  // stamped with the pin's digest regardless of when it was measured — is caught by `stale` above,
-  // which requires the store to still carry an anchor whose loader has genuinely moved.
+  // No UNATTESTED anchor reads current unless its own measurement revision derives the
+  // pin's digest. Current and historical populations are both legitimate: the real-source
+  // mutation tests above prove loader changes move digests without demanding stale evidence.
   for (const anchor of store.anchors) {
     if (anchor.source.currencyAttestation) continue;
     const declaredAtPin = config.models[`${anchor.modelId}:${anchor.backend}`].digest;

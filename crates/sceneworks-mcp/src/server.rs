@@ -709,6 +709,116 @@ impl SceneWorksMcp {
         .await
     }
 
+    #[tool(
+        description = "YuE2 (experimental, noncommercial): inspect a score in the supported native two-voice ABC dialect — a stored version (projectId + versionId) or raw abc text. Returns exact events: per-voice sounding notes after merging ties (onset/duration in quarter notes, MIDI pitch), bar grids, chord symbols with onsets, key changes, sections and tempo. Notation outside the dialect (tuplets, grace notes, chord stacks, repeats, w: lyrics, unsupported chords/keys) is reported as unsupported, which does not mean the ABC is invalid in general."
+    )]
+    async fn yue2_inspect_score(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2InspectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::inspect(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: list a project's score versions (oldest first) with their lineage (parentVersionId/rootVersionId), origin, edit operation and brief, score hash, summary and render count. Every edit is a separate version; originals are never overwritten."
+    )]
+    async fn yue2_list_score_versions(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::list_versions(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: get one score version in full — its ABC score, request (style, lyrics, cot, seed), edit record (operation, brief, contract, invariant report), provenance, and every render of it (audio asset, model/decoder identity, truncation flags)."
+    )]
+    async fn yue2_get_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2VersionArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: save a score (from a plan, a transcription or an import) as a new root version with its style, lyrics and cot. The score must be in the supported native ABC dialect; cot=melody requires a chord-free score."
+    )]
+    async fn yue2_create_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CreateArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::create_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: apply ONE bounded edit operation to a score version and save the result as a NEW version linked to its source (the source is never modified). Operations: reharmonize, strip_chords, set_tempo, arrange_sections, set_lyrics, set_style, replace_score. Each declares what it may change; the server re-parses the result and checks the parsed musical invariants — sounding notes, durations, bars, sections, tempo, chords, lyrics, style — against the source, and refuses the edit (isError with the invariant report) if anything undeclared changed. Use dryRun to check first. Rendering the new version later regenerates the WHOLE recording from score, style and lyrics; it does not edit or preserve the earlier waveform, so audio can differ outside the edited bars."
+    )]
+    async fn yue2_edit_score(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2EditArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::edit(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: persist an A/B listening comparison between two score versions, optionally naming one completed render of each. Records both requests, scores, edit briefs, lineage, every symbolic difference (parsed events, not text), the edit's invariant report when B was edited from A, the renders' audio assets and truncation flags (truncated renders are flagged), and your listening notes. Each render is a complete regeneration, not a waveform-preserving edit — compare complete recordings, and do not report listening you did not do."
+    )]
+    async fn yue2_compare_versions(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CompareArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::compare(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: list a project's persisted A/B listening comparisons (oldest first), each with both versions' requests, scores and edit briefs, lineage, symbolic differences, renders with truncation flags, warnings and listening notes."
+    )]
+    async fn yue2_list_comparisons(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ProjectArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::list_comparisons(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: get one persisted A/B listening comparison by id. Each side's render is a complete regeneration of that version, not a waveform-preserving edit of the other."
+    )]
+    async fn yue2_get_comparison(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2ComparisonArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_comparison(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL — CC BY-NC 4.0): render one take of a score version through the Song Lab's job route. The version fixes the style, lyrics, planning, seed and guidance; you may choose steps, decoder, weight tier and required compute policy (auto, bf16 or fp32). Rendering regenerates the WHOLE recording from the score, style and lyrics — it does not edit or preserve an earlier waveform, so audio can differ everywhere. Requires that the USER has accepted YuE2's licence in SceneWorks: without it the call is refused with license_acknowledgment_required and nothing is queued (this tool never accepts the licence for them). Output is noncommercial. Returns the job id; poll yue2_get_render."
+    )]
+    async fn yue2_render_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2RenderArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::render_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2 (EXPERIMENTAL, NONCOMMERCIAL): render a zero-shot cover that follows a reviewed score version — mode \"melody\" (keep the melody) or \"full\" — singing the lyrics you give, in an optional style. A cover is a complete new recording, not an edit of an earlier one. Select a required compute policy (auto, bf16 or fp32) separately from weight tier. Requires the USER's licence acceptance in SceneWorks (refused with license_acknowledgment_required otherwise; never accepted by this tool). Returns the job id; poll yue2_get_render."
+    )]
+    async fn yue2_cover_score_version(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2CoverArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::cover_version(&self.api, args).await
+    }
+
+    #[tool(
+        description = "YuE2: poll a render or cover job — status, stage, progress and, once finished, its render record, truncation flags (a truncated take is cut short), warnings, errors, the noncommercial usage policy and the produced asset ids. Use get_job_result on a completed job for download links."
+    )]
+    async fn yue2_get_render(
+        &self,
+        Parameters(args): Parameters<crate::yue2::Yue2RenderStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        crate::yue2::get_render(&self.api, args).await
+    }
+
     /// Absolute URL base for ticketed media links (sc-10290). `/mcp` and
     /// `/api/v1` are the SAME axum app, so the host the client used to reach
     /// `/mcp` is exactly the host that serves the media — derive it from the
@@ -906,7 +1016,12 @@ impl ServerHandler for SceneWorksMcp {
              list_loras for LoRA adapters compatible with a model family. generate_image \
              blocks until the images are ready; video runs minutes, so use \
              submit_video_job, poll get_job_status, then get_job_result for ticketed \
-             download links (get_job_status/get_job_result work for image jobs too).",
+             download links (get_job_status/get_job_result work for image jobs too). \
+             YuE2 score tools (yue2_*) inspect native ABC scores, apply one bounded, \
+             invariant-checked edit per new version, and persist A/B listening comparisons; \
+             yue2_render_score_version / yue2_cover_score_version queue a render (after the \
+             user has accepted YuE2's noncommercial licence in SceneWorks) and yue2_get_render \
+             polls it; rendering a version regenerates the whole recording.",
         )
     }
 }
@@ -1601,6 +1716,15 @@ pub(crate) fn compact_models(models: &Value) -> Value {
                 "installState",
                 "gated",
                 "defaults",
+                // Usage terms (sc-22988 E2): an agent picking a model must see that it is
+                // noncommercial / experimental, whether commercial use is eligible (and the
+                // alternatives when it is not), where the licence lives and that the user must
+                // accept it before it runs.
+                "nonCommercial",
+                "experimental",
+                "commercialUse",
+                "licenseUrl",
+                "requiresLicenseAcknowledgment",
             ],
             &mut out,
         );
@@ -1734,6 +1858,42 @@ mod tests {
                 "defaults": { "resolution": "1024x1024", "steps": 8, "guidanceScale": 0, "count": 4 },
                 "resolutions": ["768x768", "1024x1024"],
                 "loraFamilies": ["z-image"]
+            }])
+        );
+    }
+
+    #[test]
+    fn compact_models_keeps_the_usage_terms() {
+        let commercial_use = json!({
+            "eligible": false,
+            "reason": "CC BY-NC 4.0",
+            "alternativeFamily": "yue"
+        });
+        let full = json!([{
+            "id": "yue2",
+            "name": "YuE2",
+            "type": "audio",
+            "installState": "missing",
+            "nonCommercial": true,
+            "experimental": true,
+            "commercialUse": commercial_use,
+            "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca/LICENSE",
+            "requiresLicenseAcknowledgment": true,
+            "licenseNotice": "a long notice that stays on the full API response"
+        }]);
+        // Mutation that reds this: dropping any of the five keys from `compact_models`.
+        assert_eq!(
+            compact_models(&full),
+            json!([{
+                "id": "yue2",
+                "name": "YuE2",
+                "type": "audio",
+                "installState": "missing",
+                "nonCommercial": true,
+                "experimental": true,
+                "commercialUse": commercial_use,
+                "licenseUrl": "https://huggingface.co/m-a-p/YuE2-3B/blob/1a96eca/LICENSE",
+                "requiresLicenseAcknowledgment": true
             }])
         );
     }

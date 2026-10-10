@@ -6,8 +6,8 @@
 //
 // The pins live in crates/sceneworks-worker/Cargo.toml and
 // crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
-// candle-kernels to the multi-arch vendored copy inside the same inference revision (sc-7544 /
-// sc-13510) — that rev must move in lockstep or the patched kernels skew against candle-core. This
+// candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
+// revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
 // The direct `mlx-rs` pin (michaeltrefry/mlx-rs, a DIFFERENT url) is intentionally left alone -- but
@@ -48,7 +48,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(repoRoot, "crates/sceneworks-worker/Cargo.toml");
 const MEMORY_MANIFEST = join(repoRoot, "crates/sceneworks-memory-adapter/Cargo.toml");
 const LOCKFILE = join(repoRoot, "Cargo.lock");
-// Root workspace manifest: holds the candle-kernels [patch] pin (same repo, same rev).
+// Root workspace manifest: holds the Candle [patch] pins (same repo, same rev).
 const ROOT_MANIFEST = join(repoRoot, "Cargo.toml");
 const INFERENCE_GIT = "https://github.com/SceneWorks/inference";
 // Every inference crate any workspace manifest depends on, so `cargo update -p` refreshes ALL of
@@ -64,9 +64,9 @@ const INFERENCE_CRATES = [
   "mlx-gen",
   "candle-gen",
 ];
-// Resolved through the root [patch], not a direct dependency — still pinned to the inference
-// repo, so its lock entry must be refreshed on every bump.
-const PATCHED_CRATES = ["candle-kernels"];
+// Resolved through the root [patch], not direct dependencies. Both vendored packages must move
+// with the inference pin and have their lock entries refreshed by Cargo.
+const PATCHED_CRATES = ["candle-core", "candle-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -150,6 +150,28 @@ function repin(manifestText, sha, manifestPath = MANIFEST) {
     throw new Error(`expected to rewrite ${inferenceLines} inference pin(s), rewrote ${rewrote}`);
   }
   return out.join("\n");
+}
+
+// Before any bump writes, require the root workspace patch to carry every vendored package.
+// Cargo ignores a dependency workspace's [patch], so repinning direct crates alone is unsafe.
+function verifyCandlePatches(manifestText, sha) {
+  const marker = `[patch."https://github.com/huggingface/candle"]`;
+  const lines = manifestText.split("\n");
+  const afterMarker = lines.findIndex((line) => line.trim() === marker);
+  const section = [];
+  for (let i = afterMarker + 1; afterMarker >= 0 && i < lines.length; i += 1) {
+    if (lines[i].trim().startsWith("[")) break;
+    section.push(lines[i]);
+  }
+  for (const crate of PATCHED_CRATES) {
+    const matches = section.filter((line) =>
+      new RegExp(`^${crate}\\s*=`).test(line.trim()));
+    if (matches.length !== 1 ||
+        !matches[0].includes(`git = "${INFERENCE_GIT}"`) ||
+        !matches[0].includes(`rev = "${sha}"`)) {
+      throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
+    }
+  }
 }
 
 function repinSemanticProvenance(source, sha) {
@@ -577,22 +599,9 @@ function reportCrossLaneWork(sha) {
 }
 
 /**
- * Say up front which memory-anchor currency attestations this pin strands.
- *
- * `config/anchor-currency-attestations.json` is the OTHER half of a pin bump, and the only half
- * nothing here derives. An attestation is bounded to the one revision it names: it records that the
- * loader-closure diff from an anchor's measurement revision up to `attestedRevision` was read and is
- * accounting-only, or is witnessed unchanged by a re-measure. Moving the pin past that revision
- * leaves the store claiming a justification for a revision that is no longer the pin — which
- * `sceneworks-core`'s `a_packaged_currency_attestation_names_the_pin_it_keys_the_anchor_to` reds on
- * `parity-rust`, at the END of a CI round (sc-22765, where it cost exactly that).
- *
- * Reported rather than rewritten, for the same reason as the licence audit's prose: the remediation
- * is a REVIEW. Re-keying means reading the new range against that anchor's closure and either
- * extending the justification or deleting the entry so the anchor goes honestly stale. A script that
- * stamped the new revision in would manufacture the false green the currency key exists to prevent.
- *
- * Pure over the parsed config so `--self-test` drives it without a checkout.
+ * Report historical attestation revisions without demanding renewal. A later pin does not
+ * invalidate the original review or measurement, even when a shared loader closure changes.
+ * Currency is advisory in CI as well as at runtime (sc-23692).
  */
 function staleCurrencyAttestations(config, sha) {
   return (config?.attestations ?? [])
@@ -612,21 +621,16 @@ function reportStaleCurrencyAttestations(sha) {
   if (stale.length === 0) return;
   console.log(
     `bump-inference: ${stale.length} memory-anchor currency attestation(s) key to a revision this ` +
-      "pin moves past —",
+      "pin moves past (advisory only) —",
   );
   for (const [anchorId, at] of stale) {
     console.log(`    ${anchorId}  (attested at ${at.slice(0, 12)}…)`);
   }
   console.log(
     [
-      "  Each is a REVIEW, not a re-stamp. For one anchor, intersect its `closureFiles` in",
-      "  config/anchor-loader-closures.json with the range's changed files:",
-      `      git -C <inference> diff --name-only <attestedRevision>..${sha.slice(0, 12)}`,
-      "  An EMPTY intersection means that anchor's closure is byte-identical across the range: extend",
-      "  the entry to this pin and record that reading in its `why`. A non-empty one must be",
-      "  classified file by file, or the entry DELETED so the anchor goes honestly stale. Then:",
-      "      node scripts/anchor-loader-closure.mjs --repo <clone> --stamp-anchors",
-      "  Leaving them is a parity-rust failure, not a warning.",
+      "  Advisory only: these attestations retain their original revision and justification.",
+      "  A pin or closure change does not block CI or require attestation renewal or remeasurement.",
+      "  Assess specific loading-behaviour changes separately; preserve existing measurements.",
     ].join("\n"),
   );
 }
@@ -925,6 +929,26 @@ function selfTest() {
     repin(`candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }`, SHA) ===
       `candle-kernels = { git = "${INFERENCE_GIT}", rev = "${SHA}" }`,
   );
+  const bothPatches = repin(
+    `[patch."https://github.com/huggingface/candle"]\n` +
+    `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
+  check("root Candle patches repin together", (() => {
+    try { verifyCandlePatches(bothPatches, SHA); return true; } catch { return false; }
+  })());
+  check("a missing vendored core patch refuses a later pin", (() => {
+    try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    catch { return true; }
+  })());
+  check("a core patch in another TOML section cannot satisfy the root patch", (() => {
+    try {
+      verifyCandlePatches(
+        bothPatches.replace(/^candle-core.*\n/m, "") +
+          `[workspace.dependencies]\ncandle-core = { git = "${INFERENCE_GIT}", rev = "${SHA}" }\n`,
+        SHA);
+      return false;
+    } catch { return true; }
+  })());
   let threw = false;
   try {
     repin(`foo = "bar"`, SHA);
@@ -933,9 +957,7 @@ function selfTest() {
   }
   check("throws when no inference pin is present", threw);
 
-  // The currency-attestation preview (sc-22765). It fires on exactly the condition that reds
-  // parity-rust — an entry keyed to anything but the new pin — and stays silent once re-keyed, so
-  // "it is wired" is again not the same as "it fires".
+  // Historical attestation revisions are reported without requiring a re-key (sc-23692).
   const attestations = {
     attestations: [
       { anchorId: "keyed-to-the-old-pin", attestedRevision: "b".repeat(40) },
@@ -1572,7 +1594,7 @@ function main() {
   const repoIdx = args.indexOf("--repo");
   const explicitRepo = repoIdx >= 0 ? resolve(args[repoIdx + 1] ?? "") : null;
 
-  // Three files the tool can safely rewrite: the worker's direct deps, the root's candle-kernels
+  // Three files the tool can safely rewrite: the worker's direct deps, the root's Candle
   // [patch], and the worker's semantic-provenance stamp. They must land on the same rev, so bump
   // them as one unit. `cargo update` below refreshes a fourth, Cargo.lock.
   //
@@ -1624,6 +1646,9 @@ function main() {
   // the audited FLUX.2 window from one that merely inherits a pin already outside it.
   const previousPin = pinnedRevision(manifests.find((m) => m.path === MANIFEST)?.current ?? "");
   const cargoPinsAlreadyInManifests = cargoManifestsAlreadyPinned(manifests);
+  if (!dryRun) {
+    verifyCandlePatches(manifests.find((m) => m.path === ROOT_MANIFEST)?.bumped ?? "", sha);
+  }
   if (cargoPinsAlreadyInManifests) {
     console.log(
       lockHasStaleInferenceRevision(sha)

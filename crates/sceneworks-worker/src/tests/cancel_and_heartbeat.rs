@@ -116,6 +116,166 @@ async fn begin_video_cancel_trips_flag_and_stays_non_terminal() {
     );
 }
 
+/// sc-24109 — the IMAGE sibling of the two cancel-acknowledgement tests around it, exercised on
+/// the lane Qwen-Image 2.1 renders on off-Mac (`backend = "candle"`).
+///
+/// `begin_image_cancel` is what `consume_gen_events` calls the moment it observes a user cancel or
+/// a shutdown, for every image family on both backends. It must do two things and exactly two: trip
+/// the engine flag so the in-flight denoise actually stops, and acknowledge NON-terminally so the
+/// worker row is not freed while the GPU is still busy. The terminal `canceled` is posted by
+/// `consume_gen_events` after the blocking task joins, which is what makes "Cancelling…" honest.
+///
+/// The discriminator is `status`: a `canceled` here would free the worker row and let the next
+/// queued job claim the GPU underneath a denoise that is still running.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn begin_image_cancel_acknowledges_a_candle_qwen_image_2_1_job_non_terminally() {
+    let (base_url, posts) = spawn_progress_capture_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let cancel = gen_core::CancelFlag::new();
+
+    let request = sceneworks_core::image_request::ImageRequest::from_payload(
+        serde_json::json!({
+            "projectId": "project_1",
+            "model": "qwen_image_2_1",
+            "prompt": "a lighthouse",
+            "count": 2
+        })
+        .as_object()
+        .expect("payload object"),
+    );
+    let plan = crate::image_jobs::ImagePlan::with_count(&request, 2, None);
+
+    crate::image_jobs::begin_image_cancel(&api, "job-1", &cancel, &plan, &[], "candle").await;
+
+    assert!(
+        cancel.is_cancelled(),
+        "begin_image_cancel must trip the engine cancel flag so the denoise stops"
+    );
+    let posts = posts.lock().expect("posts lock");
+    assert_eq!(posts.len(), 1, "exactly one acknowledgement update is posted");
+    assert_eq!(
+        posts[0]["status"], "running",
+        "the image cancel acknowledgement must stay NON-terminal — the terminal canceled is \
+         deferred until the blocking generation actually stops"
+    );
+    assert!(
+        posts[0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cancelling"),
+        "the acknowledgement message should read as Cancelling…"
+    );
+    assert_eq!(
+        posts[0]["result"]["model"], "qwen_image_2_1",
+        "the streamed result must keep naming the model being cancelled"
+    );
+    assert_eq!(
+        posts[0]["result"]["expectedCount"], 2,
+        "and the batch total, so the gallery does not renumber mid-cancel"
+    );
+}
+
+/// sc-24110 — the same acknowledgement for an EDIT-shaped request.
+///
+/// ⚠️ **Lane-agnostic, and named so.** `begin_image_cancel`'s `backend` argument is a LABEL that
+/// rides the streamed result; it selects no code path, so running this twice with "mlx" and
+/// "candle" would exercise one implementation and claim two. Both values are still passed, because
+/// the label is part of the payload a client reads, but the coverage this gives is "the
+/// acknowledgement is correct for an edit-shaped request", not "both backends were exercised". The
+/// per-lane behaviour that IS distinct — which route claims the job — is pinned by
+/// `resolve_candle_image_route_*` and the core lane table.
+///
+/// Worth stating separately from the text-to-image sibling above rather than trusting the carrier
+/// is shape-agnostic: an edit request costs far more per step than a t2i one (ten references are
+/// ~41k prefix tokens re-encoded EVERY step, with no KV cache), so it is precisely the shape a user
+/// is most likely to cancel and the one where freeing the worker row early would hurt most — the
+/// next queued job would claim a GPU still grinding through a 10-reference prefix.
+///
+/// Both conditioned modes are exercised, because `ImagePlan` and the acknowledgement payload are
+/// built from the request and a mode that failed to carry the model or the batch total would
+/// renumber the gallery mid-cancel. PROGRESS on the edit route is covered separately, by
+/// `image_jobs::tests::qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_cancel`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn begin_image_cancel_acknowledges_a_qwen_image_2_1_edit_non_terminally() {
+    for (backend, mode, payload) in [
+        (
+            "mlx",
+            "edit_image",
+            serde_json::json!({
+                "projectId": "project_1",
+                "model": "qwen_image_2_1",
+                "mode": "edit_image",
+                "prompt": "put the subject on a beach",
+                "sourceAssetId": "src_1",
+                "referenceAssetIds": ["ref_1", "ref_2"],
+                "count": 2
+            }),
+        ),
+        (
+            "candle",
+            "character_image",
+            serde_json::json!({
+                "projectId": "project_1",
+                "model": "qwen_image_2_1",
+                "mode": "character_image",
+                "prompt": "the same person, three-quarter view",
+                "referenceAssetId": "ref_1",
+                "count": 2
+            }),
+        ),
+    ] {
+        let (base_url, posts) = spawn_progress_capture_stub().await;
+        let mut settings = test_settings(base_url.clone(), None);
+        settings.api_url = base_url;
+        let api = ApiClient::new(&settings);
+        let cancel = gen_core::CancelFlag::new();
+
+        let request = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().expect("payload object"),
+        );
+        let plan = crate::image_jobs::ImagePlan::with_count(&request, 2, None);
+
+        crate::image_jobs::begin_image_cancel(&api, "job-1", &cancel, &plan, &[], backend).await;
+
+        assert!(
+            cancel.is_cancelled(),
+            "{backend}/{mode}: the engine cancel flag must be tripped so the denoise stops"
+        );
+        let posts = posts.lock().expect("posts lock");
+        assert_eq!(posts.len(), 1, "{backend}/{mode}: one acknowledgement");
+        assert_eq!(
+            posts[0]["status"], "running",
+            "{backend}/{mode}: the acknowledgement must stay NON-terminal — freeing the worker row \
+             here would hand the GPU to the next job while a 10-reference prefix is still encoding"
+        );
+        assert!(
+            posts[0]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Cancelling"),
+            "{backend}/{mode}: the message should read as Cancelling…"
+        );
+        assert_eq!(
+            posts[0]["result"]["model"], "qwen_image_2_1",
+            "{backend}/{mode}: the streamed result keeps naming the model"
+        );
+        assert_eq!(
+            posts[0]["result"]["expectedCount"], 2,
+            "{backend}/{mode}: and the batch total"
+        );
+    }
+}
+
 /// sc-5516 — the training sibling of the above: `begin_training_cancel` trips the
 /// flag and acknowledges with a NON-terminal `running` update; the terminal
 /// `Canceled` is posted by `consume_training_events` after training stops. Compiled on the macOS MLX
@@ -250,7 +410,7 @@ fn seedvr2_disk_guard_rejects_an_impossibly_large_clip() {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+pub(crate) async fn spawn_analysis_cancel_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
     use std::sync::{Arc, Mutex};
     type Posts = Arc<Mutex<Vec<Value>>>;
     async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
@@ -966,6 +1126,161 @@ async fn keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag() 
     assert!(
         posts.iter().any(|p| p["status"] == "canceled"),
         "terminal Canceled posted to the job, got {posts:?}"
+    );
+}
+
+/// A keepalive stub whose FIRST worker heartbeat releases the blocking task and returns only once
+/// that task has resolved, while every job GET reports `cancel_requested: true`. The watcher's
+/// first tick therefore always observes the cancel AFTER the task finished — the race sc-22999 hit
+/// (the task resolves while the tick arm awaits its heartbeat POST and cancel peek), forced on
+/// every run instead of left to the scheduler.
+#[derive(Clone)]
+struct FinishingHeartbeatStub {
+    #[allow(clippy::type_complexity)]
+    release: std::sync::Arc<
+        std::sync::Mutex<Option<(std::sync::mpsc::Sender<()>, tokio::task::AbortHandle)>>,
+    >,
+    progress: std::sync::Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+async fn spawn_finishing_heartbeat_stub(state: FinishingHeartbeatStub) -> String {
+    async fn heartbeat_route(State(state): State<FinishingHeartbeatStub>) -> Response {
+        let pending = state.release.lock().unwrap().take();
+        if let Some((release, task)) = pending {
+            let _ = release.send(());
+            let start = std::time::Instant::now();
+            while !task.is_finished() && start.elapsed() < Duration::from_secs(30) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        }
+        Json(json!({})).into_response()
+    }
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    async fn progress_route(
+        State(state): State<FinishingHeartbeatStub>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+        Json(payload): Json<Value>,
+    ) -> Response {
+        state.progress.lock().unwrap().push(payload);
+        Json(job_snapshot_json(&job_id, true)).into_response()
+    }
+    let app = Router::new()
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let address = listener.local_addr().expect("listener has address");
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+    format!("http://{address}")
+}
+
+/// sc-22999 — a cancel the watcher observes only AFTER the blocking task already resolved must not
+/// discard the finished result: the task's value is returned, no terminal `Canceled` is posted and
+/// the (moot) engine flag is never tripped. Before the fix the tick arm tripped the flag and set
+/// `canceled`, and the next iteration turned the `Ok` into `Canceled` — a YuE2 job then ended
+/// canceled with its run already published and owned by no job. Deterministic: the stub releases
+/// the task from inside the first heartbeat and waits for it to resolve before the cancel peek.
+/// Mutation that reds this: drop the `is_finished()` check in the tick arm.
+#[tokio::test]
+async fn keepalive_returns_a_task_that_resolved_before_the_cancel_was_observed() {
+    let state = FinishingHeartbeatStub {
+        release: Default::default(),
+        progress: Default::default(),
+    };
+    let base = spawn_finishing_heartbeat_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        released
+            .recv_timeout(Duration::from_secs(30))
+            .map_err(|_| WorkerError::Engine("the first heartbeat never released".to_owned()))?;
+        Ok(7)
+    });
+    *state.release.lock().unwrap() = Some((release, task.abort_handle()));
+    let flag = gen_core::CancelFlag::new();
+    let result = super::run_blocking_with_heartbeat(
+        &api,
+        &settings,
+        "job-22999",
+        Some(flag.clone()),
+        "canceled",
+        "finished-before-cancel stand-in",
+        crate::no_cancel_ack(),
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(7)),
+        "the finished task's value wins over a cancel that raced it, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        !posts.iter().any(|p| p["status"] == "canceled"),
+        "no terminal Canceled is posted for a task that had already finished, got {posts:?}"
+    );
+    assert!(!flag.is_cancelled(), "a finished task's flag is never tripped");
+}
+
+/// sc-22999 — the committed-`Ok` policy (YuE2: the engine publishes its run before returning).
+/// Same interleaving as `keepalive_cancels_the_job_even_when_the_task_cannot_observe_the_flag`
+/// (the cancel is observed and the flag tripped while the task runs, then the task returns `Ok`),
+/// but `run_blocking_with_heartbeat_keeping_ok` returns the value and posts no terminal `Canceled`.
+/// Mutation that reds this: pass `false` for `keep_ok_after_cancel` from the keeping wrapper (and
+/// passing `true` from the default wrapper reds the sibling test above, which pins the default).
+#[tokio::test]
+async fn keepalive_keeping_ok_returns_a_task_that_finished_after_the_cancel() {
+    let state = KeepaliveStubState::new();
+    let base = spawn_keepalive_stub(state.clone()).await;
+    let mut settings = test_settings("http://127.0.0.1".to_owned(), None);
+    settings.api_url = base;
+    let api = ApiClient::new(&settings);
+
+    let flag = gen_core::CancelFlag::new();
+    let wait_flag = flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> super::WorkerResult<u32> {
+        let start = std::time::Instant::now();
+        while !wait_flag.is_cancelled() {
+            if start.elapsed() > Duration::from_secs(30) {
+                return Err(WorkerError::Engine("cancel flag never tripped".to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Ok(7)
+    });
+    let result = super::run_blocking_with_heartbeat_keeping_ok(
+        &api,
+        &settings,
+        "job-22999-keep",
+        Some(flag),
+        "canceled",
+        "published-run stand-in",
+        crate::no_cancel_ack(),
+        task,
+    )
+    .await;
+
+    assert!(
+        matches!(result, Ok(7)),
+        "a committed Ok is returned, got {result:?}"
+    );
+    let posts = state.progress.lock().unwrap();
+    assert!(
+        !posts.iter().any(|p| p["status"] == "canceled"),
+        "no terminal Canceled is posted over a committed Ok, got {posts:?}"
     );
 }
 

@@ -24,6 +24,27 @@ use super::prelude::*;
 /// number rather than two literals that happen to agree today.
 pub(super) const REFERENCE_AUDIO_SAMPLE_RATE: u32 = 32_000;
 
+/// The channel count every standalone audio reference reaches an engine at — MiniMax-H3's audio
+/// VAE output width (`mlx-gen-minimax-h3::audio_config::AUDIO_OUTPUT_CHANNELS`).
+///
+/// **This is a hard engine boundary, not a preference (sc-24070).** The packed `ref2va` layout
+/// reserves `num_audio_latents · AUDIO_OUTPUT_CHANNELS` soundtrack rows unconditionally
+/// (`pipeline::ref2va_layout` passes the constant, never the supplied track's own width), while
+/// `pipeline::audio_track_to_encoder_input` de-interleaves the track into one encoder batch item
+/// PER CHANNEL — so the rows PRODUCED scale with the reference's channel count and the rows
+/// RESERVED do not. A mono reference therefore produces exactly half the rows the layout reserves
+/// and `prepend_rows` refuses the sequence, and a 5.1 one would overrun it. The engine's own
+/// `Ref2VaReferences::check_audio` does NOT catch this — it gates `sample_rate` and rejects only a
+/// ZERO channel count — which is why the refusal lands after the full model load. Measured on real
+/// weights 2026-09-20: `minimax_h3: 556 reference soundtrack rows against a layout reserving 1112`.
+/// Both backends are identical here: the candle twin's `ref2va_layout` passes the same constant and
+/// its `check_audio` has the same blind spot.
+///
+/// Ungated for the same reason [`REFERENCE_AUDIO_SAMPLE_RATE`] is:
+/// [`super::minimax_h3::MINIMAX_H3_REFERENCE_AUDIO_CHANNELS`] is an alias of it so a video
+/// reference's own soundtrack and a standalone audio reference are normalized onto ONE number.
+pub(super) const REFERENCE_AUDIO_CHANNELS: u16 = 2;
+
 /// Resolve a video request's `referenceAudioAssetIds` (sc-17160) into the engine conditioning:
 /// one [`gen_core::Conditioning::ReferenceAudio`] per id, in submission order.
 ///
@@ -55,13 +76,24 @@ pub(super) const REFERENCE_AUDIO_SAMPLE_RATE: u32 = 32_000;
 /// off-rate, and it is what lets a reference be any container ffmpeg reads (mp3 / m4a / flac /
 /// non-PCM WAV) instead of only the canonical PCM-16 RIFF `read_wav_pcm16` decodes.
 ///
-/// The CHANNEL layout is deliberately left alone (no `-ac`). The engine accepts any positive channel
-/// count, so channels are not a contract the caller can violate — and both directions of "fixing"
-/// them substitute a different reference than the one supplied: upmixing a mono voice clip doubles
-/// its packed row cost for a duplicated channel, downmixing a stereo one discards its stereo image.
-/// This differs from the clip path's `-ac 2` on purpose: there the soundtrack is a byproduct of a
-/// VIDEO reference and stereo is the joint model's own emitted shape, while here the waveform IS the
-/// reference.
+/// # Why the channel layout is normalized too (sc-24070)
+///
+/// This used to pass no `-ac`, on the stated basis that the engine accepts any positive channel
+/// count. **It does not.** [`REFERENCE_AUDIO_CHANNELS`] documents the measured contract: the packed
+/// layout reserves rows for exactly two channels while the encoder produces rows per channel
+/// SUPPLIED, so a mono reference is refused — after the full model load, since the engine's own
+/// `check_audio` gates the rate but not the width. Every SceneWorks producer that could supply "a
+/// voice to match" emits MONO (Kokoro included), so leaving the layout alone left this capability
+/// with no reachable path from a generated clip, exactly as the rate did before sc-18650. A real
+/// render of the same clip as a dual-mono stereo copy succeeded and the voice transferred
+/// (2026-09-20 film-harness evidence).
+///
+/// So `-ac` runs unconditionally, on the same one-code-path grounds as `-ar`: mono is upmixed to
+/// dual mono, stereo passes through untouched, and anything wider is downmixed — which is what the
+/// engine's fixed two-channel layout requires, and what the clip path
+/// ([`super::minimax_h3::MINIMAX_H3_REFERENCE_AUDIO_CHANNELS`]) has always done for a video
+/// reference's own soundtrack. Upmixing does double a mono reference's packed row cost; that cost
+/// is the engine's shape, not a choice this resolver is free to make.
 ///
 /// Async since sc-18650, and it takes the `api`/`job` the shared
 /// [`crate::media_jobs::run_ffmpeg`] runner needs for its heartbeat + cooperative-cancel loop —
@@ -105,8 +137,21 @@ pub(crate) async fn resolve_reference_audio_conditioning(
         // Split so the scratch directory is dropped on EVERY exit, refusals included.
         let decoded = decode_reference_audio(api, settings, job, &path, &work_dir).await;
         let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        let audio = decoded?;
+        // The engine reserves rows for exactly [`REFERENCE_AUDIO_CHANNELS`] channels and only
+        // discovers a mismatch inside the denoise loop — after the full model load, which is how
+        // sc-24070 cost 180 s to report a decode-time fact. The normalization above is what makes
+        // this hold, so this is the assertion that it did: a decode that came back some other width
+        // is refused HERE, before the load, naming the asset the caller can act on.
+        if audio.channels != REFERENCE_AUDIO_CHANNELS {
+            return Err(WorkerError::InvalidPayload(format!(
+                "reference audio asset {asset_id} decoded to {} channels, but this engine's packed \
+                 layout reserves rows for exactly {REFERENCE_AUDIO_CHANNELS}",
+                audio.channels
+            )));
+        }
         conditioning.push(gen_core::Conditioning::ReferenceAudio {
-            audio: decoded?,
+            audio,
             // No per-reference strength knob today: the request carries one flat list, and
             // inventing a weight the caller cannot set would be a knob that silently does
             // nothing. `None` is what the voice-clone reference passes for the same reason.
@@ -131,28 +176,271 @@ async fn decode_reference_audio(
     source: &Path,
     work_dir: &Path,
 ) -> WorkerResult<gen_core::AudioTrack> {
-    let wav = work_dir.join("reference.wav");
-    let ctx = FfmpegContext::new(api, settings, &job.id, CANCEL_MESSAGE);
-    run_ffmpeg(
-        vec![
-            "ffmpeg".to_owned(),
-            "-nostdin".to_owned(),
-            "-y".to_owned(),
-            "-i".to_owned(),
-            source.display().to_string(),
-            "-map".to_owned(),
-            "0:a:0".to_owned(),
-            "-vn".to_owned(),
-            // The engine ships no resampler and refuses anything but its audio VAE's rate.
-            "-ar".to_owned(),
-            REFERENCE_AUDIO_SAMPLE_RATE.to_string(),
-            // `read_wav_pcm16` reads PCM s16 only.
-            "-c:a".to_owned(),
-            "pcm_s16le".to_owned(),
-            wav.display().to_string(),
-        ],
-        Some(ctx),
+    decode_audio_normalized(
+        api,
+        settings,
+        &job.id,
+        CANCEL_MESSAGE,
+        source,
+        work_dir,
+        AudioDecode::pcm16(REFERENCE_AUDIO_SAMPLE_RATE, REFERENCE_AUDIO_CHANNELS),
     )
-    .await?;
-    crate::audio_jobs::read_wav_pcm16(&wav)
+    .await
+}
+
+/// How [`decode_audio_normalized`] converts a source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AudioDecode {
+    /// `Some` resamples onto exactly this rate (`-ar`); `None` keeps the source's.
+    pub sample_rate: Option<u32>,
+    /// `Some` remaps onto exactly this channel count with ffmpeg's `-ac`; `None` keeps the source's.
+    pub channels: Option<u16>,
+    /// `Some(n)`: the source has `n` channels; average them into ONE (`pan`, each at gain `1/n` —
+    /// exactly `torch.mean` over channels) instead of ffmpeg's `-ac` remix, whose stereo→mono and
+    /// mono→stereo matrices are not a plain mean.
+    pub mean_downmix_from: Option<u16>,
+    /// Write + read 32-bit float PCM (no 16-bit rounding) instead of PCM s16.
+    pub float32: bool,
+}
+
+impl AudioDecode {
+    /// PCM-16 onto exactly `sample_rate` / `channels` — the video reference path.
+    pub(crate) fn pcm16(sample_rate: u32, channels: u16) -> Self {
+        Self {
+            sample_rate: Some(sample_rate),
+            channels: Some(channels),
+            ..Self::default()
+        }
+    }
+}
+
+/// Decode any container ffmpeg reads into a [`gen_core::AudioTrack`] per `decode`, through the
+/// shared [`run_ffmpeg`] heartbeat + cooperative-cancel runner: the video reference path normalizes
+/// onto its engine's exact rate / channel count as PCM-16 ([`AudioDecode::pcm16`]); the YuE ICL
+/// reference (sc-19384) keeps the source rate / channels as float32, since its engine owns the
+/// downmix + resample. `work_dir` is caller-owned scratch; the WAV is written inside it.
+pub(crate) async fn decode_audio_normalized(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel_message: &str,
+    source: &Path,
+    work_dir: &Path,
+    decode: AudioDecode,
+) -> WorkerResult<gen_core::AudioTrack> {
+    let wav = work_dir.join("reference.wav");
+    let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
+    run_ffmpeg(audio_normalize_ffmpeg_args(source, &wav, decode), Some(ctx)).await?;
+    if decode.float32 {
+        crate::audio_jobs::read_wav_f32(&wav)
+    } else {
+        crate::audio_jobs::read_wav_pcm16(&wav)
+    }
+}
+
+/// Bounded on-disk float decode for transcription. The caller prices the returned frame layout
+/// before calling `read_wav_f32`, whose general-purpose reader retains the whole WAV in memory.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DecodedWavInfo {
+    pub sample_rate: u32,
+    pub channels: u16,
+    pub frames: u64,
+    pub file_bytes: u64,
+}
+
+pub(crate) struct AudioDecodeBounds {
+    pub max_seconds: Option<f64>,
+    pub max_output_bytes: u64,
+}
+
+pub(crate) async fn write_audio_normalized_bounded(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    cancel_message: &str,
+    source: &Path,
+    work_dir: &Path,
+    bounds: AudioDecodeBounds,
+) -> WorkerResult<(std::path::PathBuf, DecodedWavInfo)> {
+    let wav = work_dir.join("reference.wav");
+    let args = bounded_audio_ffmpeg_args(source, &wav, &bounds);
+    let ctx = FfmpegContext::new(api, settings, job_id, cancel_message);
+    run_ffmpeg(args, Some(ctx)).await?;
+    let info = inspect_float_wav(&wav)?;
+    if info.file_bytes >= bounds.max_output_bytes.saturating_sub(1 << 20) {
+        return Err(WorkerError::InvalidPayload(format!(
+            "yue2: decoded recording reached the {:.2} GiB host-memory output budget",
+            bounds.max_output_bytes as f64 / 1_073_741_824.0
+        )));
+    }
+    Ok((wav, info))
+}
+
+fn bounded_audio_ffmpeg_args(source: &Path, wav: &Path, bounds: &AudioDecodeBounds) -> Vec<String> {
+    let mut args = audio_normalize_ffmpeg_args(
+        source,
+        wav,
+        AudioDecode {
+            float32: true,
+            ..Default::default()
+        },
+    );
+    args.pop();
+    if let Some(seconds) = bounds.max_seconds {
+        args.extend(["-t".to_owned(), seconds.to_string()]);
+    }
+    args.extend([
+        "-fs".to_owned(),
+        bounds.max_output_bytes.to_string(),
+        wav.display().to_string(),
+    ]);
+    args
+}
+
+/// Read only WAV chunk headers; even a multi-hour recording costs constant RAM here.
+pub(crate) fn inspect_float_wav(path: &Path) -> WorkerResult<DecodedWavInfo> {
+    inspect_wav_layout(path, true)?.ok_or_else(|| {
+        WorkerError::InvalidPayload("yue2: decoded audio is not float RIFF/WAVE".into())
+    })
+}
+
+pub(crate) fn probe_source_wav(path: &Path) -> WorkerResult<Option<DecodedWavInfo>> {
+    inspect_wav_layout(path, false)
+}
+
+fn inspect_wav_layout(path: &Path, float_only: bool) -> WorkerResult<Option<DecodedWavInfo>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let file_bytes = file.metadata()?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header)?;
+    if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
+        return Ok(None);
+    }
+    let mut pos = 12u64;
+    let mut format = None;
+    let mut data = None;
+    while pos.saturating_add(8) <= file_bytes {
+        file.seek(SeekFrom::Start(pos))?;
+        let mut chunk = [0u8; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u64::from(u32::from_le_bytes(chunk[4..8].try_into().unwrap()));
+        let start = pos + 8;
+        if &chunk[..4] == b"fmt " && size >= 16 && start + 16 <= file_bytes {
+            let mut body = [0u8; 16];
+            file.read_exact(&mut body)?;
+            let channels = u16::from_le_bytes(body[2..4].try_into().unwrap());
+            let rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            let codec = u16::from_le_bytes(body[0..2].try_into().unwrap());
+            let bits = u16::from_le_bytes(body[14..16].try_into().unwrap());
+            if (codec == 1 && bits == 16 && !float_only)
+                || ((codec == 3 || codec == 0xfffe) && bits == 32)
+            {
+                format = Some((channels, rate, bits));
+            } else {
+                return Ok(None);
+            }
+        } else if &chunk[..4] == b"data" {
+            data = Some((start, size.min(file_bytes.saturating_sub(start))));
+        }
+        if let (Some((channels, rate, bits)), Some((_, bytes))) = (format, data) {
+            let stride = u64::from(channels).saturating_mul(u64::from(bits / 8));
+            if rate == 0 || stride == 0 || bytes % stride != 0 {
+                return Err(WorkerError::InvalidPayload(
+                    "yue2: decoded WAV has invalid frames".into(),
+                ));
+            }
+            return Ok(Some(DecodedWavInfo {
+                sample_rate: rate,
+                channels,
+                frames: bytes / stride,
+                file_bytes,
+            }));
+        }
+        pos = start.saturating_add(size).saturating_add(size & 1);
+    }
+    Err(WorkerError::InvalidPayload(
+        "yue2: WAV has no readable audio frames".into(),
+    ))
+}
+
+/// The normalization command, built apart from running it so the two engine constants it carries
+/// are assertable without an ffmpeg on the host — the hosted macOS CI lane has none.
+///
+/// Test-only: production reaches the same command through [`decode_reference_audio`] →
+/// [`decode_audio_normalized`] with these two constants.
+#[cfg(test)]
+pub(super) fn reference_audio_ffmpeg_args(source: &Path, wav: &Path) -> Vec<String> {
+    // The engine ships no resampler and refuses anything but its audio VAE's rate, and its packed
+    // layout reserves rows for exactly [`REFERENCE_AUDIO_CHANNELS`] channels (sc-24070), so a mono
+    // voice clip is upmixed to dual mono and a wider track is downmixed.
+    audio_normalize_ffmpeg_args(
+        source,
+        wav,
+        AudioDecode::pcm16(REFERENCE_AUDIO_SAMPLE_RATE, REFERENCE_AUDIO_CHANNELS),
+    )
+}
+
+/// The decode command behind [`reference_audio_ffmpeg_args`], parameterized so another engine
+/// boundary reuses the one command shape: a `None` rate / channel count omits `-ar` / `-ac`, so
+/// ffmpeg keeps the source's (YuE's ICL reference, sc-19384, whose engine downmixes + resamples
+/// itself); `mean_downmix_from` averages the channels with an exact `pan`; `float32` writes
+/// `pcm_f32le` instead of `pcm_s16le`.
+pub(crate) fn audio_normalize_ffmpeg_args(
+    source: &Path,
+    wav: &Path,
+    decode: AudioDecode,
+) -> Vec<String> {
+    let mut args: Vec<String> = ["ffmpeg", "-nostdin", "-y", "-i"].map(str::to_owned).into();
+    args.push(source.display().to_string());
+    args.extend(["-map", "0:a:0", "-vn"].map(str::to_owned));
+    if let Some(n) = decode.mean_downmix_from.filter(|&n| n > 1) {
+        args.extend(["-af".to_owned(), mean_downmix_filter(n)]);
+    }
+    if let Some(rate) = decode.sample_rate {
+        args.extend(["-ar".to_owned(), rate.to_string()]);
+    }
+    if let Some(channels) = decode.channels {
+        args.extend(["-ac".to_owned(), channels.to_string()]);
+    }
+    // The readers: `read_wav_pcm16` (PCM s16) / `read_wav_f32` (IEEE float 32).
+    let codec = if decode.float32 {
+        "pcm_f32le"
+    } else {
+        "pcm_s16le"
+    };
+    args.extend(["-c:a".to_owned(), codec.to_owned()]);
+    args.push(wav.display().to_string());
+    args
+}
+
+/// `aformat=sample_fmts=flt,pan=mono|c0=g*c0+g*c1+…` with `g = 1/n`: the per-frame channel mean
+/// (`torch.mean(dim=0)`). `=` (not `<`) keeps the gains exactly as written — no renormalization.
+/// The `aformat` converts to float FIRST: on a PCM-16 input (every library asset, sc-18650) `pan`
+/// would otherwise mix in s16 and round an odd channel sum off its exact half-LSB mean.
+fn mean_downmix_filter(n: u16) -> String {
+    let gain = 1.0 / f64::from(n);
+    let terms: Vec<String> = (0..n).map(|c| format!("{gain}*c{c}")).collect();
+    format!("aformat=sample_fmts=flt,pan=mono|c0={}", terms.join("+"))
+}
+
+#[cfg(test)]
+mod bounded_decode_tests {
+    use super::*;
+
+    #[test]
+    fn compressed_transcription_decode_crops_and_caps_output_before_file_open() {
+        let args = bounded_audio_ffmpeg_args(
+            Path::new("take.webm"),
+            Path::new("reference.wav"),
+            &AudioDecodeBounds {
+                max_seconds: Some(11.0),
+                max_output_bytes: 8 << 20,
+            },
+        );
+        assert!(args.windows(2).any(|pair| pair == ["-t", "11"]));
+        assert!(args.windows(2).any(|pair| pair == ["-fs", "8388608"]));
+        assert!(args.windows(2).any(|pair| pair == ["-c:a", "pcm_f32le"]));
+        assert_eq!(args.last().map(String::as_str), Some("reference.wav"));
+    }
 }

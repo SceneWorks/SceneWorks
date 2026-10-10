@@ -16,6 +16,7 @@ use crate::contracts::{
     ContractNumber, JobSnapshot, JobStatus, JobType, ProgressStage, WorkerCapability,
     WorkerSnapshot, WorkerStatus,
 };
+use crate::film_workspace::{QWEN36_FILM_PLANNER_MODEL_ID, QWEN36_FILM_PLANNER_REPO};
 use crate::jsonc::strip_jsonc_comments;
 
 use super::catalog::VIDEO_UI_MODES;
@@ -29,6 +30,31 @@ const CANDLE_DESCRIPTOR_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/capabilities.candle.json");
 const AUDIO_DESCRIPTOR_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/audio/capabilities.candle.json");
+/// Whether the checked-in audio dump (`config/engine-capabilities/audio/`) is `backend`'s and
+/// registers `model_id` (sc-22998). A dump that fails to parse registers nothing, so a malformed
+/// file can only remove a cell, never invent one.
+fn audio_dump_registers(backend: &str, model_id: &str) -> bool {
+    static DUMP: std::sync::OnceLock<(String, BTreeSet<String>)> = std::sync::OnceLock::new();
+    let (dump_backend, ids) = DUMP.get_or_init(|| {
+        let facts: Value = serde_json::from_str(AUDIO_DESCRIPTOR_FACTS).unwrap_or(Value::Null);
+        let backend = facts
+            .get("backend")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let ids = facts
+            .get("engines")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|engine| engine.get("id").and_then(Value::as_str))
+            .map(str::to_owned)
+            .collect();
+        (backend, ids)
+    });
+    dump_backend == backend && ids.contains(model_id)
+}
+
 const MLX_RUNTIME_FACTS: &str =
     include_str!("../../../../../config/engine-capabilities/runtime/capabilities.mlx.json");
 const CANDLE_RUNTIME_FACTS: &str =
@@ -271,6 +297,8 @@ struct ManifestModel {
     mlx: Value,
     #[serde(default)]
     candle: Value,
+    #[serde(default)]
+    vector: ManifestVectorConfig,
     #[serde(rename = "loraCompatibility", default)]
     lora_compatibility: Value,
     /// Declarative non-routability (sc-19708): the entry is an installable component bundle
@@ -278,6 +306,20 @@ struct ManifestModel {
     /// adding component entries never adds a model-id branch here.
     #[serde(rename = "componentOnly", default)]
     component_only: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ManifestVectorConfig {
+    #[serde(default)]
+    providers: BTreeMap<String, ManifestProviderAvailability>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ManifestProviderAvailability {
+    id: String,
+    available: bool,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -402,6 +444,13 @@ fn backend_capability_matrix_from_runtime_sources(
 
     let mut models = Vec::with_capacity(manifest.models.len());
     for model in &manifest.models {
+        // Catalog entries awaiting the feature train's one permanent inference pin are
+        // installable, but are not shipped runtime generators yet. Excluding this exact typed
+        // state keeps the capability matrix honest without weakening the invariant that every
+        // shipped utility/audio model must have a runtime provider or canonical request.
+        if model_is_pending_terminal_vector_install(model) {
+            continue;
+        }
         models.push(model_row(
             model,
             preview.models.get(&model.id),
@@ -439,6 +488,15 @@ fn backend_capability_matrix_from_runtime_sources(
         training_kernels,
         exceptions: exceptions.records,
     })
+}
+
+fn model_is_pending_terminal_vector_install(model: &ManifestModel) -> bool {
+    model.model_type == "vector"
+        && !model.vector.providers.is_empty()
+        && model.vector.providers.values().all(|provider| {
+            !provider.available
+                && provider.reason.as_deref() == Some("pending_terminal_inference_pin")
+        })
 }
 
 fn matrix_summary(
@@ -1898,7 +1956,10 @@ fn conditioning_payload(
             job_type = kind;
             payload = character;
         }
-        "reference" => {
+        // `referenceRgba` (sc-24111 S4, Qwen-Image 2.1) is not a different SceneWorks request: the
+        // alpha is a property of the referenced ASSET, and the worker picks the carrier from the
+        // decoded image. So its canonical probe is the ordinary reference request.
+        "reference" | "referenceRgba" => {
             if job_type != JobType::ImageEdit {
                 payload["referenceAssetId"] = Value::String("probe".to_owned());
             }
@@ -2274,7 +2335,18 @@ fn precision_cell(
         // therefore `(descriptor || artifact) && production route`, and the per-family probe in
         // `rich_runtime_mutations_change_descriptor_and_dispatch_answers` proves it holds for
         // every family rather than for one spot-checked model (sc-20799).
-        descriptor || manifest_artifact_tier_support(model, tier, backend)
+        //
+        // AUDIO has no per-model route table: `audio_generate` routes by the lane's capability
+        // advertisement alone (gaps.rs), so `backend_supports` holds for ANY audio model id and
+        // cannot be the route conjunct for an audio artifact row. For audio the artifact row
+        // therefore counts only on the lane whose AUDIO dump (`config/engine-capabilities/audio/`)
+        // registers the model: the audio registry is Candle-native on every platform, so an artifact
+        // row alone put a Candle-only audio model in the MLX column (YuE, sc-19383), while dropping
+        // the artifact term for audio altogether (sc-22998's first cut) lost the Candle lane's TRUE
+        // tier cells for a model whose descriptor advertises no quants (YuE2).
+        descriptor
+            || (manifest_artifact_tier_support(model, tier, backend)
+                && (model.model_type != "audio" || audio_dump_registers(backend, &model.id)))
     };
     let mlx = support(mlx_facts) && backend_supports(&job, mlx_facts)?;
     let candle = support(candle_facts) && backend_supports(&job, candle_facts)?;
@@ -2427,6 +2499,43 @@ fn provider_alias(id: &str) -> &str {
     }
 }
 
+fn vector_operation_cell(
+    model: &ManifestModel,
+    operation: &str,
+    mlx_facts: &RuntimeDescriptorFacts,
+    candle_facts: &RuntimeDescriptorFacts,
+) -> Result<CapabilityCell, String> {
+    let payload = match operation {
+        "image_to_svg" => json!({ "mode": "image_to_svg", "sourceAssetId": "probe" }),
+        "text_to_svg" => json!({ "mode": "text_to_svg", "prompt": "probe" }),
+        other => {
+            return Err(format!(
+                "vector model {:?} has no canonical request for operation {other:?}",
+                model.id
+            ));
+        }
+    };
+    let job = probe_job(JobType::VectorGenerate, &model.id, payload)?;
+    let supports = |facts: &RuntimeDescriptorFacts| -> Result<bool, String> {
+        let Some(provider) = model.vector.providers.get(&facts.snapshot.backend) else {
+            return Ok(false);
+        };
+        Ok(provider.available
+            && facts
+                .snapshot
+                .text_llm_ids
+                .iter()
+                .any(|registered| registered == &provider.id)
+            && backend_supports(&job, facts)?)
+    };
+    Ok(cell(
+        operation.to_owned(),
+        supports(mlx_facts)?,
+        supports(candle_facts)?,
+        gap_for(&model.id, "operation", operation),
+    ))
+}
+
 fn utility_model_cells(
     model: &ManifestModel,
     mlx_facts: &RuntimeDescriptorFacts,
@@ -2439,7 +2548,62 @@ fn utility_model_cells(
     if model.id.starts_with("pid_") || model.component_only {
         return Ok(Vec::new());
     }
+    if model.model_type == "vector" {
+        return evaluated_operations(model)
+            .into_iter()
+            .map(|operation| vector_operation_cell(model, &operation, mlx_facts, candle_facts))
+            .collect();
+    }
     let engine_request = match model.id.as_str() {
+        QWEN36_FILM_PLANNER_MODEL_ID => {
+            // The optional film planner uses the production prompt-refine TextLlm seam. `model`
+            // is the planner checkpoint; `modelId` is the target video model shaping the plan.
+            Some((
+                "prompt_refine:film_plan",
+                JobType::PromptRefine,
+                json!({
+                    "prompt": "probe",
+                    "task": "film_plan",
+                    "workflow": "video",
+                    "model": QWEN36_FILM_PLANNER_REPO,
+                    "modelId": "minimax_h3",
+                    "thinkingMode": "disabled",
+                }),
+            ))
+        }
+        // The two optional Qwen-Image 2.1 prompt rewriters (sc-24113, epic 24107). Both ride the
+        // SAME production prompt-refine TextLlm seam the film planner above does — `model` is the
+        // rewriter checkpoint, `modelId` is the target image model — which is the point: no second
+        // LLM runtime was built for them.
+        //
+        // The two probes differ in exactly the one field that selects between them in production.
+        // The T2I probe carries no reference image; the I2I probe carries one, because "which
+        // rewriter applies" is decided by the REQUEST (references present ⇒ editing) and never by a
+        // user-facing picker. Probing both with the same payload would leave that binding untested
+        // in the matrix.
+        "qwen_image_2_1_pe_t2i" => Some((
+            "prompt_refine:qwen_image_rewrite",
+            JobType::PromptRefine,
+            json!({
+                "prompt": "probe",
+                "task": "qwen_image_rewrite",
+                "workflow": "image",
+                "model": "Qwen/Qwen-Image-2.1-PE-T2I",
+                "modelId": "qwen_image_2_1",
+            }),
+        )),
+        "qwen_image_2_1_pe_i2i" => Some((
+            "prompt_refine:qwen_image_rewrite",
+            JobType::PromptRefine,
+            json!({
+                "prompt": "probe",
+                "task": "qwen_image_rewrite",
+                "workflow": "image",
+                "model": "Qwen/Qwen-Image-2.1-PE-I2I",
+                "modelId": "qwen_image_2_1",
+                "imagePaths": ["probe"],
+            }),
+        )),
         "real_esrgan" => Some((
             "engine:real-esrgan",
             JobType::ImageUpscale,
@@ -2748,6 +2912,18 @@ fn validate_probe_structure(
         JobType::ImageInterleave => {
             require(nonempty("model"), "model is required")?;
             require(nonempty("prompt"), "prompt is required")?;
+        }
+        JobType::VectorGenerate => {
+            require(nonempty("model"), "model is required")?;
+            require(
+                matches!(mode, Some("image_to_svg" | "text_to_svg")),
+                "mode must be image_to_svg or text_to_svg",
+            )?;
+            if mode == Some("image_to_svg") {
+                require(nonempty("sourceAssetId"), "sourceAssetId is required")?;
+            } else {
+                require(nonempty("prompt"), "prompt is required")?;
+            }
         }
         JobType::VideoGenerate => {
             require(nonempty("model"), "model is required")?;
@@ -3149,6 +3325,50 @@ fn gpu_job_rows(
             )?],
         });
     }
+    // Keep both request modes visible, deriving image_to_svg from the shipped StarVector model and
+    // text_to_svg from an intentionally unshipped contract probe. The latter must remain
+    // false/false until a real catalog model and native provider advertise it.
+    let vector_image_model = manifest
+        .models
+        .iter()
+        .find(|model| {
+            model
+                .capabilities
+                .iter()
+                .any(|value| value == "image_to_svg")
+        })
+        .ok_or_else(|| "no shipped model has operation \"image_to_svg\"".to_owned())?;
+    let mut vector_requests = vec![vector_operation_cell(
+        vector_image_model,
+        "image_to_svg",
+        mlx_facts,
+        candle_facts,
+    )?];
+    if let Some(vector_text_model) = manifest.models.iter().find(|model| {
+        model
+            .capabilities
+            .iter()
+            .any(|value| value == "text_to_svg")
+    }) {
+        vector_requests.push(vector_operation_cell(
+            vector_text_model,
+            "text_to_svg",
+            mlx_facts,
+            candle_facts,
+        )?);
+    } else {
+        vector_requests.push(cell(
+            "text_to_svg".to_owned(),
+            false,
+            false,
+            gap_for("starvector_contract_probe", "operation", "text_to_svg"),
+        ));
+    }
+    rows.push(JobCapabilityRow {
+        job_type: "vector_generate".to_owned(),
+        category: "per-model".to_owned(),
+        requests: vector_requests,
+    });
     let mut upscale_requests = Vec::new();
     for (capability, engine) in [
         ("engine:real-esrgan", "real-esrgan"),
@@ -3629,6 +3849,106 @@ mod tests {
     }
 
     #[test]
+    fn qwen_image_2_1_adapters_are_served_on_both_registered_lanes() {
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        let qwen = matrix
+            .models
+            .iter()
+            .find(|model| model.id == "qwen_image_2_1")
+            .expect("Qwen-Image 2.1 is in the matrix");
+        for adapter in ["lora", "lokr"] {
+            let cell = qwen
+                .user_adapters
+                .iter()
+                .find(|cell| cell.capability == adapter)
+                .expect("both adapters have matrix cells");
+            assert_eq!(
+                (cell.mlx, cell.candle),
+                (Some(true), Some(true)),
+                "{adapter}"
+            );
+            assert!(
+                cell.parity_obligation.is_none(),
+                "{adapter} has no parity gap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tiered_audio_model_serves_its_tiers_only_on_the_lane_whose_audio_dump_registers_it() {
+        // sc-22998. YuE2's descriptor advertises no quants, so its tier cells rest on the artifact
+        // rows — which count for audio only on the lane whose audio dump registers the model.
+        // Mutations that red this: dropping the artifact term for audio (Candle loses its tiers),
+        // or dropping the `audio_dump_registers` conjunct (MLX gains them).
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        let yue2 = matrix
+            .models
+            .iter()
+            .find(|model| model.id == "yue2")
+            .expect("yue2 is in the matrix");
+        for tier in ["bf16", "q8", "q4"] {
+            let cell = yue2
+                .precision_tier
+                .iter()
+                .find(|cell| cell.capability == tier)
+                .unwrap_or_else(|| panic!("yue2 has a {tier} cell"));
+            assert_eq!(cell.candle, Some(true), "{tier} on candle");
+            assert_eq!(cell.mlx, Some(false), "{tier} on mlx");
+        }
+        assert!(audio_dump_registers("candle", "yue2"));
+        assert!(!audio_dump_registers("mlx", "yue2"));
+        assert!(!audio_dump_registers("candle", "not_a_registered_model"));
+    }
+
+    #[test]
+    fn terminal_vector_install_is_projected_from_native_worker_capabilities() {
+        let manifest: ManifestRoot = serde_json::from_str(&strip_jsonc_comments(MANIFEST)).unwrap();
+        let starvector = manifest
+            .models
+            .iter()
+            .find(|model| model.id == "starvector_1b")
+            .expect("StarVector remains in the installable catalog");
+        assert!(!model_is_pending_terminal_vector_install(starvector));
+
+        let matrix = backend_capability_matrix().expect("capability matrix generates");
+        for model_id in ["starvector_1b", "starvector_8b"] {
+            let model = matrix
+                .models
+                .iter()
+                .find(|model| model.id == model_id)
+                .unwrap_or_else(|| panic!("missing shipped vector model {model_id}"));
+            assert_eq!(model.model_type, "vector");
+            assert!(!model
+                .operation_and_mode
+                .iter()
+                .any(|cell| cell.capability == "text_to_svg"));
+            assert!(model.operation_and_mode.iter().any(|cell| {
+                cell.capability == "image_to_svg"
+                    && cell.mlx == Some(true)
+                    && cell.candle == Some(true)
+            }));
+        }
+
+        let job = matrix
+            .gpu_job_types
+            .iter()
+            .find(|job| job.job_type == "vector_generate")
+            .expect("vector job row exists");
+        let image = job
+            .requests
+            .iter()
+            .find(|request| request.capability == "image_to_svg")
+            .expect("image_to_svg request exists");
+        assert_eq!((image.mlx, image.candle), (Some(true), Some(true)));
+        let text = job
+            .requests
+            .iter()
+            .find(|request| request.capability == "text_to_svg")
+            .expect("text_to_svg request exists");
+        assert_eq!((text.mlx, text.candle), (Some(false), Some(false)));
+    }
+
+    #[test]
     fn source_capture_digest_values_are_provenance_not_semantics() {
         let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         let mut live = checked_in.clone();
@@ -4059,9 +4379,8 @@ mod tests {
             assert_eq!((cell.mlx, cell.candle), (Some(true), Some(true)));
             assert!(cell.parity_obligation.is_none());
         }
-        let checked_in: BackendCapabilityMatrix = serde_json::from_str(CHECKED_IN).unwrap();
         assert!(
-            checked_in_matrix_matches_live(checked_in, mutated).is_ok(),
+            checked_in_matrix_matches_live(baseline, mutated).is_ok(),
             "the route-backed exact five must survive descriptor-only capture drift"
         );
 
@@ -4792,6 +5111,7 @@ mod tests {
 
         assert_both("controlnet_tile_sdxl", "image_detail");
         assert_both("vision_caption_qwen3vl_8b", "image_caption");
+        assert_both(QWEN36_FILM_PLANNER_MODEL_ID, "prompt_refine:film_plan");
         let vision = matrix
             .models
             .iter()
@@ -6162,6 +6482,9 @@ mod tests {
         let candle = runtime_facts(CANDLE_RUNTIME_FACTS, "candle").unwrap();
 
         for model in &manifest.models {
+            if model_is_pending_terminal_vector_install(model) {
+                continue;
+            }
             let row = matrix.models.iter().find(|row| row.id == model.id).unwrap();
             let descriptors: Vec<_> = [&mlx, &candle]
                 .into_iter()

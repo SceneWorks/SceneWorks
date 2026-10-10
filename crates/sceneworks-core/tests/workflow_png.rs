@@ -1212,3 +1212,192 @@ fn file_size_is_not_a_gate_on_the_answer() {
     );
     assert_eq!(verdict(&big), Verdict::Present);
 }
+
+// ---------------------------------------------------------------------------
+// Native transparency (sc-24111)
+// ---------------------------------------------------------------------------
+//
+// The seam these cover used to be `write_workflow_chunk(rgb: &RgbImage, ...)` with
+// `set_color(png::ColorType::Rgb)` hard-coded below it, so an alpha channel could not be expressed
+// at the one funnel every generated image is written through. Qwen Image 2.1 renders native
+// transparency; without this the channel was gone before the file existed, and everything
+// downstream (asset store, thumbnailer, editor, export) was alpha-clean but had nothing to carry.
+//
+// The fixture is committed rather than generated so the assertions below are about a real PNG
+// someone can open, and so a future change to the generator cannot quietly make "alpha survives"
+// a statement about an image that has no interesting alpha.
+
+/// The committed RGBA fixture: a fully transparent band, a soft 32-step ramp, and a fully opaque
+/// band, over RGB content that differs from both white and black.
+fn rgba_fixture() -> image::RgbaImage {
+    let path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("alpha")
+        .join("alpha-64.png");
+    image::open(&path)
+        .unwrap_or_else(|error| panic!("the RGBA fixture at {} decodes: {error}", path.display()))
+        .to_rgba8()
+}
+
+/// The same image with the channel removed, for the "RGB is untouched" half of the contract.
+fn opaque_rgb_fixture() -> RgbImage {
+    let path = repo_root()
+        .join("tests")
+        .join("fixtures")
+        .join("alpha")
+        .join("opaque-rgb-64.png");
+    image::open(&path)
+        .unwrap_or_else(|error| panic!("the RGB fixture at {} decodes: {error}", path.display()))
+        .to_rgb8()
+}
+
+/// How many pixels sit at each alpha value. The shape of this map is the thing every hop has to
+/// preserve — a count of transparent pixels alone would be satisfied by an image that lost every
+/// soft edge and kept the holes.
+fn alpha_histogram(image: &image::RgbaImage) -> std::collections::BTreeMap<u8, usize> {
+    let mut histogram = std::collections::BTreeMap::new();
+    for pixel in image.pixels() {
+        *histogram.entry(pixel.0[3]).or_insert(0) += 1;
+    }
+    histogram
+}
+
+#[test]
+fn the_committed_alpha_fixture_has_non_trivial_alpha() {
+    // Guards every other test in this section. If the fixture were regenerated flat, they would
+    // all still pass while proving nothing, so the fixture's own shape is asserted first.
+    let fixture = rgba_fixture();
+    let histogram = alpha_histogram(&fixture);
+
+    assert_eq!(fixture.dimensions(), (64, 64));
+    assert!(
+        histogram.get(&0).copied().unwrap_or(0) > 0,
+        "the fixture has no fully transparent pixels"
+    );
+    assert!(
+        histogram.get(&255).copied().unwrap_or(0) > 0,
+        "the fixture has no fully opaque pixels"
+    );
+    assert!(
+        histogram.len() >= 8,
+        "the fixture has no soft edge: {} distinct alpha values",
+        histogram.len()
+    );
+    // Flattening onto white or black is the failure mode, and it is only detectable if the colour
+    // under the transparent pixels is neither.
+    for pixel in fixture.pixels().filter(|pixel| pixel.0[3] == 0) {
+        let rgb = [pixel.0[0], pixel.0[1], pixel.0[2]];
+        assert_ne!(
+            rgb,
+            [0, 0, 0],
+            "a transparent pixel is black underneath, so a flatten-to-black would be invisible"
+        );
+        assert_ne!(
+            rgb,
+            [255, 255, 255],
+            "a transparent pixel is white underneath, so a flatten-to-white would be invisible"
+        );
+    }
+}
+
+#[test]
+fn an_rgba_render_keeps_every_alpha_value_through_the_embed_lane() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("transparent.png");
+    let original = rgba_fixture();
+
+    write_workflow_chunk(&original, &path, Some(&golden_envelope())).expect("writes");
+
+    let decoded = image::open(&path).expect("`image` decodes the chunked RGBA PNG");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgba8,
+        "the embed lane re-encoded the render without its alpha channel"
+    );
+    let decoded = decoded.to_rgba8();
+    assert_eq!(
+        alpha_histogram(&decoded),
+        alpha_histogram(&original),
+        "the alpha histogram changed on the way through the embed lane"
+    );
+    // Not just the channel: the whole buffer, so a composite against any background fails here.
+    assert_eq!(decoded.as_raw(), original.as_raw());
+
+    // And the file is still a workflow-carrying PNG — the alpha did not cost the chunk.
+    let read = read_workflow_chunk_file(&path)
+        .expect("reads back")
+        .expect("carries a workflow");
+    assert_eq!(as_value(&read), as_value(&golden_envelope()));
+}
+
+#[test]
+fn an_rgba_render_keeps_its_alpha_through_the_opt_out_lane() {
+    // The `None` arm always preserved alpha for a `DynamicImage`, but it could never be reached
+    // with one: the parameter type had already flattened upstream. Both arms are now reachable
+    // with the same buffer and must agree about the channel.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let path = directory.path().join("transparent-plain.png");
+    let original = rgba_fixture();
+
+    write_workflow_chunk(&original, &path, None).expect("writes");
+
+    let decoded = image::open(&path).expect("decodes");
+    assert_eq!(decoded.color(), image::ColorType::Rgba8);
+    assert_eq!(decoded.to_rgba8().as_raw(), original.as_raw());
+}
+
+#[test]
+fn the_rgba_some_path_is_the_rgba_none_path_plus_the_chunks() {
+    // The RGBA mirror of `the_some_path_is_the_none_path_plus_the_chunks`: adding a text chunk to
+    // an alpha-carrying render must cost the chunk and nothing else — not the channel, not the
+    // encoder settings.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let plain = directory.path().join("plain.png");
+    let chunked = directory.path().join("chunked.png");
+    let fixture = rgba_fixture();
+
+    write_workflow_chunk(&fixture, &plain, None).expect("writes the opt-out file");
+    write_workflow_chunk(&fixture, &chunked, Some(&golden_envelope())).expect("writes the embed");
+
+    let chunked_bytes = fs::read(&chunked).expect("reads the embedded file");
+    let stripped = strip_workflow_chunk(&chunked_bytes)
+        .expect("the stripper runs")
+        .expect("there were chunks to take out");
+    assert_eq!(
+        stripped,
+        fs::read(&plain).expect("reads the opt-out file"),
+        "the embed lane changed more than the text chunks on an RGBA render"
+    );
+}
+
+#[test]
+fn an_rgb_render_is_unchanged_by_the_alpha_capable_seam() {
+    // The other half: widening the seam must not change a single byte for the callers that were
+    // already there. Same image content as the RGBA fixture, channel removed.
+    let directory = tempfile::tempdir().expect("temp dir");
+    let through_seam = directory.path().join("through-seam.png");
+    let reference = directory.path().join("reference.png");
+    let fixture = opaque_rgb_fixture();
+
+    write_workflow_chunk(&fixture, &through_seam, None).expect("writes through the seam");
+    fixture
+        .save_with_format(&reference, ImageFormat::Png)
+        .expect("writes the reference");
+
+    assert_eq!(
+        fs::read(&through_seam).expect("reads"),
+        fs::read(&reference).expect("reads"),
+        "an RGB write through the widened seam is no longer byte-identical"
+    );
+
+    let embedded = directory.path().join("embedded.png");
+    write_workflow_chunk(&fixture, &embedded, Some(&golden_envelope())).expect("writes");
+    let decoded = image::open(&embedded).expect("decodes");
+    assert_eq!(
+        decoded.color(),
+        image::ColorType::Rgb8,
+        "an RGB render grew an alpha channel it never had"
+    );
+    assert_eq!(decoded.to_rgb8().as_raw(), fixture.as_raw());
+}

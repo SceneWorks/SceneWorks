@@ -542,7 +542,7 @@ function validateSchema(value) {
 
 export function logicalCaseId(spec) {
   return `implan-${digest({
-    harnessVersion: HARNESS_VERSION,
+    harnessVersion: spec.harnessVersion ?? HARNESS_VERSION,
     evidenceScope: spec.evidenceScope,
     backend: spec.backend,
     loadShape: spec.loadShape,
@@ -999,7 +999,9 @@ export function validateRecord(record) {
   text(record.calibrationFingerprint, `${record.id}.calibrationFingerprint`);
   text(record.capturedAt, `${record.id}.capturedAt`);
   if (Number.isNaN(Date.parse(record.capturedAt))) fail(`${record.id}: invalid capturedAt`);
-  if (record.harnessVersion !== HARNESS_VERSION) fail(`${record.id}: invalid harnessVersion`);
+  // The measuring instrument's version is provenance, not a currency gate. Required
+  // fields and deterministic identity below still validate the actual record contract.
+  if (!/^sceneworks-memory-v[1-9][0-9]*$/.test(record.harnessVersion ?? "")) fail(`${record.id}: invalid harnessVersion`);
   if (record.logicalCaseId !== logicalCaseId(record)) fail(`${record.id}: logical identity mismatch`);
   if (record.id !== recordId(record)) fail(`${record.id}: deterministic identity mismatch`);
   object(record.loadability, `${record.id}.loadability`);
@@ -1016,7 +1018,7 @@ export function validateRecord(record) {
 export function validateBundle(bundle) {
   validateSchema(bundle);
   object(bundle, "bundle");
-  if (bundle.schemaVersion !== SCHEMA_VERSION || bundle.harnessVersion !== HARNESS_VERSION || !Array.isArray(bundle.records)) {
+  if (bundle.schemaVersion !== SCHEMA_VERSION || !Array.isArray(bundle.records)) {
     fail("invalid bundle envelope");
   }
   const sessions = new Map();

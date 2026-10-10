@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { AssetThumbnail, assetCanRenderAsImage } from "../assetMedia.jsx";
+import { AssetThumbnail, assetCanRenderAsAudio, assetCanRenderAsImage } from "../assetMedia.jsx";
 import { Icon } from "../Icons.jsx";
 import { isAiAsset } from "./editorUtils.js";
 
@@ -14,7 +14,7 @@ export function MediaBin({ assets = [], onAddToTrack, onPreview }) {
   const [visibleCount, setVisibleCount] = useState(MEDIA_PAGE_SIZE);
 
   const clipAssets = assets.filter(
-    (asset) => asset.type === "video" || asset.file?.mimeType?.startsWith("video/") || assetCanRenderAsImage(asset),
+    (asset) => asset.type === "video" || asset.file?.mimeType?.startsWith("video/") || assetCanRenderAsImage(asset) || assetCanRenderAsAudio(asset),
   );
   const shown = tab === "media" ? clipAssets : assets;
   const visible = shown.slice(0, visibleCount);

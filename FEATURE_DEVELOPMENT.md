@@ -117,6 +117,13 @@ Consequences:
 
 ### Gate teardown (2026-08-15/16) — binding on agents
 
+Measurement currency is advisory in CI as well as at runtime (sc-23692). A pin
+bump, a changed loader-closure digest, or an attestation naming an older revision
+must not fail CI, require attestation renewal, or demand remeasurement. Retain the
+original measurement and review provenance; warnings may report the difference.
+Tests of currency reporting must use controlled fixtures rather than require the
+packaged measurements to remain current. Measurement integrity checks still apply.
+
 The pin-keyed verification gates were deliberately dismantled (sc-19758
 `68670a3ee`: four `check.yml` steps `if: false`; sc-19751: license coverage
 reports and exits 0; `e14171984`: a pin bump no longer invalidates capability

@@ -1,0 +1,60 @@
+{
+  "coordinates": [
+    "llama-short-single-chunked-cold",
+    "llama-medium-supported-batch-single-shot-warm",
+    "llama-memory-material-single-single-shot-warm",
+    "llama-fit-boundary-single-chunked-cold",
+    "qwen-short-single-single-shot-cold",
+    "qwen-medium-supported-batch-chunked-warm",
+    "qwen-memory-material-single-single-shot-warm",
+    "qwen-fit-boundary-single-chunked-cold",
+    "llama8b-short-single-chunked-cold",
+    "llama8b-medium-supported-batch-single-shot-warm",
+    "llama8b-memory-material-single-single-shot-warm",
+    "llama8b-fit-boundary-single-chunked-cold",
+    "qwen8b-short-single-single-shot-cold",
+    "qwen8b-medium-supported-batch-chunked-warm",
+    "qwen8b-memory-material-single-single-shot-warm",
+    "qwen8b-fit-boundary-single-chunked-cold"
+  ],
+  "executableSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "inferenceRevision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "kind": "sc-20671-resume-identity",
+  "llama8bCandidate": {
+    "bytes": 105,
+    "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "llama8bReference": {
+    "bytes": 107,
+    "sha256": "5555555555555555555555555555555555555555555555555555555555555555"
+  },
+  "llamaCandidate": {
+    "bytes": 101,
+    "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  },
+  "llamaReference": {
+    "bytes": 103,
+    "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+  },
+  "policySha256": "03b18fb4b6e8e729189ad1243fecc31934ff1b4aa011cdf00fb6489029a17d2a",
+  "promptSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "qwen8bCandidate": {
+    "bytes": 106,
+    "sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+  },
+  "qwen8bReference": {
+    "bytes": 108,
+    "sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+  },
+  "qwenCandidate": {
+    "bytes": 102,
+    "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "qwenReference": {
+    "bytes": 104,
+    "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "sceneWorksRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "scheduleVersion": 3,
+  "schemaVersion": 1
+}

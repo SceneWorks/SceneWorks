@@ -709,7 +709,9 @@ fn full_av_video(output: GenerationOutput) -> Result<(Vec<Image>, u32, AudioTrac
         GenerationOutput::Video { audio: None, .. } => {
             Err(format!("{LABEL} full-A/V render returned no audio track"))
         }
-        GenerationOutput::Images(_) => Err(format!("{LABEL} returned images, not a video clip")),
+        GenerationOutput::Images(_) | GenerationOutput::ImagesRgba(_) => {
+            Err(format!("{LABEL} returned images, not a video clip"))
+        }
         GenerationOutput::Audio(_) => Err(format!(
             "{LABEL} returned a standalone audio track, not a video clip"
         )),

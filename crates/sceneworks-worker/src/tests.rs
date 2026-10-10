@@ -125,6 +125,54 @@ include!("tests/segment_assembly.rs");
 // production work dirs and deliberate exceptions enumerated and justified.
 include!("tests/temp_fixture_guard.rs");
 
+#[test]
+fn worker_entry_thread_has_an_explicit_runtime_and_large_stack_contract() {
+    const {
+        assert!(
+            super::WORKER_ENTRY_STACK_BYTES >= 8 * 1024 * 1024,
+            "worker entry stack must stay at least 8 MiB"
+        );
+    }
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let observed_from_worker = observed.clone();
+    super::run_on_worker_entry_thread(move || async move {
+        tokio::task::yield_now().await;
+        let name = std::thread::current().name().map(str::to_owned);
+        let runtime_is_active = tokio::runtime::Handle::try_current().is_ok();
+        *observed_from_worker.lock().expect("observation lock") = Some((name, runtime_is_active));
+        Ok(())
+    })
+    .expect("worker entry thread completes");
+
+    let observation = observed.lock().expect("observation lock").clone();
+    assert_eq!(
+        observation,
+        Some((Some(super::WORKER_ENTRY_THREAD_NAME.to_owned()), true)),
+        "the worker future must be constructed inside the named runtime thread"
+    );
+}
+
+#[test]
+fn worker_entry_thread_preserves_errors_and_panics() {
+    let error = super::run_on_worker_entry_thread(|| async {
+        Err(super::WorkerError::Engine("worker-entry-error".to_owned()))
+    })
+    .expect_err("worker error must reach the process entrypoint");
+    assert_eq!(error.to_string(), "worker-entry-error");
+
+    let panic = std::panic::catch_unwind(|| {
+        super::run_on_worker_entry_thread(|| async {
+            panic!("worker-entry-panic");
+        })
+    })
+    .expect_err("worker panic must reach the process entrypoint");
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str));
+    assert_eq!(message, Some("worker-entry-panic"));
+}
+
 /// sc-19710: the retention driver is opt-in and must never create the managed cache root as a side
 /// effect — an opt-out install growing a `models/resolved` tree just because the worker booted
 /// would be exactly the unrequested state the policy exists to prevent. A store that already

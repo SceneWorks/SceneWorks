@@ -92,6 +92,7 @@ const STATUS_LABEL = {
   // Accepted but awaiting the API-side async prompt rewrite (Ideogram 4 auto-caption, sc-9120)
   // before it becomes claimable. Non-terminal, so the card renders it as an in-flight job.
   pending_caption: "Preparing prompt",
+  pending_workflow: "Creating source image",
   running: "Running",
   completed: "Complete",
   canceled: "Cancelled",
@@ -693,6 +694,7 @@ export function WorkerProgressCard({
   onThumbnailClick,
 }) {
   const [titleExpanded, setTitleExpanded] = useState(false);
+  const [duplicateComputePolicy, setDuplicateComputePolicy] = useState("");
   const { workersById, visibleWorkers } = useAppLive();
   // Catalog read (sc-16965). `models` is a low-churn static field, so reading it through
   // useAppStatic() does not add a job/worker-tick subscription this card did not already have.
@@ -757,6 +759,8 @@ export function WorkerProgressCard({
     job.status !== "completed" &&
     (attempts > 1 || ["resume", "fresh"].includes(job.payload?.downloadAction));
   const canDuplicate = onDuplicate && canRetryBase && !isModelDownload;
+  const legacyYue2Duplicate = canDuplicate && job.payload?.model === "yue2" &&
+    job.payload?.yue2?.kind !== "transcribe" && !job.payload?.yue2?.computePolicy;
   const showOpenQueue = !!onOpenQueue && !hideOpenQueue;
 
   const chipLabel = getJobTypeChip(job.type);
@@ -886,7 +890,29 @@ export function WorkerProgressCard({
           <button className="secondary-action" onClick={() => onRetry(job)} type="button">Retry</button>
         ) : null}
         {canDuplicate ? (
-          <button className="secondary-action" onClick={() => onDuplicate(job)} type="button">Duplicate</button>
+          <>
+            {legacyYue2Duplicate ? (
+              <label>
+                Compute precision for duplicate
+                <select
+                  aria-label="Compute precision for duplicate"
+                  onChange={(event) => setDuplicateComputePolicy(event.target.value)}
+                  value={duplicateComputePolicy}
+                >
+                  <option value="">Choose precision</option>
+                  <option value="auto">Auto</option>
+                  <option value="bf16">BF16</option>
+                  <option value="fp32">FP32</option>
+                </select>
+              </label>
+            ) : null}
+            <button
+              className="secondary-action"
+              disabled={legacyYue2Duplicate && !duplicateComputePolicy}
+              onClick={() => onDuplicate(job, legacyYue2Duplicate ? duplicateComputePolicy : undefined)}
+              type="button"
+            >Duplicate</button>
+          </>
         ) : null}
         {showOpenQueue ? (
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>

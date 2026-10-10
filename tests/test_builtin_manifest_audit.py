@@ -34,6 +34,7 @@ import copy
 import json
 import math
 import re
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -932,6 +933,83 @@ def test_builtin_models_manifest_satisfies_authoring_schema():
     )
 
 
+def test_starvector_terminal_candidate_schema_is_closed_and_mutation_resistant():
+    """SC-22261: the permanent-pin terminal candidate is exact and mutation resistant."""
+    manifest = _load_builtin_models_manifest()
+    schema = _load_schema(SCHEMA_PATH)
+    validator = jsonschema.Draft202012Validator(schema)
+    model = next(model for model in manifest["models"] if model["id"] == "starvector_8b")
+    candidate = model["vector"]["deviceAdmission"]["terminalCandidate"]
+    plan = json.loads((ROOT / "release/starvector-terminal-campaign-v1.json").read_text())
+    assert candidate["inferenceRevision"] == plan["inference_contract"]["revision"]
+    assert candidate["corpusSha256"] == "757370c4eed38a52a29ac80c258fdedd7e437ab891637bcb1c916aa608bf32b5"
+    assert not list(validator.iter_errors({"schemaVersion": 1, "models": [model]}))
+    # Preserve packaged provenance: integrity is required, source currency is advisory.
+    # Controlled JS fixtures verify that changed source bytes change the closure.
+    subprocess.run(
+        [
+            "node", "--input-type=module", "--eval",
+            "import { validateProductionClosureShape } from './scripts/starvector-production-closure.mjs'; "
+            "validateProductionClosureShape(JSON.parse(process.argv[1]));",
+            json.dumps(candidate["productionClosure"]),
+        ],
+        cwd=ROOT, check=True, capture_output=True, text=True, timeout=30,
+    )
+    assert model["vector"]["providers"] == {
+        "mlx": {"id": "mlx-starvector-8b", "available": True},
+        "candle": {"id": "candle-starvector-8b", "available": True},
+    }
+    assert candidate["supportedDevices"]["mlx"] == [
+        {"deviceClass": "apple_unified_memory", "totalBytes": 137438953472}
+    ]
+    assert candidate["supportedDevices"]["candle"] == [
+        {
+            "deviceClass": "nvidia_dedicated_vram",
+            "deviceName": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+            "totalBytes": 102641958912,
+        }
+    ]
+
+    def rejected(mutate):
+        changed = copy.deepcopy(model)
+        mutate(changed["vector"]["deviceAdmission"]["terminalCandidate"])
+        return list(validator.iter_errors({"schemaVersion": 1, "models": [changed]}))
+
+    mutations = [
+        lambda value: value.clear(),
+        lambda value: value.update({"exception": "permanent"}),
+        lambda value: value.update({"inferenceRevision": "a" * 39}),
+        lambda value: value["model"].update({"revision": "floating-main"}),
+        lambda value: value["providers"].update({"other": "cloud-starvector"}),
+        lambda value: value.update(
+            {
+                "productionClosure": {
+                    "schemaVersion": 1,
+                    "sha256": "a" * 64,
+                    "entries": [
+                        {"path": "../Cargo.toml", "byteSize": 1, "sha256": "b" * 64}
+                    ],
+                }
+            }
+        ),
+        lambda value: value["supportedDevices"].update(
+            {
+                "candle": [
+                    {"deviceClass": "nvidia_dedicated_vram", "totalBytes": 1}
+                ]
+            }
+        ),
+    ]
+    for mutate in mutations:
+        assert rejected(mutate), "terminal candidate mutation must be rejected by the schema"
+
+    without_candidate = copy.deepcopy(model)
+    del without_candidate["vector"]["deviceAdmission"]["terminalCandidate"]
+    assert list(
+        validator.iter_errors({"schemaVersion": 1, "models": [without_candidate]})
+    ), "starvector_8b may not remove its terminal candidate contract"
+
+
 def _measured_contract_rows():
     """Every hand-authored (non engine-projected) memoryStrategyContract row in the catalog."""
     manifest = _load_builtin_models_manifest()
@@ -1597,6 +1675,195 @@ def test_builtin_manifest_ships_the_seeded_audio_models():
         "cover",
     }
     assert "AudioEdit" in by_id["acestep_v15_turbo"]["audio"]["conditioning"]
+
+
+# sc-22998 (epic sc-22988). Every V1/V2 separation check runs against the REAL YuE1 entries (epic
+# sc-19373: family `yue`, ids `yue_{en,zh,jp_kr}_{cot,icl}`, `SceneWorks/yue-*-candle` re-hosts) that
+# now ship beside `yue2` in the builtin catalog (epic acceptance test 5).
+_YUE1_IDS = tuple(
+    f"yue_{language}_{mode}" for language in ("en", "zh", "jp_kr") for mode in ("cot", "icl")
+)
+
+
+def _model_repos(model: dict) -> set[str]:
+    rows = list(model.get("downloads", [])) + list(model.get("conditionalComponents", []))
+    return {row["repo"] for row in rows if row.get("repo")}
+
+
+def _yue_family_separation_violations(models: list[dict]) -> list[str]:
+    """Everything that could let YuE2 stand in for YuE1 (or the reverse) at a resolution point: a
+    shared id, a family claim, a shared download/cache repo, a shared install path, or a YuE2 row
+    that is not the pinned upstream original (a re-host would need a recorded distribution basis)."""
+    v1 = [m for m in models if m.get("family") == "yue"]
+    v2 = [m for m in models if m.get("family") == "yue2"]
+    violations: list[str] = []
+    for model in v1:
+        if not re.fullmatch(r"yue_(en|zh|jp_kr)_(cot|icl)", model["id"]):
+            violations.append(f"{model['id']}: family yue claimed by a non-YuE1 id")
+    for model in v2:
+        if model["id"] != "yue2":
+            violations.append(f"{model['id']}: family yue2 claimed by a non-YuE2 id")
+    if any(m["id"] == "yue2" and m.get("family") != "yue2" for m in models):
+        violations.append("yue2: not in family yue2")
+    v1_repos = set().union(*(_model_repos(m) for m in v1)) if v1 else set()
+    for model in v2:
+        shared = _model_repos(model) & v1_repos
+        if shared:
+            violations.append(f"{model['id']}: shares repos with YuE1: {sorted(shared)}")
+        for repo in _model_repos(model):
+            if not repo.startswith("m-a-p/"):
+                violations.append(f"{model['id']}: {repo} is not the upstream original")
+        v1_paths = {m.get("paths", {}).get("model") for m in v1}
+        if model.get("paths", {}).get("model") in v1_paths:
+            violations.append(f"{model['id']}: install path collides with YuE1")
+        pointer = model.get("commercialUse", {}).get("alternativeFamily")
+        if pointer != "yue":
+            violations.append(f"{model['id']}: commercial pointer {pointer!r} is not YuE1")
+    return violations
+
+
+def test_yue2_is_explicitly_experimental_noncommercial_and_licence_gated():
+    """AC2: the CC BY-NC 4.0 restriction is carried by the fields the pre-download gate, the model
+    card and the Simple UI read (`requiresLicenseAcknowledgment` + `licenseNotice`, `nonCommercial`,
+    `experimental`), and a commercial-use route is refused with a pointer to YuE1 that claims no
+    unrelated rights clearance.
+
+    *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` (the API then fetches without
+    the notice), or rewording the pointer note to imply the alternative clears output rights.
+    """
+    yue2 = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "yue2")
+    assert yue2["experimental"] is True
+    assert yue2["nonCommercial"] is True
+    assert yue2["requiresLicenseAcknowledgment"] is True
+    notice = yue2["licenseNotice"]
+    for term in ("EXPERIMENTAL", "NONCOMMERCIAL", "CC BY-NC 4.0", "Tongyi Qianwen", "YuE1"):
+        assert term in notice, term
+    assert "does not clear rights" in notice
+    assert yue2["commercialUse"]["eligible"] is False
+    assert "does not clear rights" in yue2["commercialUse"]["alternativeNote"]
+    assert yue2["ui"]["description"].startswith("EXPERIMENTAL · NONCOMMERCIAL (CC BY-NC 4.0)")
+
+
+def test_yue1_and_yue2_identities_stay_disjoint_with_swapped_model_negative_fixtures():
+    """AC1 / E1: ids, families, download + cache repos and install paths never overlap, so no
+    upgrade, fallback, rehost alias or saved recipe can resolve one family to the other.
+
+    *Mutation that reds this:* pointing a YuE2 row at a `SceneWorks/yue-*` re-host, or relabelling
+    the entry's family to `yue`.
+    """
+    models = _load_builtin_models_manifest()["models"]
+    by_id = {m["id"]: m for m in models}
+    for model_id in _YUE1_IDS:
+        assert by_id[model_id]["family"] == "yue", model_id
+    assert _yue_family_separation_violations(models) == []
+
+    yue2 = by_id["yue2"]
+    yue_en_cot = by_id["yue_en_cot"]
+    # The checker is not vacuous: each swapped-model fixture below must be caught.
+    v1_claims_v2_family = copy.deepcopy(yue_en_cot) | {"family": "yue2"}
+    v2_claims_v1_family = copy.deepcopy(yue2) | {"family": "yue"}
+    v2_on_v1_rehost = copy.deepcopy(yue2)
+    v2_on_v1_rehost["downloads"][0]["repo"] = yue_en_cot["downloads"][0]["repo"]
+    v1_on_v2_weights = copy.deepcopy(by_id["yue_zh_cot"])
+    v1_on_v2_weights["downloads"][0]["repo"] = "m-a-p/YuE2-3B"
+    v2_pointing_at_itself = copy.deepcopy(yue2)
+    v2_pointing_at_itself["commercialUse"]["alternativeFamily"] = "yue2"
+    for label, swapped in [
+        ("V1 claims family yue2", [yue2, v1_claims_v2_family]),
+        ("V2 claims family yue", [v2_claims_v1_family, yue_en_cot]),
+        ("V2 row on a V1 re-host", [v2_on_v1_rehost, yue_en_cot]),
+        ("V1 row on the V2 weights", [yue2, v1_on_v2_weights]),
+        ("V2 commercial pointer at itself", [v2_pointing_at_itself]),
+    ]:
+        assert _yue_family_separation_violations(swapped), label
+
+
+def test_locally_derived_tiers_fetch_exactly_their_source_variant():
+    """AC3 / E7: a `localDerivation` tier downloads the verified original it is derived from — the
+    same repo, revision and files as that variant's row — so no tier selection can fetch a re-host.
+
+    *Mutation that reds this:* pointing the q4 row at `SceneWorks/yue2-3b-q4` or at `q4/*` files.
+    """
+    derived = 0
+    for model in _load_builtin_models_manifest()["models"]:
+        rows = model.get("downloads", [])
+        for row in rows:
+            derivation = row.get("localDerivation")
+            if not derivation:
+                continue
+            derived += 1
+            source = [
+                r
+                for r in rows
+                if r.get("variant") == derivation["fromVariant"] and not r.get("coRequisite")
+            ]
+            assert len(source) == 1, (model["id"], row["variant"])
+            assert "localDerivation" not in source[0]
+            for key in ("provider", "repo", "revision", "files", "platforms"):
+                assert row.get(key) == source[0].get(key), (model["id"], row["variant"], key)
+            assert row["footprint"]["diskSizeBytes"] > source[0]["footprint"]["diskSizeBytes"]
+    # Shape, not population: the catalog declares at least one derived tier (so the loop above
+    # judged something), and every one of them resolved its `fromVariant` row above.
+    assert derived >= 1, "the catalog declares no locally derived tier; this test judged nothing"
+
+
+def test_choice_groups_declare_one_default_and_cover_components_are_never_downloads():
+    """AC3: YuE2 installs YuE2-3B + its tokenizer + ONE decoder. The two decoders are one choice
+    group with exactly one default, and the cover closure (SheetSage2 + MERT-v2-FullSong) is a
+    conditional cover component that no install, tier or co-requisite path can reach. Since the
+    owner's 2026-09-27 decision (sc-23002) it is acquirable for covers — no `blocked` record — and
+    declared noncommercial CC BY-NC 4.0 with the port-code basis and a pinned weights digest.
+
+    *Mutation that reds this:* marking both decoders `default`, moving SheetSage2 into
+    `downloads`, re-adding a `blocked` record, or dropping `nonCommercial` / `licenseBasis`.
+    """
+    yue2 = next(m for m in _load_builtin_models_manifest()["models"] if m["id"] == "yue2")
+    choices = [row["choice"] for row in yue2["downloads"] if "choice" in row]
+    assert sorted(c["option"] for c in choices) == ["legacy", "standard"]
+    assert {c["group"] for c in choices} == {"decoder"}
+    assert [c["option"] for c in choices if c.get("default")] == ["standard"]
+    by_option = {row["choice"]["option"]: row for row in yue2["downloads"] if "choice" in row}
+    assert by_option["standard"]["componentId"] == "vae"
+    assert by_option["legacy"]["componentId"] == "vae_legacy"
+
+    cover = yue2["conditionalComponents"]
+    assert {c["componentId"] for c in cover} == {"yue2_sheetsage2", "yue2_mert_v2_fullsong"}
+    download_repos = {row["repo"] for row in yue2["downloads"]}
+    for component in cover:
+        assert component["requiredFor"] == ["cover"]
+        assert component["repo"] not in download_repos
+        assert "blocked" not in component, component["componentId"]
+        assert component["license"] == "cc-by-nc-4.0"
+        assert component["nonCommercial"] is True
+        assert "CC BY-NC 4.0" in component["licenseBasis"]
+        assert "noncommercial" in component["licenseBasis"]
+        assert re.fullmatch(r"[0-9a-f]{64}", component["weightsSha256"])
+        assert re.fullmatch(r"[0-9a-f]{40}", component["revision"])
+        assert "model.safetensors" in component["files"]
+
+
+def test_yue_entries_advertise_their_backend_audio_capabilities():
+    """sc-19383 (epic 19373): each YuE entry's `audio` block mirrors the candle-audio-yue descriptor
+    — segmented lyrics, repetition penalty and the Clamp/Rescale output limiter on every variant;
+    ReferenceAudio conditioning and the reference window only on the ICL checkpoints. The audio
+    polarity is ABSENT MEANS FALSE, so a dropped key silently hides the control.
+
+    *Mutation that reds this:* deleting any of those keys from one entry, or advertising
+    `conditioning` / `supportsReferenceRegion` on a CoT checkpoint.
+    """
+    by_id = {m.get("id"): m for m in _load_builtin_models_manifest()["models"]}
+    for model_id in _YUE1_IDS:
+        audio = by_id[model_id]["audio"]
+        icl = model_id.endswith("_icl")
+        for key in (
+            "supportsSegmentedLyrics",
+            "supportsRepetitionPenalty",
+            "supportsOutputLimiter",
+            "supportsGuidance",
+        ):
+            assert audio.get(key) is True, f"{model_id}.audio.{key} must be true"
+        assert audio.get("supportsReferenceRegion") is icl, model_id
+        assert ("ReferenceAudio" in audio.get("conditioning", [])) is icl, model_id
 
 
 def _duplicate_default_downloads(manifest: dict) -> list[str]:
@@ -2968,7 +3235,12 @@ def test_lora_schema_accepts_a_declared_sampling_recipe():
     authoring error."""
     entry = _sample_lora_entry()
     entry["role"] = "accelerator"
-    entry["sampling"] = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    entry["sampling"] = {
+        "steps": 4,
+        "schedulerShift": 6.0,
+        "audioSchedulerShift": 3.0,
+        "trainingShortEdge": 544,
+    }
     errors = _schema_errors({"schemaVersion": 1, "loras": [entry]}, LORA_SCHEMA_PATH)
     assert not errors, "a declared sampling recipe must be schema-valid:\n" + _format_errors(errors)
 
@@ -2981,19 +3253,27 @@ def test_lora_schema_rejects_a_malformed_sampling_recipe():
     2 h 25 m render this whole feature exists to avoid, with no error anywhere. So
     every way of writing the block wrong has to be an authoring-time red: a partial
     block (each of the three keys is load-bearing and none has a safe default), an
-    out-of-band step count, a zero shift, a string where a number belongs, a typo'd
-    key, and a non-object.
+    out-of-band step count, a zero shift, a string where a number belongs, a
+    non-positive/non-integer/out-of-u32 training edge, a typo'd key, and a non-object.
     """
-    good = {"steps": 4, "schedulerShift": 6.0, "audioSchedulerShift": 3.0}
+    good = {
+        "steps": 4,
+        "schedulerShift": 6.0,
+        "audioSchedulerShift": 3.0,
+        "trainingShortEdge": 544,
+    }
     cases = [
         ({key: value for key, value in good.items() if key != missing}, "required")
-        for missing in good
+        for missing in ("steps", "schedulerShift", "audioSchedulerShift")
     ]
     cases += [
         ({**good, "steps": 0}, "minimum"),
         ({**good, "steps": 4.5}, "type"),
         ({**good, "schedulerShift": 0}, "exclusiveMinimum"),
         ({**good, "audioSchedulerShift": "3.0"}, "type"),
+        ({**good, "trainingShortEdge": 0}, "minimum"),
+        ({**good, "trainingShortEdge": 544.5}, "type"),
+        ({**good, "trainingShortEdge": 4294967296}, "maximum"),
         # The sc-12288 field class, one level in: a typo'd key is silently ignored by a
         # permissive object, and `required` alone would not catch a MISSPELLED extra.
         ({**good, "schedulerShifts": 6.0}, "additionalProperties"),
@@ -3783,3 +4063,424 @@ def test_license_acknowledgment_schema_guard_has_teeth():
             error.validator == "additionalProperties" and key in error.message
             for error in errors
         ), f"removing {key} from the schema did not reject the entry"
+
+
+# ---------------------------------------------------------------------------------------------
+# sc-24112 — Qwen-Image 2.1 installable tiers.
+# ---------------------------------------------------------------------------------------------
+
+#: The null SHA a DECLARED-but-unpublished download row carries (sc-24112). Schema-valid 40-hex, so
+#: the manifest still type-checks, and unmistakably not a commit — the same trick git uses for "no
+#: object". Mirrors `sceneworks_core::model_artifacts::artifact_selection::PENDING_ARTIFACT_REVISION`.
+_PENDING_ARTIFACT_REVISION = "0" * 40
+
+#: Tier fidelity, lightest first. `default` must sit on the lightest INSTALLABLE tier, which is the
+#: catalog convention `qwen_image` and `qwen_image_edit_2511` already follow.
+_TIER_ORDER = ["q4", "q8", "bf16"]
+
+
+def _pending_artifact_rows(manifest: dict) -> set[tuple[str, str, str]]:
+    """`(model_id, repo, variant)` for every row flagged `pendingArtifact: true`."""
+    return {
+        (model["id"], download.get("repo", ""), download.get("variant", ""))
+        for model in manifest["models"]
+        for download in model.get("downloads", [])
+        if download.get("pendingArtifact") is True
+    }
+
+
+def _null_sha_rows(manifest: dict) -> set[tuple[str, str, str]]:
+    """`(model_id, repo, variant)` for every row carrying the null-SHA placeholder revision."""
+    return {
+        (model["id"], download.get("repo", ""), download.get("variant", ""))
+        for model in manifest["models"]
+        for download in model.get("downloads", [])
+        if download.get("revision") == _PENDING_ARTIFACT_REVISION
+    }
+
+
+def test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set():
+    """The placeholder pairing is RIGID in both directions, which is what makes publishing an
+    artifact a single edit that cannot be half-done.
+
+    * a null SHA with no `pendingArtifact` flag is a placeholder shipped as if it were offerable —
+      the download would be queued and fail to resolve, and the user would see an opaque error;
+    * a `pendingArtifact` flag with a real SHA is the flag outliving the upload — the artifact
+      exists and nothing will offer it.
+
+    So the terminal story pins the revision and drops the flag together, and this test is what says
+    so. It is not decoration: `test_the_pending_pairing_guard_catches_each_half` mutates each half
+    and asserts this rule catches it.
+    """
+    manifest = _load_builtin_models_manifest()
+    pending = _pending_artifact_rows(manifest)
+    placeholder = _null_sha_rows(manifest)
+    assert pending == placeholder, (
+        "every `pendingArtifact` row must carry the null-SHA placeholder and vice versa; "
+        f"flagged-but-pinned: {sorted(pending - placeholder)}; "
+        f"placeholder-but-not-flagged: {sorted(placeholder - pending)}"
+    )
+
+
+def test_a_pending_artifact_is_never_the_default_download():
+    """Installing the model must never queue a fetch of an artifact that does not exist.
+
+    `model_download` picks the `default: true` row (else the first), so a pending default would be
+    what a plain "Install" queues.
+    """
+    offenders = [
+        (model["id"], download.get("variant"))
+        for model in _load_builtin_models_manifest()["models"]
+        for download in model.get("downloads", [])
+        if download.get("pendingArtifact") is True and download.get("default") is True
+    ]
+    assert not offenders, (
+        f"a pending artifact may never be the default download: {offenders}"
+    )
+
+
+def test_qwen_image_2_1_defaults_to_its_lightest_installable_tier():
+    """`qwen_image_2_1` installs its LIGHTEST INSTALLABLE tier by default, so a first install is
+    the smallest download that works.
+
+    Scoped to this id rather than made a catalog-wide rule, because the catalog-wide rule is FALSE:
+    `krea_2_turbo`/`krea_2_raw` default to q8 and `instantid_realvisxl` to bf16, each deliberately.
+    Asserting it over every model would have made those three pass or fail on this story's opinion,
+    which is not this story's business.
+
+    "Installable" is the operative word. While the packed tiers are pending the default must sit on
+    bf16 — the only tier that can actually be fetched — and the moment the terminal story pins
+    their revisions and drops the flags, this test REQUIRES the default to move to q4. That is the
+    point: the rule is encoded now, so publishing the artifacts cannot quietly leave 2.1 defaulting
+    to a 30.86 GiB download forever.
+    """
+    downloads = _qwen_image_2_1_entry()["downloads"]
+    installable = [
+        download
+        for download in downloads
+        if download.get("pendingArtifact") is not True
+        and download.get("variant") in _TIER_ORDER
+    ]
+    assert installable, "at least one tier must be installable"
+    lightest = min(installable, key=lambda download: _TIER_ORDER.index(download["variant"]))
+    chosen = next((d for d in installable if d.get("default") is True), None)
+    assert chosen is not None, "some installable tier must be the default"
+    assert chosen["variant"] == lightest["variant"], (
+        f"default is {chosen['variant']}, lightest installable is {lightest['variant']}"
+    )
+    assert all(d.get("default") is not True for d in downloads if d not in installable), (
+        "a pending tier may never be the default"
+    )
+
+
+def test_the_pending_pairing_guard_catches_each_half():
+    """Mutation guard: the pairing rule is LIVE, not decoration. Each half is broken in turn and
+    the rule must catch it — otherwise the terminal story could pin a revision, forget the flag,
+    and ship a tier nothing offers."""
+    manifest = _load_builtin_models_manifest()
+    qwen = next(m for m in manifest["models"] if m["id"] == "qwen_image_2_1")
+    q8 = next(d for d in qwen["downloads"] if d.get("variant") == "q8")
+    assert _pending_artifact_rows(manifest) == _null_sha_rows(manifest), "precondition"
+
+    # Half one: the flag rides on a real revision (the flag outliving the upload).
+    q8["pendingArtifact"] = True
+    assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
+
+    # Half two: the placeholder returns without the flag.
+    del q8["pendingArtifact"]
+    q8["revision"] = _PENDING_ARTIFACT_REVISION
+    assert _pending_artifact_rows(manifest) != _null_sha_rows(manifest)
+
+
+def test_qwen_image_2_1_ships_three_tiers_on_both_backends_from_pinned_bundles():
+    """sc-24112 — the tier surface, stated where a reviewer looks for it.
+
+    Three tiers, each from a reproducible bundle, none platform-scoped: the same three are
+    installable on macOS/MLX and on Windows/Linux/Candle, which is what "both backends" means for
+    a catalog whose `platforms` key would otherwise strip a row per host.
+    """
+    qwen = _qwen_image_2_1_entry()
+    downloads = qwen["downloads"]
+    assert [d.get("variant") for d in downloads] == ["bf16", "q8", "q4"], (
+        "three tiers, densest first"
+    )
+    assert all(d.get("platforms") is None for d in downloads), (
+        "a platform-scoped tier would leave a picker entry a host cannot obtain"
+    )
+    assert all(d.get("provider") == "huggingface" for d in downloads)
+
+    # bf16 is the released upstream snapshot; the packed pair is the SceneWorks re-host, one
+    # complete standalone snapshot per subdir. The converter refuses to emit a bf16 tier, which is
+    # why the dense tier alone stays upstream.
+    by_variant = {d["variant"]: d for d in downloads}
+    assert by_variant["bf16"]["repo"] == "Qwen/Qwen-Image-2.1"
+    assert by_variant["bf16"]["revision"] == "790c92633540aa0cb11d9abf19eb46d861714758"
+    assert by_variant["bf16"]["files"] == [], "the whole-repo snapshot convention"
+    for tier in ("q8", "q4"):
+        assert by_variant[tier]["repo"] == "SceneWorks/qwen-image-2-1-mlx"
+        assert by_variant[tier]["files"] == [f"{tier}/*"], (
+            "the per-tier file scope is what makes the per-tier DELETE able to reclaim this tier "
+            "on its own"
+        )
+
+    # The licence travels with EVERY tier: one model-level acknowledgment gate, one notice, one
+    # URL, and the non-commercial flag that keeps the packaging guard fatal.
+    assert qwen["requiresLicenseAcknowledgment"] is True
+    assert qwen["nonCommercial"] is True
+    assert "Qwen RESEARCH LICENSE AGREEMENT" in qwen["licenseNotice"]
+    assert qwen["licenseUrl"].startswith("https://huggingface.co/Qwen/Qwen-Image-2.1/blob/")
+    # …and the notice must no longer claim SceneWorks re-hosts nothing, because it now does.
+    assert "never redistributes these weights" not in qwen["licenseNotice"], (
+        "the q8/q4 re-host IS a §3 redistribution; the notice must say what is true of each tier"
+    )
+    assert "re-hosted by SceneWorks" in qwen["licenseNotice"]
+
+
+#: The q8/q4 re-host as PUBLISHED (sc-24114): the revision and each tier's EXACT byte total, summed
+#: over every file under the tier's subdir from `HfApi().model_info(repo, revision=...,
+#: files_metadata=True)`.
+_QWEN_IMAGE_2_1_REHOST_REVISION = "1691de01c24a070131e0a28bf4c065fd027f4fe9"
+_QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES = {"q8": 19_949_564_007, "q4": 12_919_123_211}
+
+
+def test_qwen_image_2_1_tier_download_sizes_are_measured_from_the_published_blobs():
+    """The packed tiers' `estimatedSizeBytes`/`diskSizeBytes` are the EXACT published totals at the
+    pinned revision — measured, not derived.
+
+    They are also cross-checked against the sc-24112 derivation (the bf16 tree's exact total with
+    the DiT's and tower's group-64 Linears swapped from bf16 to packed width — the engine's own
+    `packed_bytes` arithmetic): both tiers sit the SAME constant below it, so the packed-weight
+    arithmetic is exact and only the non-weight files differ. A per-tier residue that disagreed
+    would mean one tier's number is wrong.
+
+    *Mutation that reds this:* restoring the derived 19_952_874_332 / 12_922_434_396, or rounding a
+    tier's size.
+    """
+    group_size = 64
+    bf16_width = 2
+    dit_linear_params = 7_115_112_448
+    lm_linear_params = 6_945_767_424
+
+    def packed(params: int, bits: int) -> int:
+        return params * bits // 8 + (params // group_size) * 4
+
+    by_variant = {d["variant"]: d for d in _qwen_image_2_1_entry()["downloads"]}
+    bf16_total = by_variant["bf16"]["estimatedSizeBytes"]
+    assert bf16_total == 33_134_949_212
+    residues = set()
+    for tier, bits in (("q8", 8), ("q4", 4)):
+        measured = _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier]
+        assert by_variant[tier]["estimatedSizeBytes"] == measured, tier
+        assert by_variant[tier]["footprint"]["diskSizeBytes"] == measured, tier
+        # Nothing has been measured on either backend, so no tier may claim a memory footprint.
+        assert by_variant[tier]["footprint"]["residentMemoryBytes"] is None
+        assert by_variant[tier]["footprint"]["peakMemoryBytes"] is None
+        derived = (
+            bf16_total
+            + (packed(dit_linear_params, bits) - dit_linear_params * bf16_width)
+            + (packed(lm_linear_params, bits) - lm_linear_params * bf16_width)
+        )
+        residues.add(derived - measured)
+    # q8 3_310_325 B, q4 3_311_185 B: the weight arithmetic is exact to within the few KB of
+    # per-tier text files, and the rest is the non-weight files the re-host carries instead of
+    # upstream's. A residue outside this band means a weight file is not what the tier claims.
+    assert all(3_300_000 < residue < 3_320_000 for residue in residues), residues
+
+    # Monotone in fidelity, which a copied or hand-typed number is the easiest way to break.
+    sizes = [by_variant[t]["estimatedSizeBytes"] for t in ("q4", "q8", "bf16")]
+    assert sizes == sorted(sizes), f"a denser tier must be larger: {sizes}"
+
+
+def test_qwen_image_2_1_declares_derived_per_tier_memory_floors_on_both_lanes():
+    """The per-tier floors the fit gates admit against, and the rule that produced them.
+
+    `ceil(max over the presets of (resident + transient), in GiB, x 1.25)` — one rule on both lanes,
+    in GiB because every consumer budget is GiB (`VramBudget.free_gb` divides nvidia-smi MiB by
+    1024). x1.25 rather than the `+ HEADROOM_GB` a MEASURED row gets, because the engine's peak is
+    a structural derivation that omits allocator slack. The largest-area preset, 2400x1792, binds
+    on both lanes; the TRANSIENT differs (inference #1029):
+
+    * MLX: bounded decode by default above 512^2, so the peak is the decode head's attention plus
+      the RGBA canvas — `derived::default_path_peak_max_bytes` = resident + 6.37 GiB.
+    * Candle: synchronous and untiled, so the decode tail's 3 structural full-res maps,
+      3 x 144 x 2400 x 1792 x 4 B = 6.92 GiB.
+
+    *Mutation that reds this:* restating a floor in decimal GB (the pre-fix 48/31/23), dropping
+    the margin to `peak + 2`, or pricing either lane at the 2048-square default.
+    """
+    qwen = _qwen_image_2_1_entry()
+    # Derived peaks (GiB) at 2400x1792, stated here as the INPUT to the rule, so the rule is
+    # checked and not just its outputs. Resident weights: bf16 28.61, q8 16.33, q4 9.78 (the MLX
+    # crate's parameter-count table; the Rust test pins the MLX side to the accessor itself).
+    mlx_transient = 34.98 - 28.61  # default_path_peak_max_bytes(bf16) - resident(bf16)
+    peaks_gib = {
+        "mlx": {"bf16": 28.61 + mlx_transient, "q8": 16.33 + mlx_transient, "q4": 9.78 + mlx_transient},
+        "candle": {"bf16": 28.61 + 6.92, "q8": 16.33 + 6.92, "q4": 9.78 + 6.92},
+    }
+    for backend in ("mlx", "candle"):
+        block = qwen[backend]
+        by_tier = block["minMemoryGbByTier"]
+        assert set(by_tier) == {"bf16", "q8", "q4"}
+        for tier, peak in peaks_gib[backend].items():
+            derived = math.ceil(peak * 1.25)
+            assert by_tier[tier] == derived, (
+                f"{backend}/{tier}: {by_tier[tier]} must be ceil({peak:.2f} GiB x 1.25) = {derived}"
+            )
+        assert block["minMemoryGb"] == by_tier["bf16"] == max(by_tier.values()), (
+            f"{backend}: the scalar is the densest tier's floor — the conservative fallback for an "
+            "unlisted tier (nvfp4); an under-prediction there admits a load that OOMs"
+        )
+    # The product outcome, against REAL card reports (GiB free): a 5090 reports 31.84 total and an
+    # A100-40GB 39.5, so a desktop's held memory must not refuse q8 on either.
+    candle = qwen["candle"]["minMemoryGbByTier"]
+    for card, free_gib, admitted in (
+        ("24 GB card", 22.5, {"q4"}),
+        ("RTX 5090", 30.5, {"q4", "q8"}),
+        ("A100-40GB", 38.5, {"q4", "q8"}),
+        ("48 GB card", 46.5, {"q4", "q8", "bf16"}),
+    ):
+        fits = {tier for tier, floor in candle.items() if floor <= free_gib}
+        assert fits == admitted, f"{card} with {free_gib} GiB free admits {sorted(fits)}"
+    # No MEASURED ladder on either lane — these floors carry no evidence class, which is exactly
+    # why they do not ride `vramGbByTier`.
+    for key in ("vramGbByTier", "sequentialPeakGb", "measured", "calibrations"):
+        assert key not in qwen["candle"], f"candle.{key} is a measured-evidence key"
+        assert key not in qwen["mlx"], f"mlx.{key} is a measured-evidence key"
+
+
+def test_qwen_image_2_1_advertises_no_staged_floor():
+    """sc-24114: no worker path applies a declared staged floor (the MLX contract declares no staged
+    row), so the catalog advertises none on either lane — a floor the UI quotes must be one some
+    consumer stands behind.
+    """
+    qwen = _qwen_image_2_1_entry()
+    for backend in ("mlx", "candle"):
+        assert "stagedMinMemoryGbByTier" not in qwen[backend], backend
+
+
+def test_qwen_image_2_1_packed_tiers_pin_the_published_revision():
+    """FAIL-CLOSED against a placeholder coming back (sc-24114). The q8/q4 tiers are PUBLISHED: both
+    rows pin the real re-host revision, carry no `pendingArtifact`, and q4 — not bf16 — is the
+    default. Re-introducing the null SHA, the flag, or the bf16 default reds here.
+    """
+    downloads = {d.get("variant"): d for d in _qwen_image_2_1_entry()["downloads"]}
+    for tier in ("q8", "q4"):
+        row = downloads[tier]
+        assert row["revision"] == _QWEN_IMAGE_2_1_REHOST_REVISION, tier
+        assert row["revision"] != _PENDING_ARTIFACT_REVISION, tier
+        assert "pendingArtifact" not in row, f"{tier}: the flag left with the placeholder"
+    assert downloads["q4"].get("default") is True
+    assert downloads["q8"].get("default") is not True
+    assert downloads["bf16"].get("default") is not True
+
+
+#: The published `SHA256SUMS` of each re-host tier at `_QWEN_IMAGE_2_1_REHOST_REVISION`, vendored
+#: verbatim as `<tier>/SHA256SUMS.txt` (fetched once with `hf_hub_download`; the `.txt` suffix is only
+#: so the source-control byte scanner classifies it) so E7 is checked without the network. Each value
+#: is the Hub's git blob id for that file at the revision, so a hand edit of the fixture reds.
+_QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS = {
+    "q8": "0eb8019c89740398a363e7c8f74db20d9aeb438c",
+    "q4": "4b0494d9db0efa7096c304b5612df56085d3675e",
+}
+
+
+def test_qwen_image_2_1_published_tiers_carry_the_licence_record():
+    """E7 (§3), pinned against the PUBLISHED artefacts: each re-host tier's `SHA256SUMS` lists the
+    Agreement (`LICENSE`), the attribution `README.md`, the §3(b) change record `CHANGES.md`, and
+    the three safetensors the tier ships — so "the licence travels in the bundle" is a fact about
+    the uploaded bytes, not about the converter's intent.
+
+    *Mutation that reds this:* deleting any of those lines from a vendored `SHA256SUMS` (the blob id
+    moves too), or vendoring a file that is not the one published at the revision.
+    """
+    import hashlib
+
+    required = {
+        "LICENSE",
+        "README.md",
+        "CHANGES.md",
+        "transformer/model.safetensors",
+        "text_encoder/model.safetensors",
+        "vae/diffusion_pytorch_model.safetensors",
+    }
+    for tier, blob_id in _QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS.items():
+        raw = (ROOT / "tests/fixtures/qwen_image_2_1_rehost" / tier / "SHA256SUMS.txt").read_bytes()
+        git_blob = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
+        assert git_blob == blob_id, f"{tier}: fixture is not the SHA256SUMS published at the pin"
+        listed = {}
+        for line in raw.decode().splitlines():
+            digest, name = line.split(maxsplit=1)
+            assert re.fullmatch(r"[0-9a-f]{64}", digest), line
+            listed[name] = digest
+        missing = required - listed.keys()
+        assert not missing, f"{tier}: SHA256SUMS does not list {sorted(missing)}"
+
+
+def test_qwen_image_2_1_description_states_its_own_parameter_counts():
+    """2.1 is a ~7.1B DiT + ~7.6B Qwen3-VL tower; "20B" is Qwen-Image-2512's figure.
+
+    *Mutation that reds this:* restoring "A 20B single-stream flow-matching transformer".
+    """
+    description = _qwen_image_2_1_entry()["ui"]["description"]
+    assert "20B" not in description
+    assert "~7.1B single-stream flow-matching transformer" in description
+    assert "~7.6B Qwen3-VL language tower" in description
+
+
+def test_qwen_image_2_1_licence_component_names_the_change_record_and_checksums():
+    """E7 (§3): the shipped licence component says each derived bundle carries the §3(b) change
+    record `CHANGES.md` AND the `SHA256SUMS` manifest, at the published re-host revision.
+
+    *Mutation that reds this:* dropping either file name from the component's `usage`.
+    """
+    licenses = json.loads((ROOT / "apps/desktop/licenses/manifest.json").read_text())
+    component = next(c for c in licenses["components"] if c["id"] == "qwen-image-2-1")
+    usage = component["usage"]
+    assert "CHANGES.md" in usage
+    assert "SHA256SUMS" in usage
+    assert "§3(b)" in usage
+    assert _QWEN_IMAGE_2_1_REHOST_REVISION in usage
+    assert "SHA256SUMS" in _qwen_image_2_1_entry()["licenseNotice"]
+
+
+def test_qwen_image_2_1_declares_the_admission_geometry_its_gate_consumes():
+    """The request-admission envelope, mirrored from the provider's `admission_geometry()`.
+
+    The gate (`crates/sceneworks-core/src/admission_geometry.rs`, run at enqueue and in the
+    worker) is declaration-driven, so a missing or wrong block makes it silently inert or silently
+    wrong rather than loud.
+    """
+    geometry = _qwen_image_2_1_entry()["admissionGeometry"]
+    assert geometry == {
+        "maxSide": 2752,
+        "maxPresetArea": 2400 * 1792,
+        "maxTargetImageTokens": 150 * 112,
+        "maxReferenceImages": 10,
+        "tokensPerMaxReference": 64 * 64,
+        "maxJointTokens": 58_016,
+        "pixelsPerToken": 16,
+        "maxBatch": 8,
+    }
+    # The total is the sum of its parts, so no field can be edited in isolation.
+    assert geometry["maxJointTokens"] == (
+        256
+        + geometry["maxTargetImageTokens"]
+        + geometry["maxReferenceImages"] * geometry["tokensPerMaxReference"]
+    )
+    # The largest-AREA preset is NEITHER the widest nor the square default — the mistake the field
+    # exists to prevent.
+    assert geometry["maxPresetArea"] > 2752 * 1536
+    assert geometry["maxPresetArea"] > 2048 * 2048
+    # A legal ten-reference request at the default preset fits; refusing it would be the
+    # over-pricing failure the engine's own fix pass withdrew.
+    assert 256 + (2048 // 16) ** 2 + 10 * geometry["tokensPerMaxReference"] <= geometry[
+        "maxJointTokens"
+    ]
+
+
+def _qwen_image_2_1_entry() -> dict:
+    return next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "qwen_image_2_1"
+    )

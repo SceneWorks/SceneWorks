@@ -1487,6 +1487,7 @@
           "interrupted": 0,
           "loading_model": 0,
           "pending_caption": 0,
+          "pending_workflow": 0,
           "preparing": 0,
           "queued": 1,
           "running": 0,
@@ -3752,6 +3753,8 @@
           "installed": false,
           "installedPath": null,
           "missingRequiredFiles": [],
+          "pendingArtifact": false,
+          "tierDeletable": true,
           "variant": "default"
         }
       ]
@@ -4289,6 +4292,7 @@
       "interrupted": 0,
       "loading_model": 0,
       "pending_caption": 0,
+      "pending_workflow": 0,
       "preparing": 0,
       "queued": 0,
       "running": 0,
@@ -4424,6 +4428,46 @@
             "repo": "SceneWorks/wan2.2-ti2v-5b-mlx",
             "revision": "bb1b055249614cf9d7cf4373fbdbc184b77dee88",
             "variant": "bf16"
+          },
+          {
+            "coRequisite": true,
+            "estimatedSizeBytes": 7146182696,
+            "files": [
+              "transformer/*"
+            ],
+            "footprint": {
+              "diskSizeBytes": 7146182696,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "Wan-AI/Wan2.1-VACE-1.3B-diffusers",
+            "required": "soft",
+            "revision": "ec4d2cb062b548996b179d493fdd05340de702a1"
+          },
+          {
+            "coRequisite": true,
+            "estimatedSizeBytes": 11886274274,
+            "files": [
+              "q4/t5_encoder.safetensors",
+              "q4/vae.safetensors",
+              "q4/tokenizer.json"
+            ],
+            "footprint": {
+              "diskSizeBytes": 11886274274,
+              "peakMemoryBytes": null,
+              "residentMemoryBytes": null
+            },
+            "platforms": [
+              "macos"
+            ],
+            "provider": "huggingface",
+            "repo": "SceneWorks/wan2.2-t2v-a14b-mlx",
+            "required": "soft",
+            "revision": "991eb255c544bbb2e1f1e07da4355c2f0a5337b7"
           },
           {
             "default": true,
@@ -4631,31 +4675,38 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 1,
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [],
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],
@@ -4671,16 +4722,21 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 2,
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [
           {
             "assetId": "asset_fixture",
             "currentVersionAssetId": "asset_fixture",
             "displayName": "Still",
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
             "fit": "fit",
+            "generatedAudio": "mute",
             "id": "item-1",
             "sourceIn": 0.0,
             "sourceOut": 1.0,
@@ -4709,23 +4765,28 @@
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],
@@ -4752,7 +4813,8 @@
       "resolution": 640,
       "timelineId": "timeline_fixture",
       "timelineName": "Main timeline",
-      "timelinePath": "timelines/main-timeline-<upload-suffix>.sceneworks.timeline.json"
+      "timelinePath": "timeline-exports/<timeline-export-snapshot>.json",
+      "timelineRevision": 2
     },
     "progress": 0.0,
     "projectId": "project_fixture",
@@ -4832,16 +4894,21 @@
     "id": "timeline_fixture",
     "name": "Main timeline",
     "projectId": "project_fixture",
+    "revision": 2,
     "schemaVersion": 1,
     "tracks": [
       {
+        "gain": 1.0,
         "id": "track_main",
         "items": [
           {
             "assetId": "asset_fixture",
             "currentVersionAssetId": "asset_fixture",
             "displayName": "Still",
+            "fadeInSeconds": 0.0,
+            "fadeOutSeconds": 0.0,
             "fit": "fit",
+            "generatedAudio": "mute",
             "id": "item-1",
             "sourceIn": 0.0,
             "sourceOut": 1.0,
@@ -4870,23 +4937,28 @@
         "kind": "video",
         "locked": false,
         "muted": false,
-        "name": "Main"
+        "name": "Main",
+        "role": "picture"
       },
       {
+        "gain": 1.0,
         "id": "track_overlay",
         "items": [],
         "kind": "overlay",
         "locked": false,
         "muted": false,
-        "name": "Overlay"
+        "name": "Overlay",
+        "role": "overlay"
       },
       {
+        "gain": 1.0,
         "id": "track_audio",
         "items": [],
         "kind": "audio",
         "locked": false,
         "muted": false,
-        "name": "Audio"
+        "name": "Audio",
+        "role": "sound"
       }
     ],
     "transitions": [],

@@ -157,6 +157,11 @@ string_enum! {
         ProceduralPreview => "procedural_preview",
         ZImageDiffusers => "z_image_diffusers",
         QwenImage => "qwen_image",
+        // sc-24108: Qwen-Image 2.1 stamps its own adapter id rather than reusing `qwen_image`.
+        // The recipe records which weights produced an asset, and 2.1's snapshot, latent space
+        // and licence are all different from 2512's — a shared stamp would make the two
+        // indistinguishable on replay.
+        QwenImage21 => "qwen_image_2_1",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",
@@ -214,6 +219,9 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // Vector Studio generation. Request mode is carried in the typed payload and routed to a
+        // mode-specific worker capability before claim.
+        VectorGenerate => "vector_generate",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",
@@ -331,6 +339,10 @@ string_enum! {
         // stranded row to `queued` (see jobs_store::mark_interrupted_on_startup), so it can
         // never sit un-claimable forever.
         PendingCaption => "pending_caption",
+        // Accepted but not worker-claimable while an API-owned multi-job workflow waits for its
+        // prerequisite asset. Unlike pending_caption, restart recovery resumes the coordinator and
+        // never degrades this row directly to queued.
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         LoadingModel => "loading_model",
@@ -349,6 +361,7 @@ string_enum! {
         // Stage twin of JobStatus::PendingCaption (sc-9120): the job is awaiting the
         // API-side async payload rewrite (Ideogram 4 auto-caption) before it becomes queued.
         PendingCaption => "pending_caption",
+        PendingWorkflow => "pending_workflow",
         Preparing => "preparing",
         Downloading => "downloading",
         Importing => "importing",
@@ -401,6 +414,10 @@ string_enum! {
         ImageEdit => "image_edit",
         ImageVqa => "image_vqa",
         ImageInterleave => "image_interleave",
+        // Native StarVector providers advertise modes independently. A worker that implements only
+        // raster vectorization must never claim a text_to_svg job (or vice versa).
+        VectorImageToSvg => "vector_image_to_svg",
+        VectorTextToSvg => "vector_text_to_svg",
         VideoGenerate => "video_generate",
         VideoExtend => "video_extend",
         VideoBridge => "video_bridge",
@@ -527,6 +544,7 @@ string_enum! {
         Upload => "upload",
         Frame => "frame",
         Render => "render",
+        Vector => "vector",
         // An interleaved text-image document (SenseNova-U1). The asset's `file`
         // points to an InterleavedDocument JSON in assets/documents/; the images it
         // references are ordinary `image` assets. See sc-1576.

@@ -1,6 +1,7 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LicensesScreen } from "./LicensesScreen.jsx";
 import { bundledLicenses } from "../data/bundledLicenses.js";
@@ -12,6 +13,10 @@ describe("LicensesScreen", () => {
   let root;
 
   beforeEach(() => {
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const path = decodeURIComponent(String(url).replace(/^\/@fs/, "").split("?")[0]);
+      return { ok: true, status: 200, text: async () => readFileSync(path, "utf8") };
+    }));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -20,6 +25,7 @@ describe("LicensesScreen", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.unstubAllGlobals();
   });
 
   async function render() {
@@ -194,5 +200,41 @@ describe("LicensesScreen", () => {
     expect(container.querySelector(".licenses-text").textContent).toContain(
       "GNU GENERAL PUBLIC LICENSE",
     );
+  });
+
+  it("attributes both conditional cover weights and the native port under distinct noncommercial notices", async () => {
+    await render();
+    const expected = [
+      ["SheetSage2 weights", "m-a-p/SheetSage2"],
+      ["MERT-v2-FullSong weights", "m-a-p/MERT-v2-FullSong"],
+      ["Native SheetSage2 and MERT-v2-FullSong transcription port", "candle-audio-sheetsage2"],
+    ];
+    for (const [name, provenance] of expected) {
+      const item = [...container.querySelectorAll(".licenses-item")].find((button) => button.textContent.includes(name));
+      expect(item, name).toBeTruthy();
+      await act(async () => item.click());
+      expect(container.querySelector(".licenses-facts").textContent).toContain("CC-BY-NC-4.0");
+      expect(container.querySelector(".licenses-usage").textContent).toContain("noncommercial");
+      const notice = container.querySelector(".licenses-text").textContent;
+      expect(notice).toContain("Attribution-NonCommercial 4.0 International Public License");
+      expect(notice).toContain(provenance);
+    }
+    expect(bundledLicenses.filter((entry) => entry.models.includes("yue2")).map((entry) => entry.id)).toEqual(["yue2"]);
+  });
+
+  it("reports a bundled-text load failure and offers a retry", async () => {
+    await render();
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("local asset unavailable")));
+    const sam = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("SAM 3"),
+    );
+    await act(async () => {
+      sam.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("Could not load this bundled license text");
+    expect(container.textContent).toContain("local asset unavailable");
+    expect([...container.querySelectorAll("button")].some((button) => button.textContent === "Retry license text")).toBe(true);
   });
 });

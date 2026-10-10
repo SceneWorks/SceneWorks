@@ -1,0 +1,22 @@
+<!-- @dsCard group="Spacing" viewport="700x150" name="Radius Scale" subtitle="xs 6 · sm 8 · md 12 · lg 16 · xl 22 · pill" -->
+<!DOCTYPE html>
+<html lang="en" data-theme="light" data-accent="teal">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  body { margin: 0; padding: 18px; background: var(--bg); font-family: var(--font-ui); }
+  .row { display: flex; gap: 16px; align-items: flex-end; }
+  .item { display: grid; gap: 6px; justify-items: center; }
+  .box { width: 74px; height: 60px; background: var(--accent-soft); border: 1.5px solid var(--accent); }
+  .lbl { font-size: 11px; font-weight: 600; color: var(--text); }
+  .var { font-size: 10px; font-family: var(--font-mono); color: var(--text-muted); }
+</style></head>
+<body>
+<div class="row">
+  <div class="item"><div class="box" style="border-radius:var(--r-xs)"></div><div class="lbl">xs</div><div class="var">6px</div></div>
+  <div class="item"><div class="box" style="border-radius:var(--r-sm)"></div><div class="lbl">sm</div><div class="var">8px</div></div>
+  <div class="item"><div class="box" style="border-radius:var(--r-md)"></div><div class="lbl">md</div><div class="var">12px</div></div>
+  <div class="item"><div class="box" style="border-radius:var(--r-lg)"></div><div class="lbl">lg</div><div class="var">16px</div></div>
+  <div class="item"><div class="box" style="border-radius:var(--r-xl)"></div><div class="lbl">xl</div><div class="var">22px</div></div>
+  <div class="item"><div class="box" style="border-radius:var(--r-pill);width:60px"></div><div class="lbl">pill</div><div class="var">999px</div></div>
+</div>
+</body></html>

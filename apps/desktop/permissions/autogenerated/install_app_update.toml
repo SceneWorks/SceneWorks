@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-app-update"
+description = "Enables the install_app_update command without any pre-configured scope."
+commands.allow = ["install_app_update"]
+
+[[permission]]
+identifier = "deny-install-app-update"
+description = "Denies the install_app_update command without any pre-configured scope."
+commands.deny = ["install_app_update"]
