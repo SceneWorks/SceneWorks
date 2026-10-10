@@ -6,6 +6,8 @@ import {
   guidanceDefaultFromModel,
   guidanceMethodDefaultFromModel,
   guidanceMethodOptionsFromModel,
+  maxStepsForModel,
+  negativePromptInertAtGuidance,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -215,5 +217,26 @@ describe("samplerOptions", () => {
         "ddim_uniform", "beta57",
       ]);
     }
+  });
+
+  // sc-25679 — Iris-3B ships a 100-step default above the historical 80 ceiling.
+  it("raises the Steps ceiling to the model's own default", () => {
+    expect(maxStepsForModel({ defaults: { steps: 100 } })).toBe(100);
+    expect(maxStepsForModel({ defaults: { steps: 40 } })).toBe(80);
+    expect(maxStepsForModel(null)).toBe(80);
+  });
+
+  // sc-25679 — the negative prompt is the CFG unconditional for a declaring model.
+  it("marks the negative prompt inert only at guidance 1.0 for a declaring model", () => {
+    const iris = { image: { negativePromptRequiresGuidance: true }, defaults: { guidanceScale: 3.0 } };
+    expect(negativePromptInertAtGuidance(iris, "")).toBe(false);
+    expect(negativePromptInertAtGuidance(iris, "1")).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, 1)).toBe(true);
+    expect(negativePromptInertAtGuidance(iris, "2.5")).toBe(false);
+    expect(
+      negativePromptInertAtGuidance({ ...iris, defaults: { guidanceScale: 1.0 } }, ""),
+    ).toBe(true);
+    const undeclared = { defaults: { guidanceScale: 1.0 } };
+    expect(negativePromptInertAtGuidance(undeclared, "")).toBe(false);
   });
 });

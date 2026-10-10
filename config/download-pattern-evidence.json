@@ -586,6 +586,30 @@
       ]
     },
     {
+      "key": "Qwen/Qwen3-VL-4B-Instruct@ebb281ec70b05090aa6165b016eac8ec08e71b17",
+      "repo": "Qwen/Qwen3-VL-4B-Instruct",
+      "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+      "resolvedSha": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+      "servedRepo": "Qwen/Qwen3-VL-4B-Instruct",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "chat_template.json",
+        "config.json",
+        "generation_config.json",
+        "merges.txt",
+        "model-00001-of-00002.safetensors",
+        "model-00002-of-00002.safetensors",
+        "model.safetensors.index.json",
+        "preprocessor_config.json",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "video_preprocessor_config.json",
+        "vocab.json"
+      ]
+    },
+    {
       "key": "Qwen/Qwen3.6-27B@6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
       "repo": "Qwen/Qwen3.6-27B",
       "revision": "6a9e13bd6fc8f0983b9b99948120bc37f49c13e9",
@@ -5944,6 +5968,46 @@
         "tokenizer.json",
         "tokenizer_config.json",
         "vocab.json"
+      ]
+    },
+    {
+      "key": "speridlabs/iris-3b@7445443349bc9abe3c96f01ff793e2098ca012b3",
+      "repo": "speridlabs/iris-3b",
+      "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+      "resolvedSha": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+      "servedRepo": "speridlabs/iris-3b",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "README.md",
+        "assets/downstream/depth-1-depth.webp",
+        "assets/downstream/depth-1-photo.webp",
+        "assets/downstream/depth-2-depth.webp",
+        "assets/downstream/depth-2-photo.webp",
+        "assets/downstream/restore-1-input.webp",
+        "assets/downstream/restore-1-iris.webp",
+        "assets/downstream/restore-2-input.webp",
+        "assets/downstream/restore-2-iris.webp",
+        "assets/gallery/0005.jpg",
+        "assets/gallery/0020.jpg",
+        "assets/gallery/0021.jpg",
+        "assets/gallery/0029.jpg",
+        "assets/gallery/0115.jpg",
+        "assets/gallery/1001.jpg",
+        "assets/gallery/1088.jpg",
+        "assets/gallery/1153.jpg",
+        "assets/gallery/1166.jpg",
+        "assets/gallery/1196.jpg",
+        "assets/gallery/1214.jpg",
+        "assets/reel.mp4",
+        "config.yaml",
+        "depth/config.yaml",
+        "depth/empty_prompt.safetensors",
+        "depth/model.safetensors",
+        "model.safetensors",
+        "upscaler/config.yaml",
+        "upscaler/empty_prompt.safetensors",
+        "upscaler/model.safetensors"
       ]
     },
     {

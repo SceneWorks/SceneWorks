@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 108,
+    "modelCount": 109,
     "importedFamilyCount": 4,
-    "cellCount": 1009,
+    "cellCount": 1013,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -22,12 +22,12 @@
     "descriptorMlxRuntime": "c613d4a637575e09853fc63f09dfb7e1c0b9ddd0021791ff24b427ad5b4c4ad1",
     "descriptorPreviewFacts": "bbee1b602088291f8c9cf498a2a1c1a4e7db9f37117e8f0a04a617f9f58589c8",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "295c0a3f3fc7f3252aaa94a14a3ede3eb7058999957d9b06f5a84aecb3c786b0",
+    "manifest": "d460f57bf9ec897e1e7b927abff43385f73201739a8e47f825b6f50c39cc7987",
     "modelImportDefaults": "ef53118b4bd63c4664403d56d7f80b4ba3d0845416f45a67a607d36b9df3a4ec",
     "routerCandle": "508eb48d36e094770efeb4f374177b872b98b865ac275af3721c33c5c7cbe209",
-    "routerCatalog": "a186a712e0745cf9b99cfde5161470d7b533f93529d28531be1ce67585318743",
+    "routerCatalog": "31d12853900a30c64b0e18b53eb7aa9c9296b36278a1266f00b653b709b11e3c",
     "routerGaps": "aa11c98bc877082d846ed3b6561fa243a13cfd1ec9e3faab5e3aba8809cfa20f",
-    "routerMlx": "8f92e4e8dafeaef7537cb8fad36758ae2f45121959cefb124e4e7baa05347549",
+    "routerMlx": "c02e1673428c650b1ccf85fa1649fedb72893bacf3f60f747a04fa3222a79023",
     "scheduler": "458818bae4c621c331978dc7000adfef7b6f18c0c81862334ae1880abf883782",
     "trainingCatalog": "1c78847209ffbc12498b189761963043ba4e5d01ae69e6e031a709d9f0e523de",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
@@ -46,16 +46,16 @@
     "webVideoValidation": "7645b8408a865971c7a66dec86c523221c994f94da41c6ffb1b17e5e550f7656",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
     "workerDispatch": "e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353",
-    "workerEngineTable": "1b3b9ee797dc7607fdebe32854842e6611ba70b134fc79ff7770400a5a70f718",
+    "workerEngineTable": "64195a489e2a6e8e0de57bfe8d15c10a6870145b8fe85ad6711d7bd4fc161abe",
     "workerGpuCapabilities": "46bed541b0f722bdbe73e28fcd31039ef66b0f3dd491bb1880a6f38d4cb7de0f",
-    "workerImageDispatch": "6b204f84f5ed168f9211356b39f21233b5d610a02ed0407c47c21d3b36891972",
+    "workerImageDispatch": "baa556e0b932e3983fdb1fe2d22be5ff85056ddee26492894289e3d7966d1b65",
     "workerImageKreaImported": "841965388122371dee96bc72bd69e969ed8ce2e256a4a135e827fd96583a561a",
     "workerImageMageFinetuned": "e00a6ccd9b811cda73073e0bd8270e58ab60c4a8a8e647f18f3fdec9c30a0935",
     "workerImagePulid": "992ac547e891d30ae485411506bb9088961224653a5a89c2699fa2cd879a985f",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
     "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "09aa6871bbf2f5b8ead8ae80dcc305dc8c9addce2d154467aa9eba401390fd10",
+    "workerTrainingDispatch": "1c7ad26bd3df40bf4b350111a10dea5528eb79a68196af6be82ff374e6ea713c",
     "workerUtilityDispatch": "41899f0a9b7f354c61020aea67904246b3d0084ffeaf20e1d0cb89bf2fc9ed3c",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -2040,6 +2040,44 @@
           "candle": true
         }
       ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "iris_3b",
+      "family": "iris",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",

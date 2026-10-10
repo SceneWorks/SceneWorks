@@ -774,7 +774,14 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
+    Last moved: sc-25679 adds the MLX-only `iris_3b` catalog entry (one untagged artifact, so a
+    single tier; text_to_image x {none, lora} = 2 coordinates per lane). It contributes exactly
+    five NEW lanes and moves nothing else: `resident` [2,0,0]; `staged_residency` [2,0,0] because
+    the descriptor advertises sequential offload and the engine joined the fit gate's
+    staged-residency sweep; the three bounded rungs [0,0,2] because the provider publishes no
+    memory-strategy ladder at this pin.
+
+    Previously: sc-24114 (the feature-end review round) gives `qwen_image_2_1` a HAND-AUTHORED,
     request-owned `memoryStrategyContract` on BOTH lanes whose `modes` cover the reference faces
     (`edit_image` / `image_to_image`, plus `character_image` which the catalog axis does not
     carry) as well as `text_to_image`, all over `none`. Three `qwen_image_2_1` lanes move and

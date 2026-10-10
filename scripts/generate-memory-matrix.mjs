@@ -136,6 +136,9 @@ export const MODEL_STORIES = {
   // ported it — MLX by sc-24108, Candle/CUDA by sc-24109. The Candle key lands WITH the backend,
   // never ahead of it, so a Candle cell is never attributed to a story scoped to Metal.
   qwen_image_2_1: { mlx: 24108, candle: 24109 },
+  // Iris-3B (epic 25678): MLX-only at this pin, ported by sc-25679. No `candle` key — a Candle cell
+  // fails attribution until a Candle twin exists.
+  iris_3b: { mlx: 25679 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -205,6 +208,9 @@ export const FAMILY_STORIES = {
   15526: { mlx: 15526, candle: 15837 },
   15527: { mlx: 15527, candle: 15839 },
   15528: { mlx: 15528, candle: 17414 },
+  // Iris-3B: the family is owned by its epic (sc-25678) — the model story sc-25679 already owns the
+  // iris_3b cells, and one id may own only one thing. MLX-only, so no Candle family twin yet.
+  25678: { mlx: 25678 },
 };
 
 /**
@@ -352,6 +358,7 @@ export function familyGroup(modelId) {
   if (modelId === "instantid_realvisxl") return 15526;
   if (modelId === "pulid_flux_dev") return 15527;
   if (modelId === "bernini_image") return 15528;
+  if (modelId.startsWith("iris")) return 25678;
   throw new Error(`no family story for ${modelId}`);
 }
 

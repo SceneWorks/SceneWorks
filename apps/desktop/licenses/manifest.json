@@ -1289,6 +1289,26 @@
       ]
     },
     {
+      "id": "iris-3b",
+      "models": [
+        "iris_3b"
+      ],
+      "name": "Iris-3B (speridlabs/iris-3b) + Qwen3-VL-4B-Instruct text encoder",
+      "publisher": "Sperid Labs; Alibaba Qwen Team",
+      "license": "Apache-2.0",
+      "homepage": "https://huggingface.co/speridlabs/iris-3b",
+      "platforms": [
+        "macos"
+      ],
+      "usage": "Native MLX text-to-image from the speridlabs/iris-3b generation backbone, conditioned on the Qwen/Qwen3-VL-4B-Instruct text encoder; both are Apache-2.0 and are downloaded on install from their upstream repositories (NOT re-hosted by SceneWorks). Also covers the Rust/MLX source port of the speridlabs/iris-3b reference pipeline (pixel-space DiT, layerwise text adapter and FlowDPM-Solver++).",
+      "documents": [
+        {
+          "label": "Apache License 2.0",
+          "key": "iris-3b-apache"
+        }
+      ]
+    },
+    {
       "id": "cmudict",
       "models": [],
       "name": "CMU Pronouncing Dictionary",

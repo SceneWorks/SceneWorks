@@ -201,6 +201,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen_2_1",
     },
+    // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
+    // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
+    // catalog co-requisite staged as `LoadSpec::components["text_encoder"]`
+    // (`image_jobs::iris::attach_iris_text_encoder`). Defaults are the release's own
+    // (`gen_core::iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
+    ModelRow {
+        sceneworks_id: "iris_3b",
+        engine_id: "iris_3b",
+        default_repo: "speridlabs/iris-3b",
+        default_steps: 100,
+        default_guidance: 3.0,
+        adapter_label: "mlx_iris",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1751,6 +1764,7 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "iris_3b",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -1882,6 +1896,8 @@ mod tests {
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" => 32,
+            // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
+            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1928,6 +1944,8 @@ mod tests {
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
             "qwen_image_2_1" => 32,
+            // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
+            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2190,6 +2208,7 @@ mod tests {
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),
+            ("iris_3b", 16),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];
@@ -2472,6 +2491,8 @@ mod tests {
             supports_full_finetune: false,
             // Not an instruction-edit trainer.
             max_reference_images: 0,
+            // Implements none of the optional epic 2123 training techniques.
+            techniques: gen_core::TrainingTechniques::NONE,
         }
     }
     fn stub_candle_trainer_load(

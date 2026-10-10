@@ -180,10 +180,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 ];
 // Re-pinned after the main sync: `config/download-pattern-evidence.json` retains the YuE1
 // re-hosts, YuE2's three upstream m-a-p repos, and the Wan-VACE base/transformer entries:
-// 121 repo@revision keys including the two frozen importer authorities.
+// 121 repo@revision keys including the two frozen importer authorities; sc-25679 re-recorded it
+// with the two Iris-3B keys (speridlabs/iris-3b, Qwen/Qwen3-VL-4B-Instruct): 123 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "9ac5343ea88c615289fee9e5ca9c65867b023e8a5b65a3c1ab8a4827b991b19d";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "56e2d56a23ddc4981c1c8ee63ea1cd6a8617b445616b1a0812976b6abfb8cd01";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

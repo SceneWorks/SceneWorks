@@ -12201,6 +12201,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:iris_3b:mlx:default",
+      "modelId": "iris_3b",
+      "modelFamily": "iris",
+      "route": "iris_3b",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:kolors:candle:bf16",
       "modelId": "kolors",
       "modelFamily": "kolors",

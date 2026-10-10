@@ -518,6 +518,8 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit_base", true, true),
         ("mage_flow_edit", true, true),
         ("mage_flow_edit_turbo", false, false),
+        // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
+        ("iris_3b", true, true),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
