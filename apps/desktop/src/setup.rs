@@ -3287,7 +3287,7 @@ const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA user
     a driver update is staged into the NEXT boot, so a reboot is required even if the \
     machine has been running for days.";
 
-/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s **stderr**, which the
+/// Recognize the NVML version-mismatch signature in `nvidia-smi`'s output, which the
 /// preflights below would otherwise discard along with the exit status.
 ///
 /// `nvidia-smi` prints `Failed to initialize NVML: Driver/library version mismatch` (newer
@@ -3297,13 +3297,29 @@ const NVML_DRIVER_MISMATCH: &str = "The NVIDIA kernel driver and the NVIDIA user
 /// version lines are new — and it is specific enough that nothing else in NVML's error
 /// vocabulary collides with it.
 ///
+/// **Both streams are searched, and that is the whole point of this signature check.**
+/// NVIDIA documents neither the stream nor the exit status for this failure, and when
+/// `nvidia-smi` is invoked with `--query-gpu=... --format=csv,noheader` — exactly how both
+/// preflights below call it — it has been reported writing the NVML init failure to
+/// **stdout**, in the position a GPU row would have occupied, signalling the failure only
+/// through its exit status. That is the shape that makes a stderr-only match find nothing
+/// on a genuinely mismatched host, leaving the remedy this function exists to deliver
+/// unreachable and the caller falling through to its platform's "install or update the
+/// NVIDIA driver" text — the precise wrong advice that splitting this condition out was
+/// meant to stop (GH #1966, GH #3017).
+///
+/// Since which stream carries it is observed rather than contractual, and varies across
+/// driver branches, neither stream is relied on: the signature is claimed from either, and
+/// ahead of the exit status, so no single one of those three details can hide it again.
+///
 /// Every other `nvidia-smi` failure (absent binary, `Unknown Error`, no permission) keeps
 /// the existing "no usable GPU" verdict: those really can mean the driver is missing or
 /// broken, and a reboot is not the fix.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn nvml_driver_mismatch(stderr: &str) -> Option<&'static str> {
-    stderr
-        .contains("Driver/library version mismatch")
+fn nvml_driver_mismatch(stdout: &str, stderr: &str) -> Option<&'static str> {
+    [stdout, stderr]
+        .iter()
+        .any(|stream| stream.contains("Driver/library version mismatch"))
         .then_some(NVML_DRIVER_MISMATCH)
 }
 
@@ -3361,17 +3377,22 @@ fn cuda_preflight() -> Result<(), String> {
     // Don't flash a console window when probing from the GUI app.
     command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
     let stdout = match command.output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        }
-        // Errored. A version-mismatched NVML is its own condition with its own remedy
-        // (reboot), so check stderr for it before falling back to "no usable GPU" —
-        // otherwise a user whose driver is installed and fine is told to install a driver.
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(nvml_driver_mismatch(&stderr)
-                .unwrap_or(CUDA_REQUIREMENT)
-                .to_owned());
+            // A version-mismatched NVML is its own condition with its own remedy (reboot),
+            // so claim it before falling back to "no usable GPU" — otherwise a user whose
+            // driver is installed and fine is told to install a driver. Checked across both
+            // streams and ahead of the exit status: `nvidia-smi` puts this failure on stdout
+            // where a GPU row would go, so neither the stream nor a non-zero exit can be the
+            // thing this detection hinges on.
+            if let Some(guidance) = nvml_driver_mismatch(&stdout, &stderr) {
+                return Err(guidance.to_owned());
+            }
+            if !output.status.success() {
+                return Err(CUDA_REQUIREMENT.to_owned());
+            }
+            stdout
         }
         // Couldn't run nvidia-smi at all (no NVIDIA driver) → no usable GPU.
         Err(_) => return Err(CUDA_REQUIREMENT.to_owned()),
@@ -3492,18 +3513,19 @@ fn linux_cuda_preflight() -> Result<(), String> {
         ])
         .output();
     let stdout = match output {
-        Ok(output) if output.status.success() => {
-            Some(String::from_utf8_lossy(&output.stdout).into_owned())
-        }
-        // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
-        // exits non-zero with a healthy driver installed, so it must not collapse into
-        // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver".
         Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            if let Some(guidance) = nvml_driver_mismatch(&stderr) {
+            // Same split as the Windows probe: a version-mismatched NVML means `nvidia-smi`
+            // fails with a healthy driver installed, so it must not collapse into
+            // `LINUX_CUDA_REQUIREMENT`'s "install or update the NVIDIA driver". Claimed from
+            // either stream and before the exit status is consulted — the failure arrives on
+            // stdout in place of the GPU rows, so a stderr-only check saw nothing and a
+            // stdout-only one would feed that error line to the parser below as a GPU name.
+            if let Some(guidance) = nvml_driver_mismatch(&stdout, &stderr) {
                 return Err(guidance.to_owned());
             }
-            None
+            output.status.success().then_some(stdout)
         }
         Err(_) => None,
     };
@@ -4430,16 +4452,29 @@ mod nvml_mismatch_tests {
     use super::{nvml_driver_mismatch, NVML_DRIVER_MISMATCH};
 
     /// The exact text `nvidia-smi` prints in this state, in both the classic one-line form
-    /// and the newer form that appends the two versions it found.
+    /// and the newer form that appends the two versions it found — and on **either** stream.
+    ///
+    /// The stdout cases are the regression: `--query-gpu=... --format=csv,noheader` puts the
+    /// NVML failure on stdout, so matching stderr alone found nothing on a real mismatched
+    /// host and the reboot remedy below was unreachable in the field (GH #3017).
     #[test]
     fn the_nvml_mismatch_signature_maps_to_the_reboot_remedy() {
-        for stderr in [
-            "Failed to initialize NVML: Driver/library version mismatch\n",
-            "Failed to initialize NVML: Driver/library version mismatch\n\
-             NVML library version: 610.43\n",
+        const CLASSIC: &str = "Failed to initialize NVML: Driver/library version mismatch\n";
+        const WITH_VERSIONS: &str = "Failed to initialize NVML: Driver/library version mismatch\n\
+             NVML library version: 610.43\n";
+        for (stdout, stderr) in [
+            // The field shape: the failure on stdout, nothing on stderr.
+            (CLASSIC, ""),
+            (WITH_VERSIONS, ""),
+            // Still claimed if a driver branch routes it to stderr instead.
+            ("", CLASSIC),
+            ("", WITH_VERSIONS),
+            // Or duplicates it onto both.
+            (CLASSIC, CLASSIC),
         ] {
-            let guidance =
-                nvml_driver_mismatch(stderr).expect("the NVML mismatch signature must be matched");
+            let guidance = nvml_driver_mismatch(stdout, stderr).expect(
+                "the NVML mismatch signature must be matched on whichever stream carries it",
+            );
             assert_eq!(guidance, NVML_DRIVER_MISMATCH);
             assert!(
                 guidance.contains("reboot"),
@@ -4467,19 +4502,39 @@ mod nvml_mismatch_tests {
     /// claiming them here would trade one wrong message for another.
     #[test]
     fn unrelated_nvidia_smi_failures_are_not_claimed_as_a_mismatch() {
-        for stderr in [
+        for output in [
             "Failed to initialize NVML: Unknown Error",
             "Failed to initialize NVML: Insufficient Permissions",
             "No devices were found",
             "'nvidia-smi' is not recognized as an internal or external command",
             "",
         ] {
+            // Neither stream may claim it, in either position: widening the search must not
+            // widen what counts as a mismatch.
             assert_eq!(
-                nvml_driver_mismatch(stderr),
+                nvml_driver_mismatch(output, ""),
                 None,
-                "{stderr:?} must not be reported as a driver/library version mismatch"
+                "{output:?} on stdout must not be reported as a driver/library version mismatch"
+            );
+            assert_eq!(
+                nvml_driver_mismatch("", output),
+                None,
+                "{output:?} on stderr must not be reported as a driver/library version mismatch"
             );
         }
+    }
+
+    /// A healthy run must not be re-read as a mismatch. The detection now runs before the
+    /// exit status is consulted, so the only thing keeping a successful probe out of the
+    /// reboot message is the signature itself — worth pinning, because the GPU row for the
+    /// host in GH #1966 carries a driver version and nothing else should resemble it.
+    #[test]
+    fn a_healthy_gpu_row_is_not_claimed_as_a_mismatch() {
+        assert_eq!(
+            nvml_driver_mismatch("NVIDIA GeForce RTX 3090 Ti, 610.43.03, 8.6\n", ""),
+            None,
+            "a healthy GPU row must not be reported as a driver/library version mismatch"
+        );
     }
 }
 
