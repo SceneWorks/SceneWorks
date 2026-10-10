@@ -1491,6 +1491,10 @@ where
 {
     let (optimizer, quality_preset) = optimizer_quality;
     let mut config = mutate(target.defaults.clone());
+    let mut ui = ui;
+    if recommended_for.contains(&"character") {
+        apply_z_image_character_techniques(target, &mut config, &mut ui);
+    }
     config.optimizer = optimizer.to_owned();
     config
         .advanced
@@ -1524,7 +1528,13 @@ where
         .insert("weightDecay".to_owned(), json!(0.0001));
     TrainingPreset {
         id: id.to_owned(),
-        version: 1,
+        // v2 (epic 2123, sc-2124): the character presets turned on resolution buckets and
+        // subject-masked loss, so a pinned v1 no longer describes their config.
+        version: if recommended_for.contains(&"character") {
+            2
+        } else {
+            1
+        },
         target_id: target.id.clone(),
         name: name.to_owned(),
         recommended_for: recommended_for
@@ -1537,6 +1547,113 @@ where
         ui,
         extra: ExtraFields::new(),
     }
+}
+
+/// The Z-Image character defaults chosen by the epic 2123 real-weight A/B (sc-2124): on a
+/// 76-image character dataset at 1024 px / 2000 steps, independent face likeness (w600k_r50
+/// cosine) rose from 0.328 (baseline) to 0.477 with resolution buckets, 0.402 with subject-masked
+/// loss, and 0.501 with both; every other technique scored at most 0.369, and depth anchoring
+/// hurt (0.172). So every Z-Image character preset trains with:
+///
+/// - **resolution buckets** — every target edge up to the preset's own resolution, smallest first,
+///   with the 2^k repeat skew (4:2:1 for 512/768/1024, 2:1 for a 768 preset's 512/768), the same
+///   ladder the A/B harness (`scripts/epic-2123-ab.mjs` `bucketLadder`) measured;
+/// - **subject-masked loss** at background weight 0.1, subject weight 1.0.
+///
+/// Missing subject masks never block a run: the API asks the worker to generate them with SAM3
+/// before training (`subjectMaskPrepass`, apps/rust-api `training_subject_mask_prepass`).
+fn apply_z_image_character_techniques(
+    target: &TrainingTarget,
+    config: &mut TrainingConfig,
+    ui: &mut JsonObject,
+) {
+    let ladder = z_image_character_bucket_ladder(target, config.resolution);
+    let edges = ladder
+        .iter()
+        .map(|(resolution, _)| resolution.to_string())
+        .collect::<Vec<_>>()
+        .join("/");
+    let repeats = ladder
+        .iter()
+        .map(|(_, repeats)| repeats.to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    config.advanced.insert(
+        RESOLUTION_BUCKETS_KEY.to_owned(),
+        Value::Array(
+            ladder
+                .iter()
+                .map(
+                    |(resolution, repeats)| json!({ "resolution": resolution, "repeats": repeats }),
+                )
+                .collect(),
+        ),
+    );
+    config
+        .advanced
+        .insert(SUBJECT_MASK_LOSS_KEY.to_owned(), json!(true));
+    config.advanced.insert(
+        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY.to_owned(),
+        json!(SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT),
+    );
+    config.advanced.insert(
+        SUBJECT_MASK_SUBJECT_WEIGHT_KEY.to_owned(),
+        json!(SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT),
+    );
+    let note = format!(
+        "Resolution buckets ({edges} ×{repeats}) and subject-masked loss are on: in a 76-image \
+         A/B they raised face likeness from 0.33 to 0.50. Missing subject masks are generated \
+         with SAM3 when training starts."
+    );
+    let description = match ui.get("description").and_then(Value::as_str) {
+        Some(existing) if !existing.is_empty() => format!("{existing} {note}"),
+        _ => note,
+    };
+    ui.insert("description".to_owned(), Value::String(description));
+}
+
+/// `(resolution, repeats)` rows of a character preset's bucket ladder (see
+/// [`apply_z_image_character_techniques`]): every resolution the target trains at up to and
+/// including `base`, smallest first, the smallest visited most (2^k). Climbs from `base` when
+/// fewer than two edges sit at or below it — the harness `bucketLadder` rule.
+fn z_image_character_bucket_ladder(target: &TrainingTarget, base: u32) -> Vec<(u32, u32)> {
+    let mut allowed = target
+        .limits
+        .get("resolutions")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    allowed.dedup();
+    let mut edges = allowed
+        .iter()
+        .copied()
+        .filter(|edge| *edge <= base)
+        .collect::<Vec<_>>();
+    if edges.len() < 2 {
+        edges = allowed
+            .iter()
+            .copied()
+            .filter(|edge| *edge >= base)
+            .collect();
+    }
+    assert!(
+        edges.len() >= 2,
+        "training target {} allows fewer than two resolutions for a bucket ladder",
+        target.id
+    );
+    let count = edges.len() as u32;
+    edges
+        .into_iter()
+        .enumerate()
+        .map(|(index, edge)| (edge, 1u32 << (count - 1 - index as u32)))
+        .collect()
 }
 
 fn sdxl_preset<F>(
@@ -3838,6 +3955,22 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
     latent_perceptual::validate(config)?;
     validate_subject_mask_loss(config)?;
     Ok(())
+}
+
+/// Which technique of `advanced` reads the per-image subject masks (sc-2124): `Some(field)` naming
+/// the field that turned it on — [`SUBJECT_MASK_LOSS_KEY`] for subject-masked loss, else
+/// `normalRestrictToSubject` for the subject-restricted normal loss (sc-24832) — or `None` when the
+/// run reads no mask. The API (which has missing masks generated before training) and the worker
+/// (which refuses a run still missing one) share this rule.
+pub fn subject_mask_consumer(
+    advanced: &JsonObject,
+) -> Result<Option<&'static str>, TrainingPlanError> {
+    if subject_mask_loss_weights(advanced)?.is_some() {
+        return Ok(Some(SUBJECT_MASK_LOSS_KEY));
+    }
+    let body = body_losses::body_loss_settings(advanced)?;
+    Ok((body.normal.is_some() && body.normal_restrict_to_subject)
+        .then_some(body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY))
 }
 
 /// The resolved subject-masked-loss weights `(background, subject)` of `config`'s `advanced` bag

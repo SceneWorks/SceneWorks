@@ -136,7 +136,7 @@ POST /api/v1/projects/{projectId}/training/jobs
 {
   "targetId": "z_image_turbo_lora",
   "presetId": "z_image_turbo_lora.character.adamw8bit.balanced",
-  "presetVersion": 1,
+  "presetVersion": 2,
   "datasetId": "ds_…",
   "config": { …target defaults… },
   "outputName": "Aurora Style",
@@ -151,6 +151,16 @@ The dry-run plan records `presetId`, `presetVersion`, `presetName`, the preset
 config snapshot, and the effective config snapshot. Existing direct submissions
 without a preset still work; when you provide a preset id, the API validates that
 the preset exists, matches the target, and matches the pinned version.
+
+**Z-Image character presets** (v2) train with resolution buckets (every edge up
+to the preset's resolution, smaller edges repeated more: 512/768/1024 ×4:2:1)
+and subject-masked loss (background weight 0.1). In the epic 2123 A/B on a
+76-image character dataset this raised independent face likeness from 0.33 to
+0.50. Subject-masked loss needs a subject mask per image: images without one
+are listed in the job's `subjectMaskPrepass`, and a real run generates their
+masks with the SAM3 Person Segmenter (install it from the Models screen) before
+training. An image SAM3 already found no person in is refused at submit — upload
+a mask for it in Data Sets, remove it, or turn subject-masked loss off.
 
 ## 4. Train for real
 

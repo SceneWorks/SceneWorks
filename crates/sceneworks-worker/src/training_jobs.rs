@@ -45,7 +45,8 @@ use sceneworks_core::training::{
     SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
 };
 use sceneworks_core::training_subject_masks::{
-    lookup_subject_mask_for_image, read_subject_mask_index_at, SubjectMaskLookup,
+    lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
+    SubjectMaskLookup,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -772,14 +773,16 @@ impl PreparedTrainingRun {
 fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
+    masks_pending: bool,
 ) -> WorkerResult<PreparedTrainingRun> {
     validate_training_plan(settings, plan)?;
     let engine_id = validate_training_target_config(plan)?;
     let mut prepared_inputs = PreparedTrainingInputs::default();
-    let request = match training_request_from_plan(settings, plan, &mut prepared_inputs) {
-        Ok(request) => request,
-        Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
-    };
+    let request =
+        match training_request_from_plan(settings, plan, &mut prepared_inputs, masks_pending) {
+            Ok(request) => request,
+            Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
+        };
     if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
         drop(request);
         return finish_prepared_input_operation(Err(error), prepared_inputs);
@@ -798,10 +801,14 @@ fn preflight_training_run(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 )))]
-fn preflight_training_run(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
+fn preflight_training_run(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    masks_pending: bool,
+) -> WorkerResult<()> {
     validate_training_plan(settings, plan)?;
     validate_training_target_config(plan)?;
-    preflight_subject_mask_paths(settings, plan)?;
+    preflight_subject_mask_paths(settings, plan, masks_pending)?;
     // This build cannot construct a typed engine request, but it still verifies each stored
     // prepared-bundle receipt exactly once before accepting a dry-run plan.
     let mut prepared_inputs = PreparedTrainingInputs::default();
@@ -1095,10 +1102,11 @@ fn training_request_from_plan(
     settings: &Settings,
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
+    masks_pending: bool,
 ) -> WorkerResult<TrainingRequest> {
     // Subject-masked loss (sc-24828): one mask path per item when on (refused here, naming the
     // images, when any lacks a non-empty mask); `None` keeps every item mask-free.
-    let mask_paths = preflight_subject_mask_paths(settings, plan)?;
+    let mask_paths = preflight_subject_mask_paths(settings, plan, masks_pending)?;
     let items = plan
         .dataset
         .items
@@ -1820,6 +1828,7 @@ const MISSING_SUBJECT_MASK_NAME_CAP: usize = 10;
 fn preflight_subject_mask_paths(
     settings: &Settings,
     plan: &TrainingPlan,
+    masks_pending: bool,
 ) -> WorkerResult<Option<Vec<PathBuf>>> {
     let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
@@ -1853,6 +1862,20 @@ fn preflight_subject_mask_paths(
         match lookup_subject_mask_for_image(&root, &index, &image_path) {
             Ok(SubjectMaskLookup::Present(path)) => paths.push(path),
             Ok(SubjectMaskLookup::Empty) => missing.push(format!("{name} (no subject found)")),
+            // A dry run of a job whose missing masks the real run generates first (sc-2124):
+            // validate against the path the generated mask is stored at.
+            Ok(SubjectMaskLookup::Missing) if masks_pending => {
+                paths.push(root.join(subject_mask_relative_path(
+                    &sceneworks_core::media_convert::file_content_hash(&image_path).map_err(
+                        |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "Could not read training image {name} to match its subject \
+                                 mask: {error}"
+                            ))
+                        },
+                    )?,
+                )))
+            }
             Ok(SubjectMaskLookup::Missing) => missing.push(name),
             Err(error) => {
                 return Err(WorkerError::InvalidPayload(format!(
@@ -1933,6 +1956,9 @@ async fn run_training_dry_run(
     plan: &TrainingPlan,
 ) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
+    // sc-2124: images the API queued for subject-mask generation (`subjectMaskPrepass`) have no
+    // mask yet; a dry run generates nothing, so it validates them as the masks the real run writes.
+    let masks_pending = job.payload.contains_key("subjectMaskPrepass");
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -1951,12 +1977,12 @@ async fn run_training_dry_run(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    preflight_training_run(settings, plan)?.close()?;
+    preflight_training_run(settings, plan, masks_pending)?.close()?;
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
-    preflight_training_run(settings, plan)?;
+    preflight_training_run(settings, plan, masks_pending)?;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
@@ -2657,6 +2683,49 @@ const TRAINING_COMPONENT_TIER: &str = "bf16";
 /// The adapter is written by the engine into the plan's `output.outputDir`; the API registers it
 /// from the staged manifest entry. Backend-neutral: `load_trainer(engine_id, …)` resolves whichever
 /// backend's trainer is registered under `engine_id`.
+/// A real run's preparation up to its weights-free preflight (sc-2124): first the subject-mask
+/// prepass generates the masks the API found missing (`subjectMaskPrepass`; a no-op without it),
+/// posting progress in `0.01..=0.04`; then "Preparing LoRA training." at 0.05, so progress only
+/// moves forward; then the strict preflight against the masks now stored. `make_segmenter` is the
+/// prepass's segmenter factory ([`crate::subject_mask_jobs::installed_sam3_segmenter`] in
+/// production).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn prepare_training_run<M>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    make_segmenter: M,
+) -> WorkerResult<PreparedTrainingRun>
+where
+    M: FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>,
+{
+    crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+        api,
+        settings,
+        job,
+        make_segmenter,
+    )
+    .await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            "Preparing LoRA training.",
+            None,
+            backend_label(&settings.gpu_id),
+        ),
+    )
+    .await?;
+    preflight_training_run(settings, plan, false)
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2669,21 +2738,14 @@ pub(crate) async fn run_training_execution(
 ) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
+    let prepared_run = prepare_training_run(
         api,
-        &job.id,
-        training_progress(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.05,
-            "Preparing LoRA training.",
-            None,
-            backend,
-        ),
+        settings,
+        job,
+        plan,
+        crate::subject_mask_jobs::installed_sam3_segmenter(settings),
     )
     .await?;
-
-    let prepared_run = preflight_training_run(settings, plan)?;
 
     let weights_dir = match resolve_app_managed_model_dir(
         settings,
@@ -4016,7 +4078,7 @@ mod tests {
                 std::fs::rename(&replacement, source)
             }
         });
-        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs, false)
             .expect("map request through verified snapshot");
         assert!(
             request
@@ -4229,7 +4291,7 @@ mod tests {
             plan
         };
         let partial = subject_mask_dataset(&data_dir, 3, &[0], &[]);
-        match preflight_subject_mask_paths(&settings, &plan_for(&partial, true)) {
+        match preflight_subject_mask_paths(&settings, &plan_for(&partial, true), false) {
             Err(WorkerError::InvalidPayload(message)) => {
                 assert!(
                     message.contains("subject-restricted normal loss"),
@@ -4240,7 +4302,7 @@ mod tests {
             other => panic!("expected a payload refusal, got {other:?}"),
         }
         assert!(
-            preflight_subject_mask_paths(&settings, &plan_for(&partial, false))
+            preflight_subject_mask_paths(&settings, &plan_for(&partial, false), false)
                 .unwrap()
                 .is_none()
         );
@@ -4257,10 +4319,333 @@ mod tests {
             .config
             .advanced
             .insert("normalRestrictToSubject".to_owned(), json!(true));
-        let paths = preflight_subject_mask_paths(&settings2, &full_plan)
+        let paths = preflight_subject_mask_paths(&settings2, &full_plan, false)
             .unwrap()
             .expect("masks resolved for restricted normals");
         assert_eq!(paths.len(), 2);
+    }
+
+    /// What the stub API saw during a training run's subject-mask prepass (sc-2124).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[derive(Clone, Default)]
+    struct PrepassApi {
+        progress: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+        posted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        dataset_root: std::sync::Arc<std::sync::Mutex<PathBuf>>,
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_job_value(payload: Value) -> Value {
+        json!({
+            "id": "train-job", "type": "lora_train", "status": "running",
+            "projectId": "proj", "projectName": null, "payload": payload, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.0, "stage": "queued", "message": "queued", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
+            "createdAt": "2026-10-10T00:00:00Z", "updatedAt": "2026-10-10T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    /// A stub rust-api: progress/heartbeat/job routes, and a `/subject-masks` route that stores
+    /// each POSTed mask the way the store does (PNG at its content-hash path + an index record), so
+    /// the preflight that follows the prepass reads them.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    async fn spawn_prepass_api(dataset_root: PathBuf) -> (String, PrepassApi) {
+        use axum::{
+            extract::{Path as AxumPath, State},
+            response::{IntoResponse, Response},
+            routing::{get, post},
+            Json, Router,
+        };
+        use base64::Engine as _;
+        async fn job_route() -> Response {
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn progress_route(
+            State(state): State<PrepassApi>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            if let Some(progress) = body["progress"].as_f64() {
+                state.progress.lock().unwrap().push(progress);
+            }
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            Json(json!({})).into_response()
+        }
+        async fn masks_route(
+            State(state): State<PrepassApi>,
+            AxumPath((_project, _dataset)): AxumPath<(String, String)>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            use sceneworks_core::training_subject_masks::{
+                subject_mask_relative_path, SubjectMaskRecord, SubjectMaskSource,
+                SUBJECT_MASK_INDEX_NAME,
+            };
+            let root = state.dataset_root.lock().unwrap().clone();
+            let mut index = read_subject_mask_index_at(&root).unwrap();
+            let items = body["items"].as_array().unwrap();
+            for item in items {
+                let hash = item["contentHash"].as_str().unwrap().to_owned();
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(item["maskPng"].as_str().unwrap())
+                    .unwrap();
+                std::fs::write(root.join(subject_mask_relative_path(&hash)), png).unwrap();
+                index.masks.insert(
+                    hash.clone(),
+                    SubjectMaskRecord {
+                        source: SubjectMaskSource::Auto,
+                        empty: false,
+                        width: 8,
+                        height: 8,
+                        updated_at: "2026-10-10T00:00:00Z".to_owned(),
+                        revision: String::new(),
+                    },
+                );
+                state.posted.lock().unwrap().push(hash);
+            }
+            std::fs::write(
+                root.join(SUBJECT_MASK_INDEX_NAME),
+                serde_json::to_vec(&index).unwrap(),
+            )
+            .unwrap();
+            Json(json!({ "stored": items.len() })).into_response()
+        }
+        let state = PrepassApi::default();
+        *state.dataset_root.lock().unwrap() = dataset_root;
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .route(
+                "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+                post(masks_route),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), state)
+    }
+
+    /// A stub segmenter: a full-white mask per image, counting the images it was asked to segment.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn white_mask_segmenter(
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>
+    {
+        move |_cancel| {
+            Ok(Box::new(move |count, mut load, mut finish| {
+                seen.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+                (0..count)
+                    .map(|index| {
+                        let image = load(index)?;
+                        let (w, h) = image.dimensions();
+                        finish(index, &image, vec![vec![255u8; (w * h) as usize]])
+                    })
+                    .collect()
+            }))
+        }
+    }
+
+    /// The `subjectMaskPrepass` the API stamps for `images` (every image, as at submit time).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_payload(data_dir: &Path, images: &[String]) -> Value {
+        let root = data_dir.join("datasets").join("ds-1");
+        json!({ "subjectMaskPrepass": {
+            "projectId": "proj",
+            "datasetId": "ds-1",
+            "datasetRoot": root.display().to_string(),
+            "items": images.iter().enumerate().map(|(i, image)| json!({
+                "itemId": format!("item_{i}"),
+                "imagePath": image,
+                "contentHash": sceneworks_core::media_convert::file_content_hash(Path::new(image)).unwrap(),
+            })).collect::<Vec<_>>(),
+        } })
+    }
+
+    /// sc-2124 review: a real run's preparation generates the subject masks the API found missing
+    /// BEFORE its strict preflight — a masked run on a dataset with unmasked images is prepared with
+    /// a mask path on every item — and progress only moves forward (prepass in 0.01..=0.04, then
+    /// 0.05). Mutation: skip the prepass in `prepare_training_run` ⇒ the preflight refuses ⇒ red;
+    /// post 0.05 first ⇒ the progress check ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn real_run_preparation_generates_missing_masks_before_the_strict_preflight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 2, &[], &[]);
+        let (url, api_state) = spawn_prepass_api(data_dir.join("datasets").join("ds-1")).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prepared = prepare_training_run(
+            &api,
+            &settings,
+            &job,
+            &masked_plan(&data_dir, &images, true),
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("masks generated, then the strict preflight passes");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(prepared.request.items.iter().all(|item| item
+            .subject_mask_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())));
+        let progress = api_state.progress.lock().unwrap().clone();
+        assert!(
+            progress.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress went backwards: {progress:?}"
+        );
+        assert_eq!(progress.last(), Some(&0.05), "{progress:?}");
+        assert!(
+            progress.first().is_some_and(|first| *first < 0.05),
+            "{progress:?}"
+        );
+        prepared.close().expect("close");
+    }
+
+    /// sc-2124 review: the prepass's image list is a submit-time snapshot; at run time only images
+    /// that STILL have no mask are segmented, so an existing mask — here a user upload — is never
+    /// re-segmented nor overwritten (and a fully masked dataset segments nothing). Mutation: drop the
+    /// run-time re-read ⇒ the uploaded image is segmented and POSTed ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn prepass_segments_only_images_still_without_a_mask_and_never_overwrites_an_upload() {
+        use sceneworks_core::training_subject_masks::{
+            subject_mask_relative_path, SubjectMaskSource, SUBJECT_MASK_INDEX_NAME,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        let root = data_dir.join("datasets").join("ds-1");
+        // Image 0's mask is a user upload made after submit.
+        let mut index = read_subject_mask_index_at(&root).unwrap();
+        let uploaded =
+            sceneworks_core::media_convert::file_content_hash(Path::new(&images[0])).unwrap();
+        index.masks.get_mut(&uploaded).unwrap().source = SubjectMaskSource::Upload;
+        std::fs::write(
+            root.join(SUBJECT_MASK_INDEX_NAME),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let uploaded_bytes =
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap();
+
+        let (url, api_state) = spawn_prepass_api(root.clone()).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("prepass");
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the unmasked images"
+        );
+        let posted = api_state.posted.lock().unwrap().clone();
+        assert_eq!(posted.len(), 2);
+        assert!(
+            !posted.contains(&uploaded),
+            "the uploaded mask was overwritten"
+        );
+        assert_eq!(
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap(),
+            uploaded_bytes
+        );
+        let index = read_subject_mask_index_at(&root).unwrap();
+        assert_eq!(index.masks[&uploaded].source, SubjectMaskSource::Upload);
+
+        // Every image masked now: a retry segments and posts nothing.
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("retry");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(api_state.posted.lock().unwrap().len(), 2);
+    }
+
+    /// sc-2124: a dry run of a job whose missing masks the real run generates first
+    /// (`subjectMaskPrepass`) validates each ungenerated image against the path its generated mask
+    /// is stored at, instead of refusing it — but an empty ("no subject found") mask still refuses,
+    /// since generating again finds no subject either. Mutation: ignore `masks_pending` ⇒ the
+    /// pending case refuses ⇒ red; treat Empty as pending ⇒ the empty case passes ⇒ red.
+    #[test]
+    fn pending_subject_masks_validate_against_their_generated_path_but_empty_still_refuses() {
+        use sceneworks_core::training_subject_masks::subject_mask_relative_path;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        let root = data_dir.join("datasets").join("ds-1");
+        let paths =
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), true)
+                .expect("pending masks validate")
+                .expect("masked loss on");
+        let expected: Vec<PathBuf> = images
+            .iter()
+            .map(|image| {
+                let hash = sceneworks_core::media_convert::file_content_hash(Path::new(image))
+                    .expect("hash");
+                root.join(subject_mask_relative_path(&hash))
+            })
+            .collect();
+        assert_eq!(paths, expected);
+        // Not pending (the real run, after the prepass): the same dataset refuses.
+        assert!(matches!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), false),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("2 of 3 have none")
+        ));
+        let with_empty = subject_mask_dataset(&data_dir, 2, &[0, 1], &[1]);
+        assert!(matches!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &with_empty, true), true),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("img01.png (no subject found)")
+        ));
     }
 
     /// sc-24828 AC: a masked-loss job on a dataset missing any mask is refused at worker preflight,
@@ -4272,11 +4657,14 @@ mod tests {
         let data_dir = dir.path().canonicalize().expect("canonical data root");
         let settings = test_settings(&data_dir);
         let images = subject_mask_dataset(&data_dir, 13, &[0, 1], &[1]);
-        let message =
-            match preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true)) {
-                Err(WorkerError::InvalidPayload(message)) => message,
-                other => panic!("expected a payload refusal, got {other:?}"),
-            };
+        let message = match preflight_subject_mask_paths(
+            &settings,
+            &masked_plan(&data_dir, &images, true),
+            false,
+        ) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected a payload refusal, got {other:?}"),
+        };
         assert!(message.contains("12 of 13 have none"), "{message}");
         assert!(
             message.contains("img01.png (no subject found), img02.png"),
@@ -4291,7 +4679,7 @@ mod tests {
 
         // Off ⇒ nothing is read and nothing is refused.
         assert_eq!(
-            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, false))
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, false), false)
                 .expect("off"),
             None
         );
@@ -4455,9 +4843,10 @@ mod tests {
         let data_dir = dir.path().canonicalize().expect("canonical data root");
         let settings = test_settings(&data_dir);
         let images = subject_mask_dataset(&data_dir, 3, &[0, 1, 2], &[]);
-        let paths = preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true))
-            .expect("full coverage")
-            .expect("on");
+        let paths =
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), false)
+                .expect("full coverage")
+                .expect("on");
         assert_eq!(paths.len(), 3);
         for (path, image) in paths.iter().zip(&images) {
             let hash =
@@ -4491,6 +4880,7 @@ mod tests {
             &settings,
             &masked_plan(&data_dir, &images, true),
             &mut prepared,
+            false,
         )
         .expect("on");
         assert_eq!(
@@ -4510,6 +4900,7 @@ mod tests {
             &settings,
             &masked_plan(&data_dir, &images, false),
             &mut prepared,
+            false,
         )
         .expect("off");
         assert_eq!(off.config.subject_mask_loss, None);
@@ -4526,7 +4917,8 @@ mod tests {
             training_request_from_plan(
                 &settings,
                 &masked_plan(&data_dir, &images, true),
-                &mut prepared
+                &mut prepared,
+                false
             ),
             Err(WorkerError::InvalidPayload(message)) if message.contains("img00.png, img01.png")
         ));
@@ -6805,7 +7197,7 @@ mod tests {
         for (kernel, base, network, field, value) in cases {
             let mut serialized = plan_json(dir.path(), kernel, base, network, &[&image]);
             serialized["config"]["advanced"][field] = value;
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("dry and real execution share this rejection before load");
             assert!(
                 matches!(error, WorkerError::InvalidPayload(_)),
@@ -6820,7 +7212,7 @@ mod tests {
             "lora",
             &[&image],
         ));
-        assert!(preflight_training_run(&settings, &forged)
+        assert!(preflight_training_run(&settings, &forged, false)
             .expect_err("a forged kernel/base pairing must fail")
             .to_string()
             .contains("No native trainer"));
@@ -6832,10 +7224,12 @@ mod tests {
             "lokr",
             &[&image],
         ));
-        assert!(preflight_training_run(&settings, &unsupported_network)
-            .expect_err("Wan TI2V-5B does not advertise LoKr")
-            .to_string()
-            .contains("does not support networkType"));
+        assert!(
+            preflight_training_run(&settings, &unsupported_network, false)
+                .expect_err("Wan TI2V-5B does not advertise LoKr")
+                .to_string()
+                .contains("does not support networkType")
+        );
     }
 
     #[cfg(any(
@@ -6883,7 +7277,7 @@ mod tests {
             } else {
                 serialized["config"]["advanced"][field] = value;
             }
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("the shared dry/real recipe preflight must reject before load");
             assert!(
                 matches!(error, WorkerError::InvalidPayload(_)),
@@ -6894,7 +7288,7 @@ mod tests {
         // SD3 is the sole extension: logit-normal remains a valid, weights-free request.
         let mut sd3 = plan_json(dir.path(), "sd3_lora", "sd3_5_large", "lora", &[&image]);
         sd3["config"]["advanced"]["timestepType"] = json!("logit_normal");
-        assert!(preflight_training_run(&settings, &parse(sd3)).is_ok());
+        assert!(preflight_training_run(&settings, &parse(sd3), false).is_ok());
 
         for (kernel, base) in [
             ("anima_lora", "anima_base"),
@@ -6906,7 +7300,7 @@ mod tests {
         ] {
             let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
             serialized["dataset"]["items"][0]["controlImagePath"] = json!("control.png");
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("adapter item source/control images must fail before load");
             assert!(
                 error.to_string().contains("control/source"),
@@ -6926,7 +7320,7 @@ mod tests {
         mage_full["target"]["outputKind"] = json!("base_checkpoint");
         mage_full["config"]["rank"] = json!(0);
         mage_full["config"]["advanced"]["mixedPrecision"] = json!("f32");
-        let prepared = preflight_training_run(&settings, &parse(mage_full))
+        let prepared = preflight_training_run(&settings, &parse(mage_full), false)
             .expect("rank-zero Mage full request validates");
         assert_eq!(prepared.request.config.rank, 0);
     }

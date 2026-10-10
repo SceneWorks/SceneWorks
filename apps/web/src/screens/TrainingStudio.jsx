@@ -40,6 +40,10 @@ import {
   configDraftFromTarget,
   configReseedDecision,
   configValidation,
+  draftWithResolution,
+  SUBJECT_SEGMENTER_MODEL_ID,
+  subjectMaskConsumerField,
+  subjectMaskCoverage,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -787,6 +791,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
     () => (trainingAdapterId ? missingRequiredModels(models, [trainingAdapterId]) : []),
     [models, trainingAdapterId],
   );
+  // sc-2124: images without a subject mask are segmented with SAM3 when a masked run starts, so a
+  // run that must generate any needs the SAM3 Person Segmenter installed — the API refuses it
+  // otherwise. It gates Start (on the mask technique's field) and the panel offers the download.
+  const subjectMasksToGenerate =
+    Boolean(subjectMaskConsumerField(configDraft, selectedTarget)) &&
+    Boolean(subjectMaskCoverage(subjectMasks)?.ungenerated);
+  const missingSubjectSegmenterModels = useMemo(
+    () => (subjectMasksToGenerate ? missingRequiredModels(models, [SUBJECT_SEGMENTER_MODEL_ID]) : []),
+    [models, subjectMasksToGenerate],
+  );
   const configContext = useMemo(
     () => ({
       activeDataset,
@@ -794,8 +808,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
       missingTrainingAdapterModels,
-      // Subject-masked loss (sc-24828) needs a mask on every image; incomplete coverage gates Start.
+      // Subject-masked loss (sc-24828) needs a mask on every image: an empty one gates Start, and
+      // ungenerated ones do while the segmenter that generates them is missing.
       subjectMaskReport: subjectMasks,
+      subjectSegmenterMissing: missingSubjectSegmenterModels.length > 0,
     }),
     [
       activeDataset,
@@ -804,6 +820,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       missingControlModels,
       missingTrainingAdapterModels,
       subjectMasks,
+      missingSubjectSegmenterModels,
     ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
@@ -1498,7 +1515,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
     }
     setCustomizedConfigFields((current) => new Set([...current, field]));
-    setConfigDraft((current) => ({ ...current, [field]: value }));
+    // sc-2124: a preset's bucket ladder follows the Resolution field (draftWithResolution).
+    setConfigDraft((current) =>
+      field === "resolution" ? draftWithResolution(current, selectedTarget, value) : { ...current, [field]: value },
+    );
   }
 
   function applyTrainingPreset(preset, { message = "Preset applied" } = {}) {
@@ -2227,6 +2247,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
                   missingTrainingAdapterModels={missingTrainingAdapterModels}
+                  missingSubjectSegmenterModels={missingSubjectSegmenterModels}
                   controlModelDownloadJobs={trainingDownloadJobs}
                   onDownloadModel={createModelDownloadJob}
                   onOpenModels={() => setActiveView("Models")}

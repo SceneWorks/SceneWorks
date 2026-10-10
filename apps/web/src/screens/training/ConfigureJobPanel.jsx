@@ -221,6 +221,9 @@ export function ConfigureJobPanel({
   // The de-distill training adapter this run's selected version needs but doesn't have (sc-25213);
   // folded into `configValidity` by the screen, rendered here as the download offer.
   missingTrainingAdapterModels = [],
+  // The SAM3 Person Segmenter, when this run must generate missing subject masks and it is not
+  // installed (sc-2124); folded into `configValidity` by the screen, rendered here as the offer.
+  missingSubjectSegmenterModels = [],
   controlModelDownloadJobs = [],
   onDownloadModel,
   onOpenModels,
@@ -319,6 +322,13 @@ export function ConfigureJobPanel({
             }.`
           : "Subject mask coverage is unknown until the dataset is saved."}
       </p>
+      {maskCoverage?.ungenerated ? (
+        <p className="training-field-hint" data-testid="subject-mask-autogenerate">
+          {`${maskCoverage.ungenerated} image${maskCoverage.ungenerated === 1 ? "" : "s"} without a subject mask get${
+            maskCoverage.ungenerated === 1 ? "s" : ""
+          } one generated with SAM3 when training starts.`}
+        </p>
+      ) : null}
       {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
         maskJobRequested ? (
           <p className="training-field-hint">
@@ -421,7 +431,7 @@ export function ConfigureJobPanel({
                 invalid={invalidProps(configValidity, "normalRestrictToSubject")}
                 label="Normals on the subject only"
                 onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
-                title="Average the normal loss over each image's subject mask only (needs a subject mask on every image — Data Sets → Generate subject masks)."
+                title="Average the normal loss over each image's subject mask only (needs a subject mask on every image; missing ones are generated with SAM3 when training starts)."
               />
             ) : null}
             {restrictedNormalsOn && !subjectMaskLossEnabled ? (
@@ -821,6 +831,17 @@ export function ConfigureJobPanel({
             onOpenQueue={onOpenQueue}
           />
 
+          <RequiredModelsNotice
+            detail="Images without a subject mask get one generated with it when training starts; the run would be refused without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature="Subject-masked training"
+            models={missingSubjectSegmenterModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
           <AdvancedSection
             hint="cleared values → preset default"
             onToggle={() => setShowAdvancedConfig(!showAdvancedConfig)}
@@ -1158,7 +1179,7 @@ export function ConfigureJobPanel({
                   invalid={invalidProps(configValidity, "subjectMaskLoss")}
                   label="Subject-masked loss"
                   onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
-                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image (Data Sets → Generate subject masks). Off by default."
+                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image; missing ones are generated with SAM3 when training starts. On in the Z-Image character presets, off otherwise."
                 />
               ) : null}
             </div>
