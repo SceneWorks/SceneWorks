@@ -2165,9 +2165,12 @@ fn iris_routes_plain_text_to_image_only() {
         json!({ "loras": [{ "id": "l" }] }),
         json!({ "advanced": { "mlxQuantize": 8 } }),
         json!({ "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
     ] {
         assert!(!eligible(refused.clone()), "{refused}");
     }
+    // A disabled (or malformed, which the worker parses as disabled) hires fix stays eligible.
+    assert!(eligible(json!({ "hiresFix": { "enabled": false } })));
     let support = model_mac_support("iris_3b", "image", Some("iris"));
     assert!(support.supported);
     assert!(!support.features.edit && !support.features.reference && !support.features.pose);

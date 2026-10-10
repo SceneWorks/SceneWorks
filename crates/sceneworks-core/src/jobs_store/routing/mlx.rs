@@ -466,10 +466,19 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// Iris-3B generation (sc-25679) is plain text-to-image: the `iris_3b` engine takes no source,
 /// reference, mask, control, pose or adapter, and has no quant tier — it refuses `LoadSpec::quantize`
-/// and `adapters` by name. Any such carrier keeps the job off MLX (an `mlx_unsupported` affordance)
-/// instead of reaching an engine that would refuse it.
+/// and `adapters` by name. An enabled hires fix is refused too: its second pass is an img2img
+/// refinement (a `Reference` at the hires strength) the engine refuses, after a full first pass.
+/// Any such carrier keeps the job off MLX (an `mlx_unsupported` affordance) instead of reaching an
+/// engine that would refuse it.
 pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    mage_flow_mlx_eligible(payload)
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
         && !has_nonempty_or_malformed_array(payload, "loras")
         && !["mlxQuantize", "quantTier"]
             .iter()

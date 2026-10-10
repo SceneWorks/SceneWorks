@@ -6940,6 +6940,22 @@ pub(crate) fn normalize_sampling_knob(
         "{engine}: requested {knob} {name:?} is not advertised (supported: {advertised:?}); \
          falling back to the engine default"
     );
+    emit_sampling_knob_unsupported(knob, json!(name), advertised, model_id, job_id, engine);
+    None
+}
+
+/// The `sampling_knob_unsupported` worker event [`normalize_sampling_knob`] emits when it drops a
+/// requested knob back to the engine default. Shared with the other per-request drops that remove a
+/// value the engine would refuse (Iris-3B's CFG-bound negative prompt and schedule shift, sc-25679),
+/// so every silent drop is observable through the one event.
+pub(crate) fn emit_sampling_knob_unsupported(
+    knob: &str,
+    requested: Value,
+    advertised: &[&str],
+    model_id: &str,
+    job_id: &str,
+    engine: &str,
+) {
     emit_event(
         "sampling_knob_unsupported",
         json!({
@@ -6947,11 +6963,10 @@ pub(crate) fn normalize_sampling_knob(
             "engine": engine,
             "model": model_id,
             "knob": knob,
-            "requested": name,
+            "requested": requested,
             "supported": advertised,
         }),
     );
-    None
 }
 
 /// Read the raw per-generation sampler / scheduler / schedule-shift knobs from a job's `advanced`
@@ -9757,6 +9772,37 @@ async fn generate_stream(
     backend: &str,
     asset_writes: &mut Vec<Value>,
 ) -> WorkerResult<()> {
+    generate_stream_using(
+        api,
+        settings,
+        job,
+        plan,
+        project_path,
+        backend,
+        asset_writes,
+        crate::inference_runtime::load,
+    )
+    .await
+}
+
+/// [`generate_stream`] with the generator loader supplied by the caller (the `_using` seam, see
+/// [`start_cached_gen_stream_with_request_state_using`]): every pre-load decision, the cached
+/// load, the per-item drive, and `consume_gen_events` are the production code; only the engine
+/// is injectable, so a test can pin progress / cancel / failure on a real job arm without weights.
+#[allow(clippy::too_many_arguments)]
+#[cfg(target_os = "macos")]
+async fn generate_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -9832,13 +9878,20 @@ async fn generate_stream(
     let model_true_cfg = resolve_true_cfg(request, &model);
     // A model whose negative prompt IS the CFG unconditional (`image.negativePromptRequiresGuidance`,
     // Iris-3B) refuses one at guidance 1.0, where it has no effect anyway — drop it there.
+    // Either drop emits `sampling_knob_unsupported`, like the sampler/scheduler drops above.
+    let knob_drop = iris::KnobDropContext {
+        model_id: &request.model,
+        job_id: &job.id,
+        engine: backend,
+    };
     let negative_prompt = iris::gate_negative_prompt_on_guidance(
         &request.model_manifest_entry,
         guidance,
         resolve_negative_prompt(request, &model),
+        &knob_drop,
     );
     // Iris has no scheduler axis and refuses `scheduler_shift` by name (sc-25679).
-    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift);
+    let scheduler_shift = iris::honored_scheduler_shift(engine_id, scheduler_shift, &knob_drop);
     let repo = model_repo(request, &model);
     let adapter_label = model.adapter_label();
     let count = request.count as usize;
@@ -10307,12 +10360,13 @@ async fn generate_stream(
     // Keep the source only if the face stack staged (otherwise no scorer can be built).
     let likeness_source = face_stack_dir.as_ref().and(likeness_source);
 
-    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(
+    let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using(
         job.id.clone(),
         engine_id,
         adapter_count,
         spec,
         format!("{engine_id} load failed"),
+        load_generator,
         move |generator,
               cache_state,
               loaded_policy,
@@ -18093,7 +18147,7 @@ mod declared_sequential_resident_tests {
                 .expect(declaration);
             assert!(before < shaped && shaped < release && release < load, "{declaration}");
         }
-        let base = function_body(include_str!("base.rs"), "async fn generate_stream(");
+        let base = function_body(include_str!("base.rs"), "async fn generate_stream_using(");
         let prepared = base.find("prepare_mlx_load_policy(").expect("base policy step");
         let alternative = base
             .find("declared_sequential_resident_alternative(engine_id, &pre_policy_spec, &spec)")

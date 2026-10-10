@@ -917,6 +917,11 @@ where
 /// The two slots are not interchangeable: memory admission must keep using the LOADED policy, because
 /// it names the shape the resident weights are actually in and therefore the shape the budget was
 /// proved against. The proposal's effective policy is an execution intent, never an admission input.
+///
+/// Production reaches this through [`with_cached_generator_for_request_using`] with the real loader
+/// (the image stream's `_using` seam threads its loader down, sc-25679); this production-loader
+/// shorthand remains for tests that render real weights through the cache.
+#[cfg(test)]
 pub(crate) async fn with_cached_generator_for_request<R>(
     engine_id: &'static str,
     spec: LoadSpec,
@@ -945,7 +950,7 @@ where
     .await
 }
 
-/// [`with_cached_generator_for_request`] with a cache-aware cold-load admission hook.
+/// `with_cached_generator_for_request` with a cache-aware cold-load admission hook.
 ///
 /// The hook runs on the cache thread only when this request is a genuine miss, immediately before a
 /// different resident key is dropped. An exact-key warm hit therefore never re-runs a pre-load gate

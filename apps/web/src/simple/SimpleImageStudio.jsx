@@ -778,6 +778,13 @@ export function SimpleImageStudio() {
                 }
                 value={negativePrompt}
               />
+              {negativePromptCfgOff ? (
+                // The same visible reason Image Studio gives: a disabled box holding text the user
+                // typed is otherwise a silent drop.
+                <span className="field-hint">
+                  The negative prompt only applies with guidance above 1.0 for this model.
+                </span>
+              ) : null}
             </div>
           ) : null}
           <div className="su-field su-free-size">

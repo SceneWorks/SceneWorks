@@ -580,6 +580,50 @@ where
         + Send
         + 'static,
 {
+    start_cached_gen_stream_with_request_state_using(
+        job_id,
+        engine_id,
+        adapter_count,
+        spec,
+        load_error_context,
+        crate::inference_runtime::load,
+        drive,
+    )
+}
+
+/// [`start_cached_gen_stream_with_request_state`] with the generator loader supplied by the caller
+/// — the `_using` loader-injection seam (`generator_cache::with_cached_generator_for_request_using`)
+/// lifted to the image stream, so a test can drive a whole image job arm (`generate_stream_using`)
+/// against a stub `Generator` with no tensor backend or weights. Production passes
+/// `crate::inference_runtime::load` through the plain name.
+fn start_cached_gen_stream_with_request_state_using<D>(
+    job_id: String,
+    engine_id: &'static str,
+    adapter_count: usize,
+    spec: LoadSpec,
+    load_error_context: String,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    drive: D,
+) -> (
+    CancelFlag,
+    tokio::sync::mpsc::Receiver<GenEvent>,
+    tokio::task::JoinHandle<WorkerResult<()>>,
+)
+where
+    D: FnOnce(
+            &dyn Generator,
+            gen_core::MemoryCacheState,
+            crate::generator_cache::ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            tokio::sync::mpsc::Sender<GenEvent>,
+            CancelFlag,
+        ) -> WorkerResult<()>
+        + Send
+        + 'static,
+{
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
@@ -590,10 +634,11 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request(
+        crate::generator_cache::with_cached_generator_for_request_using(
             engine_id,
             spec,
             load_error_context,
+            load_generator,
             move |generator,
                   cache_state,
                   loaded_policy,
