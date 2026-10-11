@@ -117,7 +117,8 @@ npm run rust:check:neither
 On Linux/Windows that's a native clippy — the host already *is* the neither build. On
 macOS it runs the same clippy inside a Linux Docker container, because a native macOS
 clippy always compiles `base.rs` and can never see the trap. It's also wired into the
-optional pre-push hook (installed by `npm run hooks:install`; skip a run with
+optional pre-push hook on Linux/Windows hosts (on macOS, CI's parity lane owns it — the dev
+Mac does not run the container) (installed by `npm run hooks:install`; skip a run with
 `SKIP_NEITHER_CHECK=1` or `git push --no-verify`).
 
 > **The base.rs / candle cfg rule.** Any `sceneworks-worker` item — a `use`, struct, or

@@ -30,7 +30,8 @@
 - **Preflight before any PR or push to a PR branch.** Commit everything, then run
   `npm run preflight -- --base <PR target>` (e.g. `origin/feature/sc-NNNN` for a
   story, `origin/main` otherwise). It runs the CI checks your diff can trip —
-  Rust (`rust:check`, neither, candle, MLX adapter, capability dump), web
+  Rust (`rust:check`, candle, MLX adapter, capability dump; the Dockerized
+  neither build is left to CI on macOS), web
   lint/test/build, `npm run check`, pytest — and stamps the commit on a pass. The
   pre-push hook (`npm run hooks:install`) refuses an unstamped push to a branch
   with an open PR, and a Claude Code hook refuses an unstamped `gh pr create`.
