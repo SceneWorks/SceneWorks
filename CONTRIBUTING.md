@@ -78,7 +78,10 @@ the matching platform — tell us in the PR what you were able to test.
 ## Running the checks locally
 
 CI runs the same commands, so running them before you push is the fastest way to
-a green PR. From the repo root:
+a green PR. **`npm run preflight -- --base <PR target>`** picks every check below that
+your diff can trip, runs them all, and stamps the commit on a pass; the pre-push hook
+(`npm run hooks:install`) refuses an unstamped push to a branch with an open PR. The
+individual commands, from the repo root:
 
 **Rust** (formatting, lints, tests, build — this is the full gate CI runs):
 

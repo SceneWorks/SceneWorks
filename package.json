@@ -63,7 +63,8 @@
     "release": "node scripts/release.mjs",
     "version": "node scripts/sync-version.mjs && git add Cargo.toml Cargo.lock apps/desktop/tauri.conf.json apps/desktop/package.json apps/desktop/package-lock.json apps/web/package.json apps/web/package-lock.json",
     "report:memory-contract-reconciliation": "node scripts/report-memory-contract-reconciliation.mjs",
-    "check:ltx-temporal-fit": "node scripts/fit-ltx-temporal-form.mjs --check"
+    "check:ltx-temporal-fit": "node scripts/fit-ltx-temporal-form.mjs --check",
+    "preflight": "node scripts/preflight.mjs"
   },
   "engines": {
     "node": ">=20"

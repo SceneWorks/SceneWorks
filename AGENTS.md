@@ -27,5 +27,15 @@
 
 ## Pull Requests
 
+- **Preflight before any PR or push to a PR branch.** Commit everything, then run
+  `npm run preflight -- --base <PR target>` (e.g. `origin/feature/sc-NNNN` for a
+  story, `origin/main` otherwise). It runs the CI checks your diff can trip —
+  Rust (`rust:check`, neither, candle, MLX adapter, capability dump), web
+  lint/test/build, `npm run check`, pytest — and stamps the commit on a pass. The
+  pre-push hook (`npm run hooks:install`) refuses an unstamped push to a branch
+  with an open PR, and a Claude Code hook refuses an unstamped `gh pr create`.
+  Paste the preflight summary into the PR body. CI is confirmation, not discovery.
+  This is a CI-failure gate and is unrelated to the dismantled memory-measurement
+  gates above.
 - For this repository, create pull requests with authenticated `gh pr create` directly.
 - Do not try the GitHub connector PR creation first; it repeatedly fails with `Resource not accessible by integration` and then requires falling back to `gh` anyway.
