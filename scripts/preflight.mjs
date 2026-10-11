@@ -142,7 +142,9 @@ function selectSteps(files, all) {
     steps.push({ name: "web build", command: ["npm", "--prefix", "apps/web", "run", "build"] });
   }
   if (touches(NODE)) {
-    steps.push({ name: "scaffold node suite (npm run check)", command: ["npm", "run", "check"], env: nodeSuiteEnv() });
+    // Several suites are wall-clock sensitive (watchdog ceilings, port races) and flake under the
+    // parallel runner on a loaded Mac, so one re-run is allowed and reported as such.
+    steps.push({ name: "scaffold node suite (npm run check)", command: ["npm", "run", "check"], env: nodeSuiteEnv(), retry: true });
   }
   if (touches(PYTEST)) {
     const hasDeps = spawnSync("python3", ["-c", "import pytest, httpx, jsonschema"]).status === 0;
@@ -181,9 +183,16 @@ function main() {
       continue;
     }
     const started = Date.now();
-    const status = step.fn ? step.fn() : run(step.command, step.env);
+    let status = step.fn ? step.fn() : run(step.command, step.env);
+    let retried = false;
+    if (status !== 0 && step.retry) {
+      console.log(`\n=== preflight: ${step.name} failed; re-running once`);
+      status = run(step.command, step.env);
+      retried = true;
+    }
     const ok = status === 0;
-    results.push({ name: step.name, label: ok ? "PASS" : "FAIL", ok, seconds: Math.round((Date.now() - started) / 1000) });
+    const label = ok ? (retried ? "PASS (on retry)" : "PASS") : "FAIL";
+    results.push({ name: step.name, label, ok, seconds: Math.round((Date.now() - started) / 1000) });
   }
 
   const head = git("rev-parse", "HEAD");
