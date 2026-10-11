@@ -14,7 +14,7 @@
 // worktree; `--verify` reads that stamp. The pre-push git hook and the Claude Code `gh pr create`
 // hook both require it before anything that starts a CI run.
 // Not covered here (CI only): the Windows CUDA lane's capability dump and smokes, the Docker
-// runtime smokes, and the pytest e2e/parity harnesses.
+// runtime smokes, the pytest e2e/parity harnesses, and on macOS the Dockerized neither build.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -102,6 +102,25 @@ function capabilityDumpCheck() {
   }
 }
 
+// check.yml parity-rust installs exactly these; Homebrew's python3 refuses a system-wide pip install
+// (PEP 668), so they live in a venv shared by every worktree and rebuilt when the pins change.
+const PYTEST_DEPS = ["pytest==9.0.2", "httpx==0.28.1", "jsonschema==4.25.1"];
+
+function workerPytest() {
+  const venv = path.resolve(repoRoot, git("rev-parse", "--git-common-dir"), "sceneworks-preflight", "venv");
+  const python = path.join(venv, "bin", "python");
+  const marker = path.join(venv, "preflight-deps.txt");
+  const wanted = PYTEST_DEPS.join("\n");
+  if (!existsSync(marker) || readFileSync(marker, "utf8") !== wanted) {
+    rmSync(venv, { recursive: true, force: true });
+    const created =
+      run(["python3", "-m", "venv", venv]) || run([python, "-m", "pip", "install", "-q", "--disable-pip-version-check", ...PYTEST_DEPS]);
+    if (created !== 0) return created;
+    writeFileSync(marker, wanted);
+  }
+  return run([python, "-m", "pytest", "-q", "tests/", "-m", "not e2e and not parity", "--strict-markers"]);
+}
+
 function run(command, env = {}) {
   const res = spawnSync(command[0], command.slice(1), {
     cwd: repoRoot,
@@ -117,7 +136,9 @@ function selectSteps(files, all) {
   if (touches(RUST)) {
     // check.yml parity-rust + candle; macos-mlx.yml macos-checks.
     steps.push({ name: "rust:check (tier docs, fmt, clippy, test, build)", command: ["npm", "run", "rust:check"] });
-    steps.push({ name: "neither build (Linux, no candle)", command: ["npm", "run", "rust:check:neither"] });
+    // On macOS the neither build needs a Linux Docker container (30-42 GB volume per worktree);
+    // the dev Mac does not run containers, so that lane is left to CI's parity job.
+    if (!isMac) steps.push({ name: "neither build (Linux, no candle)", command: ["npm", "run", "rust:check:neither"] });
     steps.push({ name: "candle build (not-macOS + candle)", command: ["npm", "run", "rust:check:candle", "--", "--allow-skip"] });
     if (isMac) {
       steps.push({
@@ -147,12 +168,7 @@ function selectSteps(files, all) {
     steps.push({ name: "scaffold node suite (npm run check)", command: ["npm", "run", "check"], env: nodeSuiteEnv(), retry: true });
   }
   if (touches(PYTEST)) {
-    const hasDeps = spawnSync("python3", ["-c", "import pytest, httpx, jsonschema"]).status === 0;
-    steps.push({
-      name: "worker pytest (not e2e, not parity)",
-      command: ["python3", "-m", "pytest", "-q", "tests/", "-m", "not e2e and not parity", "--strict-markers"],
-      skip: hasDeps ? null : "python3 lacks pytest/httpx/jsonschema: pip install pytest==9.0.2 httpx==0.28.1 jsonschema==4.25.1",
-    });
+    steps.push({ name: "worker pytest (not e2e, not parity)", fn: workerPytest });
   }
   return steps;
 }
@@ -177,11 +193,6 @@ function main() {
   const results = [];
   for (const step of steps) {
     console.log(`\n=== preflight: ${step.name}`);
-    if (step.skip) {
-      console.log(`skipped: ${step.skip}`);
-      results.push({ name: step.name, label: "SKIP", ok: true, seconds: 0 });
-      continue;
-    }
     const started = Date.now();
     let status = step.fn ? step.fn() : run(step.command, step.env);
     let retried = false;

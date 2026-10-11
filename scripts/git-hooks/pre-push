@@ -104,7 +104,9 @@ fi
 
 [ "$rust_changed" = "0" ] && exit 0
 
-if [ "${SKIP_NEITHER_CHECK:-0}" != "1" ]; then
+# On macOS the neither build runs in a Linux Docker container; the dev Mac does not run containers,
+# so CI's parity lane owns it there.
+if [ "$(uname -s)" != "Darwin" ] && [ "${SKIP_NEITHER_CHECK:-0}" != "1" ]; then
   echo "Running the 'neither' build (Linux, no backend-candle) for pushed Rust changes..."
   echo "(skip with SKIP_NEITHER_CHECK=1 or 'git push --no-verify')"
 
