@@ -43,6 +43,326 @@ pub const TRAINING_PLAN_VERSION: u32 = 1;
 /// `advanced.timestepType`/`timestepBias`.
 pub const SUPPORTED_LR_SCHEDULERS: [&str; 3] = ["constant", "linear", "cosine"];
 
+/// `advanced` key of the relative-mode **weight noising** strength (epic 2123, sc-24826): after
+/// every optimizer update the native trainer perturbs each adapter tensor by
+/// `N(0,1) · sigma · rms(w)`. Absent or `0` is off.
+pub const WEIGHT_NOISE_SIGMA_KEY: &str = "weightNoiseSigma";
+/// Inclusive upper bound submit-time validation accepts for [`WEIGHT_NOISE_SIGMA_KEY`]. The web
+/// form enforces the identical bound (`weightNoiseSigmaMax` in
+/// `apps/web/src/training/trainingConfig.js`; a parity test pins the two together, epic 2123 E6).
+/// The upstream suggested strength is [`WEIGHT_NOISE_SIGMA_SUGGESTED`]; 0.1 is eight times that —
+/// far into "destroys the adapter" territory, so anything above it is a typo, not a choice.
+pub const WEIGHT_NOISE_SIGMA_MAX: f64 = 0.1;
+/// The upstream (ai-toolkit-perceptual) suggested weight-noise strength when enabled.
+pub const WEIGHT_NOISE_SIGMA_SUGGESTED: f64 = 0.0125;
+/// Target `limits` flag: `true` when this target's native trainer honors
+/// [`WEIGHT_NOISE_SIGMA_KEY`] (its `TrainerDescriptor::techniques.weight_noise`). Absent = no. Since
+/// sc-24827 every LoRA/LoKr trainer declares it on BOTH backends (MLX and Candle), so the builtin
+/// value is the truth on every platform; the Krea control-branch target (a full-weight ControlNet
+/// branch, no adapter) does not carry it. The web form shows the weight-noise toggle only where this
+/// is `true`, and submit-time validation refuses a non-zero sigma elsewhere. A worker test pins the
+/// flag to the linked trainer descriptors on each platform, so it cannot drift from the engine.
+pub const WEIGHT_NOISE_SUPPORT_LIMIT: &str = "supportsWeightNoise";
+/// Target `limits` flag for [`GRADIENT_NOISE_ETA_KEY`] (`TrainerDescriptor::techniques
+/// .gradient_noise`, sc-24827) — same contract, gating, and drift test as
+/// [`WEIGHT_NOISE_SUPPORT_LIMIT`].
+pub const GRADIENT_NOISE_SUPPORT_LIMIT: &str = "supportsGradientNoise";
+
+/// Epic 2123 JSON-null policy: an explicit JSON `null` on any technique key of `advanced` (weight
+/// and gradient noise, resolution buckets, subject-masked loss, and the depth / body / face /
+/// latent-perceptual losses) means exactly what an absent key means — off, or the knob's default.
+/// Every technique parser (submit-time validation and the worker's preflight alike) reads its keys
+/// through this one accessor, so the policy cannot differ between keys or between API and worker.
+pub fn technique_value<'a>(advanced: &'a JsonObject, key: &str) -> Option<&'a Value> {
+    advanced.get(key).filter(|value| !value.is_null())
+}
+
+/// The field-error message for an aux loss's inverted noise window (`min_t > max_t`). When
+/// `max_key` is unset the message says so and names its default `max_t` — sc-2124 lowered the
+/// decoded-x0 losses' default to `0.5`, so a carried-over `*MinT` above it is now refused with
+/// the reason spelled out instead of only the numbers.
+pub(crate) fn inverted_window_message(
+    advanced: &JsonObject,
+    (min_key, min_t): (&str, f64),
+    (max_key, max_t): (&str, f64),
+) -> String {
+    if technique_value(advanced, max_key).is_some() {
+        format!("{max_key} ({max_t}) must be at least {min_key} ({min_t}).")
+    } else {
+        format!(
+            "{max_key} must be at least {min_key} ({min_t}): {max_key} is unset and its default \
+             is now {max_t}. Set {max_key} explicitly or lower {min_key}."
+        )
+    }
+}
+
+/// Every epic 2123 technique key of `advanced` that [`technique_value`] governs.
+pub const TECHNIQUE_KEYS: [&str; 45] = [
+    WEIGHT_NOISE_SIGMA_KEY,
+    GRADIENT_NOISE_ETA_KEY,
+    GRADIENT_NOISE_GAMMA_KEY,
+    RESOLUTION_BUCKETS_KEY,
+    SUBJECT_MASK_LOSS_KEY,
+    SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
+    SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
+    depth_anchoring::DEPTH_ANCHORING_WEIGHT_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MODEL_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MIN_T_KEY,
+    depth_anchoring::DEPTH_ANCHORING_MAX_T_KEY,
+    depth_anchoring::DEPTH_ANCHORING_EVERY_KEY,
+    "bodyProportionWeight",
+    "bodyProportionMinT",
+    "bodyProportionMaxT",
+    "bodyProportionEvery",
+    body_losses::BODY_PROPORTION_INCLUDE_HEAD_KEY,
+    "bodyShapeWeight",
+    "bodyShapeMinT",
+    "bodyShapeMaxT",
+    "bodyShapeEvery",
+    body_losses::BODY_SHAPE_MIN_COS_KEY,
+    "normalWeight",
+    "normalMinT",
+    "normalMaxT",
+    "normalEvery",
+    body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY,
+    face_losses::IDENTITY_LOSS_WEIGHT_KEY,
+    face_losses::IDENTITY_LOSS_MIN_T_KEY,
+    face_losses::IDENTITY_LOSS_MAX_T_KEY,
+    face_losses::IDENTITY_LOSS_EVERY_KEY,
+    face_losses::IDENTITY_LOSS_MIN_COS_KEY,
+    face_losses::IDENTITY_LOSS_REFERENCE_KEY,
+    face_losses::FACE_LANDMARK_LOSS_WEIGHT_KEY,
+    face_losses::FACE_LANDMARK_LOSS_MIN_T_KEY,
+    face_losses::FACE_LANDMARK_LOSS_MAX_T_KEY,
+    face_losses::FACE_LANDMARK_LOSS_EVERY_KEY,
+    latent_perceptual::VAE_ANCHOR.weight_key,
+    latent_perceptual::VAE_ANCHOR.min_t_key,
+    latent_perceptual::VAE_ANCHOR.max_t_key,
+    latent_perceptual::VAE_ANCHOR.every_key,
+    latent_perceptual::LATENT_LPIPS.weight_key,
+    latent_perceptual::LATENT_LPIPS.min_t_key,
+    latent_perceptual::LATENT_LPIPS.max_t_key,
+    latent_perceptual::LATENT_LPIPS.every_key,
+];
+
+fn target_limit_flag(target: &TrainingTarget, flag: &str) -> bool {
+    target.limits.get(flag).and_then(Value::as_bool) == Some(true)
+}
+
+/// Whether `target` advertises weight-noise support.
+pub fn target_supports_weight_noise(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, WEIGHT_NOISE_SUPPORT_LIMIT)
+}
+
+/// Whether `target` advertises gradient-noise support.
+pub fn target_supports_gradient_noise(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, GRADIENT_NOISE_SUPPORT_LIMIT)
+}
+
+/// Target `limits` flag: `true` when this target's native trainer on the serving platform honors
+/// [`RESOLUTION_BUCKETS_KEY`] (its `TrainerDescriptor::techniques.resolution_buckets`, sc-2127).
+/// Absent = no. The same mechanism as [`WEIGHT_NOISE_SUPPORT_LIMIT`]: the web form shows the
+/// buckets toggle only where this is `true`, submit-time validation refuses a bucket list
+/// elsewhere, and a worker test pins the flag to the linked trainer descriptors per platform.
+pub const RESOLUTION_BUCKETS_SUPPORT_LIMIT: &str = "supportsResolutionBuckets";
+
+/// Builtin targets whose trainer does NOT honor resolution buckets on any platform: LTX-2.5 trains
+/// on prepared latent packs whose geometry is fixed by the bundle, so there is no spatial edge to
+/// bucket. Every other builtin target advertises [`RESOLUTION_BUCKETS_SUPPORT_LIMIT`].
+const RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS: [&str; 1] = ["ltx_2_5_video_lora"];
+
+/// Whether `target` advertises resolution-bucket support.
+pub fn target_supports_resolution_buckets(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, RESOLUTION_BUCKETS_SUPPORT_LIMIT)
+}
+
+/// `advanced` key of the **multi-resolution buckets** list (epic 2123, sc-2127): an array of
+/// `{ "resolution": <px>, "repeats": <n> }` rows. Each dataset image is trained at every listed
+/// resolution, `repeats` times per epoch per row (ai-toolkit's `resolution` + `num_repeats` lists),
+/// so rows 512/768/1024 with repeats 16/4/1 train on a 16:4:1 per-image mix. Absent is off (one
+/// bucket at `resolution`, today's behaviour); present-but-empty is a field error.
+pub const RESOLUTION_BUCKETS_KEY: &str = "resolutionBuckets";
+/// Most bucket rows submit-time validation accepts — the engine's own cap
+/// (`gen_core::MAX_RESOLUTION_BUCKETS`; the worker pins the two together). The web form enforces the
+/// same bound (`resolutionBucketsMax` in `apps/web/src/training/trainingConfig.js`, parity-tested).
+pub const RESOLUTION_BUCKETS_MAX: usize = 8;
+/// Largest per-bucket repeat count submit-time validation accepts (web `resolutionBucketRepeatsMax`).
+/// Repeats are a per-image mix ratio; 100:1 is already far past any useful skew.
+pub const RESOLUTION_BUCKET_REPEATS_MAX: u64 = 100;
+/// Every bucket resolution must be a multiple of this (web `resolutionBucketStride`): the native
+/// trainers floor each training edge to a multiple of 32 so the latent grid tiles cleanly, so any
+/// other value would silently train at a different size than the one requested.
+pub const RESOLUTION_BUCKET_STRIDE: u64 = 32;
+
+/// One validated `advanced.resolutionBuckets` row (see [`RESOLUTION_BUCKETS_KEY`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolutionBucketSpec {
+    pub resolution: u32,
+    pub repeats: u32,
+}
+
+/// Parse and validate `advanced.resolutionBuckets` independent of any target: `Ok(None)` when the
+/// key is absent (off), otherwise a non-empty list of at most [`RESOLUTION_BUCKETS_MAX`] rows, each
+/// with an integer `resolution` (`> 0`, a multiple of [`RESOLUTION_BUCKET_STRIDE`], not repeated)
+/// and an integer `repeats` in `1..=`[`RESOLUTION_BUCKET_REPEATS_MAX`]. The error is a
+/// human-facing message for a field error on [`RESOLUTION_BUCKETS_KEY`]. The API's submit-time
+/// validation and the worker's strict preflight share this one parser.
+pub fn parse_resolution_buckets(
+    advanced: &serde_json::Map<String, Value>,
+) -> Result<Option<Vec<ResolutionBucketSpec>>, String> {
+    let Some(value) = technique_value(advanced, RESOLUTION_BUCKETS_KEY) else {
+        return Ok(None);
+    };
+    let rows = value.as_array().ok_or_else(|| {
+        format!("{RESOLUTION_BUCKETS_KEY} must be a list of {{resolution, repeats}} rows.")
+    })?;
+    if rows.is_empty() {
+        return Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} must list at least one resolution bucket (omit it to train \
+             at a single resolution)."
+        ));
+    }
+    if rows.len() > RESOLUTION_BUCKETS_MAX {
+        return Err(format!(
+            "{RESOLUTION_BUCKETS_KEY} has {} buckets; at most {RESOLUTION_BUCKETS_MAX} are allowed.",
+            rows.len()
+        ));
+    }
+    let mut buckets: Vec<ResolutionBucketSpec> = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let n = index + 1;
+        let row = row.as_object().ok_or_else(|| {
+            format!(
+                "{RESOLUTION_BUCKETS_KEY} row {n} must be an object with resolution and repeats."
+            )
+        })?;
+        let resolution = row
+            .get("resolution")
+            .and_then(Value::as_u64)
+            .filter(|value| *value > 0 && *value % RESOLUTION_BUCKET_STRIDE == 0)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{RESOLUTION_BUCKETS_KEY} row {n}: resolution must be a positive whole number \
+                     of pixels divisible by {RESOLUTION_BUCKET_STRIDE}."
+                )
+            })?;
+        let repeats = row
+            .get("repeats")
+            .and_then(Value::as_u64)
+            .filter(|value| (1..=RESOLUTION_BUCKET_REPEATS_MAX).contains(value))
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| {
+                format!(
+                    "{RESOLUTION_BUCKETS_KEY} row {n}: repeats must be a whole number between 1 \
+                     and {RESOLUTION_BUCKET_REPEATS_MAX}."
+                )
+            })?;
+        if buckets.iter().any(|bucket| bucket.resolution == resolution) {
+            return Err(format!(
+                "{RESOLUTION_BUCKETS_KEY} lists resolution {resolution} more than once."
+            ));
+        }
+        buckets.push(ResolutionBucketSpec {
+            resolution,
+            repeats,
+        });
+    }
+    Ok(Some(buckets))
+}
+
+/// The largest training resolution a config trains at: the largest
+/// [`RESOLUTION_BUCKETS_KEY`] row when buckets are set (they replace `resolution`), else
+/// `resolution`. Memory admission sizes for this (epic 2123 E7). A malformed bucket list falls back
+/// to `resolution` here only because plan validation refuses it before any job is queued.
+pub fn training_max_resolution(config: &TrainingConfig) -> u32 {
+    match parse_resolution_buckets(&config.advanced) {
+        Ok(Some(buckets)) => buckets
+            .iter()
+            .map(|bucket| bucket.resolution)
+            .max()
+            .unwrap_or(config.resolution),
+        _ => config.resolution,
+    }
+}
+
+/// `advanced` key of the annealed **gradient noise** initial scale `eta` (epic 2123, sc-24827):
+/// on every optimizer update `t` the native trainer adds `N(0,1) · eta / (1 + t)^gamma` to each
+/// adapter gradient (after the norm clip, before the step). Absent or `0` is off.
+pub const GRADIENT_NOISE_ETA_KEY: &str = "gradientNoiseEta";
+/// `advanced` key of the gradient-noise annealing exponent `gamma` (absent ⇒
+/// [`GRADIENT_NOISE_GAMMA_DEFAULT`]; only meaningful while eta is on).
+pub const GRADIENT_NOISE_GAMMA_KEY: &str = "gradientNoiseGamma";
+/// Inclusive upper bound for [`GRADIENT_NOISE_ETA_KEY`]. The web form enforces the identical bound
+/// (`gradientNoiseEtaMax` in `apps/web/src/training/trainingConfig.js`; a parity test pins them,
+/// epic 2123 E6). Ten times the upstream suggestion [`GRADIENT_NOISE_ETA_SUGGESTED`]: the noise is
+/// per element, so even 0.1 already dwarfs a unit-norm-clipped gradient on any real adapter.
+pub const GRADIENT_NOISE_ETA_MAX: f64 = 0.1;
+/// The upstream (ai-toolkit-perceptual `neelakantan` mode) suggested eta when enabled.
+pub const GRADIENT_NOISE_ETA_SUGGESTED: f64 = 0.01;
+/// Inclusive upper bound for [`GRADIENT_NOISE_GAMMA_KEY`] (web parity: `gradientNoiseGammaMax`).
+/// The annealed-noise analysis (Neelakantan et al. 2015, after Welling & Teh) needs `gamma <= 1`;
+/// larger exponents switch the noise off within a handful of updates.
+pub const GRADIENT_NOISE_GAMMA_MAX: f64 = 1.0;
+/// Default annealing exponent (the paper's and upstream's 0.55).
+pub const GRADIENT_NOISE_GAMMA_DEFAULT: f64 = 0.55;
+
+/// Body losses (epic 2123, sc-24832): ViTPose proportion, HybrIK shape and Sapiens normal losses —
+/// keys, bounds, the shared strict parser, support flags and auxiliary catalog models.
+pub mod body_losses;
+
+/// Depth anchoring (epic 2123, sc-2125): keys, bounds, the shared strict parser and the auxiliary
+/// catalog models.
+pub mod depth_anchoring;
+
+/// Face losses (epic 2123, sc-24831): the ArcFace identity loss and the FaceMesh landmark loss —
+/// keys, bounds, the shared strict parsers, support flags and auxiliary catalog models.
+pub mod face_losses;
+
+/// The latent-space perceptual losses (epic 2123, sc-24833): VAE anchor + E-LatentLPIPS keys,
+/// bounds, the shared strict parser, support flags and auxiliary catalog models.
+pub mod latent_perceptual;
+
+/// The de-distill training adapter (sc-25213): keys, the strict version→catalog-model parser, the
+/// support flag and the cataloged adapter files.
+pub mod training_adapter;
+
+/// Target `limits` flag: `true` when this target's native trainer honors subject-masked loss
+/// ([`SUBJECT_MASK_LOSS_KEY`], its `TrainerDescriptor::techniques.subject_mask_loss`). Absent = no.
+/// Every LoRA trainer declares it on both MLX and Candle except LTX-2.5 (prepared latent bundles)
+/// and the Krea ControlNet branch, so the flag is static per target and needs no Candle
+/// projection; a worker test pins it to the linked trainer descriptors on each platform. The web
+/// form shows the toggle only where this is `true`, and submit-time validation refuses mask loss
+/// elsewhere with a `subjectMaskLoss` field error.
+pub const SUBJECT_MASK_LOSS_SUPPORT_LIMIT: &str = "supportsSubjectMaskLoss";
+
+/// Whether `target` advertises subject-masked-loss support.
+pub fn target_supports_subject_mask_loss(target: &TrainingTarget) -> bool {
+    target_limit_flag(target, SUBJECT_MASK_LOSS_SUPPORT_LIMIT)
+}
+
+/// `advanced` key that turns on **subject-masked loss weighting** (epic 2123, sc-24828): each
+/// image's subject mask (`<dataset>/masks/<content hash>.png`, see
+/// [`crate::training_subject_masks`]) weights the native trainer's per-element loss. A boolean;
+/// absent or `false` is off.
+pub const SUBJECT_MASK_LOSS_KEY: &str = "subjectMaskLoss";
+/// `advanced` key of the loss weight of a pure-background latent cell, in
+/// `SUBJECT_MASK_BACKGROUND_WEIGHT_RANGE` (absent ⇒ [`SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_KEY: &str = "subjectMaskBackgroundWeight";
+/// `advanced` key of the loss weight of a pure-subject latent cell, `> 0` and at most
+/// [`SUBJECT_MASK_WEIGHT_MAX`] (absent ⇒ [`SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT`]).
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_KEY: &str = "subjectMaskSubjectWeight";
+/// Upper bound of both mask weights — the engine's `SubjectMaskLoss` bounds. The web form uses the
+/// identical bound (`subjectMaskWeightMax` in `apps/web/src/training/trainingConfig.js`; a parity
+/// test pins the two together, epic 2123 E6). The background weight may be `0` (drop the
+/// background); the subject weight must be `> 0`.
+pub const SUBJECT_MASK_WEIGHT_MAX: f64 = 1.0;
+/// Default background weight when masked loss is on: keep a little background signal so the
+/// adapter does not learn arbitrary backgrounds, while the subject dominates.
+pub const SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT: f64 = 0.1;
+/// Default subject weight when masked loss is on.
+pub const SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT: f64 = 1.0;
+
 string_enum! {
     /// Output modality of a training target. `Image` is the first production
     /// target; `Video` and `Audio` are reserved so the contract stays generic.
@@ -125,6 +445,19 @@ string_enum! {
     }
 }
 
+string_enum! {
+    /// How an auto caption was produced (epic 2123, sc-24829). `Default` is the captioner's
+    /// ordinary full-scene prompt; `SubjectOnly` asks the captioner to describe only the subject's
+    /// changeable attributes (clothing, expression, pose, accessories) so a character LoRA absorbs
+    /// the fixed identity into the trigger; `TriggerOnly` writes exactly the trigger words and loads
+    /// no captioner. Recorded on [`Caption::mode`] alongside `source: auto`.
+    pub enum CaptionMode {
+        Default => "default",
+        SubjectOnly => "subjectOnly",
+        TriggerOnly => "triggerOnly",
+    }
+}
+
 /// A training dataset: an ordered collection of captioned items owned and
 /// persisted by Rust (see story 1410 for the store).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +503,14 @@ pub struct TrainingDatasetItem {
     /// the plan item. A control-branch kernel (`krea_control`) requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// The ORDERED reference images of an instruction-edit pair (sc-24161, epic 24107): the source
+    /// image(s) the item's caption — its edit INSTRUCTION — edits or composes, in the order the
+    /// instruction names them ("Image 1" first). The item's own image (`path`) is the edit TARGET.
+    /// Empty for every captioned/control item (the default, and the only shape before sc-24161).
+    /// The order is semantic — the engine numbers the references — so it is stored and threaded
+    /// verbatim into the engine `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<TrainingDatasetReference>,
     pub display_name: String,
     pub caption: Caption,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,6 +534,24 @@ pub struct TrainingDatasetItem {
     pub extra: ExtraFields,
 }
 
+/// One stored reference image of an instruction-edit dataset item (sc-24161). Materialized into the
+/// dataset's own media dir exactly like the item image, so the dataset stays self-contained.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainingDatasetReference {
+    /// Source SceneWorks asset, when the reference was picked from the library.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    /// Path relative to the dataset root.
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+}
+
 /// Caption text and provenance for a dataset item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +559,10 @@ pub struct Caption {
     pub text: String,
     pub source: CaptionSource,
     pub trigger_words: Vec<String>,
+    /// The caption mode that produced an auto caption (sc-24829); `None` for manual/imported
+    /// captions and for auto captions written before modes existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<CaptionMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<String>,
     #[serde(flatten)]
@@ -418,6 +781,12 @@ pub struct TrainingPlanItem {
     /// `control_image_path`; a control-branch kernel requires it on every item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_image_path: Option<String>,
+    /// Absolute paths of an instruction-edit pair's ORDERED reference images (sc-24161) — empty for
+    /// a captioned/control item. For an edit pair `image_path` is the edit target and `caption` the
+    /// instruction. Threaded verbatim (order preserved) into the engine
+    /// `TrainingItem.reference_image_paths`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_image_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -477,7 +846,7 @@ pub struct TrainingProvenance {
 /// by common LoRA practice (and `ai-toolkit` as reference), not derived from
 /// any external config format.
 pub fn builtin_training_targets() -> TrainingTargetRegistry {
-    TrainingTargetRegistry {
+    let mut registry = TrainingTargetRegistry {
         schema_version: TRAINING_CONTRACT_SCHEMA_VERSION,
         targets: vec![
             z_image_turbo_lora_target(),
@@ -491,6 +860,8 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             sd3_large_lora_target(),
             sd3_medium_lora_target(),
             anima_base_lora_target(),
+            qwen_image_2_1_lora_target(),
+            qwen_image_2_1_edit_lora_target(),
             ltx_video_lora_target(),
             ltx_2_5_video_lora_target(),
             wan_lora_target(),
@@ -518,7 +889,48 @@ pub fn builtin_training_targets() -> TrainingTargetRegistry {
             ),
         ],
         extra: ExtraFields::new(),
+    };
+    // Epic 2123 latent-space perceptual losses (sc-24833): static per-target support flags
+    // (`latent_perceptual::{VAE_ANCHOR_TARGETS, LATENT_LPIPS_TARGETS}`), identical on both platforms.
+    for target in &mut registry.targets {
+        latent_perceptual::insert_limits(target);
     }
+    // Epic 2123 resolution buckets (sc-2127): every builtin target's trainer declares them except
+    // the ones listed in `RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS`.
+    for target in &mut registry.targets {
+        // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride
+        // the same shared perceptual builder arms and x0 decoder as depth anchoring, and every
+        // trainer that declares depth anchoring declares both — so each target advertising depth
+        // anchoring advertises them too (the worker drift test pins all three to the descriptors).
+        if depth_anchoring::target_supports_depth_anchoring(target) {
+            for key in [
+                face_losses::IDENTITY_LOSS_SUPPORT_LIMIT,
+                face_losses::FACE_LANDMARK_LOSS_SUPPORT_LIMIT,
+            ] {
+                target.limits.insert(key.to_owned(), Value::Bool(true));
+            }
+        }
+        if !RESOLUTION_BUCKETS_UNSUPPORTED_TARGETS.contains(&target.id.as_str()) {
+            target.limits.insert(
+                RESOLUTION_BUCKETS_SUPPORT_LIMIT.to_owned(),
+                Value::Bool(true),
+            );
+        }
+        // Epic 2123: the x0 decoder the decoded-x0 losses use, from the one trainer-keyed mapping
+        // the worker loads it by. Every builtin target has a trainer identity contract (pinned by
+        // the routing matrix tests), and the MLX and Candle trainers of a target share a latent
+        // family, so the MLX identity names the decoder on both platforms (a contract test pins
+        // that too).
+        let trainer = crate::jobs_store::expected_backend_local_trainer_id(target, "mlx")
+            .unwrap_or_else(|error| panic!("builtin training target: {error}"));
+        if let Some(decoder) = depth_anchoring::x0_decoder_for_trainer(trainer) {
+            target.limits.insert(
+                depth_anchoring::X0_DECODER_LIMIT.to_owned(),
+                depth_anchoring::x0_decoder_limit(decoder),
+            );
+        }
+    }
+    registry
 }
 
 /// The built-in training presets Rust owns out of the box.
@@ -530,6 +942,8 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
     let kolors_target = kolors_lora_target();
     let krea_target = krea_raw_lora_target();
     let anima_target = anima_base_lora_target();
+    let qwen_image_2_1_target = qwen_image_2_1_lora_target();
+    let qwen_image_2_1_edit_target = qwen_image_2_1_edit_lora_target();
     let wan_target = wan_lora_target();
     let wan_t2v_14b_target = wan_t2v_14b_lora_target();
     let wan_i2v_14b_target = wan_i2v_14b_lora_target();
@@ -1113,6 +1527,84 @@ pub fn builtin_training_presets() -> TrainingPresetRegistry {
                     "order": 30
                 })),
             ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.balanced",
+                "Character balanced",
+                &["character"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 12-25 clean character images on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.character.adamw8bit.conservative",
+                "Character conservative",
+                &["character"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 character preset for tight identity datasets.",
+                    "order": 20
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_target,
+                "qwen_image_2_1_lora.style.adamw8bit.balanced",
+                "Style balanced",
+                &["style"],
+                ("adamw8bit", "balanced"),
+                |mut config| {
+                    config.rank = 32;
+                    config.alpha = 16;
+                    config
+                },
+                object(json!({
+                    "description": "Higher-capacity Qwen Image 2.1 style LoRA for texture and look transfer.",
+                    "order": 30
+                })),
+            ),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the target defaults carry the flow-match
+            // knobs, so these only pick capacity/LR for an edit-pair dataset.
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.balanced",
+                "Edit balanced",
+                &["edit"],
+                ("adamw8bit", "balanced"),
+                |config| config,
+                object(json!({
+                    "description": "Balanced first run for 20-50 instruction-edit pairs (ordered references + target + instruction) on Qwen Image 2.1 (research/evaluation use only; the adapter inherits the Qwen RESEARCH licence).",
+                    "default": true,
+                    "order": 10
+                })),
+            ),
+            krea_preset(
+                &qwen_image_2_1_edit_target,
+                "qwen_image_2_1_edit_lora.edit.adamw8bit.conservative",
+                "Edit conservative",
+                &["edit"],
+                ("adamw8bit", "conservative"),
+                |mut config| {
+                    config.rank = 8;
+                    config.alpha = 8;
+                    config.learning_rate = number(0.00005);
+                    config
+                },
+                object(json!({
+                    "description": "Lower-rank, lower-LR Qwen Image 2.1 edit preset for small or tightly consistent edit-pair datasets.",
+                    "order": 20
+                })),
+            ),
         ],
         extra: ExtraFields::new(),
     }
@@ -1132,6 +1624,10 @@ where
 {
     let (optimizer, quality_preset) = optimizer_quality;
     let mut config = mutate(target.defaults.clone());
+    let mut ui = ui;
+    if recommended_for.contains(&"character") {
+        apply_z_image_character_techniques(target, &mut config, &mut ui);
+    }
     config.optimizer = optimizer.to_owned();
     config
         .advanced
@@ -1165,7 +1661,13 @@ where
         .insert("weightDecay".to_owned(), json!(0.0001));
     TrainingPreset {
         id: id.to_owned(),
-        version: 1,
+        // v2 (epic 2123, sc-2124): the character presets turned on resolution buckets and
+        // subject-masked loss, so a pinned v1 no longer describes their config.
+        version: if recommended_for.contains(&"character") {
+            2
+        } else {
+            1
+        },
         target_id: target.id.clone(),
         name: name.to_owned(),
         recommended_for: recommended_for
@@ -1178,6 +1680,113 @@ where
         ui,
         extra: ExtraFields::new(),
     }
+}
+
+/// The Z-Image character defaults chosen by the epic 2123 real-weight A/B (sc-2124): on a
+/// 76-image character dataset at 1024 px / 2000 steps, independent face likeness (w600k_r50
+/// cosine) rose from 0.328 (baseline) to 0.477 with resolution buckets, 0.402 with subject-masked
+/// loss, and 0.501 with both; every other technique scored at most 0.369, and depth anchoring
+/// hurt (0.172). So every Z-Image character preset trains with:
+///
+/// - **resolution buckets** — every target edge up to the preset's own resolution, smallest first,
+///   with the 2^k repeat skew (4:2:1 for 512/768/1024, 2:1 for a 768 preset's 512/768), the same
+///   ladder the A/B harness (`scripts/epic-2123-ab.mjs` `bucketLadder`) measured;
+/// - **subject-masked loss** at background weight 0.1, subject weight 1.0.
+///
+/// Missing subject masks never block a run: the API asks the worker to generate them with SAM3
+/// before training (`subjectMaskPrepass`, apps/rust-api `training_subject_mask_prepass`).
+fn apply_z_image_character_techniques(
+    target: &TrainingTarget,
+    config: &mut TrainingConfig,
+    ui: &mut JsonObject,
+) {
+    let ladder = z_image_character_bucket_ladder(target, config.resolution);
+    let edges = ladder
+        .iter()
+        .map(|(resolution, _)| resolution.to_string())
+        .collect::<Vec<_>>()
+        .join("/");
+    let repeats = ladder
+        .iter()
+        .map(|(_, repeats)| repeats.to_string())
+        .collect::<Vec<_>>()
+        .join(":");
+    config.advanced.insert(
+        RESOLUTION_BUCKETS_KEY.to_owned(),
+        Value::Array(
+            ladder
+                .iter()
+                .map(
+                    |(resolution, repeats)| json!({ "resolution": resolution, "repeats": repeats }),
+                )
+                .collect(),
+        ),
+    );
+    config
+        .advanced
+        .insert(SUBJECT_MASK_LOSS_KEY.to_owned(), json!(true));
+    config.advanced.insert(
+        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY.to_owned(),
+        json!(SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT),
+    );
+    config.advanced.insert(
+        SUBJECT_MASK_SUBJECT_WEIGHT_KEY.to_owned(),
+        json!(SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT),
+    );
+    let note = format!(
+        "Resolution buckets ({edges} ×{repeats}) and subject-masked loss are on: in a 76-image \
+         A/B they raised face likeness from 0.33 to 0.50. Missing subject masks are generated \
+         with SAM3 when training starts."
+    );
+    let description = match ui.get("description").and_then(Value::as_str) {
+        Some(existing) if !existing.is_empty() => format!("{existing} {note}"),
+        _ => note,
+    };
+    ui.insert("description".to_owned(), Value::String(description));
+}
+
+/// `(resolution, repeats)` rows of a character preset's bucket ladder (see
+/// [`apply_z_image_character_techniques`]): every resolution the target trains at up to and
+/// including `base`, smallest first, the smallest visited most (2^k). Climbs from `base` when
+/// fewer than two edges sit at or below it — the harness `bucketLadder` rule.
+fn z_image_character_bucket_ladder(target: &TrainingTarget, base: u32) -> Vec<(u32, u32)> {
+    let mut allowed = target
+        .limits
+        .get("resolutions")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_u64)
+                .filter_map(|value| u32::try_from(value).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    allowed.sort_unstable();
+    allowed.dedup();
+    let mut edges = allowed
+        .iter()
+        .copied()
+        .filter(|edge| *edge <= base)
+        .collect::<Vec<_>>();
+    if edges.len() < 2 {
+        edges = allowed
+            .iter()
+            .copied()
+            .filter(|edge| *edge >= base)
+            .collect();
+    }
+    assert!(
+        edges.len() >= 2,
+        "training target {} allows fewer than two resolutions for a bucket ladder",
+        target.id
+    );
+    let count = edges.len() as u32;
+    edges
+        .into_iter()
+        .enumerate()
+        .map(|(index, edge)| (edge, 1u32 << (count - 1 - index as u32)))
+        .collect()
 }
 
 fn sdxl_preset<F>(
@@ -1271,9 +1880,9 @@ where
     }
 }
 
-/// Build a Krea 2 LoRA preset. The flow-matching knobs (timestep sampling, Raw-base preview
-/// settings, gradient checkpointing, target modules) live on the target defaults, so the preset only
-/// overrides the optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/LR).
+/// Build a native flow-match image LoRA/LoKr preset (Krea 2 and Qwen Image 2.1 share this shape):
+/// the sampling + caching knobs live on the target defaults, so the preset overrides only the
+/// optimizer + quality label and whatever the `mutate` closure tweaks (rank/alpha/steps/LR).
 fn krea_preset<F>(
     target: &TrainingTarget,
     id: &str,
@@ -1392,7 +2001,22 @@ fn mage_flow_lora_target(
             // Order is adapter kinds first, then the non-adapter path.
             "networkTypes": ["lora", "lokr", "full"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -1469,7 +2093,23 @@ fn z_image_turbo_lora_target() -> TrainingTarget {
             // (LyCORIS Kronecker) is advertised on the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24826/sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-2125, sc-24830): declared on MLX and Candle alike.
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared on MLX and Candle alike.
+            "supportsSubjectMaskLoss": true,
+            // sc-25213: the ostris de-distill training adapter the presets select is honored by
+            // the Z-Image-Turbo trainer on MLX and Candle (pinned by a worker drift test).
+            "supportsTrainingAdapter": true
         })),
         ui: object(json!({
             "label": "Z-Image-Turbo LoRA",
@@ -1581,7 +2221,22 @@ fn lens_turbo_lora_target() -> TrainingTarget {
             // target modules above.
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Lens LoRA",
@@ -1683,7 +2338,22 @@ fn krea_raw_lora_target() -> TrainingTarget {
             // inference (the `mlx-gen-krea` trainer builds both; the apply path handles both).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
             // No `requiresBackend`/`appleSiliconOnly` markers: a Rust trainer runs on BOTH backends
             // (mlx on Apple Silicon, candle on Windows/Linux NVIDIA — sc-8614).
         })),
@@ -1871,7 +2541,22 @@ fn sd3_large_lora_target() -> TrainingTarget {
             // (the `mlx-gen-sd3` trainer builds both; `supports_lokr: true`).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Large LoRA",
@@ -1955,7 +2640,22 @@ fn sd3_medium_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "SD3.5 Medium LoRA",
@@ -2060,8 +2760,27 @@ fn ltx_lora_target(
         "batchSize": [1, 2],
         "networkTypes": ["lora"],
         "lrSchedulers": ["constant", "linear", "cosine"],
-        "outputScopes": ["project", "global"]
+        "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true
     }));
+    // Epic 2123 subject-masked loss (sc-24828): the LTX-2.3 trainer declares it on both backends;
+    // LTX-2.5 trains from prepared latent bundles, which no image mask can be aligned with, so its
+    // trainers refuse it and it is not advertised.
+    if !is_ltx_2_5 {
+        limits.insert(SUBJECT_MASK_LOSS_SUPPORT_LIMIT.to_owned(), json!(true));
+    }
+    // Epic 2123 depth anchoring (sc-24830): both LTX-2.3 and LTX-2.5 decode the video latent per
+    // frame through TAELTX2.3 (2.5's prepared bundles carry the clean video latent).
+    limits.insert(
+        depth_anchoring::DEPTH_ANCHORING_SUPPORT_LIMIT.to_owned(),
+        json!(true),
+    );
+    // Epic 2123 body losses (sc-24832): the same decoder arms, on both LTX-2.3 and LTX-2.5.
+    for loss in body_losses::BodyLoss::ALL {
+        limits.insert(loss.support_limit().to_owned(), json!(true));
+    }
     if is_ltx_2_5 {
         limits.insert("preparedBundleSchema".to_owned(), json!("ltx-prepared-v1"));
         limits.insert(
@@ -2210,7 +2929,22 @@ fn wan_lora_target() -> TrainingTarget {
             // by both single-DiT providers rather than filtered at install.
             "networkTypes": ["lora"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Wan2.2 Video LoRA",
@@ -2296,7 +3030,22 @@ fn wan_moe_lora_target(
                 json!(["lora"])
             },
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": name,
@@ -2409,7 +3158,22 @@ fn sdxl_lora_target() -> TrainingTarget {
             // the validated native image backends (epic 2193).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Stable Diffusion XL LoRA",
@@ -2490,7 +3254,22 @@ fn illustrious_xl_v1_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v1.0 LoRA",
@@ -2561,7 +3340,22 @@ fn illustrious_xl_v2_lora_target() -> TrainingTarget {
             "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Illustrious-XL v2.0 LoRA",
@@ -2642,7 +3436,22 @@ fn kolors_lora_target() -> TrainingTarget {
             // LoKr save + PEFT-injection inference path (epic 2193, sc-2217).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Kolors LoRA",
@@ -2716,6 +3525,13 @@ pub enum TrainingPlanError {
     /// client. Kept structured so the API can return a field-specific error
     /// without scraping a human-facing sentence.
     TargetLimit(TrainingTargetLimitError),
+    /// A config field holds an invalid value (wrong type, out of range, or an incompatible
+    /// combination). Names the request `field` so the API returns a field-level error.
+    InvalidField { field: String, message: String },
+    /// The dataset's shape does not fit the target — an instruction-edit dataset (items carrying
+    /// ordered reference images, sc-24161) on a target that cannot train edits, a mixed or
+    /// over-cap edit dataset, or a plain dataset on an edit-only target. Human-facing reason.
+    InvalidDataset(String),
 }
 
 /// A target-advertised limit rejected while normalizing a training request.
@@ -2811,8 +3627,11 @@ impl std::fmt::Display for TrainingPlanError {
             Self::EmptyDataset => {
                 formatter.write_str("Training dataset has no items. Add at least one image.")
             }
-            Self::InvalidConfig(detail) => formatter.write_str(detail),
+            Self::InvalidConfig(detail) | Self::InvalidDataset(detail) => {
+                formatter.write_str(detail)
+            }
             Self::TargetLimit(error) => error.fmt(formatter),
+            Self::InvalidField { message, .. } => formatter.write_str(message),
         }
     }
 }
@@ -2829,6 +3648,7 @@ pub fn build_training_plan(
     if input.dataset.items.is_empty() {
         return Err(TrainingPlanError::EmptyDataset);
     }
+    validate_dataset_shape_for_target(input.target, input.dataset)?;
 
     let trigger_words = match input.config.trigger_word.as_deref().map(str::trim) {
         Some(word) if !word.is_empty() => vec![word.to_owned()],
@@ -2861,6 +3681,13 @@ pub fn build_training_plan(
                     .as_deref()
                     .map(|path| resolve_item_path(input.dataset_root, path))
                     .transpose()?,
+                // Instruction-edit pairs (sc-24161): the ordered references resolve exactly like
+                // the target image, in stored order — the order is semantic to the engine.
+                reference_image_paths: item
+                    .references
+                    .iter()
+                    .map(|reference| resolve_item_path(input.dataset_root, &reference.path))
+                    .collect::<Result<Vec<_>, _>>()?,
             })
         })
         .collect::<Result<Vec<_>, TrainingPlanError>>()?;
@@ -2984,6 +3811,155 @@ fn resolve_item_path(
     Ok(path.display().to_string())
 }
 
+/// The target limit naming how many ORDERED reference images one instruction-edit item may carry
+/// (sc-24161). A scalar, not a numeric range, so the advertised-numeric-limit validator skips it
+/// and [`validate_dataset_shape_for_target`] enforces it against the dataset instead.
+pub const MAX_REFERENCE_IMAGES_LIMIT: &str = "maxReferenceImages";
+
+/// How many ordered reference images one instruction-edit training item may carry for `target`
+/// (`limits.maxReferenceImages`), or `0` when the target cannot train on edit pairs at all — every
+/// target before sc-24161. For Qwen Image 2.1 this mirrors the base model's own
+/// `limits.maxReferenceAssets` (10) and the engine trainer's `max_reference_images`; the contract
+/// tests pin all three together so the cap is never a second, drifting number.
+pub fn training_target_max_reference_images(target: &TrainingTarget) -> u32 {
+    target
+        .limits
+        .get(MAX_REFERENCE_IMAGES_LIMIT)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap_or(0)
+}
+
+/// Whether `target` trains on instruction-edit pairs (its reference cap is non-zero, sc-24161).
+pub fn training_target_trains_edit_pairs(target: &TrainingTarget) -> bool {
+    training_target_max_reference_images(target) > 0
+}
+
+/// The largest per-item reference count any shipped training target accepts — the dataset store's
+/// storage ceiling (a dataset is target-agnostic until a run picks a target, so the per-target cap
+/// is enforced at plan time; this only stops a dataset from holding references no target could use).
+pub fn max_training_reference_images() -> u32 {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .map(training_target_max_reference_images)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether a worker kernel trains instruction-edit pairs: some builtin target routed to it declares a
+/// non-zero reference cap (sc-24161). Kernel-keyed, not target-keyed, because a raw job / resolved
+/// plan is dispatched by kernel — and the T2I and edit kernels share one engine trainer, so the
+/// kernel is the only thing that says which mode a plan may train. A future edit kernel inherits
+/// this by declaring `limits.maxReferenceImages` on its target.
+pub fn training_kernel_trains_edit_pairs(kernel: &str) -> bool {
+    builtin_training_targets()
+        .targets
+        .iter()
+        .any(|target| target.kernel == kernel && training_target_trains_edit_pairs(target))
+}
+
+/// The kernel-level edit-pair shape floor (sc-24161) for an already-resolved plan, given each item's
+/// reference count in order: an edit kernel needs references on EVERY item, any other kernel on
+/// NONE. Returns the human-facing refusal, or `None`. The worker applies it to every plan and the
+/// API's raw job route to every hand-built one, so a plan that bypassed the typed route's
+/// target-level check can never train an edit adapter under the T2I target (or T2I under the edit
+/// target) just because both kernels share the `qwen_image_2_1` engine trainer.
+pub fn edit_pair_kernel_shape_error(
+    kernel: &str,
+    reference_counts: impl IntoIterator<Item = usize>,
+) -> Option<String> {
+    let edit_kernel = training_kernel_trains_edit_pairs(kernel);
+    reference_counts
+        .into_iter()
+        .enumerate()
+        .find_map(|(index, count)| match (edit_kernel, count) {
+            (true, 0) => Some(format!(
+                "Training kernel '{kernel}' trains instruction-edit pairs, but plan item {index} \
+                 has no referenceImagePaths."
+            )),
+            (false, count) if count > 0 => Some(format!(
+                "Training kernel '{kernel}' trains captioned images only, but plan item {index} \
+                 carries {count} referenceImagePaths (an instruction-edit pair)."
+            )),
+            _ => None,
+        })
+}
+
+/// The dataset-shape floor for a target (sc-24161), mirroring the engine's
+/// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
+///
+/// - a target that cannot train edits refuses any item carrying references (never a text-to-image
+///   adapter silently trained on the edit targets);
+/// - an edit target refuses a mixed dataset (every item needs 1..=cap references), an item with
+///   more references than the cap (the message names the cap), an item that is both an edit and a
+///   control pair, and an edit pair with an empty instruction caption.
+fn validate_dataset_shape_for_target(
+    target: &TrainingTarget,
+    dataset: &TrainingDataset,
+) -> Result<(), TrainingPlanError> {
+    let cap = training_target_max_reference_images(target);
+    let label = |item: &TrainingDatasetItem| {
+        if item.display_name.trim().is_empty() {
+            item.id.clone()
+        } else {
+            item.display_name.clone()
+        }
+    };
+    if cap == 0 {
+        if let Some(item) = dataset
+            .items
+            .iter()
+            .find(|item| !item.references.is_empty())
+        {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on captioned images only, but dataset item '{}' is an \
+                 instruction-edit pair (it carries reference images). Pick an edit training target \
+                 or remove the references.",
+                target.id,
+                label(item)
+            )));
+        }
+        return Ok(());
+    }
+    for item in &dataset.items {
+        let count = item.references.len();
+        if count == 0 {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Training target '{}' trains on instruction-edit pairs: every dataset item needs at \
+                 least one reference image, but '{}' has none. Add its references (the target is \
+                 the item's image and the caption is the edit instruction), or use a \
+                 text-to-image target for a captioned dataset.",
+                target.id,
+                label(item)
+            )));
+        }
+        if count > cap as usize {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries {count} reference images, but {} accepts at most {cap} \
+                 reference images per edit.",
+                label(item),
+                target.name
+            )));
+        }
+        if item.control_image_path.is_some() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' carries both reference images (an edit pair) and a control \
+                 image (a control pair); an item is one or the other.",
+                label(item)
+            )));
+        }
+        if item.caption.text.trim().is_empty() {
+            return Err(TrainingPlanError::InvalidDataset(format!(
+                "Dataset item '{}' is an edit pair with an empty instruction: its caption is the \
+                 edit instruction.",
+                label(item)
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_training_config_for_target(
     target: &TrainingTarget,
     config: &TrainingConfig,
@@ -2991,6 +3967,14 @@ pub fn validate_training_config_for_target(
     validate_advertised_numeric_limits(target, config)?;
     validate_advertised_optimizer_limit(target, config)?;
     validate_training_config(config)?;
+    validate_resolution_buckets_for_target(target, config)?;
+    validate_technique_support(target, config)?;
+    depth_anchoring::validate_support(target, config)?;
+    body_losses::validate_support(target, config)?;
+    face_losses::validate_support(target, config)?;
+    latent_perceptual::validate_support(target, config)?;
+    training_adapter::validate_support(target, config)?;
+    validate_subject_mask_loss_support(target, config)?;
     let network_type = match config.advanced.get("networkType") {
         None => "lora",
         Some(Value::String(value)) if value.trim().is_empty() => "lora",
@@ -3072,6 +4056,22 @@ fn validate_advertised_numeric_limits(
 ) -> Result<(), TrainingPlanError> {
     for (field, advertised) in &target.limits {
         if !contains_json_number(advertised) {
+            continue;
+        }
+        // A dataset-shape limit, not a request field: the edit-pair reference cap (sc-24161) is
+        // enforced against the dataset by `validate_dataset_shape_for_target`. It must still be a
+        // non-negative integer, so a malformed advertisement is refused rather than read as 0.
+        if field == MAX_REFERENCE_IMAGES_LIMIT {
+            if advertised
+                .as_u64()
+                .and_then(|value| u32::try_from(value).ok())
+                .is_none()
+            {
+                return Err(invalid_advertised_limit(
+                    field,
+                    "the reference-image cap must be a non-negative integer",
+                ));
+            }
             continue;
         }
         let values = advertised.as_array().ok_or_else(|| {
@@ -3253,6 +4253,284 @@ fn validate_training_config(config: &TrainingConfig) -> Result<(), TrainingPlanE
         ));
     }
     validate_lr_scheduler(config)?;
+    validate_weight_noise(config)?;
+    validate_gradient_noise(config)?;
+    parse_resolution_buckets(&config.advanced).map_err(|message| {
+        TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message,
+        }
+    })?;
+    depth_anchoring::validate(config)?;
+    body_losses::validate(config)?;
+    face_losses::validate(config)?;
+    latent_perceptual::validate(config)?;
+    validate_subject_mask_loss(config)?;
+    Ok(())
+}
+
+/// Which technique of `advanced` reads the per-image subject masks (sc-2124): `Some(field)` naming
+/// the field that turned it on — [`SUBJECT_MASK_LOSS_KEY`] for subject-masked loss, else
+/// `normalRestrictToSubject` for the subject-restricted normal loss (sc-24832) — or `None` when the
+/// run reads no mask. The API (which has missing masks generated before training) and the worker
+/// (which refuses a run still missing one) share this rule.
+pub fn subject_mask_consumer(
+    advanced: &JsonObject,
+) -> Result<Option<&'static str>, TrainingPlanError> {
+    if subject_mask_loss_weights(advanced)?.is_some() {
+        return Ok(Some(SUBJECT_MASK_LOSS_KEY));
+    }
+    let body = body_losses::body_loss_settings(advanced)?;
+    Ok((body.normal.is_some() && body.normal_restrict_to_subject)
+        .then_some(body_losses::NORMAL_RESTRICT_TO_SUBJECT_KEY))
+}
+
+/// The resolved subject-masked-loss weights `(background, subject)` of `config`'s `advanced` bag
+/// (epic 2123, sc-24828): `Ok(None)` when [`SUBJECT_MASK_LOSS_KEY`] is absent or `false`; else
+/// each weight (defaulted when absent) range-checked. Every failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field. Shared by submit-time validation and the
+/// worker, so the two cannot disagree on defaults or bounds.
+pub fn subject_mask_loss_weights(
+    advanced: &JsonObject,
+) -> Result<Option<(f64, f64)>, TrainingPlanError> {
+    let field_error = |field: &str, message: String| TrainingPlanError::InvalidField {
+        field: field.to_owned(),
+        message,
+    };
+    let enabled = match technique_value(advanced, SUBJECT_MASK_LOSS_KEY) {
+        None => false,
+        Some(Value::Bool(on)) => *on,
+        Some(_) => {
+            return Err(field_error(
+                SUBJECT_MASK_LOSS_KEY,
+                format!("{SUBJECT_MASK_LOSS_KEY} must be true or false."),
+            ))
+        }
+    };
+    let weight = |key: &str, default: f64, zero_ok: bool| -> Result<f64, TrainingPlanError> {
+        let Some(value) = technique_value(advanced, key) else {
+            return Ok(default);
+        };
+        let weight = value
+            .as_f64()
+            .filter(|weight| weight.is_finite())
+            .ok_or_else(|| field_error(key, format!("{key} must be a number.")))?;
+        let in_range = if zero_ok {
+            (0.0..=SUBJECT_MASK_WEIGHT_MAX).contains(&weight)
+        } else {
+            weight > 0.0 && weight <= SUBJECT_MASK_WEIGHT_MAX
+        };
+        if !in_range {
+            let range = if zero_ok {
+                format!("between 0 and {SUBJECT_MASK_WEIGHT_MAX}")
+            } else {
+                format!("greater than 0 and at most {SUBJECT_MASK_WEIGHT_MAX}")
+            };
+            return Err(field_error(
+                key,
+                format!("{key} ({weight}) must be {range}."),
+            ));
+        }
+        Ok(weight)
+    };
+    // The weights are range-checked even while the toggle is off, so a stored out-of-range value
+    // never lies dormant until someone flips the switch.
+    let background = weight(
+        SUBJECT_MASK_BACKGROUND_WEIGHT_KEY,
+        SUBJECT_MASK_BACKGROUND_WEIGHT_DEFAULT,
+        true,
+    )?;
+    let subject = weight(
+        SUBJECT_MASK_SUBJECT_WEIGHT_KEY,
+        SUBJECT_MASK_SUBJECT_WEIGHT_DEFAULT,
+        false,
+    )?;
+    Ok(enabled.then_some((background, subject)))
+}
+
+/// Refuses subject-masked loss on a target that does not advertise
+/// [`SUBJECT_MASK_LOSS_SUPPORT_LIMIT`] — a `subjectMaskLoss` field error at submit time instead of a
+/// refusal after the job is queued (for a control target, after its condition render). Runs after
+/// [`validate_subject_mask_loss`], so the keys are already well-formed here.
+fn validate_subject_mask_loss_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    if subject_mask_loss_weights(&config.advanced)?.is_some()
+        && !target_supports_subject_mask_loss(target)
+    {
+        return Err(TrainingPlanError::InvalidField {
+            field: SUBJECT_MASK_LOSS_KEY.to_owned(),
+            message: format!(
+                "{} does not support subject-masked loss ({SUBJECT_MASK_LOSS_KEY}).",
+                target.name
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Validates the subject-masked-loss keys (epic 2123 E6) — see [`subject_mask_loss_weights`].
+fn validate_subject_mask_loss(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    subject_mask_loss_weights(&config.advanced).map(|_| ())
+}
+
+/// Target half of the `advanced.resolutionBuckets` validation (epic 2123 sc-2127, E6): every bucket
+/// resolution must be one the target advertises in `limits.resolutions` (the same menu `resolution`
+/// is held to), as a field error naming [`RESOLUTION_BUCKETS_KEY`]. The structural checks already
+/// ran in [`validate_training_config`].
+fn validate_resolution_buckets_for_target(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    let Ok(Some(buckets)) = parse_resolution_buckets(&config.advanced) else {
+        return Ok(());
+    };
+    // The target's trainer on this platform must declare buckets (sc-2127 review): refuse here, at
+    // submit, instead of queueing a job the worker preflight then refuses (E3/E6).
+    if !target_supports_resolution_buckets(target) {
+        return Err(TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message: format!(
+                "{} does not support multi-resolution buckets ({RESOLUTION_BUCKETS_KEY}) on this \
+                 platform.",
+                target.name
+            ),
+        });
+    }
+    let Some(allowed) = target.limits.get("resolutions").and_then(Value::as_array) else {
+        return Ok(());
+    };
+    let allowed = numeric_limit_values("resolutions", allowed)?;
+    if let Some(bucket) = buckets
+        .iter()
+        .find(|bucket| !allowed.contains(&u64::from(bucket.resolution)))
+    {
+        let allowed = allowed
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(TrainingPlanError::InvalidField {
+            field: RESOLUTION_BUCKETS_KEY.to_owned(),
+            message: format!(
+                "{RESOLUTION_BUCKETS_KEY}: {} does not train at {}px. Supported resolutions: \
+                 {allowed}.",
+                target.name, bucket.resolution
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Refuses a non-zero `advanced.weightNoiseSigma` / `gradientNoiseEta` on a target that does not
+/// advertise [`WEIGHT_NOISE_SUPPORT_LIMIT`] / [`GRADIENT_NOISE_SUPPORT_LIMIT`] — a field error at
+/// submit time instead of a refusal after the job is queued. Runs after [`validate_weight_noise`]
+/// and [`validate_gradient_noise`], so the values are already valid numbers here.
+fn validate_technique_support(
+    target: &TrainingTarget,
+    config: &TrainingConfig,
+) -> Result<(), TrainingPlanError> {
+    for (key, supported, technique) in [
+        (
+            WEIGHT_NOISE_SIGMA_KEY,
+            target_supports_weight_noise(target),
+            "weight noise",
+        ),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            target_supports_gradient_noise(target),
+            "gradient noise",
+        ),
+    ] {
+        let value = technique_value(&config.advanced, key)
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0);
+        if value > 0.0 && !supported {
+            return Err(TrainingPlanError::InvalidField {
+                field: key.to_owned(),
+                message: format!(
+                    "{} does not support {technique} ({key}) on this platform.",
+                    target.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Validates `advanced.weightNoiseSigma` (epic 2123 weight noising): when present it must be a
+/// finite number in `0..=`[`WEIGHT_NOISE_SIGMA_MAX`], and a non-zero value cannot be combined with
+/// a full base fine-tune — weight noise perturbs adapter factors only (E5). Each failure is a
+/// [`TrainingPlanError::InvalidField`] naming the field.
+fn validate_weight_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let Some(value) = technique_value(&config.advanced, WEIGHT_NOISE_SIGMA_KEY) else {
+        return Ok(());
+    };
+    let field_error = |message: String| TrainingPlanError::InvalidField {
+        field: WEIGHT_NOISE_SIGMA_KEY.to_owned(),
+        message,
+    };
+    let sigma = value
+        .as_f64()
+        .filter(|sigma| sigma.is_finite())
+        .ok_or_else(|| field_error(format!("{WEIGHT_NOISE_SIGMA_KEY} must be a number.")))?;
+    if !(0.0..=WEIGHT_NOISE_SIGMA_MAX).contains(&sigma) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} ({sigma}) must be between 0 and {WEIGHT_NOISE_SIGMA_MAX}."
+        )));
+    }
+    if sigma > 0.0 && config_is_full_finetune(config) {
+        return Err(field_error(format!(
+            "{WEIGHT_NOISE_SIGMA_KEY} perturbs adapter weights only and cannot be combined with \
+             networkType '{NETWORK_TYPE_FULL}'."
+        )));
+    }
+    Ok(())
+}
+
+/// Reads an optional finite number in `0..=max` from `advanced[key]` (absent ⇒ `None`), as a
+/// field-level [`TrainingPlanError::InvalidField`] on any other value.
+fn advanced_bounded_number(
+    config: &TrainingConfig,
+    key: &str,
+    max: f64,
+) -> Result<Option<f64>, TrainingPlanError> {
+    let Some(value) = technique_value(&config.advanced, key) else {
+        return Ok(None);
+    };
+    let field_error = |message: String| TrainingPlanError::InvalidField {
+        field: key.to_owned(),
+        message,
+    };
+    let number = value
+        .as_f64()
+        .filter(|number| number.is_finite())
+        .ok_or_else(|| field_error(format!("{key} must be a number.")))?;
+    if !(0.0..=max).contains(&number) {
+        return Err(field_error(format!(
+            "{key} ({number}) must be between 0 and {max}."
+        )));
+    }
+    Ok(Some(number))
+}
+
+/// Validates `advanced.gradientNoiseEta` / `gradientNoiseGamma` (epic 2123 gradient noise,
+/// sc-24827): each, when present, a finite number within its bound ([`GRADIENT_NOISE_ETA_MAX`],
+/// [`GRADIENT_NOISE_GAMMA_MAX`]); a non-zero eta cannot be combined with a full base fine-tune —
+/// the noise perturbs adapter gradients only (E5). Each failure names its field.
+fn validate_gradient_noise(config: &TrainingConfig) -> Result<(), TrainingPlanError> {
+    let eta = advanced_bounded_number(config, GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX)?;
+    advanced_bounded_number(config, GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX)?;
+    if eta.is_some_and(|eta| eta > 0.0) && config_is_full_finetune(config) {
+        return Err(TrainingPlanError::InvalidField {
+            field: GRADIENT_NOISE_ETA_KEY.to_owned(),
+            message: format!(
+                "{GRADIENT_NOISE_ETA_KEY} perturbs adapter gradients only and cannot be combined \
+                 with networkType '{NETWORK_TYPE_FULL}'."
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -3367,7 +4645,22 @@ fn anima_base_lora_target() -> TrainingTarget {
             // LoKr through the shared `apply_anima_adapters` seam (sc-10521).
             "networkTypes": ["lora", "lokr"],
             "lrSchedulers": ["constant", "linear", "cosine"],
-            "outputScopes": ["project", "global"]
+            "outputScopes": ["project", "global"],
+            // Epic 2123 adapter noise (sc-24827): declared by the trainer on both backends.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            // Epic 2123 depth anchoring (sc-24830): declared by this target's trainer on MLX and
+            // Candle alike (pinned per platform by a worker drift test).
+            "supportsDepthAnchoring": true,
+            // Epic 2123 body losses (sc-24832): every trainer that decodes x0 for depth anchoring
+            // also declares the three body losses (same builder arms; ViTPose+, HybrIK and Sapiens
+            // are cataloged).
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            // Epic 2123 subject-masked loss (sc-24828): declared by this target's trainer on
+            // both MLX and Candle (pinned per platform by a worker drift test).
+            "supportsSubjectMaskLoss": true
         })),
         ui: object(json!({
             "label": "Anima LoRA",
@@ -3376,6 +4669,203 @@ fn anima_base_lora_target() -> TrainingTarget {
         })),
         extra: ExtraFields::new(),
     }
+}
+
+/// The SceneWorks LoRA family a Qwen Image 2.1 adapter is labelled with (epic 24107 E10). Distinct
+/// from the 2512 `qwen-image` family on purpose: a 2.1 adapter is never offered to 2512 nor the
+/// reverse (`lora_family.rs`, sc-24156).
+pub const QWEN_IMAGE_2_1_LORA_FAMILY: &str = "qwen-image-2-1";
+
+/// The licence every Qwen Image 2.1 derivative — so every adapter trained from it — carries (epic
+/// 24107 E12). The API records it on the trained adapter's library entry.
+pub const QWEN_IMAGE_2_1_LICENSE: &str = "Qwen RESEARCH LICENSE AGREEMENT";
+
+/// The pinned licence text the 2.1 manifest entry links (same revision as its bf16 download).
+pub const QWEN_IMAGE_2_1_LICENSE_URL: &str =
+    "https://huggingface.co/Qwen/Qwen-Image-2.1/blob/790c92633540aa0cb11d9abf19eb46d861714758/LICENSE";
+
+/// Qwen Image 2.1 text-to-image LoRA/LoKr training (epic 24107 S11, sc-24159).
+///
+/// Trains on the DENSE BF16 base only — the upstream `Qwen/Qwen-Image-2.1` diffusers snapshot, the
+/// same flat tree the catalog installs as the `bf16` tier. QLoRA against the SceneWorks q8/q4
+/// re-host (`SceneWorks/qwen-image-2-1-mlx`) is an epic non-goal, so a host with only a quantized
+/// tier installed is refused before the run with "install the bf16 tier" (the API's
+/// `TrainingTierMissing` arm), never a silent failure at load.
+///
+/// The `qwen_image_2_1_lora` kernel maps to the engine trainer registered under the inference
+/// generator id of the training base, `qwen_image_2_1` — the convention every native trainer follows
+/// (the worker's `engine_trainer_id_for`). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` (MLX trainer) and `CANDLE_ROUTED_TRAINING_KERNELS` (Candle trainer,
+/// sc-24160), and stays in the native-only `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses
+/// it. On candle the worker forces gradient checkpointing on (dense-backward OOM class).
+///
+/// Licensing (E12): the base is governed by the Qwen RESEARCH LICENSE AGREEMENT (non-commercial —
+/// research/evaluation use only) and an adapter trained from it is a derivative that inherits it.
+/// `ui.requiresLicenseAcknowledgment` makes the Training Studio show `ui.licenseNotice` and require
+/// an explicit acceptance before Start training; the API refuses a real run without
+/// `licenseAcknowledged: true`; and the trained adapter's library entry records the base model and
+/// `ui.license`.
+///
+/// No `loraTargetModules` default: the engine trainer's own default target set over the 2.1 adapter
+/// host applies (no other model's module list is borrowed). No training memory numbers are declared
+/// here either (E13) — the engine trainer's memory preflight owns that, from 2.1's own contract.
+fn qwen_image_2_1_lora_target() -> TrainingTarget {
+    TrainingTarget {
+        id: "qwen_image_2_1_lora".to_owned(),
+        name: "Qwen Image 2.1 LoRA".to_owned(),
+        modality: TrainingModality::Image,
+        output_kind: TrainingOutputKind::Lora,
+        family: QWEN_IMAGE_2_1_LORA_FAMILY.to_owned(),
+        base_model: "qwen_image_2_1".to_owned(),
+        // The bf16 tier IS the upstream snapshot (the converter refuses to emit a `bf16/` subdir), so
+        // the dense training base is this repo, flat — never the q8/q4 SceneWorks re-host.
+        base_model_repo: Some("Qwen/Qwen-Image-2.1".to_owned()),
+        kernel: "qwen_image_2_1_lora".to_owned(),
+        defaults: TrainingConfig {
+            rank: 16,
+            alpha: 16,
+            learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
+            steps: 3000,
+            batch_size: 1,
+            gradient_accumulation: 1,
+            resolution: 1024,
+            save_every: 250,
+            seed: 42,
+            // MLX training aliases `adamw8bit` → AdamW (bitsandbytes 8-bit is CUDA-only); the label
+            // stays consistent with the other native image targets (the engine normalizes it).
+            optimizer: "adamw8bit".to_owned(),
+            trigger_word: None,
+            advanced: object(json!({
+                "mixedPrecision": "bf16",
+                // Latents and the Qwen3-VL caption features are cached once, then the text tower is
+                // dropped for the step loop.
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "gradientCheckpointing": true,
+                "networkType": "lora",
+                // 2.1 is an undistilled base trained over the full flow-match schedule, so noise
+                // sampling is neutral (no few-step high-noise tilt like the Turbo families).
+                "timestepType": "sigmoid",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "weightDecay": 0.0001,
+                "lrScheduler": "constant",
+                // Previews render on the loaded base with 2.1's own catalog defaults (40 steps,
+                // guidance 1.0 — true CFG engages only with a negative prompt). Heavy, so a wide
+                // cadence by default.
+                "sampleEvery": 500,
+                "sampleSteps": 40,
+                "sampleGuidanceScale": 1.0,
+                "qualityPreset": "balanced",
+                "outputScope": "project",
+                "requestedGpu": "auto"
+            })),
+            extra: ExtraFields::new(),
+        },
+        limits: object(json!({
+            "rank": [4, 128],
+            "alpha": [1, 128],
+            "steps": [200, 6000],
+            "resolutions": [768, 1024, 1536],
+            "batchSize": [1, 4],
+            "optimizers": ["adamw8bit", "adamw", "adam", "prodigyopt", "rose"],
+            // Both round-trip the 2.1 adapter host at inference (sc-24156).
+            "networkTypes": ["lora", "lokr"],
+            "lrSchedulers": ["constant", "linear", "cosine"],
+            "outputScopes": ["project", "global"],
+            // Epic 2123: the Qwen Image 2.1 trainer declares adapter noise, depth anchoring, the
+            // three body losses and subject-masked loss on MLX and Candle alike (pinned per platform
+            // by the worker drift tests); its decoded-x0 losses decode through TAEQI2.1. The face
+            // losses follow depth anchoring, and resolution buckets / the VAE anchor are stamped in
+            // `builtin_training_targets`. No E-LatentLPIPS (no published weights for this latent
+            // family) and no training adapter.
+            "supportsWeightNoise": true,
+            "supportsGradientNoise": true,
+            "supportsDepthAnchoring": true,
+            "supportsBodyProportionLoss": true,
+            "supportsBodyShapeLoss": true,
+            "supportsNormalLoss": true,
+            "supportsSubjectMaskLoss": true
+        })),
+        ui: object(json!({
+            "label": "Qwen Image 2.1 LoRA",
+            "description": "Train a text-to-image LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base (install the bf16 tier; the quantized q8/q4 tiers cannot be trained). Apple Silicon (native MLX) or Windows/Linux NVIDIA (candle/CUDA). Research/evaluation use only under the Qwen RESEARCH licence.",
+            "recommendedFor": ["character", "style"],
+            "datasetModality": "image",
+            "license": QWEN_IMAGE_2_1_LICENSE,
+            "licenseUrl": QWEN_IMAGE_2_1_LICENSE_URL,
+            "licenseNotice": "Qwen Image 2.1 is licensed under the Qwen RESEARCH LICENSE AGREEMENT: non-commercial use only, meaning research or evaluation. An adapter you train from it is a derivative of the model and inherits that restriction — it may not be used commercially without a separate commercial licence from Hangzhou Tongyi Laboratory. If you distribute a trained adapter you must include a copy of the Agreement, prominently display \"Built with Qwen\" or \"Improved using Qwen\" in its documentation, and not use \"Qwen\" as its primary name.",
+            "requiresLicenseAcknowledgment": true
+        })),
+        extra: ExtraFields::new(),
+    }
+}
+
+/// How many ordered reference images one Qwen Image 2.1 instruction-edit training item may carry
+/// (sc-24161). The SAME fact as the base model's `limits.maxReferenceAssets` in the builtin manifest
+/// and the engine 2.1 trainer's `TrainerDescriptor::max_reference_images` — the contract tests pin
+/// the three together, so this is never a second, drifting number.
+pub const QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES: u32 = 10;
+
+/// Qwen Image 2.1 instruction-EDIT LoRA/LoKr training (epic 24107 S13, sc-24161).
+///
+/// The same dense bf16 base, licence gate, adapter family (`qwen-image-2-1`) and LoRA/LoKr network
+/// types as the text-to-image [`qwen_image_2_1_lora_target`], but trained on instruction-edit
+/// PAIRS: every dataset item is an edit TARGET image (the item image) + its edit INSTRUCTION (the
+/// item caption) + 1..=10 ORDERED reference images (`TrainingDatasetItem::references`). The cap
+/// (`limits.maxReferenceImages`) is enforced at plan time by `build_training_plan` (and again by the
+/// engine's `validate_edit_request` floor); a plain captioned dataset is refused here, and an edit
+/// dataset is refused by every non-edit target.
+///
+/// The `qwen_image_2_1_edit_lora` kernel maps to the SAME engine trainer as the T2I target,
+/// `qwen_image_2_1` (the engine trains edit mode when the items carry references, and stamps
+/// `trainingMode=edit` on the adapter). Native on both backends: the kernel is in
+/// `MLX_ROUTED_TRAINING_KERNELS` and `CANDLE_ROUTED_TRAINING_KERNELS` (the Candle edit trainer,
+/// sc-24162 — base-gated to `qwen_image_2_1`, LoRA/LoKr only), and stays in the native-only
+/// `MLX_ONLY_TRAINING_KERNELS` so a generic worker refuses it. On candle the worker forces
+/// gradient checkpointing on and loads the base at Bf16, exactly like the T2I kernel.
+fn qwen_image_2_1_edit_lora_target() -> TrainingTarget {
+    let mut target = qwen_image_2_1_lora_target();
+    target.id = "qwen_image_2_1_edit_lora".to_owned();
+    target.name = "Qwen Image 2.1 Edit LoRA".to_owned();
+    target.kernel = "qwen_image_2_1_edit_lora".to_owned();
+    // Previews keep the T2I target's cadence (`sampleEvery: 500`): both pinned engine trainers
+    // render an edit run's previews as EDITS, conditioned on the first dataset item's ordered
+    // references, so the samples show what the adapter does to an edit pair.
+    target.limits.insert(
+        MAX_REFERENCE_IMAGES_LIMIT.to_owned(),
+        json!(QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES),
+    );
+    for (key, value) in [
+        ("label", json!("Qwen Image 2.1 Edit LoRA")),
+        (
+            "description",
+            json!(format!(
+                "Train an instruction-edit LoRA or LoKr for Qwen Image 2.1 on its dense bf16 base \
+                 (install the bf16 tier). Each dataset item is an edit pair: the item image is the \
+                 edit target, its caption is the edit instruction, and it carries 1-{QWEN_IMAGE_2_1_MAX_REFERENCE_IMAGES} \
+                 ordered reference images. Apple Silicon (native MLX) or Windows/Linux NVIDIA \
+                 (candle/CUDA). Research/evaluation use \
+                 only under the Qwen RESEARCH licence."
+            )),
+        ),
+        ("recommendedFor", json!(["edit"])),
+        ("datasetKind", json!("editPairs")),
+    ] {
+        target.ui.insert(key.to_owned(), value);
+    }
+    target
+}
+
+/// Whether a training target's base model licence requires the user's explicit acceptance before
+/// a run starts (`ui.requiresLicenseAcknowledgment`, epic 24107 E12). The API's real-run gate and
+/// the Training Studio's Start gate both key off this one field.
+pub fn training_target_requires_license_acknowledgment(target: &TrainingTarget) -> bool {
+    target
+        .ui
+        .get("requiresLicenseAcknowledgment")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Build an Anima image LoRA/LoKr preset. The flow-match sampling + caching knobs live on the target

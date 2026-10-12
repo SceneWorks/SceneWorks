@@ -129,6 +129,14 @@ run manual builds, and those contend with any CI job sharing the host — badly,
 share a `CARGO_TARGET_DIR` (see the warning under "Heavy-recompile mitigation" below).
 Moving the long jobs to a box with no interactive agent work removes that entirely.
 
+The final SceneWorks PR can explicitly select `nax-macos-2` for its `nax-worker` job by
+starting the PR title with `[Mac2]`. Put the prefix in the title passed to `gh pr create` so
+it is present in the initial `pull_request` event; adding a label or editing the title later
+can miss that run. To keep the post-merge `main` push on the same physical runner, merge with
+an exact subject that also starts with `[Mac2]`, for example
+`gh pr merge --subject '[Mac2] sc-24107: ...'`. Ordinary PRs and pushes keep using the `nax`
+pool. Explicit calibration and five-rung dispatches keep using `nax` plus `weights`.
+
 Note what routing *cannot* fix: a manual build does not make the runner busy, so GitHub
 sees an idle runner, assigns it a job, and only then does that job hit the contention.
 No label arrangement can steer around work GitHub cannot observe — which is why the fix

@@ -1,7 +1,58 @@
 import { describe, expect, it } from "vitest";
 
 import { summarize } from "../validation/issues.js";
-import { datasetPayload, datasetSaveValidation, selectionAfterDuplicateRemoval } from "./datasetHelpers.js";
+import {
+  appendReferences,
+  captionDraftsFromDataset,
+  datasetPayload,
+  datasetReferenceAssets,
+  datasetReferenceCap,
+  datasetSaveValidation,
+  editPairDatasetIssues,
+  referenceDraftsDiffer,
+  referenceDraftsFromDataset,
+  selectionAfterDuplicateRemoval,
+  trainingTargetReferenceCap,
+} from "./datasetHelpers.js";
+
+describe("caption mode round-trip (sc-24829)", () => {
+  const selection = "dataset-item:ds1:item_1";
+  const activeDataset = {
+    id: "ds1",
+    items: [{
+      id: "item_1",
+      path: "images/item_1.png",
+      displayName: "one",
+      caption: { text: "miraStyle, a red jacket", source: "auto", triggerWords: ["miraStyle"], mode: "subjectOnly" },
+    }],
+  };
+  const assetsById = new Map([[selection, {
+    id: selection,
+    datasetOwned: true,
+    displayName: "one",
+    file: { path: "training/datasets/ds1/images/item_1.png" },
+  }]]);
+  const save = (captionDraftById) =>
+    datasetPayload({ activeDataset, assetsById, captionDraftById, name: "Mira", selectedAssetIds: [selection] });
+
+  it("keeps an auto caption's mode through the draft a save is built from", () => {
+    const drafts = captionDraftsFromDataset(activeDataset);
+    expect(drafts[selection]).toEqual({ text: "miraStyle, a red jacket", source: "auto", mode: "subjectOnly" });
+    expect(save(drafts).items[0].caption).toEqual({
+      text: "miraStyle, a red jacket",
+      source: "auto",
+      triggerWords: ["miraStyle"],
+      mode: "subjectOnly",
+    });
+  });
+
+  it("keeps the mode when no draft exists, and drops it once the caption is edited by hand", () => {
+    expect(save({}).items[0].caption.mode).toBe("subjectOnly");
+    const edited = save({ [selection]: { text: "my own words", source: "manual" } }).items[0].caption;
+    expect(edited.source).toBe("manual");
+    expect(edited.mode).toBeUndefined();
+  });
+});
 
 it("preserves prepared bundle extras and stable item ids across dataset saves", () => {
   const activeDataset = {
@@ -153,5 +204,187 @@ describe("datasetSaveValidation", () => {
   it("tolerates a missing health context", () => {
     expect(() => datasetSaveValidation(whole)).not.toThrow();
     expect(summarize(datasetSaveValidation(whole)).ready).toBe(true);
+  });
+});
+
+// sc-24161: instruction-edit pairs — ordered references round-trip through the save payload, the
+// cap is the model's own reference limit, and the training gate mirrors the API's refusals.
+describe("edit-pair dataset helpers (sc-24161)", () => {
+  const editTarget = {
+    id: "qwen_image_2_1_edit_lora",
+    baseModel: "qwen_image_2_1",
+    limits: { maxReferenceImages: 10 },
+    ui: { label: "Qwen Image 2.1 Edit LoRA" },
+  };
+  const t2iTarget = { id: "qwen_image_2_1_lora", baseModel: "qwen_image_2_1", limits: {}, ui: { label: "Qwen Image 2.1 LoRA" } };
+  const qwenModel = { id: "qwen_image_2_1", limits: { maxReferenceAssets: 10 } };
+
+  it("keeps reference order through draft seeding and the save payload", () => {
+    const dataset = {
+      id: "ds1",
+      items: [
+        {
+          id: "item_0001",
+          assetId: "target",
+          path: "images/item_0001.png",
+          caption: { text: "swap the sky", source: "manual", triggerWords: [] },
+          references: [
+            { assetId: "ref-c", path: "images/refs/item_0001_ref1.png" },
+            { path: "images/refs/item_0001_ref2.png", displayName: "upload.png" },
+            { assetId: "ref-a", path: "images/refs/item_0001_ref3.png" },
+          ],
+        },
+      ],
+    };
+    const catalog = [{ id: "target" }, { id: "ref-a" }, { id: "ref-c" }];
+    const drafts = referenceDraftsFromDataset(dataset);
+    expect(drafts).toEqual({ target: ["ref-c", "dataset-ref:ds1:item_0001:1", "ref-a"] });
+    const owned = datasetReferenceAssets(dataset, "p1", catalog);
+    expect(owned).toHaveLength(1);
+    expect(owned[0]).toMatchObject({
+      id: "dataset-ref:ds1:item_0001:1",
+      datasetOwned: true,
+      file: { path: "training/datasets/ds1/images/refs/item_0001_ref2.png" },
+    });
+
+    const assetsById = new Map(
+      [...catalog.map((asset) => ({ ...asset, type: "image", displayName: `${asset.id}.png` })), ...owned].map((asset) => [
+        asset.id,
+        asset,
+      ]),
+    );
+    // Reorder: the dataset-owned reference first.
+    const reordered = { target: ["dataset-ref:ds1:item_0001:1", "ref-a", "ref-c"] };
+    const payload = datasetPayload({
+      activeDataset: dataset,
+      assetsById,
+      name: "Edits",
+      selectedAssetIds: ["target"],
+      referenceDraftById: reordered,
+    });
+    expect(payload.items[0].references).toEqual([
+      { path: "training/datasets/ds1/images/refs/item_0001_ref2.png", displayName: "upload.png" },
+      { assetId: "ref-a", displayName: "ref-a.png" },
+      { assetId: "ref-c", displayName: "ref-c.png" },
+    ]);
+    expect(referenceDraftsDiffer(reordered, drafts, ["target"])).toBe(true);
+    expect(referenceDraftsDiffer(drafts, drafts, ["target"])).toBe(false);
+
+    // No drafts → no `references` key at all (plain items keep their exact payload shape), and a
+    // stale stored list never rides along through the forward-compatible extras.
+    const plain = datasetPayload({ activeDataset: dataset, assetsById, name: "Edits", selectedAssetIds: ["target"] });
+    expect(plain.items[0]).not.toHaveProperty("references");
+  });
+
+  it("keeps every stored reference, in order, whatever the catalog held when the drafts were seeded", () => {
+    const dataset = {
+      id: "ds1",
+      items: [
+        {
+          id: "item_0001",
+          assetId: "target",
+          path: "images/item_0001.png",
+          references: [
+            { assetId: "ref-c", path: "images/refs/item_0001_ref1.png" },
+            { path: "images/refs/item_0001_ref2.png", displayName: "upload.png" },
+            { assetId: "ref-a", path: "images/refs/item_0001_ref3.png" },
+          ],
+        },
+      ],
+    };
+    const library = ["target", "ref-a", "ref-c"].map((id) => ({ id, type: "image", displayName: `${id}.png` }));
+    // The studio's merge: catalog assets first, then the synthetic reference assets (first id wins).
+    const save = (drafts, catalog) => {
+      const assetsById = new Map(
+        [...catalog, ...datasetReferenceAssets(dataset, "p1", catalog)].reverse().map((asset) => [asset.id, asset]),
+      );
+      return datasetPayload({
+        activeDataset: dataset,
+        assetsById,
+        name: "Edits",
+        selectedAssetIds: ["target"],
+        referenceDraftById: drafts,
+      }).items[0].references;
+    };
+    const stored = [
+      { assetId: "ref-c", displayName: "ref-c.png" },
+      { path: "training/datasets/ds1/images/refs/item_0001_ref2.png", displayName: "upload.png" },
+      { assetId: "ref-a", displayName: "ref-a.png" },
+    ];
+
+    // Drafts are seeded once per dataset load — here before the catalog arrived. The keys must not
+    // depend on it, so the references still resolve once it does.
+    const drafts = referenceDraftsFromDataset(dataset);
+    expect(drafts).toEqual({ target: ["ref-c", "dataset-ref:ds1:item_0001:1", "ref-a"] });
+    expect(save(drafts, library)).toEqual(stored);
+
+    // A library asset that disappears while the studio is mounted falls back to its stored file
+    // under the same key: still three references, in the same order.
+    expect(save(drafts, library.filter((asset) => asset.id !== "ref-a"))).toEqual([
+      stored[0],
+      stored[1],
+      { path: "training/datasets/ds1/images/refs/item_0001_ref3.png", displayName: "item_0001_ref3.png" },
+    ]);
+
+    // A key nothing resolves is sent as-is — the server refuses it — never filtered away, which
+    // would delete the stored file and renumber the references after it.
+    expect(save({ target: ["ref-c", "gone", "ref-a"] }, library)).toEqual([
+      stored[0],
+      { assetId: "gone" },
+      stored[2],
+    ]);
+  });
+
+  it("takes the reference cap from the model and never exceeds the target contract", () => {
+    expect(trainingTargetReferenceCap(editTarget, [qwenModel])).toBe(10);
+    expect(trainingTargetReferenceCap(editTarget, [{ ...qwenModel, limits: { maxReferenceAssets: 4 } }])).toBe(4);
+    // A model that declares nothing falls back to the target's own cap.
+    expect(trainingTargetReferenceCap(editTarget, [])).toBe(10);
+    expect(trainingTargetReferenceCap(t2iTarget, [qwenModel])).toBe(0);
+    expect(datasetReferenceCap([t2iTarget, editTarget], [qwenModel])).toBe(10);
+    expect(datasetReferenceCap([t2iTarget], [qwenModel])).toBe(0);
+  });
+
+  it("appends picks in order, de-duplicated, and stops at the cap", () => {
+    expect(appendReferences(["a"], ["b", "a", "item", "c"], { cap: 3, itemId: "item" })).toEqual({
+      next: ["a", "b", "c"],
+      dropped: 0,
+    });
+    expect(appendReferences(["a", "b"], ["c", "d", "e"], { cap: 3 })).toEqual({ next: ["a", "b", "c"], dropped: 2 });
+  });
+
+  it("holds training with the API's reasons for a dataset that does not fit the target", () => {
+    const item = (id, refCount, text = "do the edit") => ({
+      id,
+      displayName: `${id}.png`,
+      caption: { text },
+      references: Array.from({ length: refCount }, (_, index) => ({ path: `images/refs/${id}_${index}.png` })),
+    });
+    const messages = (dataset, target, cap) => editPairDatasetIssues(dataset, target, cap).map((entry) => entry.message);
+
+    expect(messages({ items: [item("a", 2), item("b", 10)] }, editTarget, 10)).toEqual([]);
+    expect(messages({ items: [item("a", 2)] }, t2iTarget, 0)[0]).toContain("rejects references");
+    expect(messages({ items: [item("a", 1), item("b", 0)] }, editTarget, 10)[0]).toContain("needs a");
+    expect(messages({ items: [item("a", 11)] }, editTarget, 10)[0]).toContain("limit of 10");
+    expect(messages({ items: [item("a", 1, "  ")] }, editTarget, 10)[0]).toContain("instructions");
+    expect(messages({ items: [item("a", 0)] }, t2iTarget, 0)).toEqual([]);
+  });
+});
+
+describe("edit-pair control conflict (sc-24161 review)", () => {
+  it("refuses an item that is both an edit pair and a control pair", () => {
+    const target = { id: "edit", limits: { maxReferenceImages: 10 }, ui: { label: "Edit" } };
+    const item = {
+      id: "a",
+      displayName: "a.png",
+      caption: { text: "edit it" },
+      references: [{ path: "images/refs/a_ref1.png" }],
+    };
+    expect(editPairDatasetIssues({ items: [item] }, target, 10)).toEqual([]);
+    const messages = editPairDatasetIssues({ items: [{ ...item, controlImagePath: "controls/a.png" }] }, target, 10).map(
+      (entry) => entry.message,
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("control inputs");
   });
 });

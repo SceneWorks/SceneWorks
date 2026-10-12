@@ -180,6 +180,18 @@ export function normalizeLoraFamily(family) {
   return normalized === "krea2" ? "krea-2" : normalized;
 }
 
+// The family sentence appended to a "LoRA import queued" message. With Auto-detect, an uploaded
+// file is inspected when the job is queued: a resolved family is reported; an unresolved one gets
+// a notice telling the user to choose it, because a family-less LoRA is offered to no model
+// (sc-24163, epic 24107 E10 — undeterminable families are surfaced, never guessed). A URL import is
+// only inspected after download, so nothing is claimed for it here.
+export function loraImportFamilyNote({ chosenFamily, resolvedFamily, isFileImport }) {
+  if (chosenFamily) return "";
+  if (resolvedFamily) return ` Detected family: ${normalizeLoraFamily(resolvedFamily)}.`;
+  if (!isFileImport) return "";
+  return " Choose family under LoRAs.";
+}
+
 export function normalizeFamilies(values) {
   return (Array.isArray(values) ? values : [values])
     .map(normalizeLoraFamily)

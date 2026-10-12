@@ -81,7 +81,7 @@ hf_cache_roots() {
     raw="${DEFAULT_HF_CACHE:-}"
   fi
   # `;` and newlines both separate; empty entries are dropped.
-  printf '%s' "$raw" | tr ';' '\n' | while IFS= read -r root; do
+  printf '%s\n' "$raw" | tr ';' '\n' | while IFS= read -r root; do
     root="$(echo "$root" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [[ -z "$root" ]] && continue
     printf '%s\n' "$root"

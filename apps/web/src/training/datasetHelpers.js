@@ -3,6 +3,7 @@
 // owned-asset/asset-id normalizers, dataset-health math, and the save payload
 // builder. No React, no app state — just data shaping over dataset records.
 
+import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { issue } from "../validation/issues.js";
 
 export function imageAssetName(asset) {
@@ -40,38 +41,43 @@ export function captionDraftsFromDataset(dataset) {
     map[datasetItemSelectionKey(dataset, item, index)] = {
       text: item.caption?.text ?? "",
       source: item.caption?.source ?? "manual",
+      // The auto-caption mode (sc-24829) rides the draft so a save keeps it; a manual edit
+      // replaces the draft without one.
+      ...(item.caption?.mode ? { mode: item.caption.mode } : {}),
     };
   });
   return map;
 }
 
+// The synthetic dataset-owned asset for one stored image (an item, or an edit-pair reference) under
+// its selection key `id` — null when the catalog has that asset, or the image has no stored path.
+function datasetOwnedAsset(dataset, projectId, catalogIds, source, id) {
+  const path = datasetItemProjectPath(dataset, source);
+  if (catalogIds.has(id) || !path) {
+    return null;
+  }
+  return {
+    id,
+    assetId: source.assetId ?? null,
+    datasetOwned: true,
+    projectId,
+    type: "image",
+    displayName: source.displayName ?? imageAssetName(source),
+    file: {
+      path,
+      mimeType: `image/${String(path).split(".").pop() || "png"}`,
+      width: source.width ?? null,
+      height: source.height ?? null,
+    },
+  };
+}
+
 export function datasetOwnedAssets(dataset, projectId, catalogAssets = []) {
   const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
   return (dataset?.items ?? [])
-    .map((item, index) => {
-      if (item.assetId && catalogIds.has(item.assetId)) {
-        return null;
-      }
-      const path = datasetItemProjectPath(dataset, item);
-      if (!path) {
-        return null;
-      }
-      const id = datasetItemSelectionKey(dataset, item, index);
-      return {
-        id,
-        assetId: item.assetId ?? null,
-        datasetOwned: true,
-        projectId,
-        type: "image",
-        displayName: item.displayName ?? imageAssetName(item),
-        file: {
-          path,
-          mimeType: `image/${String(path).split(".").pop() || "png"}`,
-          width: item.width ?? null,
-          height: item.height ?? null,
-        },
-      };
-    })
+    .map((item, index) =>
+      datasetOwnedAsset(dataset, projectId, catalogIds, item, datasetItemSelectionKey(dataset, item, index)),
+    )
     .filter(Boolean);
 }
 
@@ -161,13 +167,24 @@ function datasetItemExtras(item) {
   for (const key of [
     "id", "assetId", "path", "displayName", "caption", "controlImagePath", "width", "height",
     "contentHash", "tier0Scalars", "qualityAck", "addedAt",
+    // The edit-pair reference list is rebuilt from the draft on every save (sc-24161); a stale
+    // copy of the stored one must never ride along and override it.
+    "references",
   ]) {
     delete extra[key];
   }
   return extra;
 }
 
-export function datasetPayload({ activeDataset, assetsById, associatedCharacterId, captionDraftById = {}, name, selectedAssetIds }) {
+export function datasetPayload({
+  activeDataset,
+  assetsById,
+  associatedCharacterId,
+  captionDraftById = {},
+  referenceDraftById = {},
+  name,
+  selectedAssetIds,
+}) {
   const itemsByAssetId = new Map(
     (activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item]),
   );
@@ -191,15 +208,32 @@ export function datasetPayload({ activeDataset, assetsById, associatedCharacterI
             text: draft.text ?? "",
             source: draft.source ?? "manual",
             triggerWords: previous?.caption?.triggerWords ?? [],
+            ...(draft.mode ? { mode: draft.mode } : {}),
           };
         } else if (previous?.caption) {
           caption = {
             text: previous.caption.text ?? "",
             source: previous.caption.source ?? "manual",
             triggerWords: previous.caption.triggerWords ?? [],
+            ...(previous.caption.mode ? { mode: previous.caption.mode } : {}),
           };
         }
         const source = asset.datasetOwned || asset.datasetOnly ? { path: asset.file?.path } : { assetId: asset.id };
+        // Instruction-edit pairs (sc-24161): the ORDERED references, each sent with the same source
+        // contract as an item (library assetId, else the project-relative path of a dataset-owned or
+        // freshly uploaded image). Order is kept verbatim — the engine numbers the references — so a
+        // key that does not resolve is still sent (by id) rather than dropped: the server refuses the
+        // save instead of deleting the stored file and renumbering the references after it.
+        const references = (referenceDraftById[selectionId] ?? []).map((referenceId) => {
+          const reference = assetsById.get(referenceId);
+          if (!reference) return { assetId: referenceId };
+          return {
+            ...(reference.datasetOwned || reference.datasetOnly
+              ? { path: reference.file?.path }
+              : { assetId: reference.id }),
+            displayName: reference.displayName ?? imageAssetName(reference),
+          };
+        });
         return {
           ...datasetItemExtras(previous),
           ...(previous?.id ? { id: previous.id } : {}),
@@ -207,8 +241,158 @@ export function datasetPayload({ activeDataset, assetsById, associatedCharacterI
           ...source,
           displayName: asset.displayName ?? imageAssetName(asset),
           caption,
+          ...(references.length ? { references } : {}),
         };
       })
       .filter(Boolean),
   };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Instruction-edit pairs (sc-24161, epic 24107). An edit-pair dataset item is the item image (the
+// edit TARGET) + its caption (the edit INSTRUCTION) + 1..N ORDERED reference images, stored on the
+// server item as `references: [{ assetId?, path, displayName? }]` in the order given.
+// ---------------------------------------------------------------------------------------------
+
+// The selection key the studio tracks a stored reference under: its library asset id when it has
+// one, else a synthetic key. Deliberately catalog-independent (like `datasetItemSelectionKey`): a
+// key seeded before the catalog loaded, or held across an asset's deletion, must keep resolving.
+export function datasetReferenceKey(dataset, item, index, reference) {
+  return reference?.assetId || `dataset-ref:${dataset?.id ?? "draft"}:${item?.id ?? "item"}:${index}`;
+}
+
+// Ordered reference drafts keyed by item selection id, seeded from the saved dataset.
+export function referenceDraftsFromDataset(dataset) {
+  const map = {};
+  (dataset?.items ?? []).forEach((item, itemIndex) => {
+    const references = Array.isArray(item?.references) ? item.references : [];
+    if (!references.length) return;
+    map[datasetItemSelectionKey(dataset, item, itemIndex)] = references.map((reference, index) =>
+      datasetReferenceKey(dataset, item, index, reference),
+    );
+  });
+  return map;
+}
+
+// Synthetic dataset-owned assets, under the same key, for stored references that are not (or no
+// longer) catalog assets, so the editor can render and re-send them (their project-relative path
+// re-materializes on save).
+export function datasetReferenceAssets(dataset, projectId, catalogAssets = []) {
+  const catalogIds = new Set(catalogAssets.map((asset) => asset.id));
+  return (dataset?.items ?? [])
+    .flatMap((item) =>
+      (Array.isArray(item?.references) ? item.references : []).map((reference, index) =>
+        datasetOwnedAsset(dataset, projectId, catalogIds, reference, datasetReferenceKey(dataset, item, index, reference)),
+      ),
+    )
+    .filter(Boolean);
+}
+
+// Whether two ordered reference drafts differ for any of the given selection ids.
+export function referenceDraftsDiffer(current = {}, saved = {}, selectionIds = []) {
+  return selectionIds.some(
+    (id) => JSON.stringify(current[id] ?? []) !== JSON.stringify(saved[id] ?? []),
+  );
+}
+
+// How many ordered references one edit-pair item may carry for a training target, or 0 when the
+// target cannot train edit pairs. The target declares its cap (`limits.maxReferenceImages`, the
+// Rust-owned contract the API enforces) and the base MODEL declares its own
+// (`limits.maxReferenceAssets`, the render-side cap the Image Editor reads); the UI takes the lower
+// of the two, so it can never offer more references than either side accepts. Qwen Image 2.1: 10.
+export function trainingTargetReferenceCap(target, models = []) {
+  const declared = Number(target?.limits?.maxReferenceImages);
+  if (!Number.isInteger(declared) || declared <= 0) {
+    return 0;
+  }
+  const model = (models ?? []).find((entry) => entry?.id === target?.baseModel);
+  return Math.min(declared, maxReferencesForModel(model, declared));
+}
+
+// The largest per-item reference count any available training target accepts — what the dataset
+// editor (which is target-agnostic until a run picks one) lets an item carry. 0 hides the editor's
+// edit-pair affordances entirely.
+export function datasetReferenceCap(targets = [], models = []) {
+  return (targets ?? []).reduce(
+    (cap, target) => Math.max(cap, trainingTargetReferenceCap(target, models)),
+    0,
+  );
+}
+
+// Append picked references to an item's ordered list: de-duplicated, never the item's own image,
+// and never past `cap`. Returns the next list plus how many picks did not fit.
+export function appendReferences(current = [], picked = [], { cap = 0, itemId = "" } = {}) {
+  const next = [...current];
+  let dropped = 0;
+  for (const id of picked ?? []) {
+    if (!id || id === itemId || next.includes(id)) continue;
+    if (next.length >= cap) {
+      dropped += 1;
+      continue;
+    }
+    next.push(id);
+  }
+  return { next, dropped };
+}
+
+// The edit-pair dataset-shape issues for a training target, mirroring the API's plan-time floor
+// (`validate_dataset_shape_for_target`) so Start training is held with the same reasons the server
+// would refuse with. `cap` is the target's effective reference cap (0 = not an edit target).
+export function editPairDatasetIssues(dataset, target, cap) {
+  const items = dataset?.items ?? [];
+  if (!target || !items.length) return [];
+  const label = target.ui?.label ?? target.name ?? target.id;
+  const name = (item) => item?.displayName || item?.id || "an item";
+  const count = (item) => item?.references?.length ?? 0;
+  if (!cap) {
+    const editItem = items.find((item) => count(item) > 0);
+    return editItem
+      ? [
+          issue.error(
+            "target",
+            `${label} rejects references on “${name(editItem)}”.`,
+          ),
+        ]
+      : [];
+  }
+  const issues = [];
+  let bare;
+  let over;
+  let both;
+  let blank;
+  for (const item of items) {
+    const references = count(item);
+    if (!references) bare ??= item;
+    if (references > cap) over ??= item;
+    if (references && item?.controlImagePath) both ??= item;
+    if (references && !captionText(item)) blank ??= item;
+  }
+  if (bare) {
+    issues.push(
+      issue.error(
+        "dataset",
+        `“${name(bare)}” needs a ${label} reference.`,
+      ),
+    );
+  }
+  if (over) {
+    issues.push(
+      issue.error(
+        "dataset",
+        `“${name(over)}” exceeds ${label}'s limit of ${cap}.`,
+      ),
+    );
+  }
+  if (both) {
+    issues.push(
+      issue.error(
+        "dataset",
+        `“${name(both)}” mixes reference and control inputs.`,
+      ),
+    );
+  }
+  if (blank) {
+    issues.push(issue.error("dataset", `“${name(blank)}” needs instructions.`));
+  }
+  return issues;
 }

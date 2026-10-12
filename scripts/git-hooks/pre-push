@@ -52,6 +52,12 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
   fi
 done
 
+# Git exports GIT_DIR (and friends) into hooks. Inherited by cargo, they misdirect dependency build
+# scripts that shell out to git from inside cargo's own checkouts, so drop them now that the hook's
+# own git calls are done; anything below rediscovers this repo from the cwd.
+# shellcheck disable=SC2046
+unset $(git rev-parse --local-env-vars)
+
 [ "$rust_changed" = "0" ] && [ "$tier_integrity_changed" = "0" ] && exit 0
 
 if ! command -v npm >/dev/null 2>&1; then

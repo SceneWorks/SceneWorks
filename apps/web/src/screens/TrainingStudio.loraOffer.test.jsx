@@ -321,6 +321,18 @@ describe("TrainingStudio trained-LoRA offer (sc-24815)", () => {
     expect(apiFetchMock).not.toHaveBeenCalled();
   });
 
+  it("surfaces no offer for a Qwen2.1 adapter whose dataset omits characterId", async () => {
+    const unassociatedDataset = dataset();
+    delete unassociatedDataset.characterId;
+    const job = adapterJob();
+    job.payload.manifestEntry.family = "qwen-image-2-1";
+    job.payload.baseModel = "qwen_image_2_1";
+
+    await render({ jobs: [job], trainingDatasets: [unassociatedDataset] });
+    expect(offerPanel()).toBeNull();
+    expect(apiFetchMock).not.toHaveBeenCalled();
+  });
+
   it("surfaces no offer for a base-checkpoint (non-adapter) run", async () => {
     await render({
       jobs: [adapterJob({ result: { baseCheckpointRegistered: true, baseCheckpointId: "mira_full" } })],
