@@ -6117,3 +6117,220 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
         "the refusal names the count and the cap: {detail}"
     );
 }
+
+/// sc-25785: a training job that ended without completing records the resume checkpoint on disk,
+/// `{ "resume": true }` resumes its persisted plan in one call, and `{ "resume": false }` restarts
+/// from step 0 even when the persisted plan was itself a resume.
+#[tokio::test]
+async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_plan() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    let (_, original) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    claim_training_job(&app, &job_id).await;
+
+    let stem = adapter_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("adapter stem");
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for step in ["000050", "000100"] {
+        write_test_safetensors(&output_dir.join(format!("{stem}-step{step}.resume.safetensors")));
+    }
+    // A user-loadable adapter checkpoint at a higher step is not a resume point.
+    write_test_safetensors(&output_dir.join(format!("{stem}-step000150.safetensors")));
+
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "LoRA training canceled by user.",
+            "workerId": TEST_TRAINING_WORKER_ID
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["result"]["resumeCheckpointStep"], 100);
+
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{resumed}");
+    assert_ne!(resumed["id"], job_id);
+    let mut expected_plan = original["payload"]["plan"].clone();
+    assert_ne!(expected_plan["config"]["advanced"]["resume"], true);
+    expected_plan["config"]["advanced"]["resume"] = json!(true);
+    assert_eq!(resumed["payload"]["plan"], expected_plan);
+
+    // The resumed run fails before its next checkpoint; restarting it must turn resume back off.
+    let resumed_id = resumed["id"].as_str().expect("resumed id").to_owned();
+    claim_training_job(&app, &resumed_id).await;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, restarted) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{restarted}");
+    assert_eq!(
+        restarted["payload"]["plan"]["config"]["advanced"]["resume"],
+        false
+    );
+}
+
+/// sc-25785: resume is refused, typed, when there is nothing to resume — no checkpoint on disk, a
+/// completed run, or a job that is not training.
+#[tokio::test]
+async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (failed_id, _, _) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &failed_id).await;
+    let (status, failed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(failed["result"].get("resumeCheckpointStep").is_none());
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("no saved checkpoint"),
+        "{refused}"
+    );
+
+    // A completed run is not resumable even with a bundle on disk.
+    let (completed_id, completed_dir, completed_adapter) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &completed_id).await;
+    stage_trained_adapter(&completed_dir, &completed_adapter);
+    let stem = completed_adapter
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("stem");
+    write_test_safetensors(&completed_dir.join(format!("{stem}-step000050.resume.safetensors")));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": completed_adapter.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused.to_string().contains("can be resumed"), "{refused}");
+
+    // A non-training job rejects the flag in either direction.
+    let (status, prompt_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "model_download", "payload": { "modelId": "resume_probe" }, "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let prompt_job_id = prompt_job["id"].as_str().expect("job id").to_owned();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{prompt_job_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{prompt_job_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("only to training jobs"),
+        "{refused}"
+    );
+}

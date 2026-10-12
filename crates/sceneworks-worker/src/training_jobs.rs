@@ -1909,6 +1909,22 @@ pub(crate) async fn run_training_execution(
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
     }
+    // sc-25785: a run that starts from step 0 (a fresh submit, or a "restart" retry into the same
+    // output dir) removes the resume bundles a previous run left there, so a later resume continues
+    // from THIS run's checkpoints and never from a stale higher-step one. A removal failure fails the
+    // job rather than leaving that hazard in place.
+    if !prepared_run.request.config.resume {
+        if let Err(error) = remove_training_resume_bundles(&prepared_run.request.output_dir) {
+            let message = format!(
+                "Could not clear stale training resume checkpoints in {}: {error}",
+                prepared_run.request.output_dir.display()
+            );
+            return prepared_run.finish(Err(WorkerError::Io(std::io::Error::new(
+                error.kind(),
+                message,
+            ))));
+        }
+    }
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped

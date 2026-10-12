@@ -559,12 +559,28 @@ pub(crate) fn resolve_training_output_dir(
     output_dir: &str,
     label: &str,
 ) -> WorkerResult<PathBuf> {
-    // `normalize_app_managed_path` now returns the canonicalized path (sc-8877), so
-    // build each sub-root in both its lexical and canonical form to keep this second
-    // `starts_with` consistent (a canonical path never starts_with a lexical root
-    // when the two differ, e.g. macOS `/var` -> `/private/var`).
-    let path = normalize_app_managed_path(settings, output_dir, label)?;
-    let data_dir = normalized_data_dir(settings)?;
+    resolve_training_output_dir_under(&settings.data_dir, output_dir, label)
+}
+
+/// [`resolve_training_output_dir`] keyed on the bare data dir, so the API can confine a training
+/// plan's `output.outputDir` exactly as the worker does before it reads that directory (sc-25785).
+pub fn resolve_training_output_dir_under(
+    data_dir_root: &Path,
+    output_dir: &str,
+    label: &str,
+) -> WorkerResult<PathBuf> {
+    let output_dir = output_dir.trim();
+    if output_dir.is_empty() {
+        return Err(WorkerError::InvalidPayload(format!("{label} is required.")));
+    }
+    // Canonicalize before the confinement check so a symlink (or `..`) under the data dir can't
+    // satisfy a purely-lexical `starts_with`. Each sub-root is built in both its lexical and
+    // canonical form (a canonical path never starts_with a lexical root when the two differ,
+    // e.g. macOS `/var` -> `/private/var`).
+    let data_dir = normalize_absolute_path(data_dir_root)?;
+    let canonical_data_dir = normalize_existing_or_absolute(data_dir_root)?;
+    let path = normalize_existing_or_absolute(Path::new(output_dir))?;
+    let path = ensure_path_under(path, &[data_dir.clone(), canonical_data_dir], label)?;
     // Global-scope outputs land in `<data>/loras` (or `<data>/models` for full
     // fine-tunes); project-scope outputs — the default — land in the owning
     // project's tree, `<data>/projects/<slug>.sceneworks/loras/<lora_id>`, which
@@ -574,11 +590,54 @@ pub(crate) fn resolve_training_output_dir(
     let mut allowed_roots = Vec::with_capacity(6);
     for sub in ["loras", "models", "projects"] {
         allowed_roots.push(data_dir.join(sub));
-        allowed_roots.push(normalize_existing_or_absolute(
-            &settings.data_dir.join(sub),
-        )?);
+        allowed_roots.push(normalize_existing_or_absolute(&data_dir_root.join(sub))?);
     }
     ensure_path_under(path, &allowed_roots, label)
+}
+
+/// The step of a trainer resume bundle file name — `{stem}-step{NNNNNN}.resume.safetensors` (the
+/// engine's `checkpoint::resume_snapshot_filename`) — or `None` for any other file.
+fn training_resume_bundle_step(name: &str) -> Option<u32> {
+    let (_, rest) = name.rsplit_once("-step")?;
+    let digits = rest.strip_suffix(".resume.safetensors")?;
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
+/// The highest step of any trainer resume bundle in `output_dir`, i.e. the checkpoint a
+/// `resume: true` run continues from. `None` when the directory is absent or holds none (sc-25785).
+pub fn latest_training_resume_step(output_dir: &Path) -> Option<u32> {
+    std::fs::read_dir(output_dir)
+        .ok()?
+        .flatten()
+        .filter_map(|entry| training_resume_bundle_step(entry.file_name().to_str()?))
+        .max()
+}
+
+/// Delete every trainer resume bundle (`*-stepNNNNNN.resume.safetensors` and its
+/// `.optim.safetensors` optimizer sibling) in `output_dir`, returning how many files were removed.
+/// A run that starts from step 0 calls this so a later resume can never continue from a stale
+/// higher-step bundle left by an earlier run into the same directory (sc-25785). The user-loadable
+/// `*-stepNNNNNN.safetensors` adapter checkpoints are left alone. An absent directory is a no-op.
+pub fn remove_training_resume_bundles(output_dir: &Path) -> std::io::Result<usize> {
+    let entries = match std::fs::read_dir(output_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut removed = 0;
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        let resume_name = name.replace(".optim.safetensors", ".resume.safetensors");
+        if training_resume_bundle_step(&resume_name).is_some() && entry.file_type()?.is_file() {
+            std::fs::remove_file(entry.path())?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 pub(crate) fn resolve_dataset_item_path(
@@ -825,4 +884,76 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> WorkerResult<String> {
         .map_err(|_| WorkerError::InvalidPayload("Path is outside project.".to_owned()))?
         .to_string_lossy()
         .replace('\\', "/"))
+}
+
+#[cfg(test)]
+mod training_resume_bundle_tests {
+    use super::*;
+
+    #[test]
+    fn latest_step_and_removal_touch_only_resume_bundles() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let names = [
+            "style-step000050.resume.safetensors",
+            "style-step000050.optim.safetensors",
+            "style_high_noise-step000200.resume.safetensors",
+            "style_high_noise-step000200.optim.safetensors",
+            "style-step000300.safetensors",
+            "style.safetensors",
+            "style-stepXYZ.resume.safetensors",
+            "training-config.json",
+        ];
+        for name in names {
+            std::fs::write(dir.path().join(name), b"x").expect("write");
+        }
+        assert_eq!(latest_training_resume_step(dir.path()), Some(200));
+
+        assert_eq!(
+            remove_training_resume_bundles(dir.path()).expect("remove"),
+            4
+        );
+        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("read")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .into_string()
+                    .expect("utf8")
+            })
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "style-step000300.safetensors",
+                "style-stepXYZ.resume.safetensors",
+                "style.safetensors",
+                "training-config.json",
+            ]
+        );
+        assert_eq!(latest_training_resume_step(dir.path()), None);
+    }
+
+    #[test]
+    fn absent_output_dir_has_no_checkpoint_and_removal_is_a_no_op() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let missing = dir.path().join("never-created");
+        assert_eq!(latest_training_resume_step(&missing), None);
+        assert_eq!(remove_training_resume_bundles(&missing).expect("no-op"), 0);
+    }
+
+    #[test]
+    fn output_dir_resolution_is_confined_to_the_training_roots() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let data = dir.path();
+        let inside = data.join("projects/p.sceneworks/loras/lora_1");
+        assert!(resolve_training_output_dir_under(data, inside.to_str().unwrap(), "out").is_ok());
+        let outside_root = data.join("cache/elsewhere");
+        assert!(
+            resolve_training_output_dir_under(data, outside_root.to_str().unwrap(), "out").is_err()
+        );
+        assert!(resolve_training_output_dir_under(data, "/etc", "out").is_err());
+        assert!(resolve_training_output_dir_under(data, "  ", "out").is_err());
+    }
 }

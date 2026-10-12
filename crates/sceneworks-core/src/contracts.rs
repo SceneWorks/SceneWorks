@@ -1279,6 +1279,10 @@ pub struct DuplicateJobRequest {
 pub struct RetryJobRequest {
     #[serde(default)]
     pub payload_changes: JsonObject,
+    /// Training jobs only (sc-25785): `true` resumes the job's plan from its latest checkpoint,
+    /// `false` restarts it from step 0; absent keeps the plan's own `advanced.resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<bool>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

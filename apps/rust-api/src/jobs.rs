@@ -406,6 +406,9 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    if let Some(resume) = payload.resume {
+        apply_training_retry_resume(&state, &job_id, resume, &mut payload.payload_changes).await?;
+    }
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -436,6 +439,78 @@ pub(crate) async fn retry_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// sc-25785: fold a retry's `resume` choice into the training plan the retry will run, so a caller
+/// resumes (or restarts) a training job in one call without resending the plan. The plan is the
+/// caller's `payloadChanges.plan` when supplied, else the persisted one, with `advanced.resume`
+/// set to `resume`. Resuming is refused, typed, unless the job ended without completing and its
+/// output directory holds a resume checkpoint — the trainer would otherwise start from step 0
+/// while the caller believed it resumed.
+async fn apply_training_retry_resume(
+    state: &AppState,
+    job_id: &str,
+    resume: bool,
+    payload_changes: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return Err(ApiError::bad_request(
+            "resume applies only to training jobs (lora_train, control_training).",
+        ));
+    }
+    let mut plan = payload_changes
+        .get("plan")
+        .or_else(|| job.payload.get("plan"))
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("Training job has no plan to retry."))?;
+    if resume {
+        if !matches!(
+            job.status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        ) {
+            return Err(ApiError::bad_request(
+                "Only a failed, canceled or interrupted training job can be resumed.",
+            ));
+        }
+        if training_plan_resume_checkpoint_step(state, &Value::Object(plan.clone())).is_none() {
+            return Err(ApiError::bad_request(
+                "This training job has no saved checkpoint to resume from; restart it from step 0 instead.",
+            ));
+        }
+    }
+    let config = plan
+        .entry("config")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan config must be an object."))?;
+    config
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan advanced must be an object."))?
+        .insert("resume".to_owned(), Value::Bool(resume));
+    payload_changes.insert("plan".to_owned(), Value::Object(plan));
+    Ok(())
+}
+
+/// The latest resume-checkpoint step in a training plan's `output.outputDir`, after confining that
+/// directory exactly as the worker does. `None` when the plan names no valid output dir or the dir
+/// holds no resume bundle (sc-25785).
+pub(crate) fn training_plan_resume_checkpoint_step(state: &AppState, plan: &Value) -> Option<u32> {
+    let output_dir = plan.pointer("/output/outputDir").and_then(Value::as_str)?;
+    let output_dir = sceneworks_worker::resolve_training_output_dir_under(
+        &state.settings.data_dir,
+        output_dir,
+        "Training outputDir",
+    )
+    .ok()?;
+    sceneworks_worker::latest_training_resume_step(&output_dir)
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
@@ -1457,6 +1532,22 @@ async fn apply_progress_side_effects(
         // LoRA registrar defers rather than mis-registering an 8 GB base checkpoint as an adapter.
         if let Some(status) = register_completed_base_checkpoint(state, &job_id).await {
             result.extend(status);
+        }
+    }
+    // sc-25785: a training run that ended without completing records the checkpoint a retry with
+    // `resume: true` would continue from, so the Queue can offer Resume only when there is one.
+    if matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining)
+        && matches!(
+            job.status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        )
+    {
+        if let Some(step) = job
+            .payload
+            .get("plan")
+            .and_then(|plan| training_plan_resume_checkpoint_step(state, plan))
+        {
+            result.insert("resumeCheckpointStep".to_owned(), json!(step));
         }
     }
     // Fail after catalog registration but before project persistence/CAS so
