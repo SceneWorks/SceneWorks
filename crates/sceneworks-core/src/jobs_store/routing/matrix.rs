@@ -404,6 +404,11 @@ struct TrainerCapabilityFacts {
     supports_lokr: bool,
     supports_control: bool,
     supports_full_finetune: bool,
+    /// Most ordered reference images one instruction-edit training item may carry (sc-24161);
+    /// `0` = the trainer refuses edit-pair datasets. Absent from dumps that predate the field, which
+    /// reads as `0` — exactly what every trainer before sc-24161 is.
+    #[serde(default)]
+    max_reference_images: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1042,7 +1047,7 @@ fn runtime_facts(source: &str, expected_backend: &str) -> Result<RuntimeDescript
 /// base. Keep the product target id, base id, and worker kernel in the key, and allow the value to be
 /// backend-local because inference deliberately registers the future LTX-2.5 trainer under different
 /// MLX and Candle ids.
-fn expected_backend_local_trainer_id(
+pub(crate) fn expected_backend_local_trainer_id(
     target: &crate::training::TrainingTarget,
     backend: &str,
 ) -> Result<&'static str, String> {
@@ -1075,6 +1080,10 @@ fn expected_backend_local_trainer_id(
         }
         ("mage_flow_base_lora", "mage_flow_base", "mage_flow_lora") => {
             ("mage_flow_base", "mage_flow_base")
+        }
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
+        | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
+            ("qwen_image_2_1", "qwen_image_2_1")
         }
         _ => {
             return Err(format!(
@@ -3293,6 +3302,13 @@ fn gpu_job_rows(
             json!({ "datasetId": "probe" }),
         ),
         (
+            "dataset_subject_mask",
+            "utility",
+            JobType::DatasetSubjectMask,
+            "sam3_person_segment",
+            json!({ "datasetId": "probe" }),
+        ),
+        (
             "face_likeness_compare",
             "utility",
             JobType::FaceLikenessCompare,
@@ -3447,10 +3463,18 @@ fn target_network_types(target: &crate::training::TrainingTarget) -> Result<Vec<
     Ok(types)
 }
 
-fn trainer_supports(facts: &RuntimeDescriptorFacts, target: &str, network_type: &str) -> bool {
-    let Some(engine) = facts.trainer_mappings.get(target) else {
+fn trainer_supports(
+    facts: &RuntimeDescriptorFacts,
+    target: &crate::training::TrainingTarget,
+    network_type: &str,
+) -> bool {
+    let Some(engine) = facts.trainer_mappings.get(&target.id) else {
         return false;
     };
+    // An instruction-edit target (sc-24161) needs a trainer that accepts at least the target's own
+    // reference cap — a T2I-only trainer under the same engine id (max_reference_images 0) would
+    // otherwise read as supporting the edit target and train text-to-image on the edit targets.
+    let required_references = crate::training::training_target_max_reference_images(target);
     facts
         .snapshot
         .trainer_capabilities
@@ -3458,6 +3482,7 @@ fn trainer_supports(facts: &RuntimeDescriptorFacts, target: &str, network_type: 
         .find(|descriptor| descriptor.id == *engine)
         .is_some_and(|descriptor| {
             descriptor.backend == facts.snapshot.backend
+                && descriptor.max_reference_images >= required_references
                 && match network_type {
                     "lora" => descriptor.supports_lora,
                     "lokr" => descriptor.supports_lokr,
@@ -3481,9 +3506,9 @@ fn training_rows(
                 JobType::LoraTrain
             };
             let job = probe_job(job_type, "", training_payload(&target, &network_type))?;
-            let mlx = trainer_supports(mlx_facts, &target.id, &network_type)
+            let mlx = trainer_supports(mlx_facts, &target, &network_type)
                 && backend_supports(&job, mlx_facts)?;
-            let candle = trainer_supports(candle_facts, &target.id, &network_type)
+            let candle = trainer_supports(candle_facts, &target, &network_type)
                 && backend_supports(&job, candle_facts)?;
             rows.push(TrainingCapabilityRow {
                 target: target.id.clone(),
@@ -3987,6 +4012,7 @@ mod tests {
                         supports_lokr: false,
                         supports_control: false,
                         supports_full_finetune: false,
+                        max_reference_images: 0,
                     });
             }
         }
@@ -4013,6 +4039,25 @@ mod tests {
             expected_backend_local_trainer_id(&ltx_2_5, "candle").unwrap(),
             "ltx_2_5_distilled"
         );
+    }
+
+    /// Epic 2123: the training catalog projects `limits.x0Decoder` from a target's MLX trainer
+    /// identity only, which is right on Candle too only while both identities map to the same x0
+    /// decoder. Mutation: map `ltx_2_5_distilled` to another decoder in `x0_decoder_for_trainer` ⇒
+    /// red.
+    #[test]
+    fn mlx_and_candle_trainer_identities_share_each_targets_x0_decoder() {
+        use crate::training::depth_anchoring::x0_decoder_for_trainer;
+        for target in crate::training::builtin_training_targets().targets {
+            let mlx = expected_backend_local_trainer_id(&target, "mlx").unwrap();
+            let candle = expected_backend_local_trainer_id(&target, "candle").unwrap();
+            assert_eq!(
+                x0_decoder_for_trainer(mlx),
+                x0_decoder_for_trainer(candle),
+                "{}: {mlx} (MLX) vs {candle} (Candle)",
+                target.id
+            );
+        }
     }
 
     #[test]
@@ -4095,6 +4140,48 @@ mod tests {
             error.contains("runtime trainer") && error.contains("backend/identity drift"),
             "unexpected error: {error}"
         );
+    }
+
+    /// sc-24163: at the terminal pin both runtimes register the `qwen_image_2_1` trainer, so the
+    /// former pending-pin target validates like every other target and its matrix rows read true
+    /// on BOTH backends (the scheduler has routed it to both since sc-24160).
+    #[test]
+    fn qwen_image_2_1_training_target_is_supported_on_both_backends_at_the_pin() {
+        let (mlx, candle) = valid_runtime_pair();
+        validate_runtime_pair(&mlx, &candle).expect("committed pair validates");
+        // sc-24161/sc-24162: the instruction-edit target maps onto the SAME trainer, whose
+        // `max_reference_images` (10) covers its cap on both backends.
+        for target in ["qwen_image_2_1_lora", "qwen_image_2_1_edit_lora"] {
+            for facts in [&mlx, &candle] {
+                assert_eq!(
+                    facts.trainer_mappings.get(target).map(String::as_str),
+                    Some("qwen_image_2_1"),
+                    "{} runtime maps {target} onto its trainer",
+                    facts.snapshot.backend
+                );
+                assert!(
+                    facts
+                        .snapshot
+                        .trainer_capabilities
+                        .iter()
+                        .any(|descriptor| descriptor.id == "qwen_image_2_1"
+                            && descriptor.max_reference_images >= 10),
+                    "{} runtime registers the edit-capable qwen_image_2_1 trainer",
+                    facts.snapshot.backend
+                );
+            }
+            let rows = training_rows(&mlx, &candle).unwrap();
+            let target_rows: Vec<_> = rows.iter().filter(|row| row.target == target).collect();
+            assert_eq!(target_rows.len(), 2, "{target} has lora + lokr rows");
+            for row in target_rows {
+                assert_eq!(
+                    (row.support.mlx, row.support.candle),
+                    (Some(true), Some(true)),
+                    "{target}/{}",
+                    row.network_type
+                );
+            }
+        }
     }
 
     #[test]
@@ -6302,6 +6389,64 @@ mod tests {
         assert!(validate_runtime_pair(&wrong_video_shape, &candle).is_err());
     }
 
+    /// sc-24161: the instruction-edit target shares the T2I target's engine trainer id, so a trainer
+    /// that cannot take edit pairs (`max_reference_images` 0 — the T2I-only descriptor shape, and
+    /// every dump that predates the field) must NOT read as supporting the edit target; one that
+    /// accepts at least the target's own cap does.
+    #[test]
+    fn edit_targets_need_a_trainer_that_accepts_their_reference_cap() {
+        let targets = crate::training::builtin_training_targets().targets;
+        let edit = targets
+            .iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("edit target ships");
+        let t2i = targets
+            .iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("t2i target ships");
+        let cap = crate::training::training_target_max_reference_images(edit);
+        assert_eq!(cap, 10);
+        assert_eq!(
+            crate::training::training_target_max_reference_images(t2i),
+            0
+        );
+        for (max_reference_images, edit_supported) in
+            [(0, false), (cap - 1, false), (cap, true), (cap + 2, true)]
+        {
+            let (mut mlx, _) = valid_runtime_pair();
+            for target in [&edit.id, &t2i.id] {
+                mlx.trainer_mappings
+                    .insert(target.clone(), "qwen_image_2_1".to_owned());
+            }
+            // Replace the pinned descriptor so only this case's cap is in play.
+            mlx.snapshot
+                .trainer_capabilities
+                .retain(|descriptor| descriptor.id != "qwen_image_2_1");
+            mlx.snapshot
+                .trainer_capabilities
+                .push(TrainerCapabilityFacts {
+                    id: "qwen_image_2_1".to_owned(),
+                    backend: "mlx".to_owned(),
+                    supports_lora: true,
+                    supports_lokr: true,
+                    supports_control: false,
+                    supports_full_finetune: false,
+                    max_reference_images,
+                });
+            for network_type in ["lora", "lokr"] {
+                assert_eq!(
+                    trainer_supports(&mlx, edit, network_type),
+                    edit_supported,
+                    "edit/{network_type} with a trainer cap of {max_reference_images}"
+                );
+                assert!(
+                    trainer_supports(&mlx, t2i, network_type),
+                    "the T2I target needs no reference cap ({network_type})"
+                );
+            }
+        }
+    }
+
     #[test]
     fn trainer_mappings_allow_native_engine_ids_and_fail_closed() {
         let mlx = runtime_facts(MLX_RUNTIME_FACTS, "mlx").unwrap();
@@ -6314,8 +6459,13 @@ mod tests {
             "the regression requires distinct native LTX 2.5 trainer engines"
         );
         validate_runtime_pair(&mlx, &candle).unwrap();
-        assert!(trainer_supports(&mlx, target, "lora"));
-        assert!(trainer_supports(&candle, target, "lora"));
+        let target_contract = crate::training::builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|candidate| candidate.id == target)
+            .expect("ltx 2.5 target ships");
+        assert!(trainer_supports(&mlx, &target_contract, "lora"));
+        assert!(trainer_supports(&candle, &target_contract, "lora"));
 
         let mut missing_target = candle.clone();
         missing_target.trainer_mappings.remove(target);

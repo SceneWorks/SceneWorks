@@ -36,6 +36,10 @@ pub(crate) fn default_training_captioner() -> String {
     "joy_caption".to_owned()
 }
 
+pub(crate) fn default_training_caption_mode() -> sceneworks_core::training::CaptionMode {
+    sceneworks_core::training::CaptionMode::Default
+}
+
 pub(crate) fn default_training_caption_model() -> String {
     "fancyfeast/llama-joycaption-beta-one-hf-llava".to_owned()
 }

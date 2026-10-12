@@ -10,9 +10,10 @@ This is a different model from **Qwen Image** (the 2512 weights) in the same cat
 checkpoint with a different text encoder. Prompts do transfer between the two, but seeds and exact
 framing do not.
 
-**Adapters are not supported for this model in this release.** The engine refuses LoRA and LoKr
-outright, and the catalog advertises no compatible family, so the Studio offers none — a Qwen Image
-LoRA will not load here. Everything below is prompt-side.
+**LoRA and LoKr adapters are supported** for generation and reference-image editing. Choose
+adapters from the `qwen-image-2-1` family; adapters trained for the older Qwen Image checkpoint
+belong to a different family and will not load here. Training uses the dense BF16 2.1 base and
+requires accepting the Qwen Research License. Trained adapters inherit that research licence.
 
 ## Prompt Shape
 

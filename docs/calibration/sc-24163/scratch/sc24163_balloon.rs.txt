@@ -1,0 +1,20 @@
+//! SCRATCH (sc-24163 evidence session, never committed): hold BALLOON_GIB of touched device memory
+//! on cuda:0 (2 GiB zero-filled chunks) until killed, to emulate a smaller card.
+use candle_core::{DType, Device, Tensor};
+
+fn main() {
+    let gib: usize = std::env::var("BALLOON_GIB").unwrap().parse().unwrap();
+    let device = Device::new_cuda(0).expect("cuda:0");
+    let mut held = Vec::new();
+    let mut left = gib;
+    while left > 0 {
+        let chunk = left.min(2);
+        held.push(Tensor::zeros((chunk << 30,), DType::U8, &device).expect("alloc"));
+        left -= chunk;
+    }
+    device.synchronize().unwrap();
+    println!("balloon holding {gib} GiB");
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
+}

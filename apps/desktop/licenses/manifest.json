@@ -1638,6 +1638,30 @@
           "key": "insightface-model-notice"
         }
       ]
+    },
+    {
+      "id": "ai-toolkit-perceptual-source",
+      "models": [],
+      "name": "Perceptual LoRA Toolkit body-loss source",
+      "publisher": "Ostris, LLC; ai-toolkit-perceptual fork contributors",
+      "license": "MIT (source only)",
+      "homepage": "https://github.com/BuffaloBuffaloBuffaloBuffalo/ai-toolkit-perceptual/tree/6e01a6e3a75dab3d4567fe885e148df9161daba7",
+      "platforms": [
+        "macos",
+        "windows",
+        "linux"
+      ],
+      "usage": "Native Rust/Candle and Rust/MLX implementations of the body-loss architectures and formulas documented in toolkit/body_id.py,body_shape.py,normal_id.py at the pinned fork revision. The source MIT license and Ostris copyright notice are retained. This source attribution does not license or claim redistribution rights for ViTPose+,HybrIK,Sapiens or other optional model weights.",
+      "documents": [
+        {
+          "label": "MIT License (source)",
+          "key": "ai-toolkit-perceptual-source-mit"
+        },
+        {
+          "label": "Body-loss source provenance",
+          "key": "ai-toolkit-perceptual-source-notice"
+        }
+      ]
     }
   ]
 }

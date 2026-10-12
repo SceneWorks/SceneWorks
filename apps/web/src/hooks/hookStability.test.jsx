@@ -39,6 +39,8 @@ const ACTION_KEYS = {
     "updateTrainingDataset", "batchRenameTrainingDataset", "writeTrainingDatasetCaptionSidecars",
     "createTrainingDatasetCaptionJob", "createTrainingDatasetParquetImportJob", "createTrainingDatasetUpscaleJob",
     "createTrainingDatasetAnalysisJob", "createTrainingDatasetFaceAnalysisJob",
+    "createTrainingDatasetSubjectMaskJob", "loadTrainingDatasetSubjectMasks",
+    "uploadTrainingDatasetSubjectMask",
     "smartCropTrainingDataset", "stripExifTrainingDataset", "createTrainingJob",
   ],
   // sc-11231 (F-037): enqueueTimelineGenerationApply is fed to useJobEvents, whose SSE

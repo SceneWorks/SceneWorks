@@ -30,8 +30,11 @@
 //   * every `mod x;` a reached file DECLARES, when that file was admitted as a whole module. Rust
 //     modules are reachable by method syntax with no named path anywhere, so an impl-only module is
 //     invisible to a path-driven walk; admitting declarations closes that hole. It over-includes a
-//     declared-but-uncalled module, and that over-inclusion stays inside a crate the loader already
-//     reached, so sibling-model separation is untouched. `#[path = "…"]` overrides are honoured;
+//     declared-but-uncalled module. The over-included module's own edges are followed, so it can
+//     reach further crates: `mlx-gen-ltx`'s declared trainer module names the shared perceptual-loss
+//     builder (epic 2123), which pulls the training-time auxiliary model crates into the LTX loader
+//     closure. Generation-model siblings stay separated; the test file pins both halves of that
+//     exception. `#[path = "…"]` overrides are honoured;
 //   * every FIRST-PARTY CRATE a reached file names in a path (`mlx_gen::array::contiguous`,
 //     `use gen_core::…`), entered at the module the path names and walked the same way — so a shared
 //     crate the loader genuinely reaches IS in the unit, and one it does not is not;

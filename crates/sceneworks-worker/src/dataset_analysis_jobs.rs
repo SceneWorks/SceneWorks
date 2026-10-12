@@ -217,6 +217,7 @@ pub(crate) async fn run_dataset_analysis_job(
         saving_message: "Saving embeddings.",
         join_error_label: "dataset analysis task join",
         item_message: &|index, total| format!("Analyzed image {} of {}.", index + 1, total),
+        post_chunk_bytes: None,
     };
     run_batched_analysis_job(
         api,
@@ -229,15 +230,17 @@ pub(crate) async fn run_dataset_analysis_job(
         rx,
         blocking,
         analysis_embedding_records_payload,
-        |embeddings, stored| {
-            analysis_progress(
+        |embeddings, mut responses| {
+            // One POST (`post_chunk_bytes: None`), so exactly one response.
+            let stored = responses.pop().unwrap_or(Value::Null);
+            Ok(analysis_progress(
                 JobStatus::Completed,
                 ProgressStage::Completed,
                 1.0,
                 &format!("Embedded {} training item(s).", embeddings.len()),
                 Some(analysis_result(&dataset_id, embeddings.len(), stored)),
                 backend,
-            )
+            ))
         },
     )
     .await?;

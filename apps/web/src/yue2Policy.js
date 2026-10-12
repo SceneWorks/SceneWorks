@@ -66,3 +66,18 @@ export function yue2AssetFilename(asset) {
 export function yue2TakeFilename(asset, policy = null) {
   return `${yue2ExportStem("yue2-song", asset?.id ?? "take", asset?.extra?.usagePolicy ?? policy)}.wav`;
 }
+
+// A derived-tier install needs an audio worker after its download, so its queue state is more
+// specific than an ordinary model download. Keep this tiny shared label helper with the other
+// YuE2 policy helpers: Model Manager is a separate route and must not pull in the full Song Lab.
+export function installJobStatusLabel(job) {
+  const derived = Boolean(job?.payload?.localDerivation);
+  const status = String(job?.status ?? "");
+  if (derived && (status === "queued" || status === "pending")) {
+    return "queued — waits for an audio-lane worker to derive it";
+  }
+  if (derived && status === "running") {
+    return "deriving on this machine";
+  }
+  return status;
+}

@@ -626,7 +626,7 @@ async fn recipe_preset_crud_routes_persist_global_and_project_presets() {
     assert_eq!(bad_status, StatusCode::BAD_REQUEST);
     assert_eq!(
         bad_error["detail"],
-        "LoRA qwen_style is not compatible with model z_image_turbo"
+        "LoRA qwen_style is not compatible with model z_image_turbo: the LoRA is a qwen-image adapter, and z_image_turbo loads z-image adapters"
     );
 
     let create_one = request(

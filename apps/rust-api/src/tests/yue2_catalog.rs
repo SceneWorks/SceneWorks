@@ -564,7 +564,12 @@ async fn a_verified_derived_snapshot_installs_the_tier_and_its_delete_spares_the
     seed_snapshot(&temp_dir, &yue2_row(&yue2, "m-a-p/YuE2-Vae", true));
     let derived_dir = temp_dir
         .path()
-        .join("data/models/derived/yue2/q4/yue2-ggml-tier-v1");
+        .join("data")
+        .join("models")
+        .join("derived")
+        .join("yue2")
+        .join("q4")
+        .join("yue2-ggml-tier-v1");
     std::fs::create_dir_all(&derived_dir).unwrap();
 
     // A snapshot of the right size but the wrong bytes is not the tier.

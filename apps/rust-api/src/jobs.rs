@@ -1084,6 +1084,18 @@ async fn validate_raw_job_payload(
     ) {
         crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
     }
+    // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
+    // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
+            return Err(error);
+        }
+        // sc-24161: a hand-built plan whose edit-pair shape contradicts its kernel is refused here,
+        // not first discovered by the worker.
+        if let Some(error) = crate::training::raw_training_payload_edit_shape_error(payload) {
+            return Err(error);
+        }
+    }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload
             .get("outputDir")
