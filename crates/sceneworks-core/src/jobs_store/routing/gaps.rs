@@ -435,6 +435,10 @@ pub fn mac_rust_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         // worker — not a native-flow gap. Gated by the worker's capability advertisement, so it queues
         // rather than enforce-fails here.
         | JobType::DatasetFaceAnalysis
+        // sc-2126: dataset_subject_mask runs the native SAM3 person segmenter (the smart-select
+        // checkpoint) in the Rust worker — not a native-flow gap. It routes by the `image_segment`
+        // capability advertisement, so it queues rather than enforce-fails here.
+        | JobType::DatasetSubjectMask
         // sc-4415: face_likeness_compare runs the same native SCRFD+ArcFace stack to score two existing
         // assets on demand — a native Rust/MLX job, not a native-flow gap. Gated by the worker's
         // capability advertisement, so it queues rather than enforce-fails here.
@@ -702,6 +706,8 @@ pub fn candle_supported(job: &JobSnapshot) -> Result<(), UnsupportedReason> {
         | JobType::DatasetUpscale
         // sc-6538: dataset_face_analysis on the candle lane (candle-gen-face) routes by capability too.
         | JobType::DatasetFaceAnalysis
+        // sc-2126: dataset_subject_mask on the candle lane (candle SAM3) routes by `image_segment` too.
+        | JobType::DatasetSubjectMask
         // sc-4415: face_likeness_compare on the candle lane (candle-gen-face) routes by capability too.
         | JobType::FaceLikenessCompare
         // sc-13404: pure audio synthesis (Kokoro TTS) runs on the runtime's candle audio lane off-Mac

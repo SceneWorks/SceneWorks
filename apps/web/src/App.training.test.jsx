@@ -1003,7 +1003,120 @@ describe("SceneWorks app shell", () => {
 
     expect(createCaptionJob).toHaveBeenCalledWith("dataset-a", expect.objectContaining({ captioner: "joy_caption" }));
     expect(createCaptionJob.mock.calls[0][1].itemIds).toBeUndefined();
+    // The default mode sends the full-scene prompt the dialog built.
+    expect(createCaptionJob.mock.calls[0][1].mode).toBe("default");
+    // The seeded trigger words (the dataset name) ride every mode (sc-24829).
+    expect(createCaptionJob.mock.calls[0][1].triggerWords).toEqual(["Portrait Set"]);
+    expect(createCaptionJob.mock.calls[0][1].options.captionPrompt).not.toBe("");
     expect(container.textContent).toContain("Caption job queued (job-caption-1)");
+  });
+
+  // sc-24829: the chosen caption mode reaches the job request; a non-default mode sends no prompt
+  // (subject-only uses the worker's own; trigger-only runs no captioner).
+  it.each(["subjectOnly", "triggerOnly"])("queues a %s caption job without a caller prompt", async (mode) => {
+    const updateDataset = vi.fn(async (datasetId, payload) => ({ id: datasetId, name: payload.name, version: 4, items: singleItemDataset().items }));
+    const createCaptionJob = vi.fn(async () => ({ id: "job-caption-mode", type: "training_caption" }));
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          createCaptionJob,
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset: vi.fn(async () => singleItemDataset()),
+          updateDataset,
+        }),
+      );
+    });
+    await openPortraitSet();
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Caption all").click();
+    });
+    await changeField(field(document.body, "Mode"), mode);
+    // The dialog seeds the trigger words from the dataset name; the user's edit is what is sent.
+    expect(field(document.body, "Trigger words").value).toBe("Portrait Set");
+    await changeField(field(document.body, "Trigger words"), "miraStyle,  red coat ,");
+    await act(async () => {
+      [...document.body.querySelectorAll(".dataset-caption-footer button")].find((button) => button.textContent.startsWith("Caption")).click();
+    });
+    await settle();
+
+    expect(createCaptionJob).toHaveBeenCalledTimes(1);
+    const payload = createCaptionJob.mock.calls[0][1];
+    expect(payload.mode).toBe(mode);
+    expect(payload.options.captionPrompt).toBe("");
+    expect(payload.triggerWords).toEqual(["miraStyle", "red coat"]);
+  });
+
+  it("generates subject masks, reports coverage, and uploads a replacement mask (sc-2126)", async () => {
+    const emptyReport = {
+      datasetId: "dataset-a",
+      total: 1,
+      masked: 1,
+      empty: 1,
+      uploaded: 0,
+      items: [{ itemId: "item_0001", hasMask: true, empty: true, source: "auto", maskPath: "training/datasets/dataset-a/masks/h.png", updatedAt: "t1", revision: "r1" }],
+    };
+    const uploadedReport = {
+      ...emptyReport,
+      empty: 0,
+      uploaded: 1,
+      items: [{ ...emptyReport.items[0], empty: false, source: "upload", updatedAt: "t2" }],
+    };
+    const loadSubjectMasks = vi.fn(async () => emptyReport);
+    const createSubjectMaskJob = vi.fn(async () => ({ id: "job-mask-1", type: "dataset_subject_mask" }));
+    const uploadSubjectMask = vi.fn(async () => uploadedReport);
+    root = createRoot(container);
+    await act(async () => {
+      root.render(
+        withTrainingDataSetsLibraryContext({
+          activeProject: { id: "project-a", name: "Project A" },
+          assets: [{ id: "asset-a", type: "image", displayName: "Mira.png", file: { path: "assets/images/Mira.png", mimeType: "image/png" } }],
+          datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+          loadDataset: vi.fn(async () => singleItemDataset()),
+          updateDataset: vi.fn(async () => singleItemDataset()),
+          loadSubjectMasks,
+          createSubjectMaskJob,
+          uploadSubjectMask,
+        }),
+      );
+    });
+    await openPortraitSet();
+
+    expect(loadSubjectMasks).toHaveBeenCalledWith("dataset-a", "project-a", expect.anything());
+    expect(container.querySelector('[aria-label="Subject mask coverage"]').textContent).toBe("1/1 masked");
+    expect(container.textContent).toContain("No subject in mask");
+
+    await act(async () => {
+      [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Generate subject masks").click();
+    });
+    await settle();
+    expect(createSubjectMaskJob).toHaveBeenCalledWith("dataset-a", {});
+    expect(container.textContent).toContain("Subject mask job queued (job-mask-1)");
+
+    const input = container.querySelector('input[aria-label^="Upload subject mask for"]');
+    const choose = async (file) => {
+      Object.defineProperty(input, "files", { configurable: true, value: [file] });
+      await act(async () => {
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await settle();
+    };
+
+    // Over the shared 32 MiB limit: refused in the browser, never uploaded.
+    const oversized = new File(["x"], "huge.png", { type: "image/png" });
+    Object.defineProperty(oversized, "size", { value: 32 * 1024 * 1024 + 1 });
+    await choose(oversized);
+    expect(uploadSubjectMask).not.toHaveBeenCalled();
+    expect(container.querySelector('[role="alert"]').textContent).toContain("32 MiB");
+
+    const mask = new File([new Uint8Array([1])], "mask.png", { type: "image/png" });
+    await choose(mask);
+    expect(uploadSubjectMask).toHaveBeenCalledWith("dataset-a", "item_0001", mask);
+    expect(container.textContent).toContain("Mask uploaded");
+    expect(container.textContent).not.toContain("No subject in mask");
   });
 
   it("re-captions a single image with the itemIds filter (sc-2025)", async () => {

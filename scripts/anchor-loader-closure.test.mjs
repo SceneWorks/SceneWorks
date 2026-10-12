@@ -240,6 +240,15 @@ test("the checked-in key matches the derivation over the pinned inference source
   assert.equal(config.digestVersion, ANCHOR_LOADER_CLOSURE_VERSION);
 });
 
+/**
+ * The frozen auxiliary models the shared perceptual-loss builder runs at TRAINING time (epic 2123:
+ * TAE decoders, Depth Anything V2, ArcFace/FaceMesh, HybrIK/Sapiens). They are not generation
+ * models and own no anchor, but `mlx-gen-ltx`'s trainer module (`src/training.rs`) names the
+ * builder, and the walk admits that module because `lib.rs` declares it (the documented
+ * declared-module over-inclusion). So they are in the LTX loader closure by construction. The
+ * allowance is narrow: these crates only, and only through the trainer module — the case below
+ * proves the second half by emptying that one file.
+ */
 const LTX_SHARED_AUXILIARY_CRATES = new Set([
   "crates/media/mlx-gen/mlx-gen-body",
   "crates/media/mlx-gen/mlx-gen-depth",
@@ -255,6 +264,17 @@ function unexpectedLtxGeneratorCrates(files) {
       /mlx-gen-|candle-gen-/.test(crate) &&
       crate !== "crates/media/mlx-gen/mlx-gen-ltx" &&
       !LTX_SHARED_AUXILIARY_CRATES.has(crate),
+  );
+}
+
+const LTX_TRAINER = "crates/media/mlx-gen/mlx-gen-ltx/src/training.rs";
+
+function otherModelCrates(files) {
+  const crateOf = (file) => file.slice(0, file.indexOf("/src/"));
+  const crates = new Set(files.map(crateOf));
+  assert.ok(crates.has("crates/media/mlx-gen/mlx-gen-ltx"), [...crates].join(" "));
+  return [...crates].filter(
+    (crate) => /mlx-gen-|candle-gen-/.test(crate) && crate !== "crates/media/mlx-gen/mlx-gen-ltx",
   );
 }
 
@@ -278,6 +298,15 @@ test("the closure admits exact shared auxiliaries, never unrelated generator sib
     "crates/media/mlx-gen/mlx-gen-qwen-image",
     "crates/media/mlx-gen/mlx-gen-qwen-image-2-1",
   ]);
+});
+
+test("the training-time auxiliary crates reach the closure only through the trainer module", { skip }, () => {
+  const { files } = keyAt(PIN);
+  assert.ok(files.includes(LTX_TRAINER), `${LTX_TRAINER} must be in the closure`);
+  // With the trainer module emptied, the loader reaches no other model crate at all — so the
+  // auxiliary allowance above cannot hide a crate the LOADER itself started naming.
+  const withoutTrainer = keyAt(PIN, { [LTX_TRAINER]: "" });
+  assert.deepEqual(otherModelCrates(withoutTrainer.files), []);
 });
 
 /**

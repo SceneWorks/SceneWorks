@@ -65,6 +65,10 @@ function validityFor(draft = VALID_DRAFT, ctx = { activeDataset: DATASET, select
   return summarize(configValidation(draft, ctx));
 }
 
+function outerBaseProps(overrides = {}) {
+  return baseProps(overrides);
+}
+
 function baseProps(overrides = {}) {
   return {
     active: { id: "configure", title: "Configure training job" },
@@ -540,6 +544,922 @@ describe("ConfigureJobPanel — missing control preprocessor", () => {
   it("renders no notice for a LoRA target", () => {
     mount(<ConfigureJobPanel {...baseProps({ missingControlModels: [] })} />);
     expect(container.querySelector(".required-models-notice")).toBeNull();
+  });
+});
+
+// sc-24826 (epic 2123): weight noising is an off-by-default advanced toggle, offered only for a
+// target whose platform trainer declares it (`limits.supportsWeightNoise`, from the targets
+// endpoint). Checking it seeds the upstream-suggested sigma into the draft (which
+// `trainingConfigSnapshot` carries to the job); unchecking clears it; the toggle is checked only
+// for a positive sigma; the sigma input exists while the draft holds a value.
+describe("ConfigureJobPanel weight noise", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsWeightNoise: true },
+  };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Weight noise"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function sigmaInput() {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith("Weight noise sigma"))
+      ?.querySelector("input");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds 0.0125 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle()).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(sigmaInput()).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", "0.0125"]]);
+  });
+
+  it("offers no toggle for a target that does not support weight noise (SDXL)", () => {
+    mountWith({ target: SDXL });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(sigmaInput()).toBeUndefined();
+  });
+
+  it("shows the sigma input while enabled and clears the draft when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0.0125" } });
+    expect(toggle().checked).toBe(true);
+    expect(sigmaInput().value).toBe("0.0125");
+    expect(sigmaInput().getAttribute("max")).toBe("0.1");
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", ""]]);
+  });
+
+  it("reads a zero sigma as off", () => {
+    mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0" } });
+    expect(toggle().checked).toBe(false);
+  });
+
+  it("outlines an above-limit sigma", () => {
+    mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0.5" } });
+    expect(sigmaInput().getAttribute("aria-invalid")).toBe("true");
+  });
+
+  // sc-24827: a "0" draft is off, but the input stays mounted so a user typing "0.02" through "0"
+  // never loses the field; re-checking seeds the suggestion.
+  it("keeps the sigma input mounted for a zero draft and re-seeds on check", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, weightNoiseSigma: "0" } });
+    expect(sigmaInput().value).toBe("0");
+    act(() => toggle().click());
+    expect(calls).toEqual([["weightNoiseSigma", "0.0125"]]);
+  });
+});
+
+// sc-24827 (epic 2123): annealed gradient noise is an off-by-default advanced toggle, offered only
+// for a target whose trainer declares it (`limits.supportsGradientNoise`). Checking it seeds the
+// upstream eta (0.01) and gamma (0.55); unchecking clears both; the eta/gamma inputs exist while the
+// eta draft holds a value, carry the API maxima, and are outlined when invalid.
+describe("ConfigureJobPanel gradient noise", () => {
+  const SUPPORTING = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsWeightNoise: true, supportsGradientNoise: true },
+  };
+  const WEIGHT_ONLY = { ...SUPPORTING, limits: { supportsWeightNoise: true } };
+  const CONTROL = {
+    id: "krea_pose_control",
+    name: "Krea Pose Control",
+    outputKind: "control_branch",
+    defaults: { advanced: { controlType: "pose" } },
+    limits: {},
+  };
+
+  function toggle(label) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === label)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function input(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input");
+  }
+  function mountWith({ target = SUPPORTING, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds eta 0.01 + gamma 0.55 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle("Gradient noise")).toBeTruthy();
+    expect(toggle("Gradient noise").checked).toBe(false);
+    expect(input("Gradient noise eta")).toBeUndefined();
+    expect(input("Gradient noise gamma")).toBeUndefined();
+    act(() => toggle("Gradient noise").click());
+    expect(calls).toEqual([
+      ["gradientNoiseEta", "0.01"],
+      ["gradientNoiseGamma", "0.55"],
+    ]);
+  });
+
+  it("shows eta/gamma with the API maxima while enabled and clears both when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0.01", gradientNoiseGamma: "0.55" } });
+    expect(toggle("Gradient noise").checked).toBe(true);
+    expect(input("Gradient noise eta").value).toBe("0.01");
+    expect(input("Gradient noise eta").getAttribute("max")).toBe("0.1");
+    expect(input("Gradient noise gamma").value).toBe("0.55");
+    expect(input("Gradient noise gamma").getAttribute("max")).toBe("1");
+    act(() => toggle("Gradient noise").click());
+    expect(calls).toEqual([
+      ["gradientNoiseEta", ""],
+      ["gradientNoiseGamma", ""],
+    ]);
+  });
+
+  it("reads a zero eta as off", () => {
+    mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0" } });
+    expect(toggle("Gradient noise").checked).toBe(false);
+    expect(input("Gradient noise eta").value).toBe("0");
+  });
+
+  it("outlines an above-limit eta and gamma", () => {
+    mountWith({ draft: { ...VALID_DRAFT, gradientNoiseEta: "0.5", gradientNoiseGamma: "3" } });
+    expect(input("Gradient noise eta").getAttribute("aria-invalid")).toBe("true");
+    expect(input("Gradient noise gamma").getAttribute("aria-invalid")).toBe("true");
+  });
+
+  it("gates each toggle on its own flag", () => {
+    mountWith({ target: WEIGHT_ONLY });
+    expect(toggle("Weight noise")).toBeTruthy();
+    expect(toggle("Gradient noise")).toBeUndefined();
+  });
+
+  it("offers neither toggle (nor their inputs) on the control-branch target", () => {
+    mountWith({
+      target: CONTROL,
+      draft: { ...VALID_DRAFT, weightNoiseSigma: "0.0125", gradientNoiseEta: "0.01" },
+    });
+    expect(toggle("Weight noise")).toBeUndefined();
+    expect(toggle("Gradient noise")).toBeUndefined();
+    expect(input("Weight noise sigma")).toBeUndefined();
+    expect(input("Gradient noise eta")).toBeUndefined();
+  });
+});
+
+// sc-2127 (epic 2123): multi-resolution buckets are an off-by-default advanced toggle. Checking it
+// seeds rows from the target's resolutions; the row editor edits/adds/removes rows through the draft
+// and is outlined when the list is invalid.
+describe("ConfigureJobPanel resolution buckets", () => {
+  const bucketTarget = { ...TARGET, limits: { resolutions: [512, 768, 1024], supportsResolutionBuckets: true } };
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Multi-resolution buckets"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  const editor = () => container.querySelector(".training-resolution-buckets");
+  const rows = (...pairs) => pairs.map(([resolution, repeats]) => ({ resolution: String(resolution), repeats: String(repeats) }));
+
+  it("is off by default and seeds the target's resolutions when enabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, resolution: "768" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(false);
+    expect(editor()).toBeNull();
+    act(() => toggle().click());
+    expect(calls).toEqual([["resolutionBuckets", rows([512, 1], [768, 1])]]);
+  });
+
+  it("edits, adds and removes rows, and clears the list when disabled", () => {
+    const calls = [];
+    const draft = { ...VALID_DRAFT, resolutionBuckets: rows([512, 16], [1024, 1]) };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: bucketTarget }),
+          updateConfigDraft: (field, value) => calls.push([field, value]),
+        })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(editor().getAttribute("aria-invalid")).toBeNull();
+    const repeats = container.querySelector('[aria-label="Bucket 1 repeats"]');
+    expect(repeats.value).toBe("16");
+    expect(repeats.getAttribute("max")).toBe("100");
+    const resolution = container.querySelector('[aria-label="Bucket 2 resolution"]');
+    expect([...resolution.options].map((option) => option.value)).toEqual(["512", "768", "1024"]);
+    act(() => {
+      resolution.value = "768";
+      resolution.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    act(() => container.querySelector('[aria-label="Remove bucket 1"]').click());
+    act(() => [...editor().querySelectorAll("button")].find((node) => node.textContent === "Add bucket").click());
+    act(() => toggle().click());
+    expect(calls).toEqual([
+      ["resolutionBuckets", rows([512, 16], [768, 1])],
+      ["resolutionBuckets", rows([1024, 1])],
+      ["resolutionBuckets", [...rows([512, 16], [1024, 1]), { resolution: String(VALID_DRAFT.resolution), repeats: "1" }]],
+      ["resolutionBuckets", null],
+    ]);
+  });
+
+  it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {
+    const ltx25 = { ...TARGET, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { resolutions: [512, 768, 1024] } };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: ltx25,
+          configValidity: validityFor(VALID_DRAFT, { activeDataset: DATASET, selectedTarget: ltx25 }),
+        })}
+      />,
+    );
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(editor()).toBeNull();
+  });
+
+  it("outlines a list with a non-positive repeat", () => {
+    const draft = { ...VALID_DRAFT, resolutionBuckets: rows([512, 0]) };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: bucketTarget,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: bucketTarget }),
+        })}
+      />,
+    );
+    expect(editor().getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-2125 (epic 2123): depth anchoring is an off-by-default advanced toggle, offered only for a
+// target whose platform trainer declares it (`limits.supportsDepthAnchoring`, the same mechanism as
+// weight noise). Checking it seeds the upstream DA2-Small weight; its knobs only exist while it is
+// on, and an invalid knob is outlined.
+describe("ConfigureJobPanel depth anchoring", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsDepthAnchoring: true },
+  };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Depth anchoring"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  // Epic 2123 review: the help text names the target's own x0 decoder (`limits.x0Decoder`), not
+  // TAEF1 for every family. Mutation: restore the hard-coded TAEF1 tooltip ⇒ red.
+  it("names the target's x0 decoder in its help text", () => {
+    mountWith({ target: { ...Z_IMAGE, limits: { ...Z_IMAGE.limits, x0Decoder: { label: "TAESDXL tiny decoder", install: true } } } });
+    const help = toggle().closest("label").getAttribute("title");
+    expect(help).toContain("the TAESDXL tiny decoder");
+    expect(help).not.toContain("TAEF1");
+  });
+
+  it("is off by default and seeds 0.1 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle()).toBeTruthy();
+    expect(toggle().checked).toBe(false);
+    expect(field("Depth anchoring weight")).toBeUndefined();
+    expect(field("Depth model")).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", "0.1"]]);
+  });
+
+  // Review minor: a target that does not advertise depth anchoring offers neither the toggle nor
+  // its knobs (even with a carried-over weight). Mutation: render the toggle unconditionally ⇒ red.
+  it("offers no toggle or knobs for a target that does not support depth anchoring (SDXL)", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle()).toBeUndefined();
+    expect(field("Depth anchoring weight")).toBeUndefined();
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small" } });
+    expect(toggle().checked).toBe(true);
+    expect(field("Depth anchoring weight").value).toBe("0.1");
+    expect(field("Depth anchoring weight").getAttribute("max")).toBe("1");
+    expect([...field("Depth model").options].map((o) => o.value)).toEqual(["small", "base", "large"]);
+    expect(field("Depth every N steps").getAttribute("max")).toBe("16");
+    expect(field("Depth window min")).toBeTruthy();
+    expect(field("Depth window max")).toBeTruthy();
+    act(() => toggle().click());
+    expect(calls).toEqual([["depthAnchoringWeight", ""]]);
+  });
+
+  it("outlines an out-of-range alternation period", () => {
+    mountWith({
+      draft: { ...VALID_DRAFT, depthAnchoringWeight: "0.1", depthAnchoringModel: "small", depthAnchoringEvery: "40" },
+    });
+    expect(field("Depth every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24832 (epic 2123): each body loss is an off-by-default advanced toggle offered only for a
+// target that advertises it; checking it seeds the suggested weight; its knobs exist only while on.
+describe("ConfigureJobPanel body losses", () => {
+  const PROPORTION_ONLY = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsBodyProportionLoss: true },
+  };
+  const ALL = {
+    ...PROPORTION_ONLY,
+    limits: { supportsBodyProportionLoss: true, supportsBodyShapeLoss: true, supportsNormalLoss: true },
+  };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = PROPORTION_ONLY, draft = VALID_DRAFT, calls = [], report = null, onGenerate } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target, subjectMaskReport: report }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+          subjectMaskReport: report,
+          onGenerateSubjectMasks: onGenerate,
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  // Restricted normals read the subject masks like subject-masked loss: the same coverage readout,
+  // an error on the checkbox while coverage is incomplete, and "Generate subject masks" (shown once
+  // when subject-masked loss is on too). Mutation: drop the restricted-normal affordance ⇒ red.
+  it("offers subject-mask coverage and generation for restricted normals", () => {
+    const partial = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }] };
+    const draft = { ...VALID_DRAFT, normalWeight: "0.1", normalRestrictToSubject: true };
+    let generated = 0;
+    mountWith({ target: ALL, draft, report: partial, onGenerate: () => (generated += 1) });
+    expect(field("Normals on the subject only").getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeTruthy();
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain("1 of 2 images");
+    const generate = [...container.querySelectorAll("button")].find((node) =>
+      node.textContent.includes("Generate subject masks"),
+    );
+    act(() => generate.click());
+    expect(generated).toBe(1);
+    expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  it("shows no mask readout for unrestricted normals, and one readout alongside subject-masked loss", () => {
+    const partial = { items: [{ hasMask: false }] };
+    mountWith({ target: ALL, draft: { ...VALID_DRAFT, normalWeight: "0.1" }, report: partial });
+    expect(container.querySelector("[data-testid=subject-mask-coverage]")).toBeNull();
+    mountWith({
+      target: { ...ALL, limits: { ...ALL.limits, supportsSubjectMaskLoss: true } },
+      draft: {
+        ...VALID_DRAFT,
+        normalWeight: "0.1",
+        normalRestrictToSubject: true,
+        subjectMaskLoss: true,
+        subjectMaskBackgroundWeight: "0.1",
+        subjectMaskSubjectWeight: "1",
+      },
+      report: partial,
+    });
+    expect(container.querySelectorAll("[data-testid=subject-mask-coverage]")).toHaveLength(1);
+    expect(container.querySelector("[data-testid=restricted-normal-masks]")).toBeNull();
+  });
+
+  // Mutation: render every body toggle regardless of the target flag ⇒ the shape toggle appears ⇒ red.
+  it("offers only the advertised losses, off by default, seeding 0.1 when enabled", () => {
+    const calls = mountWith();
+    expect(toggle("Body proportion loss").checked).toBe(false);
+    expect(toggle("Body shape loss")).toBeUndefined();
+    expect(toggle("Surface normals loss")).toBeUndefined();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body proportion loss").click());
+    expect(calls).toEqual([["bodyProportionWeight", "0.1"]]);
+  });
+
+  it("shows each enabled loss's knobs and clears the weight when disabled", () => {
+    const calls = mountWith({ target: ALL, draft: { ...VALID_DRAFT, bodyShapeWeight: "0.1", normalWeight: "0.2" } });
+    expect(toggle("Body shape loss").checked).toBe(true);
+    expect(field("Body shape weight").value).toBe("0.1");
+    expect(field("Body shape weight").getAttribute("max")).toBe("1");
+    // sc-2124: body shape keeps upstream's [0.4, 0.8].
+    expect(field("Body shape window min").getAttribute("placeholder")).toBe("0.4");
+    expect(field("Body shape window max").getAttribute("placeholder")).toBe("0.8");
+    expect(field("Body shape every N steps").getAttribute("max")).toBe("16");
+    expect(field("Body shape cosine gate")).toBeTruthy();
+    expect(field("Surface normals weight").value).toBe("0.2");
+    expect(field("Normals on the subject only")).toBeTruthy();
+    expect(field("Body proportion weight")).toBeUndefined();
+    act(() => toggle("Body shape loss").click());
+    expect(calls).toEqual([["bodyShapeWeight", ""]]);
+  });
+
+
+  it("outlines an out-of-range alternation period", () => {
+    mountWith({ draft: { ...VALID_DRAFT, bodyProportionWeight: "0.1", bodyProportionEvery: "40" } });
+    expect(field("Body proportion every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24833 (epic 2123): the VAE anchor and E-LatentLPIPS are off-by-default advanced toggles, offered
+// only for a target whose platform trainer declares them (`limits.supportsVaeAnchorLoss` /
+// `limits.supportsLatentLpipsLoss`). Checking one seeds weight 1; its knobs exist only while it is on,
+// and an invalid knob is outlined.
+describe("ConfigureJobPanel latent-space perceptual losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsVaeAnchorLoss: true, supportsLatentLpipsLoss: true },
+  };
+  const LPIPS_ONLY = { ...Z_IMAGE, limits: { supportsLatentLpipsLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(label) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === `${label} loss`)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("is off by default and seeds weight 1 when enabled", () => {
+    const calls = mountWith();
+    for (const label of ["VAE anchor", "E-LatentLPIPS"]) {
+      expect(toggle(label)).toBeTruthy();
+      expect(toggle(label).checked).toBe(false);
+      expect(field(`${label} weight`)).toBeUndefined();
+    }
+    act(() => toggle("VAE anchor").click());
+    act(() => toggle("E-LatentLPIPS").click());
+    expect(calls).toEqual([
+      ["vaeAnchorWeight", "1"],
+      ["latentLpipsWeight", "1"],
+    ]);
+  });
+
+  // Mutation: render the toggles without the per-target support filter ⇒ red.
+  it("offers each toggle only where the target declares that loss", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, vaeAnchorWeight: "1", latentLpipsWeight: "1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeUndefined();
+    expect(field("VAE anchor weight")).toBeUndefined();
+    mountWith({ target: LPIPS_ONLY });
+    expect(toggle("VAE anchor")).toBeUndefined();
+    expect(toggle("E-LatentLPIPS")).toBeTruthy();
+  });
+
+  it("shows its knobs while enabled and clears the weight when disabled", () => {
+    const calls = mountWith({ draft: { ...VALID_DRAFT, vaeAnchorWeight: "1" } });
+    expect(toggle("VAE anchor").checked).toBe(true);
+    expect(field("VAE anchor weight").value).toBe("1");
+    expect(field("VAE anchor weight").getAttribute("max")).toBe("10");
+    expect(field("VAE anchor window max").getAttribute("placeholder")).toBe("0.5");
+    expect(field("VAE anchor every N steps").getAttribute("max")).toBe("16");
+    expect(field("VAE anchor every N steps").getAttribute("placeholder")).toBe("1");
+    expect(field("E-LatentLPIPS weight")).toBeUndefined();
+    act(() => toggle("VAE anchor").click());
+    expect(calls).toEqual([["vaeAnchorWeight", ""]]);
+  });
+
+  it("outlines an out-of-range knob", () => {
+    mountWith({ draft: { ...VALID_DRAFT, latentLpipsWeight: "1", latentLpipsEvery: "40" } });
+    expect(field("E-LatentLPIPS every N steps").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24828 (epic 2123): subject-masked loss is an advanced toggle (on in the Z-Image character
+// presets, sc-2124). While on, the two weight inputs and the dataset's mask coverage appear; an
+// empty mask is an error on the toggle (it blocks Start), a missing one is generated when training
+// starts, and incomplete coverage offers "Generate subject masks".
+describe("ConfigureJobPanel subject-masked loss", () => {
+  const fullReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: false }] };
+  const partialReport = { items: [{ hasMask: true, empty: false }, { hasMask: true, empty: true }, { hasMask: false }] };
+  function toggle() {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.includes("Subject-masked loss"))
+      ?.querySelector("input[type=checkbox]");
+  }
+  function weightInput(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input");
+  }
+  function generateButton() {
+    return [...container.querySelectorAll("button")].find((node) => node.textContent.includes("Generate subject masks"));
+  }
+  const onDraft = { ...VALID_DRAFT, subjectMaskLoss: true, subjectMaskBackgroundWeight: "0.1", subjectMaskSubjectWeight: "1" };
+  // The toggle exists only for a target that advertises support (sc-24828 review).
+  const MASK_TARGET = { ...TARGET, limits: { supportsSubjectMaskLoss: true } };
+  const ctx = (report, target = MASK_TARGET) => ({ activeDataset: DATASET, selectedTarget: target, subjectMaskReport: report });
+  const baseProps = (overrides = {}) => outerBaseProps({ selectedTarget: MASK_TARGET, ...overrides });
+
+  it("is absent for a target that does not advertise it, and a carried-over true blocks Start", () => {
+    // e.g. LTX-2.5 (prepared latent bundles) — no supportsSubjectMaskLoss limit.
+    const ltx25 = { id: "ltx_2_5_video_lora", name: "LTX-2.5", baseModel: "ltx_2_5", limits: {} };
+    const validity = validityFor(onDraft, ctx(fullReport, ltx25));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: ltx25,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: fullReport,
+        })}
+      />,
+    );
+    expect(toggle()).toBeUndefined();
+    expect(weightInput("Background weight")).toBeUndefined();
+    expect(container.querySelector("[data-testid=subject-mask-coverage]")).toBeNull();
+    expect(validity.ready).toBe(false);
+    expect(validity.surfaced.some((entry) => entry.message.includes("does not support subject-masked loss"))).toBe(true);
+    // Off on the same target is clean.
+    expect(
+      validityFor({ ...onDraft, subjectMaskLoss: false }, ctx(fullReport, ltx25)).surfaced.filter((entry) =>
+        String(entry.message).includes("subject-masked"),
+      ),
+    ).toEqual([]);
+  });
+
+  it("is off by default with no weight inputs, and toggles the draft", () => {
+    const calls = [];
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, updateConfigDraft: (field, value) => calls.push([field, value]) })}
+      />,
+    );
+    expect(toggle().checked).toBe(false);
+    expect(weightInput("Background weight")).toBeUndefined();
+    act(() => toggle().click());
+    expect(calls).toEqual([["subjectMaskLoss", true]]);
+  });
+
+  it("shows the weights and full coverage without blocking", () => {
+    const validity = validityFor(onDraft, ctx(fullReport));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: onDraft, configValidity: validity, subjectMaskReport: fullReport })}
+      />,
+    );
+    expect(toggle().checked).toBe(true);
+    expect(weightInput("Background weight").value).toBe("0.1");
+    expect(weightInput("Background weight").getAttribute("max")).toBe("1");
+    expect(weightInput("Subject weight").value).toBe("1");
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain("2 of 2 images");
+    expect(generateButton()).toBeUndefined();
+    expect(toggle().getAttribute("aria-invalid")).not.toBe("true");
+  });
+
+  it("flags incomplete coverage on the toggle and offers Generate subject masks", () => {
+    let generated = 0;
+    const validity = validityFor(onDraft, ctx(partialReport));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: partialReport,
+          onGenerateSubjectMasks: () => {
+            generated += 1;
+          },
+        })}
+      />,
+    );
+    expect(toggle().getAttribute("aria-invalid")).toBe("true");
+    expect(container.querySelector("[data-testid=subject-mask-coverage]").textContent).toContain(
+      "1 of 3 images (1 found no subject)",
+    );
+    act(() => generateButton().click());
+    expect(generated).toBe(1);
+    expect(generateButton()).toBeUndefined();
+    expect(container.textContent).toContain("Subject mask generation queued");
+  });
+
+  // sc-2124: a dataset whose images merely lack masks (none examined yet) trains as-is — the worker
+  // generates them first — so the toggle is not flagged and the readout says so. Mutation: block on
+  // `missing` instead of `empty` ⇒ red.
+  it("does not block on images that only lack a mask, and says they are generated at start", () => {
+    const ungenerated = { items: [{ hasMask: true, empty: false }, { hasMask: false }, { hasMask: false }] };
+    const validity = validityFor(onDraft, ctx(ungenerated));
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: ungenerated,
+          onGenerateSubjectMasks: () => {},
+        })}
+      />,
+    );
+    expect(toggle().getAttribute("aria-invalid")).not.toBe("true");
+    expect(validity.surfaced.filter((entry) => entry.field === "subjectMaskLoss")).toEqual([]);
+    expect(container.querySelector("[data-testid=subject-mask-autogenerate]").textContent).toBe(
+      "2 images without a subject mask get one generated with SAM3 when training starts.",
+    );
+    expect(generateButton()).toBeTruthy();
+  });
+
+  // sc-2124 review (E6): masks still to generate + no SAM3 segmenter ⇒ Start is blocked on the toggle
+  // and the panel offers the segmenter like any other missing model. Mutation: drop the notice ⇒ red.
+  it("offers the SAM3 segmenter and blocks Start when masks must be generated without it", () => {
+    const ungenerated = { items: [{ hasMask: true, empty: false }, { hasMask: false }] };
+    const SAM3 = { id: "sam3_person_segment", name: "SAM3 Person Segmenter", installState: "missing" };
+    const validity = validityFor(onDraft, { ...ctx(ungenerated), subjectSegmenterMissing: true });
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          configDraft: onDraft,
+          configValidity: validity,
+          subjectMaskReport: ungenerated,
+          missingSubjectSegmenterModels: [SAM3],
+          onDownloadModel: () => {},
+        })}
+      />,
+    );
+    expect(container.textContent).toContain("SAM3 Person Segmenter");
+    expect(container.textContent).toContain("Subject-masked training");
+    expect(toggle().getAttribute("aria-invalid")).toBe("true");
+    const start = [...container.querySelectorAll("button")].find((el) => el.textContent.includes("Start training"));
+    expect(start.disabled).toBe(true);
+  });
+
+  it("outlines out-of-range weights", () => {
+    const draft = { ...onDraft, subjectMaskBackgroundWeight: "1.5", subjectMaskSubjectWeight: "0" };
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({ showAdvancedConfig: true, configDraft: draft, configValidity: validityFor(draft, ctx(fullReport)) })}
+      />,
+    );
+    expect(weightInput("Background weight").getAttribute("aria-invalid")).toBe("true");
+    expect(weightInput("Subject weight").getAttribute("aria-invalid")).toBe("true");
+  });
+});
+
+// sc-24831 (epic 2123): the identity / face-landmark losses are off-by-default advanced toggles,
+// offered only for a target whose platform trainer declares them (`limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss`). Checking one seeds 0.1; its knobs exist only while it is on.
+describe("ConfigureJobPanel face losses", () => {
+  const Z_IMAGE = {
+    id: "z_image_turbo_lora",
+    name: "Z-Image-Turbo LoRA",
+    baseModel: "z_image_turbo",
+    limits: { supportsIdentityLoss: true },
+  };
+  const BOTH = { ...Z_IMAGE, limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const SDXL = { id: "sdxl_lora", name: "SDXL LoRA", baseModel: "sdxl", limits: { networkTypes: ["lora", "lokr"] } };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+  function field(label) {
+    return [...container.querySelectorAll("label")]
+      .find((node) => node.textContent.trim().startsWith(label))
+      ?.querySelector("input, select");
+  }
+  function mountWith({ target = Z_IMAGE, draft = VALID_DRAFT, calls = [] } = {}) {
+    mount(
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => calls.push([name, value]),
+        })}
+      />,
+    );
+    return calls;
+  }
+
+  it("offers the identity loss off by default, seeds 0.1, and hides the landmark loss", () => {
+    const calls = mountWith();
+    expect(toggle("Identity loss").checked).toBe(false);
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    act(() => toggle("Identity loss").click());
+    expect(calls).toEqual([["identityLossWeight", "0.1"]]);
+  });
+
+  // Mutation: render the toggles unconditionally ⇒ red.
+  it("offers no toggle or knobs for a target that supports neither (SDXL)", () => {
+    mountWith({ target: SDXL, draft: { ...VALID_DRAFT, identityLossWeight: "0.1", faceLandmarkLossWeight: "0.1" } });
+    expect(container.textContent).toContain("Gradient checkpointing");
+    expect(toggle("Identity loss")).toBeUndefined();
+    expect(toggle("Face landmark loss")).toBeUndefined();
+    expect(field("Identity loss weight")).toBeUndefined();
+    expect(field("Face landmark loss weight")).toBeUndefined();
+  });
+
+  it("shows each loss's knobs while enabled and outlines an invalid gate", () => {
+    const calls = mountWith({
+      target: BOTH,
+      draft: {
+        ...VALID_DRAFT,
+        identityLossWeight: "0.1",
+        identityLossReference: "dataset_average",
+        identityLossMinCos: "2",
+        faceLandmarkLossWeight: "0.1",
+      },
+    });
+    expect(toggle("Identity loss").checked).toBe(true);
+    expect(field("Identity loss weight").getAttribute("max")).toBe("1");
+    expect(field("Identity loss every N steps").getAttribute("max")).toBe("16");
+    expect([...field("Identity reference").options].map((o) => o.value)).toEqual(["dataset_average", "per_image"]);
+    expect(field("Identity gate").getAttribute("aria-invalid")).toBe("true");
+    expect(field("Face landmark loss weight").value).toBe("0.1");
+    expect(field("Face landmark loss window max")).toBeTruthy();
+    act(() => toggle("Face landmark loss").click());
+    expect(calls).toEqual([["faceLandmarkLossWeight", ""]]);
+  });
+});
+
+// Epic 2123 feature review: every technique toggle behaves like the noise toggles — visible wherever
+// the target supports the technique, even on a combination the engine refuses (a Mage full base
+// fine-tune, an LTX-2.5 workflow that generates no video). There the refusal names the loss's
+// weight key: the toggle is outlined, the chip row says why, Start is blocked — and unticking the
+// still-clickable toggle unblocks Start. E-LatentLPIPS decodes nothing, so only the full fine-tune
+// refuses it; on the no-video LTX-2.5 workflow it must stay accepted. Mutation: gate any toggle on
+// its combination refusal again (it disappears), attach a refusal to no field (the toggle is not
+// outlined), or drop the full fine-tune refusal for E-LatentLPIPS ⇒ red.
+describe("ConfigureJobPanel technique toggles on a refused combination", () => {
+  // Sections refused by every scenario below.
+  const SECTIONS = [
+    ["Depth anchoring", "supportsDepthAnchoring"],
+    ["Body proportion loss", "supportsBodyProportionLoss"],
+    ["Body shape loss", "supportsBodyShapeLoss"],
+    ["Surface normals loss", "supportsNormalLoss"],
+    ["Identity loss", "supportsIdentityLoss"],
+    ["Face landmark loss", "supportsFaceLandmarkLoss"],
+    ["VAE anchor loss", "supportsVaeAnchorLoss"],
+  ];
+  // E-LatentLPIPS: refused only by the full fine-tune (it decodes no video stream).
+  const LPIPS = ["E-LatentLPIPS loss", "supportsLatentLpipsLoss"];
+  const supports = Object.fromEntries([...SECTIONS, LPIPS].map(([, limit]) => [limit, true]));
+  const MAGE = {
+    id: "mage_flow_base_lora",
+    name: "Mage-Flow Base LoRA",
+    baseModel: "mage_flow_base",
+    limits: { networkTypes: ["lora", "lokr", "full"], ...supports },
+  };
+  const LTX25 = {
+    id: "ltx_2_5_video_lora",
+    name: "LTX-2.5 Video LoRA",
+    baseModel: "ltx_2_5",
+    limits: { networkTypes: ["lora"], ltxWorkflows: ["t2v_lora", "t2a_lora"], ...supports },
+  };
+
+  function toggle(text) {
+    return [...container.querySelectorAll(".training-advanced-toggles label")]
+      .find((node) => node.textContent.trim() === text)
+      ?.querySelector("input[type=checkbox]");
+  }
+
+  // The screen owns the draft; this harness plays that role so a click flows back through the real
+  // validation rules into the panel, exactly as in the Training Studio.
+  function Harness({ target, initial }) {
+    const [draft, setDraft] = React.useState(initial);
+    return (
+      <ConfigureJobPanel
+        {...baseProps({
+          showAdvancedConfig: true,
+          selectedTarget: target,
+          configDraft: draft,
+          configValidity: validityFor(draft, { activeDataset: DATASET, selectedTarget: target }),
+          updateConfigDraft: (name, value) => setDraft((current) => ({ ...current, [name]: value })),
+        })}
+      />
+    );
+  }
+
+  for (const [scenario, target, extra, reason, refused] of [
+    ["a Mage full base fine-tune", MAGE, { networkType: "full" }, "not a full fine-tune", [...SECTIONS, LPIPS]],
+    ["an LTX-2.5 no-video workflow", LTX25, { ltxWorkflow: "t2a_lora" }, "generates none", SECTIONS],
+  ]) {
+    it(`keeps every toggle clickable on ${scenario} and unblocks Start once it is unticked`, () => {
+      for (const [label] of refused) {
+        mount(<Harness target={target} initial={{ ...VALID_DRAFT, ...extra }} />);
+        expect(submitButton().disabled, `${label}: Start is open before the toggle is ticked`).toBe(false);
+
+        act(() => toggle(label).click());
+        expect(toggle(label).checked, label).toBe(true);
+        expect(toggle(label).getAttribute("aria-invalid"), label).toBe("true");
+        expect(chips().some((chip) => chip.includes(reason)), `${label}: ${chips()}`).toBe(true);
+        expect(submitButton().disabled, `${label}: Start is blocked while refused`).toBe(true);
+
+        act(() => toggle(label).click());
+        expect(toggle(label).checked, label).toBe(false);
+        expect(chips(), label).toEqual([]);
+        expect(submitButton().disabled, `${label}: Start unblocks once unticked`).toBe(false);
+      }
+    });
+
+  }
+
+  it("accepts E-LatentLPIPS on an LTX-2.5 no-video workflow (it decodes no video stream)", () => {
+    mount(<Harness target={LTX25} initial={{ ...VALID_DRAFT, ltxWorkflow: "t2a_lora" }} />);
+    act(() => toggle(LPIPS[0]).click());
+    expect(toggle(LPIPS[0]).checked).toBe(true);
+    expect(toggle(LPIPS[0]).getAttribute("aria-invalid")).not.toBe("true");
+    expect(chips()).toEqual([]);
+    expect(submitButton().disabled).toBe(false);
   });
 });
 

@@ -7,6 +7,7 @@ import { WorkPanel } from "../../components/WorkPanel.jsx";
 import { safeExternalUrl } from "../../urls.js";
 import { DatasetDoctorReadout } from "./DatasetDoctor.jsx";
 import { invalidProps, ReadyPill, ValidationSummary } from "../../validation/Validation.jsx";
+import { numberFromDraft } from "../../training/drafts.js";
 import {
   lossTypeOptions,
   ltx25WorkflowPlan,
@@ -14,10 +15,138 @@ import {
   optimizerLabel,
   optionLabel,
   qualityPresetLabel,
+  rangeOptions,
+  resolutionBucketRepeatsMax,
+  resolutionBucketsMax,
+  resolutionBucketStride,
+  seedResolutionBuckets,
+  targetSupportsResolutionBuckets,
+  subjectMaskCoverage,
+  subjectMaskWeightMax,
+  targetSupportsSubjectMaskLoss,
   timestepBiasOptions,
   timestepTypeOptionsForTarget,
+  targetSupportsWeightNoise,
   trainingAdapterVersionLabels,
+  gradientNoiseEtaMax,
+  gradientNoiseEtaSuggested,
+  gradientNoiseGammaDefault,
+  gradientNoiseGammaMax,
+  targetSupportsGradientNoise,
+  weightNoiseSigmaMax,
+  weightNoiseSigmaSuggested,
+  depthAnchoringEnabled,
+  targetSupportsDepthAnchoring,
+  auxModelsInstallNote,
+  depthAnchoringEveryDefault,
+  depthAnchoringEveryMax,
+  depthAnchoringModelLabels,
+  depthAnchoringModelOptions,
+  depthAnchoringWeightMax,
+  depthAnchoringWeightSuggested,
+  latentLossEnabled,
+  latentPerceptualLosses,
+  targetSupportsLatentLoss,
+  bodyLosses,
+  bodyLossEnabled,
+  bodyLossEveryDefault,
+  bodyLossEveryMax,
+  bodyLossWeightMax,
+  bodyLossWeightSuggested,
+  bodyShapeMinCosDefault,
+  targetSupportsBodyLoss,
+  faceLandmarkLossEnabled,
+  faceLossEveryDefault,
+  faceLossEveryMax,
+  faceLossWeightMax,
+  faceLossWeightSuggested,
+  identityLossEnabled,
+  identityLossMinCosDefault,
+  identityLossReferenceLabels,
+  identityLossReferenceOptions,
+  targetSupportsFaceLandmarkLoss,
+  targetSupportsIdentityLoss,
 } from "../../training/trainingConfig.js";
+
+// A number input bound to the config-draft key `field` (`draft` = { configDraft, configValidity,
+// updateConfigDraft }), outlined when a validation chip names it. `input` overrides min/type and adds
+// max/step/placeholder.
+function DraftNumber({ draft, field, label, title, ...input }) {
+  return (
+    <label title={title}>
+      {label}
+      <input
+        min="0"
+        type="number"
+        {...input}
+        onChange={(event) => draft.updateConfigDraft(field, event.target.value)}
+        value={draft.configDraft[field] ?? ""}
+        {...invalidProps(draft.configValidity, field)}
+      />
+    </label>
+  );
+}
+
+// One training-technique checkbox (epic 2123); `invalid` is the invalidProps of the key it sets.
+function TechniqueToggle({ label, title, invalid, ...input }) {
+  return (
+    <label className="training-checkbox-field" title={title}>
+      <input type="checkbox" {...input} {...invalid} />
+      {label}
+    </label>
+  );
+}
+
+// The weight / noise window / alternation knobs of one auxiliary loss (an entry of the panel's
+// `auxLosses`), shown while the loss is on, plus its loss-specific `afterWeight` / `after` controls.
+function AuxLossKnobs({ loss, draft }) {
+  const { prefix, stem, noun, window: bounds } = loss;
+  return (
+    <>
+      <DraftNumber
+        draft={draft}
+        field={`${prefix}Weight`}
+        label={loss.weightLabel ?? `${stem} weight`}
+        max={loss.weightMax}
+        step={loss.weightStep ?? "0.01"}
+        title={loss.weightTitle}
+      />
+      {loss.afterWeight}
+      <DraftNumber
+        draft={draft}
+        field={`${prefix}MinT`}
+        label={`${stem} window min`}
+        max="1"
+        placeholder={String(bounds[0])}
+        step="0.05"
+        title={`Lowest noise level (0 = clean image, 1 = pure noise) at which the ${noun} applies. Empty = ${bounds[0]}.`}
+      />
+      <DraftNumber
+        draft={draft}
+        field={`${prefix}MaxT`}
+        label={`${stem} window max`}
+        max="1"
+        placeholder={String(bounds[1])}
+        step="0.05"
+        title={`Highest noise level at which the ${noun} applies. Empty = ${bounds[1]}.`}
+      />
+      <DraftNumber
+        draft={draft}
+        field={`${prefix}Every`}
+        label={`${stem} every N steps`}
+        max={loss.everyMax}
+        min="1"
+        placeholder={String(loss.everyDefault)}
+        step="1"
+        title={
+          loss.everyTitle ??
+          `Every Nth step trains the ${noun} alone; the steps between train the normal loss. 1 adds ${loss.everyIt ?? "it"} to every step instead.`
+        }
+      />
+      {loss.after}
+    </>
+  );
+}
 
 // Configure-training-job panel. The Purpose zone of the Training Studio under the
 // page-frame standard (sc-10475): one work-panel holding the twelve basic plan
@@ -92,6 +221,12 @@ export function ConfigureJobPanel({
   // into `configValidity` by the screen, which is what actually blocks Start training; this only
   // renders the offer. Empty for every LoRA target.
   missingControlModels = [],
+  // The de-distill training adapter this run's selected version needs but doesn't have (sc-25213);
+  // folded into `configValidity` by the screen, rendered here as the download offer.
+  missingTrainingAdapterModels = [],
+  // The SAM3 Person Segmenter, when this run must generate missing subject masks and it is not
+  // installed (sc-2124); folded into `configValidity` by the screen, rendered here as the offer.
+  missingSubjectSegmenterModels = [],
   // The licence the selected target's base imposes on what is trained from it
   // (`trainingTargetLicense`, epic 24107 E12 — Qwen Image 2.1's Qwen RESEARCH licence), or null.
   // Rendered as a notice with a required acceptance; whether it blocks Start is one of
@@ -104,6 +239,10 @@ export function ConfigureJobPanel({
   onOpenModels,
   onOpenQueue,
   onCancelJob,
+  // Subject-masked loss (sc-24828): the active dataset's /subject-masks report (null = unknown)
+  // and the screen's "Generate subject masks" action (saves the dataset, queues the SAM3 job).
+  subjectMaskReport = null,
+  onGenerateSubjectMasks,
 }) {
   // ControlNet training (epic 10159) reuses this panel: a `control_branch` target renders the
   // per-image control condition from the selected dataset (the data source) and trains a control
@@ -116,6 +255,280 @@ export function ConfigureJobPanel({
     : null;
   const requiredFullPrecision = fullFinetuneConfig?.mixedPrecision;
   const fullCheckpointingUnsupported = fullFinetuneConfig?.gradientCheckpointing === false;
+  // Adapter noise (epic 2123) is offered only where the target's trainer declares it — the targets
+  // endpoint's `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (every LoRA/LoKr target
+  // since sc-24827; never the control-branch target) — elsewhere the run would be refused.
+  // A toggle is checked for a positive value (a "0" draft is off); the input stays visible while the
+  // draft holds any value so an out-of-range entry can be corrected in place (and typing "0.0…"
+  // never unmounts the field mid-edit).
+  const weightNoiseSupported = targetSupportsWeightNoise(selectedTarget);
+  const weightNoiseEnabled = (numberFromDraft(configDraft.weightNoiseSigma) ?? 0) > 0;
+  const weightNoiseInputVisible =
+    weightNoiseSupported && String(configDraft.weightNoiseSigma ?? "").trim() !== "";
+  // Gradient noise: the same on/visible split over eta; gamma is edited alongside it.
+  const gradientNoiseSupported = targetSupportsGradientNoise(selectedTarget);
+  const gradientNoiseEnabled = (numberFromDraft(configDraft.gradientNoiseEta) ?? 0) > 0;
+  const gradientNoiseInputVisible =
+    gradientNoiseSupported && String(configDraft.gradientNoiseEta ?? "").trim() !== "";
+  // Multi-resolution buckets are on whenever the draft carries a row list (null = off).
+  const resolutionBuckets = Array.isArray(configDraft.resolutionBuckets) ? configDraft.resolutionBuckets : null;
+  // Offered only where the target's trainer on this platform declares buckets
+  // (`limits.supportsResolutionBuckets`, withheld for LTX-2.5) — elsewhere the run would be refused.
+  // A list carried onto an unsupported target keeps its toggle so it can be turned off.
+  const resolutionBucketsSupported = targetSupportsResolutionBuckets(selectedTarget);
+  // Bucket rows pick from the resolutions the target advertises (the API's menu, E6).
+  const bucketResolutionOptions = rangeOptions(selectedTarget?.limits, "resolutions");
+  const updateResolutionBucket = (index, key, value) =>
+    updateConfigDraft(
+      "resolutionBuckets",
+      resolutionBuckets.map((row, rowIndex) => (rowIndex === index ? { ...row, [key]: value } : row)),
+    );
+  // Depth anchoring follows the same target-support mechanism (`limits.supportsDepthAnchoring`);
+  // it is on whenever the draft carries a weight (empty = off), and its knobs appear while on.
+  // Like the noise toggles, every decoded-x0 / latent loss toggle is gated on target support only:
+  // on a combination the engine refuses (a full fine-tune, an LTX-2.5 workflow with no generated
+  // video) the toggle stays visible and outlined, and the refusal — attached to its weight key, like
+  // the API — blocks Start from the chip row until the user unticks it (epic 2123 review).
+  // Body losses (sc-24832): each is offered only where the target's trainer on this platform
+  // declares it and its weights are cataloged (`limits.supportsBodyProportionLoss` / …ShapeLoss /
+  // …NormalLoss); on whenever the draft carries its weight, knobs shown while on.
+  // The frozen models each body loss loads besides the x0 decoder (its help text's install note).
+  const bodyLossModels = {
+    bodyProportion: ["ViTPose+ Base"],
+    bodyShape: ["ViTPose+ Base", "HybrIK ResNet-34"],
+    normal: ["ViTPose+ Base", "Sapiens Normal 0.3B"],
+  };
+  // The face losses (sc-24831) follow the same target-support mechanism
+  // (`limits.supportsIdentityLoss` / `limits.supportsFaceLandmarkLoss`); so do the latent-space
+  // perceptual losses (sc-24833), one per entry of `latentPerceptualLosses`
+  // (`limits.supportsVaeAnchorLoss` / `limits.supportsLatentLpipsLoss`).
+  const latentLossHelp = {
+    vaeAnchor: `Match the training image at several scales: the model's prediction is decoded and a frozen FLUX.2 VAE encoder compares its features with the training image's. ${auxModelsInstallNote(selectedTarget, ["the FLUX.2 VAE"])} Off by default.`,
+    latentLpips:
+      "A learned perceptual similarity measured directly on the latent (E-LatentLPIPS) between the model's prediction and the training image. Needs the E-LatentLPIPS weights for this model family installed. Off by default.",
+  };
+  // Subject-masked loss (sc-24828) is offered only where the target's trainer on this platform
+  // declares it (`limits.supportsSubjectMaskLoss`); a carried-over `true` elsewhere blocks Start
+  // through configValidation instead of rendering a toggle the run would refuse.
+  const subjectMaskLossSupported = targetSupportsSubjectMaskLoss(selectedTarget);
+  const subjectMaskLossEnabled = subjectMaskLossSupported && Boolean(configDraft.subjectMaskLoss);
+  const maskCoverage = subjectMaskCoverage(subjectMaskReport);
+  const [maskJobRequested, setMaskJobRequested] = React.useState(false);
+  // A queued-generation note belongs to the dataset it was queued for.
+  React.useEffect(() => setMaskJobRequested(false), [activeDataset?.id]);
+  // The subject-restricted normal loss (sc-24832) reads the same per-image masks, so it gets the
+  // same coverage readout and "Generate subject masks" action (once — under subject-masked loss
+  // when that is on too).
+  const restrictedNormalsOn =
+    selectedTarget?.baseModel !== "ltx_2_5" &&
+    Boolean(configDraft.normalRestrictToSubject) &&
+    bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft, loss));
+  const subjectMaskCoverageAffordance = (
+    <>
+      <p className="training-field-hint" data-testid="subject-mask-coverage">
+        {maskCoverage
+          ? `Subject masks: ${maskCoverage.usable} of ${maskCoverage.total} images${
+              maskCoverage.empty ? ` (${maskCoverage.empty} found no subject)` : ""
+            }.`
+          : "Subject mask coverage is unknown until the dataset is saved."}
+      </p>
+      {maskCoverage?.ungenerated ? (
+        <p className="training-field-hint" data-testid="subject-mask-autogenerate">
+          {`${maskCoverage.ungenerated} image${maskCoverage.ungenerated === 1 ? "" : "s"} without a subject mask get${
+            maskCoverage.ungenerated === 1 ? "s" : ""
+          } one generated with SAM3 when training starts.`}
+        </p>
+      ) : null}
+      {maskCoverage && !maskCoverage.complete && typeof onGenerateSubjectMasks === "function" ? (
+        maskJobRequested ? (
+          <p className="training-field-hint">
+            Subject mask generation queued — coverage updates when the job finishes.
+          </p>
+        ) : (
+          <button
+            className="secondary-action"
+            onClick={() => {
+              setMaskJobRequested(true);
+              onGenerateSubjectMasks();
+            }}
+            type="button"
+          >
+            Generate subject masks
+          </button>
+        )
+      ) : null}
+    </>
+  );
+  // Every decoded-x0 / latent auxiliary loss the target supports, in display order: its toggle
+  // (label, help text, suggested weight) and the knobs shown while it is on (label stem, help-text
+  // noun, bounds, default window and period, loss-specific extras).
+  const draft = { configDraft, configValidity, updateConfigDraft };
+  const auxLosses = [
+    {
+      prefix: "depthAnchoring",
+      supported: targetSupportsDepthAnchoring(selectedTarget),
+      on: depthAnchoringEnabled(configDraft),
+      suggested: depthAnchoringWeightSuggested,
+      toggleLabel: "Depth anchoring",
+      toggleTitle: `Keep the character's 3D shape consistent: the model's prediction is decoded and a frozen depth model compares its depth to the training image's. ${auxModelsInstallNote(selectedTarget, ["a Depth Anything V2 model"])} Off by default.`,
+      weightLabel: "Depth anchoring weight",
+      weightTitle:
+        "Depth anchoring loss weight. 0.1 is the suggested weight for the Small depth model; use a much smaller weight (around 0.001) with Large.",
+      weightMax: depthAnchoringWeightMax,
+      stem: "Depth",
+      noun: "depth loss",
+      window: [0, 1],
+      everyMax: depthAnchoringEveryMax,
+      everyDefault: depthAnchoringEveryDefault,
+      everyIt: "the depth loss",
+      afterWeight: (
+        <label title={`Which Depth Anything V2 model judges the depth. ${auxModelsInstallNote(selectedTarget, ["the chosen Depth Anything V2 model"])}`}>
+          Depth model
+          <select
+            onChange={(event) => updateConfigDraft("depthAnchoringModel", event.target.value)}
+            value={configDraft.depthAnchoringModel ?? ""}
+            {...invalidProps(configValidity, "depthAnchoringModel")}
+          >
+            {depthAnchoringModelOptions.map((option) => (
+              <option key={option} value={option}>
+                {depthAnchoringModelLabels[option] ?? option}
+              </option>
+            ))}
+          </select>
+        </label>
+      ),
+    },
+    ...bodyLosses.map((loss) => ({
+      prefix: loss.prefix,
+      supported: targetSupportsBodyLoss(selectedTarget, loss),
+      on: bodyLossEnabled(configDraft, loss),
+      suggested: bodyLossWeightSuggested,
+      toggleLabel: `${loss.label} loss`,
+      toggleTitle: `${loss.label} loss: the model's prediction is decoded and compared to the training image by a frozen body model; images with no person are skipped. ${auxModelsInstallNote(selectedTarget, bodyLossModels[loss.prefix])} Off by default.`,
+      weightTitle: `${loss.label} loss weight. ${bodyLossWeightSuggested} is the suggested starting weight.`,
+      weightMax: bodyLossWeightMax,
+      stem: loss.label,
+      noun: `${loss.label.toLowerCase()} loss`,
+      window: loss.window,
+      everyMax: bodyLossEveryMax,
+      everyDefault: bodyLossEveryDefault,
+      after: {
+        bodyProportion: (
+          <TechniqueToggle
+            checked={Boolean(configDraft.bodyProportionIncludeHead)}
+            label="Include head proportions"
+            onChange={(event) => updateConfigDraft("bodyProportionIncludeHead", event.target.checked)}
+            title="Also compare head proportions (nose-to-shoulders height, ear-to-ear width)."
+          />
+        ),
+        bodyShape: (
+          <DraftNumber
+            draft={draft}
+            field="bodyShapeMinCos"
+            label="Body shape cosine gate"
+            max="1"
+            min="-1"
+            placeholder={String(bodyShapeMinCosDefault)}
+            step="0.05"
+            title={`The shape loss only counts while the predicted body shape is already this similar (cosine) to the reference. Empty = ${bodyShapeMinCosDefault}.`}
+          />
+        ),
+        normal: (
+          <>
+            {selectedTarget?.baseModel !== "ltx_2_5" ? (
+              <TechniqueToggle
+                checked={Boolean(configDraft.normalRestrictToSubject)}
+                invalid={invalidProps(configValidity, "normalRestrictToSubject")}
+                label="Normals on the subject only"
+                onChange={(event) => updateConfigDraft("normalRestrictToSubject", event.target.checked)}
+                title="Average the normal loss over each image's subject mask only (needs a subject mask on every image; missing ones are generated with SAM3 when training starts)."
+              />
+            ) : null}
+            {restrictedNormalsOn && !subjectMaskLossEnabled ? (
+              <div className="training-subject-mask-loss" data-testid="restricted-normal-masks">
+                {subjectMaskCoverageAffordance}
+              </div>
+            ) : null}
+          </>
+        ),
+      }[loss.prefix],
+    })),
+    {
+      prefix: "identityLoss",
+      supported: targetSupportsIdentityLoss(selectedTarget),
+      on: identityLossEnabled(configDraft),
+      suggested: faceLossWeightSuggested,
+      toggleLabel: "Identity loss",
+      toggleTitle: `Keep the character's face: the model's prediction is decoded and a frozen face recognizer (ArcFace) compares the face to the training images'. Images without a detectable face are skipped. ${auxModelsInstallNote(selectedTarget, ["the InstantID face analysis stack"])} Off by default.`,
+      weightTitle: "Identity loss weight. Upstream suggests starting between 0.01 and 0.1.",
+      weightMax: faceLossWeightMax,
+      stem: "Identity loss",
+      noun: "identity loss",
+      window: [0, 1],
+      everyMax: faceLossEveryMax,
+      everyDefault: faceLossEveryDefault,
+      after: (
+        <>
+          <DraftNumber
+            draft={draft}
+            field="identityLossMinCos"
+            label="Identity gate (min similarity)"
+            max="1"
+            min="-1"
+            placeholder={String(identityLossMinCosDefault)}
+            step="0.05"
+            title="A step whose predicted face is no more similar to the reference than this (cosine, -1 to 1) adds no identity loss, so blobs that are not faces are never pushed. Empty = 0.2."
+          />
+          <label title="What each image's face is pulled toward: the average identity of every training image (steadier), or that image's own face.">
+            Identity reference
+            <select
+              onChange={(event) => updateConfigDraft("identityLossReference", event.target.value)}
+              value={configDraft.identityLossReference ?? ""}
+              {...invalidProps(configValidity, "identityLossReference")}
+            >
+              {identityLossReferenceOptions.map((option) => (
+                <option key={option} value={option}>
+                  {identityLossReferenceLabels[option] ?? option}
+                </option>
+              ))}
+            </select>
+          </label>
+        </>
+      ),
+    },
+    {
+      prefix: "faceLandmarkLoss",
+      supported: targetSupportsFaceLandmarkLoss(selectedTarget),
+      on: faceLandmarkLossEnabled(configDraft),
+      suggested: faceLossWeightSuggested,
+      toggleLabel: "Face landmark loss",
+      toggleTitle: `Keep the character's face shape: a frozen face-mesh model compares the predicted face's landmarks (jaw, lips, eyes, nose) to the training image's. ${auxModelsInstallNote(selectedTarget, ["the InstantID face analysis stack", "MediaPipe FaceMesh v2"])} Off by default.`,
+      weightTitle: "Face landmark loss weight. Upstream suggests starting between 0.01 and 0.1.",
+      weightMax: faceLossWeightMax,
+      stem: "Face landmark loss",
+      noun: "face landmark loss",
+      window: [0, 1],
+      everyMax: faceLossEveryMax,
+      everyDefault: faceLossEveryDefault,
+    },
+    ...latentPerceptualLosses.map((loss) => ({
+      prefix: loss.prefix,
+      supported: targetSupportsLatentLoss(selectedTarget, loss),
+      on: latentLossEnabled(configDraft, loss),
+      suggested: loss.weightSuggested,
+      toggleLabel: `${loss.label} loss`,
+      toggleTitle: latentLossHelp[loss.prefix],
+      weightTitle: `${loss.label} loss weight. ${loss.weightSuggested} is the starting weight.`,
+      weightMax: loss.weightMax,
+      weightStep: "0.1",
+      stem: loss.label,
+      noun: `${loss.label} loss`,
+      window: [0, loss.maxTDefault],
+      everyMax: loss.everyMax,
+      everyDefault: loss.everyDefault,
+      everyTitle: `1 adds the ${loss.label} loss to every step. N above 1 makes every Nth step train the ${loss.label} loss alone.`,
+    })),
+  ].filter((loss) => loss.supported);
   const visibleTimestepTypeOptions = timestepTypeOptionsForTarget(selectedTarget);
   const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
@@ -420,6 +833,28 @@ export function ConfigureJobPanel({
             onOpenQueue={onOpenQueue}
           />
 
+          <RequiredModelsNotice
+            detail="It is applied to the base only while training, so your LoRA learns the subject instead of fighting the distillation; the run would fail without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature="Z-Image-Turbo LoRA training"
+            models={missingTrainingAdapterModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
+          <RequiredModelsNotice
+            detail="Images without a subject mask get one generated with it when training starts; the run would be refused without it."
+            downloadJobs={controlModelDownloadJobs}
+            feature="Subject-masked training"
+            models={missingSubjectSegmenterModels}
+            onCancelJob={onCancelJob}
+            onDownload={onDownloadModel}
+            onOpenModels={onOpenModels}
+            onOpenQueue={onOpenQueue}
+          />
+
           <AdvancedSection
             hint="cleared values → preset default"
             onToggle={() => setShowAdvancedConfig(!showAdvancedConfig)}
@@ -511,6 +946,41 @@ export function ConfigureJobPanel({
                 LR warmup steps
                 {numericInput("lrWarmupSteps", { min: "0" })}
               </label>
+              {weightNoiseInputVisible ? (
+                <DraftNumber
+                  draft={draft}
+                  field="weightNoiseSigma"
+                  label="Weight noise sigma"
+                  max={weightNoiseSigmaMax}
+                  step="0.0025"
+                  title="Weight noise strength (sigma): after every optimizer step each adapter weight gets Gaussian noise scaled by sigma times that tensor's RMS. 0.0125 is the suggested strength."
+                />
+              ) : null}
+              {gradientNoiseInputVisible ? (
+                <>
+                  <DraftNumber
+                    draft={draft}
+                    field="gradientNoiseEta"
+                    label="Gradient noise eta"
+                    max={gradientNoiseEtaMax}
+                    step="0.001"
+                    title="Gradient noise initial scale (eta): every optimizer step adds Gaussian noise of standard deviation eta / (1 + step)^gamma to each adapter gradient, after clipping. 0.01 is the suggested scale."
+                  />
+                  <DraftNumber
+                    draft={draft}
+                    field="gradientNoiseGamma"
+                    label="Gradient noise gamma"
+                    max={gradientNoiseGammaMax}
+                    step="0.05"
+                    title="Gradient noise annealing exponent (gamma): larger values fade the noise out faster over the run. 0.55 is the default."
+                  />
+                </>
+              ) : null}
+              {auxLosses
+                .filter((loss) => loss.on)
+                .map((loss) => (
+                  <AuxLossKnobs draft={draft} key={loss.prefix} loss={loss} />
+                ))}
               <label>
                 Timestep type
                 <select onChange={(event) => updateConfigDraft("timestepType", event.target.value)} value={configDraft.timestepType ?? ""}>
@@ -619,7 +1089,163 @@ export function ConfigureJobPanel({
                   Gradient checkpointing
                 </label>
               )}
+              {weightNoiseSupported ? (
+                <TechniqueToggle
+                  checked={weightNoiseEnabled}
+                  label="Weight noise"
+                  onChange={(event) =>
+                    updateConfigDraft("weightNoiseSigma", event.target.checked ? String(weightNoiseSigmaSuggested) : "")
+                  }
+                  title="Perturb the adapter weights with small seeded noise after every optimizer step (relative to each tensor's RMS) — a regularizer against overfitting a small character dataset. Off by default."
+                />
+              ) : null}
+              {gradientNoiseSupported ? (
+                <TechniqueToggle
+                  checked={gradientNoiseEnabled}
+                  label="Gradient noise"
+                  onChange={(event) => {
+                    updateConfigDraft("gradientNoiseEta", event.target.checked ? String(gradientNoiseEtaSuggested) : "");
+                    updateConfigDraft("gradientNoiseGamma", event.target.checked ? String(gradientNoiseGammaDefault) : "");
+                  }}
+                  title="Add seeded Gaussian noise to the adapter gradients that fades out over the run (eta / (1 + step)^gamma) — helps escape poor early minima. Off by default."
+                />
+              ) : null}
+              {resolutionBucketsSupported || resolutionBuckets ? (
+                <TechniqueToggle
+                  checked={Boolean(resolutionBuckets)}
+                  label="Multi-resolution buckets"
+                  onChange={(event) =>
+                    updateConfigDraft(
+                      "resolutionBuckets",
+                      event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
+                    )
+                  }
+                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                />
+              ) : null}
+              {auxLosses.map((loss) => (
+                <TechniqueToggle
+                  checked={loss.on}
+                  invalid={invalidProps(configValidity, `${loss.prefix}Weight`)}
+                  key={loss.prefix}
+                  label={loss.toggleLabel}
+                  onChange={(event) =>
+                    updateConfigDraft(`${loss.prefix}Weight`, event.target.checked ? String(loss.suggested) : "")
+                  }
+                  title={loss.toggleTitle}
+                />
+              ))}
+              {subjectMaskLossSupported ? (
+                <TechniqueToggle
+                  checked={subjectMaskLossEnabled}
+                  invalid={invalidProps(configValidity, "subjectMaskLoss")}
+                  label="Subject-masked loss"
+                  onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
+                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image; missing ones are generated with SAM3 when training starts. On in the Z-Image character presets, off otherwise."
+                />
+              ) : null}
             </div>
+
+            {resolutionBuckets ? (
+              <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
+                <legend>Resolution buckets</legend>
+                <span className="training-field-hint">
+                  Each image trains at every resolution below, repeated that many times per epoch. These replace the
+                  single Resolution setting.
+                </span>
+                {resolutionBuckets.map((row, index) => (
+                  <div className="training-resolution-bucket-row" key={index}>
+                    <label>
+                      Resolution
+                      {bucketResolutionOptions.length ? (
+                        <select
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          value={row.resolution ?? ""}
+                        >
+                          {bucketResolutionOptions.map(String).includes(String(row.resolution)) ? null : (
+                            <option value={row.resolution ?? ""}>{row.resolution ?? ""}</option>
+                          )}
+                          {bucketResolutionOptions.map((resolution) => (
+                            <option key={resolution} value={resolution}>
+                              {resolution}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          aria-label={`Bucket ${index + 1} resolution`}
+                          min={resolutionBucketStride}
+                          onChange={(event) => updateResolutionBucket(index, "resolution", event.target.value)}
+                          step={resolutionBucketStride}
+                          type="number"
+                          value={row.resolution ?? ""}
+                        />
+                      )}
+                    </label>
+                    <label>
+                      Repeats
+                      <input
+                        aria-label={`Bucket ${index + 1} repeats`}
+                        max={resolutionBucketRepeatsMax}
+                        min="1"
+                        onChange={(event) => updateResolutionBucket(index, "repeats", event.target.value)}
+                        step="1"
+                        type="number"
+                        value={row.repeats ?? ""}
+                      />
+                    </label>
+                    <button
+                      aria-label={`Remove bucket ${index + 1}`}
+                      className="secondary-action"
+                      onClick={() =>
+                        updateConfigDraft(
+                          "resolutionBuckets",
+                          resolutionBuckets.filter((_, rowIndex) => rowIndex !== index),
+                        )
+                      }
+                      type="button"
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="secondary-action"
+                  disabled={resolutionBuckets.length >= resolutionBucketsMax}
+                  onClick={() =>
+                    updateConfigDraft("resolutionBuckets", [
+                      ...resolutionBuckets,
+                      { resolution: String(configDraft.resolution ?? ""), repeats: "1" },
+                    ])
+                  }
+                  type="button"
+                >
+                  Add bucket
+                </button>
+              </fieldset>
+            ) : null}
+            {subjectMaskLossEnabled ? (
+              <div className="training-subject-mask-loss">
+                <DraftNumber
+                  draft={draft}
+                  field="subjectMaskBackgroundWeight"
+                  label="Background weight"
+                  max={subjectMaskWeightMax}
+                  step="0.05"
+                  title="Loss weight of background pixels (outside the subject mask). 0 ignores the background entirely. The loss is still averaged over the whole image, so with a low background weight and a small subject the effective learning rate drops roughly in proportion to the subject's share of the frame."
+                />
+                <DraftNumber
+                  draft={draft}
+                  field="subjectMaskSubjectWeight"
+                  label="Subject weight"
+                  max={subjectMaskWeightMax}
+                  step="0.05"
+                  title="Loss weight of subject pixels (inside the subject mask). Must be greater than 0."
+                />
+                {subjectMaskCoverageAffordance}
+              </div>
+            ) : null}
           </AdvancedSection>
 
           {/* Dataset Doctor readout before the Train button (sc-6534). Advisory: it

@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:9530648ef5f4b4c7de9645505a45d8e4e7b71c1db250b739651a01f46bf5e117",
+    "sceneWorksRevision": "source-tree:7438613b036642a590f2665d9d32925b61921274245b47b2316710d139390173",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "6fd5f7497bec24dd5079536765754e2bca71f604e8d386de4aecb603219f4dc3"
+        "sha256": "6c78467c5435bf1dfedb7c7faa2cbeaf6d1306f2bcb4cf81ce7a564994ac226f"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "9fcd80ec23845543b1affac3c5b8c29ea316bbc9a13f7e3d2ec5b76ad4ed8848"
+        "sha256": "0a588b44dbb4e41bcc562d7ffe98d112fd88a0298d6f4c38509a2f26f4d6f36f"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",

@@ -24,6 +24,360 @@ export const lossTypeOptions = ["mse", "mae"];
 // fixed; linear/cosine decay it over the run). Distinct from the timestep/noise
 // scheduler above. The target's `limits.lrSchedulers` overrides this fallback.
 export const lrSchedulerOptions = ["constant", "linear", "cosine"];
+// Relative-mode weight noising (epic 2123, sc-24826): after every optimizer update the trainer
+// adds N(0,1)·sigma·rms(w) to each adapter tensor. Off (empty/0) by default; enabling it seeds the
+// upstream-suggested strength. The max is the API's bound (WEIGHT_NOISE_SIGMA_MAX in
+// crates/sceneworks-core/src/training.rs) — a Rust parity test reads this line, keep them equal.
+export const weightNoiseSigmaMax = 0.1;
+export const weightNoiseSigmaSuggested = 0.0125;
+// Annealed gradient noise (epic 2123, sc-24827): on optimizer update t the trainer adds
+// N(0,1)·eta/(1+t)^gamma to every adapter gradient (after the norm clip). Off (empty/0) by default;
+// enabling it seeds the upstream eta and the paper's gamma. The maxima are the API's bounds
+// (GRADIENT_NOISE_ETA_MAX / GRADIENT_NOISE_GAMMA_MAX in crates/sceneworks-core/src/training.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const gradientNoiseEtaMax = 0.1;
+export const gradientNoiseEtaSuggested = 0.01;
+export const gradientNoiseGammaMax = 1;
+export const gradientNoiseGammaDefault = 0.55;
+// Multi-resolution buckets with per-bucket repeat counts (epic 2123, sc-2127): each dataset image
+// trains at every listed resolution, `repeats` times per epoch per row (so 512/768/1024 at 16/4/1
+// is a 16:4:1 per-image mix). Off (null draft) by default. These are the API's limits
+// (RESOLUTION_BUCKETS_MAX / RESOLUTION_BUCKET_REPEATS_MAX / RESOLUTION_BUCKET_STRIDE in
+// crates/sceneworks-core/src/training.rs) — a Rust parity test reads these lines, keep them equal.
+export const resolutionBucketsMax = 8;
+export const resolutionBucketRepeatsMax = 100;
+export const resolutionBucketStride = 32;
+// Depth anchoring (epic 2123, sc-2125): an auxiliary loss that decodes the model's prediction with
+// a tiny decoder, runs a frozen Depth Anything V2 on it, and pulls its depth toward the training
+// image's. Off (empty weight) by default; enabling seeds the upstream DA2-Small weight. These
+// bounds are the API's (crates/sceneworks-core/src/training/depth_anchoring.rs) — a Rust parity
+// test reads these lines, keep them equal.
+export const depthAnchoringWeightMax = 1;
+export const depthAnchoringWeightSuggested = 0.1;
+export const depthAnchoringEveryMax = 16;
+export const depthAnchoringEveryDefault = 2;
+// Default noise window [0, 0.5] (sc-2124): near pure noise the decoded prediction is mush.
+export const depthAnchoringMaxTDefault = 0.5;
+export const depthAnchoringModelOptions = ["small", "base", "large"];
+// Latent-space perceptual losses (epic 2123, sc-24833): the VAE anchor (the model's prediction is
+// decoded and re-encoded by a frozen FLUX.2 VAE encoder, matched against the training image's
+// multi-scale features) and E-LatentLPIPS (a learned perceptual metric on the latent itself). Off
+// (empty weight) by default; enabling seeds weight 1 with upstream's window [0, 0.5], added every
+// step. These bounds are the API's (crates/sceneworks-core/src/training/latent_perceptual.rs) — a
+// Rust parity test reads these lines, keep them equal.
+export const vaeAnchorWeightMax = 10;
+export const vaeAnchorWeightSuggested = 1;
+export const vaeAnchorMaxTDefault = 0.5;
+export const vaeAnchorEveryDefault = 1;
+export const vaeAnchorEveryMax = 16;
+export const latentLpipsWeightMax = 10;
+export const latentLpipsWeightSuggested = 1;
+export const latentLpipsMaxTDefault = 0.5;
+export const latentLpipsEveryDefault = 1;
+export const latentLpipsEveryMax = 16;
+// One entry per latent-perceptual loss: its `advanced` key prefix, label, support flag and bounds.
+export const latentPerceptualLosses = [
+  {
+    prefix: "vaeAnchor",
+    label: "VAE anchor",
+    supportLimit: "supportsVaeAnchorLoss",
+    weightMax: vaeAnchorWeightMax,
+    weightSuggested: vaeAnchorWeightSuggested,
+    maxTDefault: vaeAnchorMaxTDefault,
+    everyDefault: vaeAnchorEveryDefault,
+    everyMax: vaeAnchorEveryMax,
+  },
+  {
+    prefix: "latentLpips",
+    label: "E-LatentLPIPS",
+    supportLimit: "supportsLatentLpipsLoss",
+    weightMax: latentLpipsWeightMax,
+    weightSuggested: latentLpipsWeightSuggested,
+    maxTDefault: latentLpipsMaxTDefault,
+    everyDefault: latentLpipsEveryDefault,
+    everyMax: latentLpipsEveryMax,
+  },
+];
+// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
+// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
+export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
+export const depthAnchoringModelLabels = {
+  small: "Small (fast)",
+  base: "Base",
+  large: "Large (much smaller weight)",
+};
+// Body losses (epic 2123, sc-24832): three auxiliary losses on the same decoded prediction —
+// ViTPose bone-length proportions, HybrIK SMPL body shape and Sapiens surface normals; images with
+// no detected person are skipped. Each is off (empty weight) by default and has its own weight,
+// noise window and alternation period. These bounds are the API's
+// (crates/sceneworks-core/src/training/body_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const bodyLossWeightMax = 1;
+export const bodyLossWeightSuggested = 0.1;
+export const bodyLossEveryMax = 16;
+export const bodyLossEveryDefault = 2;
+// Default noise windows (sc-2124): body proportion [0, 0.5] (upstream [0, 1]); shape and normal
+// keep upstream's [0.4, 0.8], which already excludes the top of the noise range.
+export const bodyProportionMaxTDefault = 0.5;
+export const bodySurfaceWindowDefault = [0.4, 0.8];
+export const bodyShapeMinCosDefault = 0.2;
+// The three losses: the `advanced` key prefix, the target support flag, the default noise window
+// (proportion [0, bodyProportionMaxTDefault], shape/normal bodySurfaceWindowDefault) and the UI label.
+export const bodyLosses = [
+  { prefix: "bodyProportion", limit: "supportsBodyProportionLoss", window: [0, bodyProportionMaxTDefault], label: "Body proportion" },
+  { prefix: "bodyShape", limit: "supportsBodyShapeLoss", window: bodySurfaceWindowDefault, label: "Body shape" },
+  { prefix: "normal", limit: "supportsNormalLoss", window: bodySurfaceWindowDefault, label: "Surface normals" },
+];
+
+// Face losses (epic 2123, sc-24831): the ArcFace identity loss pulls the decoded prediction's face
+// toward the training images' identity; the FaceMesh landmark loss keeps the face shape. Off (empty
+// weight) by default; enabling seeds the upstream starting weight. These bounds are the API's
+// (crates/sceneworks-core/src/training/face_losses.rs) — a Rust parity test reads these lines, keep
+// them equal.
+export const faceLossWeightMax = 1;
+export const faceLossWeightSuggested = 0.1;
+export const faceLossEveryMax = 16;
+export const faceLossEveryDefault = 2;
+// Default noise window [0, 0.5] for both face losses (sc-2124).
+export const faceLossMaxTDefault = 0.5;
+export const identityLossMinCosDefault = 0.2;
+export const identityLossReferenceOptions = ["dataset_average", "per_image"];
+export const identityLossReferenceLabels = {
+  dataset_average: "Average of all images",
+  per_image: "Each image's own face",
+};
+
+// Whether the target's trainer on the serving platform honors the identity / face-landmark loss —
+// the API projects the platform-effective `limits.supportsIdentityLoss` /
+// `limits.supportsFaceLandmarkLoss` (pinned to the trainer descriptors by a worker test).
+export function targetSupportsIdentityLoss(target) {
+  return target?.limits?.supportsIdentityLoss === true;
+}
+export function targetSupportsFaceLandmarkLoss(target) {
+  return target?.limits?.supportsFaceLandmarkLoss === true;
+}
+
+// Why a face loss (`label`) cannot run for this target + draft even though the target advertises
+// it, or null — mirrors the API's `face_loss_combination_refusal` (sc-24831), the same rules as
+// depth anchoring's: a full base fine-tune trains no adapter step, and an LTX-2.5 workflow with no
+// generated video has nothing to decode.
+export function faceLossCombinationRefusal(target, configDraft, label) {
+  return adapterLossRefusal(target, configDraft, `${label} trains`, `${label} needs a generated video stream`);
+}
+
+// The refusal every decoded-x0 / latent auxiliary loss shares: `adapterOnly` ("X trains") when the
+// draft is a full fine-tune, `video` ("X needs a generated video stream") on an LTX-2.5 workflow that
+// generates no video (skipped when `video` is empty), else null.
+function adapterLossRefusal(target, configDraft, adapterOnly, video) {
+  if (isFullFinetuneNetworkType(configDraft?.networkType)) {
+    return `${adapterOnly} a LoRA/LoKr adapter only, not a full fine-tune`;
+  }
+  const workflow = asText(configDraft?.ltxWorkflow).trim();
+  if (video && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+    return `${video}; the LTX-2.5 workflow ${workflow} generates none`;
+  }
+  return null;
+}
+
+// Subject-masked loss weighting (epic 2123, sc-24828): each image's subject mask weights the
+// trainer's per-element loss — background cells by the background weight, subject cells by the
+// subject weight. Off by default. The bound and defaults are the API's (SUBJECT_MASK_WEIGHT_MAX and
+// SUBJECT_MASK_*_WEIGHT_DEFAULT in crates/sceneworks-core/src/training.rs) — a Rust parity test
+// reads these lines, keep them equal. Background may be 0 (drop it); subject must be > 0.
+export const subjectMaskWeightMax = 1;
+export const subjectMaskBackgroundWeightDefault = 0.1;
+export const subjectMaskSubjectWeightDefault = 1;
+
+// Mask coverage of a dataset for masked loss, from its /subject-masks report: `usable` images carry
+// a non-empty mask (an all-black "no subject" mask counts as missing — the worker refuses it too).
+// `null` when no report is loaded (unknown coverage).
+export function subjectMaskCoverage(report) {
+  if (!report || !Array.isArray(report.items)) {
+    return null;
+  }
+  const total = report.items.length;
+  const usable = report.items.filter((item) => item?.hasMask && !item?.empty).length;
+  const empty = report.items.filter((item) => item?.hasMask && item?.empty).length;
+  // `ungenerated` images have no mask at all — the worker generates those with SAM3 before it trains
+  // (sc-2124), so only `empty` ones (SAM3 already found no subject) need the user.
+  return {
+    total,
+    usable,
+    empty,
+    missing: total - usable,
+    ungenerated: total - usable - empty,
+    complete: total > 0 && usable === total,
+  };
+}
+
+// Catalog id of the SAM3 person segmenter that generates missing subject masks before training
+// (the API's `SUBJECT_SEGMENTER_MODEL_ID`).
+export const SUBJECT_SEGMENTER_MODEL_ID = "sam3_person_segment";
+
+// The field a run's subject-mask requirement is reported on — mirrors the API's
+// `subject_mask_consumer`: `subjectMaskLoss` when subject-masked loss is on (even if the restricted
+// normal loss is on too), else `normalRestrictToSubject` when the subject-restricted normal loss is
+// on, else null (the run reads no mask).
+export function subjectMaskConsumerField(configDraft, selectedTarget) {
+  if (configDraft?.subjectMaskLoss && targetSupportsSubjectMaskLoss(selectedTarget)) {
+    return "subjectMaskLoss";
+  }
+  const normalOn = bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft ?? {}, loss));
+  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.baseModel !== "ltx_2_5") {
+    return "normalRestrictToSubject";
+  }
+  return null;
+}
+
+function subjectMaskTechniqueName(field) {
+  return field === "subjectMaskLoss" ? "Subject-masked loss" : "The subject-restricted normal loss";
+}
+
+// The Start-blocking issue for the technique on `field` that reads the subject masks, or "" when
+// none — the API's submit-time refusals, worded the same:
+// - an image whose stored mask is empty (no subject found) cannot be fixed by generating again;
+// - images with no mask yet are generated with SAM3 when training starts (sc-2124), so they block
+//   only while the SAM3 Person Segmenter is not installed (`segmenterMissing`).
+export function subjectMaskCoverageIssue(report, field = "subjectMaskLoss", { segmenterMissing = false } = {}) {
+  const coverage = subjectMaskCoverage(report);
+  const technique = subjectMaskTechniqueName(field);
+  if (coverage?.empty) {
+    return `${technique} needs a subject on every dataset image, but subject mask generation found no person in ${coverage.empty} of ${coverage.total} images. Upload a subject mask for those images in Data Sets, remove them from the dataset, or turn off ${technique}.`;
+  }
+  if (coverage?.ungenerated && segmenterMissing) {
+    return `${technique} needs a subject mask on every dataset image; ${coverage.ungenerated} of ${coverage.total} have none, and the SAM3 Person Segmenter that generates them is not installed. Install "SAM3 Person Segmenter" from the Models screen, or generate or upload the masks in Data Sets.`;
+  }
+  return "";
+}
+
+// The target's advertised training resolutions, ascending (empty when it advertises none).
+function targetResolutions(target) {
+  const values = target?.limits?.resolutions;
+  return Array.isArray(values) ? values.map(Number).filter(Number.isFinite).sort((a, b) => a - b) : [];
+}
+
+// The resolution-bucket ladder for a base resolution (sc-2124) — the rule the Z-Image character
+// presets ship (`z_image_character_bucket_ladder` in sceneworks-core) and the A/B harness measured
+// (`scripts/epic-2123-ab.mjs` `bucketLadder`): every resolution the target trains at up to and
+// including `resolution`, smallest first, with 2^k repeats (4:2:1 for three edges, 2:1 for two).
+// Unlike the harness it never climbs above `resolution`: a bucket larger than the resolution the user
+// picked would train (and need memory) above it. Draft rows; null (buckets off) when fewer than two
+// allowed resolutions sit at or below `resolution`.
+export function bucketLadderDraft(target, resolution) {
+  const base = numberFromDraft(resolution);
+  const allowed = [...new Set(targetResolutions(target))];
+  const edges = allowed.filter((value) => base === null || value <= base);
+  if (edges.length < 2) return null;
+  return edges.map((value, index) => ({ resolution: String(value), repeats: String(2 ** (edges.length - 1 - index)) }));
+}
+
+function sameBucketRows(left, right) {
+  return (
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every(
+      (row, index) =>
+        numberFromDraft(row?.resolution) === numberFromDraft(right[index]?.resolution) &&
+        numberFromDraft(row?.repeats) === numberFromDraft(right[index]?.repeats),
+    )
+  );
+}
+
+// The draft after the user sets Resolution to `resolution` (sc-2124): a bucket list that is still
+// the ladder of the previous resolution (as a Z-Image character preset seeds it) follows the new
+// resolution through `bucketLadderDraft` (off when no ladder fits at or below it, so no bucket
+// exceeds the chosen resolution); buckets the user edited — or off — are left alone.
+export function draftWithResolution(configDraft, target, resolution) {
+  const next = { ...configDraft, resolution };
+  const previousLadder = bucketLadderDraft(target, configDraft?.resolution);
+  if (previousLadder && sameBucketRows(configDraft?.resolutionBuckets, previousLadder)) {
+    next.resolutionBuckets = bucketLadderDraft(target, resolution);
+  }
+  return next;
+}
+
+// Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
+export function resolutionBucketsDraft(value) {
+  return Array.isArray(value)
+    ? value.map((row) => ({ resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }))
+    : null;
+}
+
+// The rows the "Multi-resolution buckets" toggle seeds: every resolution the target trains at up to
+// the current one (or just the current one when the target advertises none), one repeat each, so a
+// fresh list trains exactly the sizes the target already offers and the user tunes the mix.
+export function seedResolutionBuckets(target, resolution) {
+  const current = numberFromDraft(resolution);
+  const offered = targetResolutions(target).filter((value) => current === null || value <= current);
+  const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
+  return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
+}
+
+// Whether the target's trainer honors weight noise / gradient noise — the targets endpoint's
+// `limits.supportsWeightNoise` / `limits.supportsGradientNoise` (pinned to the trainer descriptors
+// by a worker test). Absent means unsupported.
+export function targetSupportsWeightNoise(target) {
+  return target?.limits?.supportsWeightNoise === true;
+}
+export function targetSupportsGradientNoise(target) {
+  return target?.limits?.supportsGradientNoise === true;
+}
+
+// Whether the target's trainer on the serving platform honors multi-resolution buckets — the
+// platform-effective `limits.supportsResolutionBuckets` (pinned to the trainer descriptors by a
+// worker test; withheld for LTX-2.5). Absent means unsupported.
+export function targetSupportsResolutionBuckets(target) {
+  return target?.limits?.supportsResolutionBuckets === true;
+}
+
+// Whether the target's trainer on the serving platform honors depth anchoring — the same
+// mechanism as weight noise: the API projects the platform-effective `limits.supportsDepthAnchoring`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsDepthAnchoring(target) {
+  return target?.limits?.supportsDepthAnchoring === true;
+}
+
+// The install note of a decoded-x0 loss's help text: the target's x0 decoder (the API's
+// `limits.x0Decoder`, projected from the same trainer-keyed mapping the worker loads it by) followed
+// by the loss's own frozen models. A cataloged tiny decoder is one more model to install; a trainer
+// that decodes through its base model's own VAE needs nothing extra, which the note says instead.
+export function auxModelsInstallNote(target, models) {
+  const decoder = target?.limits?.x0Decoder;
+  const label = typeof decoder?.label === "string" ? decoder.label : null;
+  const needs = label && decoder.install ? [`the ${label}`, ...models] : models;
+  const list = needs.length > 1 ? `${needs.slice(0, -1).join(", ")} and ${needs.at(-1)}` : needs[0];
+  const decodedWith = label && !decoder.install ? ` The prediction is decoded through ${label}.` : "";
+  return `Needs ${list} installed.${decodedWith}`;
+}
+
+// Whether the target's trainer on the serving platform honors the body loss `loss` (an entry of
+// `bodyLosses`) — the platform-effective `limits.<loss.limit>` (pinned to the trainer descriptors
+// and the cataloged weights by a worker test). Absent means unsupported.
+export function targetSupportsBodyLoss(target, loss) {
+  return target?.limits?.[loss.limit] === true;
+}
+
+// Why the body losses cannot run for this target + draft even though the target advertises them,
+// or null — mirrors the API's `body_loss_combination_refusal`: a full base fine-tune trains no
+// adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function bodyLossCombinationRefusal(target, configDraft) {
+  return adapterLossRefusal(target, configDraft, "The body losses train", "The body losses need a generated video stream");
+}
+
+// Why depth anchoring cannot run for this target + draft even though the target advertises it, or
+// null — mirrors the API's `depth_anchoring_combination_refusal` (sc-24830): a full base fine-tune
+// trains no adapter step, and an LTX-2.5 workflow with no generated video has nothing to decode.
+export function depthAnchoringCombinationRefusal(target, configDraft) {
+  return adapterLossRefusal(target, configDraft, "Depth anchoring trains", "Depth anchoring needs a generated video stream");
+}
+
+// Whether the target's trainer on the serving platform honors subject-masked loss (sc-24828) — the
+// API advertises `limits.supportsSubjectMaskLoss` per target (pinned to the trainer descriptors on
+// both platforms by a worker test). Absent means unsupported.
+export function targetSupportsSubjectMaskLoss(target) {
+  return target?.limits?.supportsSubjectMaskLoss === true;
+}
 export const optimizerLabels = {
   adam: "Adam",
   adamw: "AdamW",
@@ -53,6 +407,22 @@ export const qualityPresetLabels = {
 // Versions of the ostris de-distill training adapter (Z-Image-Turbo only). The
 // worker maps these to the matching repo file; legacy "v2-default" normalizes to v2.
 export const trainingAdapterVersionOptions = ["v1", "v2"];
+// The one de-distill adapter repo the worker resolves (sceneworks_core training_adapter).
+export const ZIMAGE_TURBO_TRAINING_ADAPTER_REPO = "ostris/zimage_turbo_training_adapter";
+
+// The catalog model a draft's de-distill adapter selection needs installed (sc-25213), or null
+// when the draft names none. Mirrors the worker's mapping: v1 → the v1 file; v2, the presets'
+// legacy "v2-default" and blank → v2. An unknown repo/version maps to null here — the API
+// refuses it as a field error at submit, so there is nothing to offer for download.
+export function trainingAdapterModelId(configDraft) {
+  const repo = asText(configDraft?.trainingAdapterRepo).trim();
+  if (!repo) return null;
+  if (repo !== ZIMAGE_TURBO_TRAINING_ADAPTER_REPO) return null;
+  const version = asText(configDraft?.trainingAdapterVersion).trim().toLowerCase();
+  if (version === "v1") return "zimage_turbo_training_adapter_v1";
+  if (version === "" || version === "v2" || version === "v2-default") return "zimage_turbo_training_adapter_v2";
+  return null;
+}
 export const trainingAdapterVersionLabels = {
   v1: "v1 — stable (smaller)",
   v2: "v2 — experimental (heavier de-distill)",
@@ -334,6 +704,30 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     weightDecay: numericDraft(advanced.weightDecay),
     lrScheduler: asText(advanced.lrScheduler || "constant"),
     lrWarmupSteps: numericDraft(advanced.lrWarmupSteps),
+    // Empty = weight noising off (the default); see weightNoiseSigmaSuggested.
+    weightNoiseSigma: numericDraft(advanced.weightNoiseSigma),
+    // Empty = gradient noise off (the default); the toggle seeds eta + gamma together.
+    gradientNoiseEta: numericDraft(advanced.gradientNoiseEta),
+    gradientNoiseGamma: numericDraft(advanced.gradientNoiseGamma),
+    // null = one resolution (the default); see seedResolutionBuckets.
+    resolutionBuckets: resolutionBucketsDraft(advanced.resolutionBuckets),
+    // Empty weight = depth anchoring off (the default); see depthAnchoringWeightSuggested. The
+    // other knobs only matter (and only reach the job) while it is on.
+    // Empty weight = that auxiliary loss off (the default); its knobs only reach the job while it is
+    // on. Every loss carries Weight/MinT/MaxT/Every; the extras below are loss-specific.
+    ...auxLossesDraft(advanced),
+    depthAnchoringModel: asText(advanced.depthAnchoringModel || depthAnchoringModelOptions[0]),
+    bodyProportionIncludeHead: advanced.bodyProportionIncludeHead === true,
+    bodyShapeMinCos: numericDraft(advanced.bodyShapeMinCos),
+    normalRestrictToSubject: advanced.normalRestrictToSubject === true,
+    identityLossMinCos: numericDraft(advanced.identityLossMinCos),
+    identityLossReference: asText(advanced.identityLossReference || identityLossReferenceOptions[0]),
+    // Subject-masked loss: off unless the target/preset turns it on; the weights seed the defaults.
+    subjectMaskLoss: advanced.subjectMaskLoss === true,
+    subjectMaskBackgroundWeight: numericDraft(
+      advanced.subjectMaskBackgroundWeight ?? subjectMaskBackgroundWeightDefault,
+    ),
+    subjectMaskSubjectWeight: numericDraft(advanced.subjectMaskSubjectWeight ?? subjectMaskSubjectWeightDefault),
     steps: numericDraft(defaults.steps),
     timestepType: asText(advanced.timestepType || "sigmoid"),
     timestepBias: asText(advanced.timestepBias || "balanced"),
@@ -372,6 +766,55 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
         }
       : {}),
   };
+}
+
+// Resolution buckets: optional (null = off), but when on the list must hold 1..max rows, each an
+// on-stride resolution the target trains at (not repeated) with a whole repeat count in
+// 1..resolutionBucketRepeatsMax — the API's exact rules (E6), so the button never enables a job
+// the API would refuse.
+function validateResolutionBuckets(rows, target, issues) {
+  if (!Array.isArray(rows)) {
+    return;
+  }
+  const field = "resolutionBuckets";
+  // A list carried over from another target (or a preset) on a target that cannot honor it would be
+  // refused by the API — block it here with the same reason.
+  if (!targetSupportsResolutionBuckets(target)) {
+    issues.push(issue.error(field, "This target does not support multi-resolution buckets — turn them off or pick a supporting target"));
+    return;
+  }
+  if (!rows.length) {
+    issues.push(issue.error(field, "Add at least one resolution bucket, or turn multi-resolution buckets off"));
+    return;
+  }
+  if (rows.length > resolutionBucketsMax) {
+    issues.push(issue.error(field, `At most ${resolutionBucketsMax} resolution buckets`));
+  }
+  const offered = targetResolutions(target);
+  const seen = new Set();
+  rows.forEach((row, index) => {
+    const n = index + 1;
+    const resolution = numberFromDraft(row?.resolution);
+    const repeats = numberFromDraft(row?.repeats);
+    if (
+      resolution === null ||
+      !Number.isInteger(resolution) ||
+      resolution <= 0 ||
+      resolution % resolutionBucketStride !== 0
+    ) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution must be a positive multiple of ${resolutionBucketStride}`));
+    } else if (offered.length && !offered.includes(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
+    } else if (seen.has(resolution)) {
+      issues.push(issue.error(field, `Bucket ${n}: resolution ${resolution} is already listed`));
+    }
+    if (resolution !== null) {
+      seen.add(resolution);
+    }
+    if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
+      issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
+    }
+  });
 }
 
 // Decide how the config-draft basis effect should react to a basis change (sc-11970).
@@ -450,11 +893,16 @@ export function configValidation(
     selectedTarget,
     datasetNotReady = false,
     missingControlModels = [],
+    missingTrainingAdapterModels = [],
+    subjectMaskReport = null,
+    subjectSegmenterMissing = false,
     licenseAcknowledged = false,
     models = [],
   } = {},
 ) {
   const issues = [];
+  // The one field the run's subject-mask requirement is reported on (the API's rule).
+  const maskField = subjectMaskConsumerField(configDraft, selectedTarget);
   if (!selectedTarget) {
     issues.push(issue.requirement("target", "Select a training target"));
   }
@@ -503,6 +951,76 @@ export function configValidation(
       issues.push(issue.error(field, `${label} must be greater than zero`));
     }
   }
+  // Weight noising: optional, but when set it must sit inside the API's bound (same max, E6),
+  // and it only perturbs adapter weights, so a full base fine-tune cannot use it (E5).
+  if (String(configDraft.weightNoiseSigma ?? "").trim()) {
+    const sigma = numberFromDraft(configDraft.weightNoiseSigma);
+    if (sigma === null || sigma < 0 || sigma > weightNoiseSigmaMax) {
+      issues.push(issue.error("weightNoiseSigma", `Weight noise must be between 0 and ${weightNoiseSigmaMax}`));
+    } else if (sigma > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
+      issues.push(issue.error("weightNoiseSigma", "Weight noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (sigma > 0 && selectedTarget && !targetSupportsWeightNoise(selectedTarget)) {
+      // The toggle is hidden for such a target, so this names no input (field null): the value can
+      // only arrive from a carried-over draft, and the API would refuse it anyway.
+      issues.push(issue.error(null, "This target does not support weight noise — clear it or pick a supporting target"));
+    }
+  }
+  // Gradient noise (sc-24827): same bounds as the API (E6); eta is adapter-only (E5).
+  if (String(configDraft.gradientNoiseEta ?? "").trim()) {
+    const eta = numberFromDraft(configDraft.gradientNoiseEta);
+    if (eta === null || eta < 0 || eta > gradientNoiseEtaMax) {
+      issues.push(issue.error("gradientNoiseEta", `Gradient noise eta must be between 0 and ${gradientNoiseEtaMax}`));
+    } else if (eta > 0 && isFullFinetuneNetworkType(configDraft.networkType)) {
+      issues.push(issue.error("gradientNoiseEta", "Gradient noise only applies to LoRA/LoKr adapters, not a full fine-tune"));
+    } else if (eta > 0 && selectedTarget && !targetSupportsGradientNoise(selectedTarget)) {
+      // As for weight noise: the controls are hidden for such a target, so this names no input.
+      issues.push(issue.error(null, "This target does not support gradient noise — clear it or pick a supporting target"));
+    }
+  }
+  if (String(configDraft.gradientNoiseGamma ?? "").trim()) {
+    const gamma = numberFromDraft(configDraft.gradientNoiseGamma);
+    if (gamma === null || gamma < 0 || gamma > gradientNoiseGammaMax) {
+      issues.push(issue.error("gradientNoiseGamma", `Gradient noise gamma must be between 0 and ${gradientNoiseGammaMax}`));
+    }
+  }
+  validateResolutionBuckets(configDraft.resolutionBuckets, selectedTarget, issues);
+  for (const [field, message] of auxLossesIssues(configDraft, selectedTarget)) {
+    issues.push(issue.error(field, message));
+  }
+  // Subject-masked loss: the weights sit inside the API's bounds (same max, E6); its mask coverage
+  // is checked below with the other mask consumer.
+  if (configDraft.subjectMaskLoss && selectedTarget && !targetSupportsSubjectMaskLoss(selectedTarget)) {
+    // The toggle is hidden for such a target, so a `true` can only be carried over from another
+    // target's draft; it must block Start (the API refuses it too).
+    issues.push(issue.error(null, "This target does not support subject-masked loss — pick a supporting target"));
+  } else if (configDraft.subjectMaskLoss) {
+    const background = numberFromDraft(configDraft.subjectMaskBackgroundWeight);
+    if (background === null || background < 0 || background > subjectMaskWeightMax) {
+      issues.push(
+        issue.error("subjectMaskBackgroundWeight", `Background weight must be between 0 and ${subjectMaskWeightMax}`),
+      );
+    }
+    const subject = numberFromDraft(configDraft.subjectMaskSubjectWeight);
+    if (subject === null || subject <= 0 || subject > subjectMaskWeightMax) {
+      issues.push(
+        issue.error(
+          "subjectMaskSubjectWeight",
+          `Subject weight must be greater than 0 and at most ${subjectMaskWeightMax}`,
+        ),
+      );
+    }
+  }
+  // Every technique that reads the subject masks shares one coverage requirement, reported — like
+  // the API's refusal — once, on the consumer field (subject-masked loss wins over the restricted
+  // normal loss when both are on).
+  if (maskField) {
+    const maskIssue = subjectMaskCoverageIssue(subjectMaskReport, maskField, {
+      segmenterMissing: subjectSegmenterMissing,
+    });
+    if (maskIssue) {
+      issues.push(issue.error(maskField, maskIssue));
+    }
+  }
   // Whether the chosen dataset is trainable is part of "can this job run", so it belongs
   // in the Train button's one validity summary rather than a separate `disabled` term.
   // The screen passes the already-computed gate (trainBlockedByReadiness keeps its
@@ -526,6 +1044,14 @@ export function configValidation(
         `Install ${names.join(" and ")} to render this run's control condition.`,
       ),
     );
+  }
+  // The de-distill training adapter (sc-25213) resolves from the installed library only — a missing
+  // one is refused at submit by the API and by the worker, so it gates Start like the preprocessor
+  // models above; the panel renders the download offer.
+  if (missingTrainingAdapterModels.length > 0) {
+    const names = missingTrainingAdapterModels.map((model) => model?.name ?? model?.id).filter(Boolean);
+    // Attached to the version picker — the same field the API's submit-time refusal names.
+    issues.push(issue.error("trainingAdapterVersion", `Install ${names.join(" and ")} — this run trains with it.`));
   }
   if (selectedTarget?.baseModel === "ltx_2_5") {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)
@@ -636,6 +1162,29 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     weightDecay: numberFromDraft(configDraft.weightDecay),
     lrScheduler: asText(configDraft.lrScheduler).trim() || "constant",
     lrWarmupSteps: numberFromDraft(configDraft.lrWarmupSteps),
+    // Omitted when off (empty draft), so a default job's snapshot is unchanged.
+    weightNoiseSigma: numberFromDraft(configDraft.weightNoiseSigma),
+    // Gradient noise: omitted when off; gamma only travels with an eta (it means nothing alone).
+    gradientNoiseEta: numberFromDraft(configDraft.gradientNoiseEta),
+    gradientNoiseGamma: String(configDraft.gradientNoiseEta ?? "").trim()
+      ? numberFromDraft(configDraft.gradientNoiseGamma)
+      : undefined,
+    // Omitted when off (null draft); an empty "on" list is sent as [] and refused by both sides.
+    resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
+      ? configDraft.resolutionBuckets.map((row) => ({
+          resolution: numberFromDraft(row?.resolution),
+          repeats: numberFromDraft(row?.repeats),
+        }))
+      : undefined,
+    ...auxLossesSnapshot(configDraft),
+    // Omitted entirely when off, so a default job's snapshot is unchanged.
+    subjectMaskLoss: configDraft.subjectMaskLoss ? true : undefined,
+    subjectMaskBackgroundWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskBackgroundWeight)
+      : undefined,
+    subjectMaskSubjectWeight: configDraft.subjectMaskLoss
+      ? numberFromDraft(configDraft.subjectMaskSubjectWeight)
+      : undefined,
     timestepType: asText(configDraft.timestepType).trim(),
     timestepBias: asText(configDraft.timestepBias).trim(),
     lossType: asText(configDraft.lossType).trim(),
@@ -694,4 +1243,284 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
       advanced,
     },
   };
+}
+
+// Depth anchoring is on whenever the draft carries a weight (empty = off).
+export function depthAnchoringEnabled(configDraft) {
+  return auxLossOn(configDraft, "depthAnchoring");
+}
+
+// An auxiliary loss is on whenever the draft carries its `<prefix>Weight` (empty = off).
+function auxLossOn(configDraft, prefix) {
+  return String(configDraft?.[`${prefix}Weight`] ?? "").trim() !== "";
+}
+
+const auxLossKnobs = ["Weight", "MinT", "MaxT", "Every"];
+
+// Whether the target's trainer on the serving platform honors a latent-perceptual loss — the same
+// mechanism as depth anchoring: the API projects the platform-effective `limits.<supportLimit>`
+// (pinned to the trainer descriptors by a worker test). Absent means unsupported.
+export function targetSupportsLatentLoss(target, loss) {
+  return target?.limits?.[loss.supportLimit] === true;
+}
+
+export function targetSupportsVaeAnchorLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[0]);
+}
+
+export function targetSupportsLatentLpipsLoss(target) {
+  return targetSupportsLatentLoss(target, latentPerceptualLosses[1]);
+}
+
+// Why a latent-perceptual loss cannot run for this target + draft even though the target advertises
+// it (the API's latent_loss_combination_refusal), or null: no aux loss on a full fine-tune, and the
+// decoded-x0 VAE anchor not on an LTX-2.5 workflow that generates no video.
+export function latentLossCombinationRefusal(target, configDraft, loss) {
+  const subject = `The ${loss.label} loss`;
+  return adapterLossRefusal(
+    target,
+    configDraft,
+    `${subject} trains`,
+    loss.prefix === "vaeAnchor" && `${subject} decodes the generated video stream`,
+  );
+}
+
+// A latent-perceptual loss is on whenever the draft carries its weight (empty = off).
+export function latentLossEnabled(configDraft, loss) {
+  return auxLossOn(configDraft, loss.prefix);
+}
+
+// A face loss is on whenever the draft carries its weight (empty = off).
+export function identityLossEnabled(configDraft) {
+  return auxLossOn(configDraft, "identityLoss");
+}
+export function faceLandmarkLossEnabled(configDraft) {
+  return auxLossOn(configDraft, "faceLandmarkLoss");
+}
+
+// A body loss is on whenever the draft carries its weight (empty = off).
+export function bodyLossEnabled(configDraft, loss) {
+  return auxLossOn(configDraft, loss.prefix);
+}
+
+// One spec per decoded-x0 / latent auxiliary loss, in validation order (depth anchoring, the body
+// losses, the face losses, the latent-perceptual losses). `name` heads the weight-range message,
+// `what` the unsupported-target message; `window` is the API's default noise window; `lenient`
+// losses keep checking their other knobs past an out-of-range weight (as the API does for depth
+// anchoring and the face losses); `before`/`after` add loss-specific issues around the shared
+// window/period checks; `extras` adds loss-specific snapshot keys.
+const faceLossSpec = (prefix, name, supported, extra) => ({
+  family: "face",
+  prefix,
+  name,
+  what: `the ${name.toLowerCase()}`,
+  weightMax: faceLossWeightMax,
+  everyMax: faceLossEveryMax,
+  window: [0, faceLossMaxTDefault],
+  lenient: true,
+  supported,
+  refusal: (target, configDraft) => faceLossCombinationRefusal(target, configDraft, name),
+  ...extra,
+});
+
+const auxLossSpecs = [
+  {
+    family: "depth",
+    prefix: "depthAnchoring",
+    name: "Depth anchoring",
+    what: "depth anchoring",
+    weightMax: depthAnchoringWeightMax,
+    everyMax: depthAnchoringEveryMax,
+    window: [0, depthAnchoringMaxTDefault],
+    lenient: true,
+    supported: targetSupportsDepthAnchoring,
+    refusal: depthAnchoringCombinationRefusal,
+    before: (configDraft) =>
+      depthAnchoringModelOptions.includes(asText(configDraft.depthAnchoringModel).trim())
+        ? []
+        : [["depthAnchoringModel", `Depth model must be one of ${depthAnchoringModelOptions.join(", ")}`]],
+    extras: (configDraft) => ({ depthAnchoringModel: asText(configDraft.depthAnchoringModel).trim() }),
+  },
+  ...bodyLosses.map((loss) => ({
+    family: "body",
+    prefix: loss.prefix,
+    name: `${loss.label} loss`,
+    what: `the ${loss.label.toLowerCase()} loss`,
+    weightMax: bodyLossWeightMax,
+    everyMax: bodyLossEveryMax,
+    window: loss.window,
+    supported: (target) => targetSupportsBodyLoss(target, loss),
+    refusal: bodyLossCombinationRefusal,
+    after: bodyLossExtraIssues,
+    extras: (configDraft) => ({
+      bodyProportion: { bodyProportionIncludeHead: configDraft.bodyProportionIncludeHead ? true : undefined },
+      bodyShape: { bodyShapeMinCos: numberFromDraft(configDraft.bodyShapeMinCos) },
+      normal: { normalRestrictToSubject: configDraft.normalRestrictToSubject ? true : undefined },
+    })[loss.prefix],
+  })),
+  faceLossSpec("identityLoss", "Identity loss", targetSupportsIdentityLoss, {
+    after: (configDraft) => {
+      const issues = [];
+      if (String(configDraft.identityLossMinCos ?? "").trim()) {
+        const minCos = numberFromDraft(configDraft.identityLossMinCos);
+        if (minCos === null || minCos < -1 || minCos > 1) {
+          issues.push(["identityLossMinCos", "Identity gate must be between -1 and 1"]);
+        }
+      }
+      if (!identityLossReferenceOptions.includes(asText(configDraft.identityLossReference).trim())) {
+        issues.push(["identityLossReference", `Identity reference must be one of ${identityLossReferenceOptions.join(", ")}`]);
+      }
+      return issues;
+    },
+    extras: (configDraft) => ({
+      identityLossMinCos: numberFromDraft(configDraft.identityLossMinCos),
+      identityLossReference: asText(configDraft.identityLossReference).trim(),
+    }),
+  }),
+  faceLossSpec("faceLandmarkLoss", "Face landmark loss", targetSupportsFaceLandmarkLoss),
+  ...latentPerceptualLosses.map((loss) => ({
+    family: "latent",
+    prefix: loss.prefix,
+    name: loss.label,
+    what: `the ${loss.label} loss`,
+    weightMax: loss.weightMax,
+    everyMax: loss.everyMax,
+    window: [0, loss.maxTDefault],
+    supported: (target) => targetSupportsLatentLoss(target, loss),
+    refusal: (target, configDraft) => latentLossCombinationRefusal(target, configDraft, loss),
+  })),
+];
+
+// The draft fields every auxiliary loss shares, read from a target's `advanced` defaults.
+function auxLossesDraft(advanced) {
+  const draft = {};
+  for (const { prefix } of auxLossSpecs) {
+    for (const knob of auxLossKnobs) {
+      draft[prefix + knob] = numericDraft(advanced?.[prefix + knob]);
+    }
+  }
+  return draft;
+}
+
+// Field issues for one enabled auxiliary loss — the API's bounds (E6): weight in [0, weightMax], a
+// [0, 1] noise window with min <= max, and a whole alternation period in [1, everyMax]. A weight on a
+// target that does not support the loss names no input (field null): the toggle is hidden there, so
+// the value can only arrive from a carried-over draft, and the API refuses it anyway. A refused
+// combination (full fine-tune, no-video LTX-2.5 workflow) names the weight key, like the API: the
+// toggle stays visible on a supporting target, so the user can untick it there.
+function auxLossIssues(configDraft, selectedTarget, spec) {
+  const key = (knob) => spec.prefix + knob;
+  const issues = [];
+  const weight = numberFromDraft(configDraft[key("Weight")]);
+  if (weight === null || weight < 0 || weight > spec.weightMax) {
+    issues.push([key("Weight"), `${spec.name} weight must be between 0 and ${spec.weightMax}`]);
+    if (!spec.lenient) return issues;
+  } else if (weight > 0 && selectedTarget) {
+    if (!spec.supported(selectedTarget)) {
+      return [[null, `This target does not support ${spec.what} — clear it or pick a supporting target`]];
+    }
+    const refusal = spec.refusal(selectedTarget, configDraft);
+    if (refusal) return [[key("Weight"), refusal]];
+  }
+  issues.push(...(spec.before?.(configDraft) ?? []));
+  const bounds = {};
+  for (const knob of ["MinT", "MaxT"]) {
+    if (!String(configDraft[key(knob)] ?? "").trim()) continue;
+    const t = numberFromDraft(configDraft[key(knob)]);
+    if (t === null || t < 0 || t > 1) {
+      issues.push([key(knob), "Noise window bounds must be between 0 and 1"]);
+    } else {
+      bounds[knob] = t;
+    }
+  }
+  if ((bounds.MinT ?? spec.window[0]) > (bounds.MaxT ?? spec.window[1])) {
+    issues.push([
+      key("MaxT"),
+      bounds.MaxT === undefined
+        ? `Noise window max must be at least its min — it is empty and its default is now ${spec.window[1]}`
+        : "Noise window max must be at least its min",
+    ]);
+  }
+  if (String(configDraft[key("Every")] ?? "").trim()) {
+    const every = numberFromDraft(configDraft[key("Every")]);
+    if (every === null || !Number.isInteger(every) || every < 1 || every > spec.everyMax) {
+      issues.push([key("Every"), `Alternation period must be a whole number from 1 to ${spec.everyMax}`]);
+    }
+  }
+  issues.push(...(spec.after?.(configDraft, selectedTarget, spec.prefix) ?? []));
+  return issues;
+}
+
+// The body losses' own knobs: the subject-restricted normal loss and the shape loss's cosine gate.
+function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
+  const issues = [];
+  if (prefix === "normal" && configDraft.normalRestrictToSubject) {
+    if (selectedTarget?.baseModel === "ltx_2_5") {
+      // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
+      // The toggle is hidden there, so a carried-over `true` names no input.
+      issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);
+    }
+    // Its subject-mask coverage requirement is checked once in configValidation, on the field the
+    // API names (`subjectMaskConsumerField`).
+  }
+  if (prefix === "bodyShape" && String(configDraft.bodyShapeMinCos ?? "").trim()) {
+    const c = numberFromDraft(configDraft.bodyShapeMinCos);
+    if (c === null || c < -1 || c > 1) {
+      issues.push(["bodyShapeMinCos", "Shape cosine gate must be between -1 and 1"]);
+    }
+  }
+  return issues;
+}
+
+// Field issues for every enabled auxiliary loss (of `family` when given), in spec order.
+function auxLossesIssues(configDraft, selectedTarget, family = null) {
+  return auxLossSpecs
+    .filter((spec) => (!family || spec.family === family) && auxLossOn(configDraft, spec.prefix))
+    .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec));
+}
+
+// The auxiliary-loss keys a job snapshot carries: none for a loss that is off (a default job's
+// snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
+// defaults).
+function auxLossesSnapshot(configDraft, family = null) {
+  const snapshot = {};
+  for (const spec of auxLossSpecs) {
+    if ((family && spec.family !== family) || !auxLossOn(configDraft, spec.prefix)) continue;
+    Object.assign(
+      snapshot,
+      compactObject({
+        ...Object.fromEntries(
+          auxLossKnobs.map((knob) => [spec.prefix + knob, numberFromDraft(configDraft[spec.prefix + knob])]),
+        ),
+        ...spec.extras?.(configDraft),
+      }),
+    );
+  }
+  return snapshot;
+}
+
+// Per-family views of the shared checks (depth anchoring, body, face, latent-perceptual).
+export function depthAnchoringIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, "depth");
+}
+export function depthAnchoringSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "depth");
+}
+export function bodyLossIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, "body");
+}
+export function bodyLossSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "body");
+}
+export function faceLossIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, "face");
+}
+export function faceLossSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "face");
+}
+export function latentPerceptualIssues(configDraft, selectedTarget) {
+  return auxLossesIssues(configDraft, selectedTarget, "latent");
+}
+export function latentPerceptualSnapshot(configDraft) {
+  return auxLossesSnapshot(configDraft, "latent");
 }

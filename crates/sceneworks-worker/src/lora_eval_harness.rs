@@ -19,6 +19,15 @@
 //! face to the reference centroid), output sharpness, prompt adherence (image↔text cosine),
 //! and output spread (mean pairwise CLIP distance — variety).
 //!
+//! **Independent identity metric (epic 2123, sc-2124).** The primary identity axis embeds with
+//! the InstantID bundle's glintr100 (iresnet100) — the same network the identity-loss training
+//! technique optimises, so identity LoRAs can game it. Set `FACE_R50_WEIGHTS` to a converted
+//! InsightFace buffalo_l `w600k_r50` (iresnet50, WebFace600K) safetensors and the report gains
+//! `identity_r50_cosine_mean`/`_std` (and a per-output `identity_r50_cosine`): the same SCRFD
+//! detection, the same alignment, an embedding from that second network, cosine to a reference
+//! centroid built from that second network. No training technique uses it. Unset, the keys are
+//! absent and every other value is unchanged.
+//!
 //! Run (real weights, MLX is `!Send` so single-threaded):
 //! ```sh
 //! REF_DIR=~/Datasets/Basim/reference \
@@ -131,6 +140,10 @@ struct OutputScore {
     face_detected: bool,
     /// Cosine of the largest detected face to the reference centroid; `None` if no face.
     identity_cosine: Option<f64>,
+    /// The same face embedded by the independent `w600k_r50` network, cosine to that network's
+    /// own reference centroid. Absent when `FACE_R50_WEIGHTS` is unset or no face was found.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_r50_cosine: Option<f64>,
     /// `blur_variance` (higher = sharper).
     sharpness: f64,
     /// Image↔prompt-text CLIP cosine; `None` if no prompt was supplied for this image.
@@ -143,6 +156,10 @@ struct EvalAggregates {
     face_detect_rate: f64,
     identity_cosine_mean: Option<f64>,
     identity_cosine_std: Option<f64>,
+    /// The independent-network identity axis; `None` (keys absent from the JSON) when
+    /// `FACE_R50_WEIGHTS` is unset.
+    #[serde(flatten)]
+    identity_r50: Option<IdentityR50Aggregates>,
     sharpness_mean: Option<f64>,
     sharpness_std: Option<f64>,
     prompt_adherence_mean: Option<f64>,
@@ -153,6 +170,15 @@ struct EvalAggregates {
     /// seeds (`1 - mean_pairwise_cosine` of the same prompt's outputs). This is the actual
     /// mode-collapse measure — only meaningful with ≥ 2 seeds per prompt. `None` otherwise.
     same_prompt_spread: Option<f64>,
+}
+
+/// Aggregates of the `w600k_r50` identity axis. Flattened into [`EvalAggregates`], so the JSON
+/// keys are `identity_r50_cosine_mean` / `identity_r50_cosine_std` — present (possibly `null`
+/// when no output had a face) exactly when the second model was loaded.
+#[derive(Serialize, Debug, PartialEq)]
+struct IdentityR50Aggregates {
+    identity_r50_cosine_mean: Option<f64>,
+    identity_r50_cosine_std: Option<f64>,
 }
 
 #[derive(Serialize)]
@@ -178,12 +204,57 @@ fn match_prompt_key<'a>(stem: &str, keys: impl Iterator<Item = &'a String>) -> O
         .cloned()
 }
 
+/// Score raw face embeddings from ONE recognition network against the centroid of that same
+/// network's reference embeddings. Each list entry is `None` where no face was found. Returns
+/// one cosine per output (`None` where the output had no face), or `None` overall when no
+/// reference face yielded a usable embedding (no centroid to score against).
+///
+/// Both identity axes go through this, each with its own model's reference set — a centroid
+/// from one network is meaningless for another network's embeddings.
+fn score_against_reference_centroid(
+    reference: &[Option<Vec<f32>>],
+    outputs: &[Option<Vec<f32>>],
+) -> Option<Vec<Option<f64>>> {
+    let ref_normalized: Vec<Vec<f32>> = reference
+        .iter()
+        .flatten()
+        .filter_map(|e| l2_normalized(e))
+        .collect();
+    let centroid = centroid_normalized(&ref_normalized)?;
+    Some(
+        outputs
+            .iter()
+            .map(|o| {
+                o.as_ref()
+                    .and_then(|e| l2_normalized(e))
+                    .map(|n| cosine_normalized(&n, &centroid))
+            })
+            .collect(),
+    )
+}
+
+/// The `w600k_r50` weights path from the raw `FACE_R50_WEIGHTS` value: `None` (metric absent)
+/// when unset or empty. A set, non-empty path is returned as-is so a bad path fails loudly at
+/// load time instead of silently dropping the metric.
+fn face_r50_weights_path(raw: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    raw.filter(|v| !v.is_empty()).map(PathBuf::from)
+}
+
 /// Fold per-output scores + the per-output CLIP image embeddings (aligned with `outputs`, `None`
-/// where the embedding failed) into the aggregate Y vector.
-fn aggregate(outputs: &[OutputScore], output_clip: &[Option<Vec<f32>>]) -> EvalAggregates {
+/// where the embedding failed) into the aggregate Y vector. `identity_r50_enabled` says whether
+/// the independent identity network was loaded; when false its aggregate keys are omitted.
+fn aggregate(
+    outputs: &[OutputScore],
+    output_clip: &[Option<Vec<f32>>],
+    identity_r50_enabled: bool,
+) -> EvalAggregates {
     let n = outputs.len();
     let detected = outputs.iter().filter(|o| o.face_detected).count();
     let id_cos: Vec<f64> = outputs.iter().filter_map(|o| o.identity_cosine).collect();
+    let id_r50: Vec<f64> = outputs
+        .iter()
+        .filter_map(|o| o.identity_r50_cosine)
+        .collect();
     let sharp: Vec<f64> = outputs.iter().map(|o| o.sharpness).collect();
     let adh: Vec<f64> = outputs.iter().filter_map(|o| o.prompt_adherence).collect();
 
@@ -209,6 +280,10 @@ fn aggregate(outputs: &[OutputScore], output_clip: &[Option<Vec<f32>>]) -> EvalA
         },
         identity_cosine_mean: mean(&id_cos),
         identity_cosine_std: std_dev(&id_cos),
+        identity_r50: identity_r50_enabled.then(|| IdentityR50Aggregates {
+            identity_r50_cosine_mean: mean(&id_r50),
+            identity_r50_cosine_std: std_dev(&id_r50),
+        }),
         sharpness_mean: mean(&sharp),
         sharpness_std: std_dev(&sharp),
         prompt_adherence_mean: mean(&adh),
@@ -225,6 +300,7 @@ fn aggregate(outputs: &[OutputScore], output_clip: &[Option<Vec<f32>>]) -> EvalA
 mod harness {
     use super::*;
     use gen_core::{Image, LoadSpec, WeightsSource};
+    use runtime_macos::providers::face::FaceAnalysis;
 
     use crate::image_jobs::{INSTANTID_ARCFACE_FILE, INSTANTID_SCRFD_FILE};
 
@@ -290,16 +366,35 @@ mod harness {
         files
     }
 
-    /// Largest-face raw 512-d ArcFace embedding for an image, or `None` if no face detected.
-    fn largest_face_embedding(
-        fa: &runtime_macos::providers::face::FaceAnalysis,
+    /// Raw 512-d embeddings of an image's largest face: `(primary, r50)`, both `None` if no face
+    /// was detected. Detection runs ONCE (the primary stack's SCRFD) and the same detection is
+    /// aligned and embedded by the independent `r50` network when it is loaded, so the two
+    /// identity axes always describe the same face.
+    fn largest_face_embeddings(
+        fa: &FaceAnalysis,
+        r50: Option<&FaceAnalysis>,
         path: &Path,
-    ) -> Option<Vec<f32>> {
-        let (pixels, w, h) = decode_rgb(path)?;
-        let dets = fa.detect(&pixels, h as usize, w as usize).ok()?;
-        let det = dets.first()?; // detect() returns largest-first
-        let face = fa.embed(&pixels, h as usize, w as usize, det).ok()?;
-        Some(face.embedding)
+    ) -> (Option<Vec<f32>>, Option<Vec<f32>>) {
+        let Some((pixels, w, h)) = decode_rgb(path) else {
+            return (None, None);
+        };
+        let (h, w) = (h as usize, w as usize);
+        // detect() returns largest-first.
+        let Ok(detections) = fa.detect(&pixels, h, w) else {
+            return (None, None);
+        };
+        let Some(det) = detections.first() else {
+            return (None, None);
+        };
+        let primary = fa.embed(&pixels, h, w, det).ok().map(|f| f.embedding);
+        // A detected face the second network cannot embed is a loader fault, not "no face":
+        // dropping it would silently skew the r50 mean against the primary axis.
+        let second = r50.map(|m| {
+            m.embed(&pixels, h, w, det)
+                .unwrap_or_else(|e| panic!("w600k_r50 embed {}: {e}", path.display()))
+                .embedding
+        });
+        (primary, second)
     }
 
     /// 768-d raw CLIP image embedding.
@@ -385,29 +480,36 @@ mod harness {
         let arcface =
             runtime_macos::media::weights::Weights::from_file(bundle.join(INSTANTID_ARCFACE_FILE))
                 .expect("load ArcFace weights");
-        let fa = runtime_macos::providers::face::FaceAnalysis::load(&scrfd, &arcface)
-            .expect("load FaceAnalysis");
+        let fa = FaceAnalysis::load(&scrfd, &arcface).expect("load FaceAnalysis");
+        // The independent identity network (sc-2124): same SCRFD, `w600k_r50` recognition. The
+        // ArcFace loader reads the IResNet depth from the checkpoint keys, so iresnet50 loads
+        // through the same seam as glintr100.
+        let fa_r50 = face_r50_weights_path(std::env::var_os("FACE_R50_WEIGHTS")).map(|path| {
+            let w = runtime_macos::media::weights::Weights::from_file(&path)
+                .unwrap_or_else(|e| panic!("load FACE_R50_WEIGHTS {}: {e}", path.display()));
+            FaceAnalysis::load(&scrfd, &w).expect("load w600k_r50 FaceAnalysis")
+        });
 
-        // --- reference centroid from the held-out pool ---
+        // --- reference centroids from the held-out pool (one per recognition network) ---
         let ref_files = image_files(&ref_dir);
         assert!(
             !ref_files.is_empty(),
             "no reference images in {}",
             ref_dir.display()
         );
-        let mut ref_normalized = Vec::new();
-        let mut ref_detected = 0usize;
+        let mut ref_primary = Vec::with_capacity(ref_files.len());
+        let mut ref_r50 = Vec::with_capacity(ref_files.len());
         for p in &ref_files {
-            if let Some(emb) = largest_face_embedding(&fa, p) {
-                if let Some(n) = l2_normalized(&emb) {
-                    ref_normalized.push(n);
-                    ref_detected += 1;
-                }
-            }
+            let (primary, second) = largest_face_embeddings(&fa, fa_r50.as_ref(), p);
+            ref_primary.push(primary);
+            ref_r50.push(second);
         }
+        let ref_detected = ref_primary
+            .iter()
+            .flatten()
+            .filter(|e| l2_normalized(e).is_some())
+            .count();
         let reference_face_detect_rate = ref_detected as f64 / ref_files.len() as f64;
-        let centroid = centroid_normalized(&ref_normalized)
-            .expect("reference centroid (no faces detected in REF_DIR?)");
 
         // --- precompute prompt-text embeddings (by stem) ---
         let mut prompt_text_norm: BTreeMap<String, Vec<f32>> = BTreeMap::new();
@@ -426,16 +528,22 @@ mod harness {
         // --- score outputs ---
         let gen_files = image_files(&gen_dir);
         assert!(!gen_files.is_empty(), "no images in {}", gen_dir.display());
+        let (gen_primary, gen_r50): (Vec<_>, Vec<_>) = gen_files
+            .iter()
+            .map(|p| largest_face_embeddings(&fa, fa_r50.as_ref(), p))
+            .unzip();
+        let identity = score_against_reference_centroid(&ref_primary, &gen_primary)
+            .expect("reference centroid (no faces detected in REF_DIR?)");
+        let identity_r50 = if fa_r50.is_some() {
+            score_against_reference_centroid(&ref_r50, &gen_r50)
+                .expect("w600k_r50 reference centroid (no faces embedded in REF_DIR?)")
+        } else {
+            vec![None; gen_files.len()]
+        };
         let mut outputs = Vec::new();
         let mut output_clip: Vec<Option<Vec<f32>>> = Vec::new();
-        for p in &gen_files {
+        for (i, p) in gen_files.iter().enumerate() {
             let s = stem(p);
-            // identity
-            let face_emb = largest_face_embedding(&fa, p);
-            let identity_cosine = face_emb
-                .as_ref()
-                .and_then(|e| l2_normalized(e))
-                .map(|n| cosine_normalized(&n, &centroid));
             // clip image embedding (for spread + prompt adherence), aligned per output
             let clip_norm =
                 clip_image_embedding(img_embedder.as_ref(), p).and_then(|e| l2_normalized(&e));
@@ -453,15 +561,16 @@ mod harness {
                     .unwrap_or("")
                     .to_string(),
                 prompt_id: prompt_key,
-                face_detected: face_emb.is_some(),
-                identity_cosine,
+                face_detected: gen_primary[i].is_some(),
+                identity_cosine: identity[i],
+                identity_r50_cosine: identity_r50[i],
                 sharpness: sharpness(p).unwrap_or(0.0),
                 prompt_adherence,
             });
             output_clip.push(clip_norm);
         }
 
-        let aggregates = aggregate(&outputs, &output_clip);
+        let aggregates = aggregate(&outputs, &output_clip, fa_r50.is_some());
         EvalReport {
             label,
             reference_pool_size: ref_files.len(),
@@ -502,7 +611,109 @@ mod harness {
                 m > SMOKE_MIN_SELF_COSINE,
                 "self-consistency identity cosine {m:.3} below {SMOKE_MIN_SELF_COSINE} — face stack mis-wired?"
             );
+            if let Some(r50) = &agg.identity_r50 {
+                let m = r50
+                    .identity_r50_cosine_mean
+                    .expect("smoke: w600k_r50 identity mean");
+                assert!(
+                    m > SMOKE_MIN_SELF_COSINE,
+                    "self-consistency w600k_r50 identity cosine {m:.3} below {SMOKE_MIN_SELF_COSINE} — r50 loader mis-wired?"
+                );
+            }
         }
+    }
+
+    /// Real-weights sanity check of the independent `w600k_r50` identity network (sc-2124): a
+    /// few faces of ONE person (`SAME_DIR`, default the Kelsie dataset) must score high against
+    /// their own leave-one-out centroid, and faces of OTHER people (`OTHER_DIR`, one person per
+    /// image) must score low against that person's centroid. Loads only SCRFD + the two
+    /// recognition nets on MLX (seconds); glintr100 numbers are printed for comparison.
+    #[test]
+    #[ignore = "research: needs FACE_R50_WEIGHTS + the InstantID SCRFD/ArcFace bundle; set OTHER_DIR (and optionally SAME_DIR)"]
+    fn face_r50_separates_identities() {
+        const MAX_IMAGES: usize = 6;
+        let r50_path = face_r50_weights_path(std::env::var_os("FACE_R50_WEIGHTS"))
+            .expect("set FACE_R50_WEIGHTS");
+        let same_dir = std::env::var("SAME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home().join("Datasets/Kelsie"));
+        let other_dir = PathBuf::from(std::env::var("OTHER_DIR").expect("set OTHER_DIR"));
+
+        let bundle = face_bundle_dir();
+        let load = |p: PathBuf| {
+            runtime_macos::media::weights::Weights::from_file(&p)
+                .unwrap_or_else(|e| panic!("load {}: {e}", p.display()))
+        };
+        let scrfd = load(bundle.join(INSTANTID_SCRFD_FILE));
+        let fa = FaceAnalysis::load(&scrfd, &load(bundle.join(INSTANTID_ARCFACE_FILE)))
+            .expect("load glintr100 FaceAnalysis");
+        let fa_r50 = FaceAnalysis::load(&scrfd, &load(r50_path)).expect("load w600k_r50");
+
+        let embed_dir = |dir: &Path| -> (Vec<Vec<f32>>, Vec<Vec<f32>>) {
+            let (mut glint, mut r50) = (Vec::new(), Vec::new());
+            for p in image_files(dir) {
+                if glint.len() == MAX_IMAGES {
+                    break;
+                }
+                if let (Some(g), Some(r)) = largest_face_embeddings(&fa, Some(&fa_r50), &p) {
+                    glint.push(g);
+                    r50.push(r);
+                }
+            }
+            (glint, r50)
+        };
+        let (same_g, same_r) = embed_dir(&same_dir);
+        let (other_g, other_r) = embed_dir(&other_dir);
+        assert!(
+            same_r.len() >= 3,
+            "need >= 3 faces in {}",
+            same_dir.display()
+        );
+        assert!(!other_r.is_empty(), "no faces in {}", other_dir.display());
+
+        // Same identity: each face against the centroid of the OTHER same-identity faces.
+        let leave_one_out = |set: &[Vec<f32>]| -> f64 {
+            let scores: Vec<f64> = (0..set.len())
+                .map(|i| {
+                    let rest: Vec<Option<Vec<f32>>> = set
+                        .iter()
+                        .enumerate()
+                        .filter(|(j, _)| *j != i)
+                        .map(|(_, e)| Some(e.clone()))
+                        .collect();
+                    score_against_reference_centroid(&rest, &[Some(set[i].clone())])
+                        .expect("centroid")[0]
+                        .expect("score")
+                })
+                .collect();
+            mean(&scores).unwrap()
+        };
+        let cross = |same: &[Vec<f32>], other: &[Vec<f32>]| -> f64 {
+            let reference: Vec<Option<Vec<f32>>> = same.iter().cloned().map(Some).collect();
+            let outs: Vec<Option<Vec<f32>>> = other.iter().cloned().map(Some).collect();
+            let scores: Vec<f64> = score_against_reference_centroid(&reference, &outs)
+                .expect("centroid")
+                .into_iter()
+                .flatten()
+                .collect();
+            mean(&scores).unwrap()
+        };
+        let (r50_same, r50_other) = (leave_one_out(&same_r), cross(&same_r, &other_r));
+        let (g_same, g_other) = (leave_one_out(&same_g), cross(&same_g, &other_g));
+        println!(
+            "w600k_r50: same {r50_same:.3} other {r50_other:.3} | glintr100: same {g_same:.3} \
+             other {g_other:.3} | faces same {} other {}",
+            same_r.len(),
+            other_r.len()
+        );
+        assert!(
+            r50_same > 0.6,
+            "w600k_r50 same-identity cosine {r50_same:.3} <= 0.6"
+        );
+        assert!(
+            r50_other < 0.3,
+            "w600k_r50 other-identity cosine {r50_other:.3} >= 0.3"
+        );
     }
 
     /// Dump the Dataset Doctor X-signal vector for a dataset directory (protocol §3): the CPU
@@ -651,6 +862,7 @@ mod tests {
                 prompt_id: Some("p1".into()),
                 face_detected: true,
                 identity_cosine: Some(0.5),
+                identity_r50_cosine: None,
                 sharpness: 100.0,
                 prompt_adherence: Some(0.3),
             },
@@ -659,13 +871,14 @@ mod tests {
                 prompt_id: Some("p2".into()),
                 face_detected: false, // no face → excluded from identity mean
                 identity_cosine: None,
+                identity_r50_cosine: None,
                 sharpness: 200.0,
                 prompt_adherence: None,
             },
         ];
         let x = l2_normalized(&[1.0, 0.0]).unwrap();
         let y = l2_normalized(&[0.0, 1.0]).unwrap();
-        let agg = aggregate(&outputs, &[Some(x), Some(y)]);
+        let agg = aggregate(&outputs, &[Some(x), Some(y)], false);
         assert_eq!(agg.n, 2);
         assert!(approx(agg.face_detect_rate, 0.5));
         assert!(approx(agg.identity_cosine_mean.unwrap(), 0.5)); // only the detected one
@@ -674,5 +887,122 @@ mod tests {
         assert!(approx(agg.output_spread.unwrap(), 1.0)); // orthogonal → spread 1
                                                           // two distinct prompts, one output each → no within-prompt pair → None
         assert!(agg.same_prompt_spread.is_none());
+        assert!(agg.identity_r50.is_none());
+    }
+
+    fn score(image: &str, identity: Option<f64>, r50: Option<f64>) -> OutputScore {
+        OutputScore {
+            image: image.into(),
+            prompt_id: None,
+            face_detected: identity.is_some(),
+            identity_cosine: identity,
+            identity_r50_cosine: r50,
+            sharpness: 1.0,
+            prompt_adherence: None,
+        }
+    }
+
+    #[test]
+    fn reference_centroid_scoring_uses_the_given_models_reference_set() {
+        // Reference faces of one network: two raw (un-normalized) embeddings whose normalized
+        // mean points at 45°, plus a no-face entry that must be skipped, not counted.
+        let reference = vec![Some(vec![3.0, 0.0]), None, Some(vec![0.0, 0.5])];
+        let outputs = vec![Some(vec![2.0, 2.0]), None, Some(vec![-1.0, 0.0])];
+        let got = score_against_reference_centroid(&reference, &outputs).unwrap();
+        assert_eq!(got.len(), 3);
+        assert!(approx(got[0].unwrap(), 1.0)); // on the centroid direction
+        assert!(got[1].is_none()); // no face → no score
+        assert!(approx(got[2].unwrap(), -(0.5f64.sqrt()))); // 135° from the centroid
+
+        // A second network with a different embedding space (and dimension) scores against
+        // ITS OWN reference centroid: outputs equal to its reference score 1.0 even though the
+        // first network's centroid would be meaningless for them.
+        let ref_b = vec![Some(vec![0.0, 0.0, 1.0]), Some(vec![0.0, 0.0, 4.0])];
+        let got_b = score_against_reference_centroid(&ref_b, &[Some(vec![0.0, 0.0, 7.0])]).unwrap();
+        assert!(approx(got_b[0].unwrap(), 1.0));
+
+        // No usable reference face (none detected, or zero-norm) → no centroid → None.
+        assert!(
+            score_against_reference_centroid(&[None, Some(vec![0.0, 0.0])], &outputs).is_none()
+        );
+        assert!(score_against_reference_centroid(&[], &outputs).is_none());
+    }
+
+    #[test]
+    fn face_r50_weights_env_unset_or_empty_means_absent() {
+        assert_eq!(face_r50_weights_path(None), None);
+        assert_eq!(face_r50_weights_path(Some("".into())), None);
+        assert_eq!(
+            face_r50_weights_path(Some("/m/arcface_w600k_r50.safetensors".into())),
+            Some(PathBuf::from("/m/arcface_w600k_r50.safetensors"))
+        );
+    }
+
+    fn json_keys(agg: &EvalAggregates) -> Vec<String> {
+        let v = serde_json::to_value(agg).unwrap();
+        let mut keys: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    }
+
+    #[test]
+    fn identity_r50_aggregates_are_absent_when_disabled_and_present_when_enabled() {
+        let outputs = vec![
+            score("a.png", Some(0.5), Some(0.2)),
+            score("b.png", Some(0.7), Some(0.4)),
+            score("c.png", None, None),
+        ];
+        let clip = vec![None, None, None];
+
+        // Disabled: exactly the pre-sc-2124 key set — no r50 key, nothing else changed.
+        let off = aggregate(&outputs, &clip, false);
+        let expected_off: Vec<String> = [
+            "face_detect_rate",
+            "identity_cosine_mean",
+            "identity_cosine_std",
+            "n",
+            "output_spread",
+            "prompt_adherence_mean",
+            "same_prompt_spread",
+            "sharpness_mean",
+            "sharpness_std",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        assert_eq!(json_keys(&off), expected_off);
+
+        // Enabled: the two r50 keys appear (flattened, not nested) and fold only faced outputs.
+        let on = aggregate(&outputs, &clip, true);
+        let mut expected_on = expected_off.clone();
+        expected_on.extend([
+            "identity_r50_cosine_mean".into(),
+            "identity_r50_cosine_std".into(),
+        ]);
+        expected_on.sort();
+        assert_eq!(json_keys(&on), expected_on);
+        let r50 = on.identity_r50.as_ref().unwrap();
+        assert!(approx(r50.identity_r50_cosine_mean.unwrap(), 0.3));
+        assert!(approx(r50.identity_r50_cosine_std.unwrap(), 0.02f64.sqrt()));
+        // The primary axis is untouched by enabling the second one.
+        assert_eq!(on.identity_cosine_mean, off.identity_cosine_mean);
+        assert!(approx(on.identity_cosine_mean.unwrap(), 0.6));
+
+        // Enabled but no output had a face: keys present, values null (distinguishable from off).
+        let none = aggregate(&[score("x.png", None, None)], &[None], true);
+        let v = serde_json::to_value(&none).unwrap();
+        assert!(v["identity_r50_cosine_mean"].is_null());
+        assert!(v
+            .as_object()
+            .unwrap()
+            .contains_key("identity_r50_cosine_mean"));
+    }
+
+    #[test]
+    fn per_output_r50_cosine_is_omitted_when_absent() {
+        let v = serde_json::to_value(score("a.png", Some(0.5), None)).unwrap();
+        assert!(!v.as_object().unwrap().contains_key("identity_r50_cosine"));
+        let v = serde_json::to_value(score("a.png", Some(0.5), Some(0.25))).unwrap();
+        assert!(approx(v["identity_r50_cosine"].as_f64().unwrap(), 0.25));
     }
 }

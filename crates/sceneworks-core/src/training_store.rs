@@ -19,7 +19,7 @@ use crate::store_util::{
 };
 use crate::time::utc_now;
 use crate::training::{
-    caption_with_trigger_words, max_training_reference_images, Caption, CaptionSource,
+    caption_with_trigger_words, max_training_reference_images, Caption, CaptionMode, CaptionSource,
     TrainingDataset, TrainingDatasetItem, TrainingDatasetReference, TrainingDatasetStatus,
     TrainingModality, TRAINING_CONTRACT_SCHEMA_VERSION,
 };
@@ -161,6 +161,9 @@ pub struct CaptionInput {
     pub source: Option<CaptionSource>,
     #[serde(default)]
     pub trigger_words: Vec<String>,
+    /// The auto-caption mode that produced `text` (sc-24829); carried through unchanged.
+    #[serde(default)]
+    pub mode: Option<CaptionMode>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -217,6 +220,10 @@ impl TrainingDatasetStore {
         Self {
             project_path: project_path.into(),
         }
+    }
+
+    pub(crate) fn project_path(&self) -> &Path {
+        &self.project_path
     }
 
     pub fn list_datasets(
@@ -968,7 +975,10 @@ impl TrainingDatasetStore {
         })
     }
 
-    fn read_dataset_by_id(&self, dataset_id: &str) -> ProjectStoreResult<TrainingDataset> {
+    pub(crate) fn read_dataset_by_id(
+        &self,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<TrainingDataset> {
         if !is_safe_id(dataset_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset ID".to_owned(),
@@ -983,7 +993,7 @@ impl TrainingDatasetStore {
         read_dataset(&manifest_path)
     }
 
-    fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+    pub(crate) fn save_dataset(&self, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
         let manifest_path = dataset_manifest_path(&self.project_path, &dataset.id);
         write_json(&manifest_path, dataset)?;
         index_dataset(&self.project_path, dataset, &manifest_path)
@@ -1491,6 +1501,22 @@ fn rollback_file_renames(applied: &[AppliedRename]) {
     }
 }
 
+/// Refuses a caption whose `mode` is not one of the known caption modes (sc-24829, E6): an
+/// unrecognized string deserializes to `CaptionMode::Unknown` and would otherwise be stored
+/// silently on every dataset write path (create/update items, external items, caption sidecars).
+fn validate_caption_input_mode(caption: Option<&CaptionInput>) -> ProjectStoreResult<()> {
+    match caption.and_then(|caption| caption.mode.as_ref()) {
+        Some(CaptionMode::Unknown(mode)) => Err(ProjectStoreError::FieldInvalid {
+            field: "mode",
+            code: "training_field_error",
+            detail: format!(
+                "caption.mode {mode:?} is not supported; use default, subjectOnly, or triggerOnly."
+            ),
+        }),
+        _ => Ok(()),
+    }
+}
+
 fn apply_caption_patches(
     dataset: &mut TrainingDataset,
     inputs: Vec<TrainingDatasetCaptionSidecarItemInput>,
@@ -1498,6 +1524,7 @@ fn apply_caption_patches(
 ) -> ProjectStoreResult<()> {
     let mut seen_inputs = Vec::new();
     for input in inputs {
+        validate_caption_input_mode(Some(&input.caption))?;
         if !is_safe_id(&input.item_id) {
             return Err(ProjectStoreError::BadRequest(
                 "Invalid training dataset item ID".to_owned(),
@@ -1520,6 +1547,7 @@ fn apply_caption_patches(
             text: input.caption.text,
             source: input.caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: input.caption.trigger_words,
+            mode: input.caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         };
@@ -1614,6 +1642,7 @@ fn materialize_external_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    validate_caption_input_mode(input.item.caption.as_ref())?;
     let source_path = fs::canonicalize(&input.source_path).map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             ProjectStoreError::NotFound("Verified dataset source was unavailable".to_owned())
@@ -1676,6 +1705,7 @@ fn materialize_external_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Imported),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -1709,6 +1739,7 @@ fn materialize_item(
     now: &str,
 ) -> ProjectStoreResult<TrainingDatasetItem> {
     validate_supported_modality(modality)?;
+    validate_caption_input_mode(input.caption.as_ref())?;
     let reference_ceiling = max_training_reference_images() as usize;
     if input.references.len() > reference_ceiling {
         return Err(ProjectStoreError::BadRequest(format!(
@@ -1786,6 +1817,7 @@ fn materialize_item(
             text: caption.text,
             source: caption.source.unwrap_or(CaptionSource::Manual),
             trigger_words: caption.trigger_words,
+            mode: caption.mode,
             updated_at: Some(now.to_owned()),
             extra: Default::default(),
         },
@@ -2107,7 +2139,10 @@ fn ensure_supported_item_mime(path: &Path, modality: &TrainingModality) -> Proje
     Ok(())
 }
 
-fn ensure_dataset_project(project_id: &str, dataset: &TrainingDataset) -> ProjectStoreResult<()> {
+pub(crate) fn ensure_dataset_project(
+    project_id: &str,
+    dataset: &TrainingDataset,
+) -> ProjectStoreResult<()> {
     if dataset.project_id.as_deref() != Some(project_id) {
         return Err(ProjectStoreError::NotFound(
             "Training dataset not found".to_owned(),
@@ -2364,7 +2399,7 @@ fn write_text(path: &Path, payload: &str) -> ProjectStoreResult<()> {
     atomic_write(path, payload.as_bytes())
 }
 
-fn dataset_item_path(
+pub(crate) fn dataset_item_path(
     project_path: &Path,
     dataset: &TrainingDataset,
     item: &TrainingDatasetItem,
@@ -2445,6 +2480,7 @@ mod tests {
                 text: String::new(),
                 source: CaptionSource::Manual,
                 trigger_words: Vec::new(),
+                mode: None,
                 updated_at: None,
                 extra: Default::default(),
             },
@@ -2490,6 +2526,56 @@ mod tests {
                 well_exposed_fraction: 1.0,
                 phash: vec![1, 2, 3, 4, 5, 6, 7, 8],
             },
+        }
+    }
+
+    // sc-24829 (E6): an unknown caption mode on the external-item path is a field error, refused
+    // before the source is even opened (the bogus source path would otherwise be NotFound).
+    #[test]
+    fn external_item_with_an_unknown_caption_mode_is_a_mode_field_error() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let input = ExternalTrainingDatasetItemInput {
+            item: TrainingDatasetItemInput {
+                id: Some("item_0001".to_owned()),
+                asset_id: None,
+                path: None,
+                display_name: None,
+                caption: Some(CaptionInput {
+                    text: "a caption".to_owned(),
+                    source: Some(CaptionSource::Auto),
+                    trigger_words: Vec::new(),
+                    mode: Some(CaptionMode::Unknown("faceOnly".to_owned())),
+                }),
+                width: None,
+                height: None,
+                control_image_path: None,
+                references: Vec::new(),
+                extra: Default::default(),
+            },
+            source_path: temp.path().join("missing.png"),
+            expected_content_hash: String::new(),
+            expected_width: 1,
+            expected_height: 1,
+            extra: Default::default(),
+        };
+        let error = materialize_external_item(
+            temp.path(),
+            &TrainingModality::Image,
+            input,
+            "item_0001".to_owned(),
+            "now",
+        )
+        .expect_err("unknown caption mode is refused");
+        match error {
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => {
+                assert_eq!((field, code), ("mode", "training_field_error"));
+                assert!(detail.contains("caption.mode \"faceOnly\""), "{detail}")
+            }
+            other => panic!("expected a mode field error, got {other:?}"),
         }
     }
 
@@ -2590,6 +2676,7 @@ mod tests {
             text: "a photo of Mira".to_owned(),
             source: CaptionSource::Auto,
             trigger_words: vec!["mira".to_owned()],
+            mode: None,
             updated_at: Some("then".to_owned()),
             extra: Default::default(),
         };

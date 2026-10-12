@@ -206,10 +206,17 @@ test("current and legacy Illustrious download selectors fail closed independentl
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
   const current = expectedCurrentArtifactFilesFromEvidenceBytes(checked, evidenceBytes);
-  // The union includes the YuE1 re-hosts, YuE2 upstream repos, and Wan-VACE entries. The
-  // Illustrious file censuses below did not move; assert them beside the digest.
+  // Re-pinned by sc-24832 alongside `CURRENT_DOWNLOAD_EVIDENCE_SHA256`: the evidence file was
+  // re-recorded when the catalog gained epic 2123's training auxiliaries — the depth-anchoring keys
+  // (sc-2125), the sc-24830 tiny decoders, the sc-24831 FaceMesh-v2 re-host, the sc-24833 FLUX.2
+  // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
+  // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys), and sc-25213's ostris Z-Image-Turbo
+  // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
+  // decoded-x0 losses (137 keys). The Illustrious file censuses below are
+  // the real subject of this test and did NOT move — which is the point of asserting them beside the
+  // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "9ac5343ea88c615289fee9e5ca9c65867b023e8a5b65a3c1ab8a4827b991b19d");
+    "cc86ec216ff857331e6472015e8a3da10ecac5983bc7f8974d11b6804e44991e");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

@@ -14,8 +14,10 @@ import {
   buildJoyCaptionPrompt,
   defaultCaptionSettings,
   joyCaptionModel,
+  parseCaptionTriggerWords,
 } from "../training/joyCaptionPrompts.js";
 import { asText, boundedNumber, integerFromDraft } from "../training/drafts.js";
+import { subjectMaskFileError } from "../training/subjectMasks.js";
 import { trainingBaseState, trainingBaseTier } from "../trainingBase.js";
 import {
   appendReferences,
@@ -44,6 +46,10 @@ import {
   configDraftFromTarget,
   configReseedDecision,
   configValidation,
+  draftWithResolution,
+  SUBJECT_SEGMENTER_MODEL_ID,
+  subjectMaskConsumerField,
+  subjectMaskCoverage,
   defaultGpuOptions,
   defaultOptimizerOptions,
   defaultPresetForTarget,
@@ -56,6 +62,7 @@ import {
   qualityTiersForPreset,
   rangeOptions,
   samplePromptsFromTrigger,
+  trainingAdapterModelId,
   trainingAdapterVersionOptions,
   trainingConfigSnapshot,
   trainingLicenseAckKey,
@@ -148,9 +155,16 @@ function resolveSavedItemId(dataset, member) {
 
 
 function trainingCaptionJobPayload(settings) {
-  const captionPrompt = String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim();
+  const mode = settings.mode || "default";
+  // Only the default mode sends a prompt: subject-only uses the worker's own prompt (the API
+  // refuses a caller prompt alongside it) and trigger-only runs no captioner.
+  const captionPrompt = mode === "default" ? String(settings.captionPrompt || buildJoyCaptionPrompt(settings)).trim() : "";
   return {
     captioner: "joy_caption",
+    mode,
+    // The dialog's trigger words (sc-24829): the API fills them into every item without its own,
+    // so trigger-only has words to write and default/subject-only captions get them prepended.
+    triggerWords: parseCaptionTriggerWords(settings.triggerWords),
     modelNameOrPath: String(settings.modelNameOrPath ?? "").trim() || joyCaptionModel,
     recaption: Boolean(settings.recaption),
     requestedGpu: settings.requestedGpu || "auto",
@@ -368,6 +382,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
     createTrainingDatasetUpscaleJob,
     createTrainingDatasetAnalysisJob,
     createTrainingDatasetFaceAnalysisJob,
+    createTrainingDatasetSubjectMaskJob,
+    loadTrainingDatasetSubjectMasks,
+    uploadTrainingDatasetSubjectMask,
     smartCropTrainingDataset,
     stripExifTrainingDataset,
     createTrainingJob,
@@ -490,6 +507,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // until the user edits them (sc-8671), mirroring configTriggerFollowsCaptions.
   const [configPromptsFollowTrigger, setConfigPromptsFollowTrigger] = useState(true);
   const [submittingJob, setSubmittingJob] = useState(false);
+  // Subject masks (sc-2126): the saved dataset's /subject-masks report (coverage + per-image status),
+  // refetched on dataset version / mask-job completion, replaced by an upload's response.
+  const [subjectMasks, setSubjectMasks] = useState(null);
   // The config-draft basis, keyed on (target, dataset, default-preset). Value-preserving
   // across an async trainingPresets load (sc-11970): a preset-only basis flip no longer
   // wipes the user's config edits. See the basis effect below.
@@ -601,6 +621,18 @@ export function TrainingStudio({ mode = "training" } = {}) {
           job.status === "completed" &&
           job.payload?.datasetId === activeDataset?.id,
       ) ?? null,
+    [jobs, activeDataset?.id],
+  );
+  // The newest completed subject-mask job for this dataset (sc-2126): its id keys the mask-report
+  // refetch, so the editor picks up masks the moment the worker finishes.
+  const completedSubjectMaskJobId = useMemo(
+    () =>
+      jobs.find(
+        (job) =>
+          job.type === "dataset_subject_mask" &&
+          job.status === "completed" &&
+          job.payload?.datasetId === activeDataset?.id,
+      )?.id ?? "",
     [jobs, activeDataset?.id],
   );
   const completedParquetImportId = completedParquetImport?.id ?? "";
@@ -794,6 +826,23 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
     return missingRequiredModels(models, [POSE_DETECT_MODEL_ID]);
   }, [models, selectedTarget?.outputKind, controlType]);
+  // The de-distill training adapter the selected version needs (sc-25213). The worker resolves it
+  // from the installed library only, so a missing one gates Start and the panel offers the download.
+  const trainingAdapterId = showTrainingAdapter ? trainingAdapterModelId(configDraft) : null;
+  const missingTrainingAdapterModels = useMemo(
+    () => (trainingAdapterId ? missingRequiredModels(models, [trainingAdapterId]) : []),
+    [models, trainingAdapterId],
+  );
+  // sc-2124: images without a subject mask are segmented with SAM3 when a masked run starts, so a
+  // run that must generate any needs the SAM3 Person Segmenter installed — the API refuses it
+  // otherwise. It gates Start (on the mask technique's field) and the panel offers the download.
+  const subjectMasksToGenerate =
+    Boolean(subjectMaskConsumerField(configDraft, selectedTarget)) &&
+    Boolean(subjectMaskCoverage(subjectMasks)?.ungenerated);
+  const missingSubjectSegmenterModels = useMemo(
+    () => (subjectMasksToGenerate ? missingRequiredModels(models, [SUBJECT_SEGMENTER_MODEL_ID]) : []),
+    [models, subjectMasksToGenerate],
+  );
   // A base whose licence binds the adapters trained from it (Qwen Image 2.1, epic 24107 E12) shows
   // its notice in the panel and holds Start training until the user accepts it. The acceptance is
   // remembered per target (fails closed when storage is unavailable) and asserted on the submit.
@@ -815,10 +864,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
       selectedTarget,
       datasetNotReady: readinessBlocksTraining,
       missingControlModels,
+      missingTrainingAdapterModels,
+      // Subject-masked loss (sc-24828) needs a mask on every image: an empty one gates Start, and
+      // ungenerated ones do while the segmenter that generates them is missing.
+      subjectMaskReport: subjectMasks,
+      subjectSegmenterMissing: missingSubjectSegmenterModels.length > 0,
       licenseAcknowledged,
       models,
     }),
-    [activeDataset, selectedTarget, readinessBlocksTraining, missingControlModels, licenseAcknowledged, models],
+    [
+      activeDataset,
+      selectedTarget,
+      readinessBlocksTraining,
+      missingControlModels,
+      missingTrainingAdapterModels,
+      subjectMasks,
+      missingSubjectSegmenterModels,
+      licenseAcknowledged,
+      models,
+    ],
   );
   const configValidity = useValidation(configValidation, configDraft, configContext);
 
@@ -879,6 +943,36 @@ export function TrainingStudio({ mode = "training" } = {}) {
     readinessQuery,
     readinessRefreshTick,
     loadTrainingDatasetReadiness,
+  ]);
+
+  // Subject-mask report for the SAVED dataset (sc-2126). Advisory like readiness: a failed fetch
+  // drops back to "no masks yet" rather than blocking editing.
+  useEffect(() => {
+    const projectId = activeProject?.id;
+    const datasetId = activeDataset?.id;
+    if (!projectId || !datasetId || typeof loadTrainingDatasetSubjectMasks !== "function") {
+      setSubjectMasks(null);
+      return undefined;
+    }
+    const controller = new AbortController();
+    loadTrainingDatasetSubjectMasks(datasetId, projectId, { signal: controller.signal })
+      .then((report) => {
+        if (!controller.signal.aborted) {
+          setSubjectMasks(report ?? null);
+        }
+      })
+      .catch((err) => {
+        if (!isAbortError(err) && !controller.signal.aborted) {
+          setSubjectMasks(null);
+        }
+      });
+    return () => controller.abort();
+  }, [
+    activeProject?.id,
+    activeDataset?.id,
+    activeDataset?.version,
+    completedSubjectMaskJobId,
+    loadTrainingDatasetSubjectMasks,
   ]);
 
   // Dismiss/undo a single quality finding on an image (sc-6534). The endpoint replaces the item's
@@ -951,7 +1045,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setReferenceDraftById(referenceDraftsFromDataset(activeDataset));
     setRenamePrefix(safeSlug(activeDataset?.name, "item"));
     setCaptionTriggerWords(datasetTriggerPhrase);
-    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase }));
+    setCaptionSettings((current) => ({ ...current, nameInput: datasetTriggerPhrase, triggerWords: datasetTriggerPhrase }));
   }, [activeDataset]);
 
   useEffect(() => {
@@ -1536,7 +1630,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       }
     }
     setCustomizedConfigFields((current) => new Set([...current, field]));
-    setConfigDraft((current) => ({ ...current, [field]: value }));
+    // sc-2124: a preset's bucket ladder follows the Resolution field (draftWithResolution).
+    setConfigDraft((current) =>
+      field === "resolution" ? draftWithResolution(current, selectedTarget, value) : { ...current, [field]: value },
+    );
   }
 
   function applyTrainingPreset(preset, { message = "Preset applied" } = {}) {
@@ -2020,6 +2117,50 @@ export function TrainingStudio({ mode = "training" } = {}) {
     }
   }
 
+  // Subject masks (sc-2126): enqueue SAM3 person segmentation over the whole dataset. Saves first so
+  // the job sees the live items; async (GPU), the mask report refreshes when the job completes.
+  async function generateSubjectMasks() {
+    if (savingDataset) {
+      return;
+    }
+    setSavingDataset(true);
+    setDatasetError("");
+    setDatasetMessage("");
+    try {
+      const saved = await persistDataset();
+      if (!saved?.id) {
+        setDatasetError("Save the dataset before generating subject masks.");
+        return;
+      }
+      const job = await createTrainingDatasetSubjectMaskJob(saved.id, {});
+      setDatasetMessage(
+        `Subject mask job queued${job?.id ? ` (${job.id})` : ""}. Track it in the Queue; the masks appear when it finishes.`,
+      );
+    } catch (err) {
+      setDatasetError(err.message);
+    } finally {
+      setSavingDataset(false);
+    }
+  }
+
+  // Replace one image's subject mask with an uploaded file (sc-2126). The file is checked against the
+  // same limits the API enforces first; a server field error is rethrown for the card to show.
+  async function uploadSubjectMask(member, file) {
+    const fileError = subjectMaskFileError(file);
+    if (fileError) {
+      throw new Error(fileError);
+    }
+    const itemId = resolveSavedItemId(activeDataset, member);
+    if (!activeDataset?.id || !itemId || typeof uploadTrainingDatasetSubjectMask !== "function") {
+      throw new Error("Save this dataset item before uploading its subject mask.");
+    }
+    const report = await uploadTrainingDatasetSubjectMask(activeDataset.id, itemId, file);
+    // The upload answers with the updated report — authoritative, so no refetch.
+    setSubjectMasks(report ?? null);
+    setDatasetMessage(`Subject mask replaced for ${member.displayName ?? imageAssetName(member)}.`);
+    return report;
+  }
+
   // One-tap smart-crop (sc-6539): synchronously crop the crop-loss-flagged items toward a trainable
   // aspect, then reload the dataset (re-derives selection — re-pointed items become dataset-owned).
   async function smartCropItems(itemIds) {
@@ -2213,6 +2354,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   imageAssets, characters, associatedCharacterId, setActiveView,
                   importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
                 }}
+                maskSession={{
+                  projectId: activeProject?.id,
+                  report: subjectMasks,
+                  onGenerateMasks: generateSubjectMasks,
+                  onUploadMask: uploadSubjectMask,
+                }}
               />
             ) : (
               <>
@@ -2230,6 +2377,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 <ConfigureJobPanel
                   setActiveView={setActiveView}
                   missingControlModels={missingControlModels}
+                  missingTrainingAdapterModels={missingTrainingAdapterModels}
+                  missingSubjectSegmenterModels={missingSubjectSegmenterModels}
                   targetLicense={selectedTargetLicense}
                   licenseAcknowledged={licenseAcknowledged}
                   onLicenseAcknowledgedChange={setLicenseAcknowledged}
@@ -2277,6 +2426,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
                   submitTrainingJob={submitTrainingJob}
                   configSnapshot={configSnapshot}
                   datasetDoctor={datasetDoctor}
+                  subjectMaskReport={subjectMasks}
+                  onGenerateSubjectMasks={generateSubjectMasks}
                 />
                 <TrainingLiveProgress
                   jobs={activeTrainingJobs}

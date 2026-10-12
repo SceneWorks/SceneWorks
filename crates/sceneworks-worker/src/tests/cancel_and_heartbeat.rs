@@ -494,6 +494,7 @@ async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
         saving_message: "Saving embeddings.",
         join_error_label: "analysis task join",
         item_message: &|index, total| format!("Analyzed image {} of {}.", index + 1, total),
+        post_chunk_bytes: None,
     };
     let mut records_payload_calls = 0usize;
     let result = super::run_batched_analysis_job(
@@ -539,6 +540,138 @@ async fn batched_analysis_defers_terminal_canceled_until_the_task_stops() {
     assert!(
         posts.iter().all(|p| p["status"] != "saving"),
         "a canceled job must not post the Saving stage: {posts:?}"
+    );
+}
+
+/// sc-2126 review: with `post_chunk_bytes` set, the batched scaffold POSTs the records to the
+/// sidecar in several bounded requests — every record exactly once, in order, no body over the
+/// budget — and hands `completed` every response in POST order.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test]
+async fn batched_analysis_posts_records_in_bounded_chunks() {
+    use std::sync::{Arc, Mutex};
+    type Bodies = Arc<Mutex<Vec<Value>>>;
+    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn progress_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+        Json(job_snapshot_json(&job_id, false)).into_response()
+    }
+    async fn heartbeat_route(
+        axum::extract::Path(worker_id): axum::extract::Path<String>,
+    ) -> Response {
+        Json(worker_snapshot_json(&worker_id)).into_response()
+    }
+    async fn sidecar_route(State(bodies): State<Bodies>, body: String) -> Response {
+        let value: Value = serde_json::from_str(&body).expect("sidecar body is JSON");
+        let count = value["items"].as_array().expect("items").len();
+        bodies
+            .lock()
+            .expect("bodies lock")
+            .push(json!({ "bytes": body.len(), "body": value }));
+        Json(json!({ "stored": count })).into_response()
+    }
+    let bodies: Bodies = Arc::new(Mutex::new(Vec::new()));
+    let app = Router::new()
+        .route("/api/v1/jobs/:job_id", get(job_route))
+        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .route(
+            "/api/v1/projects/p1/training/datasets/d1/subject-masks",
+            post(sidecar_route),
+        )
+        .with_state(bodies.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener binds");
+    let base_url = format!("http://{}", listener.local_addr().expect("address"));
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("stub serves");
+    });
+
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5;
+    let api = ApiClient::new(&settings);
+    let mut snapshot = job_snapshot_json("job-1", false);
+    snapshot["payload"] = json!({ "projectId": "p1", "datasetId": "d1" });
+    let job: JobSnapshot = serde_json::from_value(snapshot).expect("job snapshot deserializes");
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<usize>(4);
+    drop(tx);
+    let records: Vec<String> = (0..7).map(|i| format!("{i}{}", "m".repeat(99))).collect();
+    let produced = records.clone();
+    let blocking = tokio::task::spawn_blocking(move || -> super::WorkerResult<Vec<String>> {
+        Ok(produced)
+    });
+    // Each item encodes to 103 bytes (`"<100 chars>"` + separator): a 250-byte budget fits two.
+    let cfg = super::AnalysisJobConfig {
+        endpoint_suffix: "subject-masks",
+        space: "sam3-person",
+        cancel_message: "canceled",
+        saving_message: "Saving.",
+        join_error_label: "task join",
+        item_message: &|index, total| format!("{} of {}", index + 1, total),
+        post_chunk_bytes: Some(250),
+    };
+    let mut seen_responses = Vec::new();
+    super::run_batched_analysis_job(
+        &api,
+        &settings,
+        &job,
+        &cfg,
+        records.len(),
+        "mlx",
+        gen_core::CancelFlag::new(),
+        rx,
+        blocking,
+        |records: &[String]| records.iter().map(|r| json!(r)).collect(),
+        |_records, responses| {
+            seen_responses = responses;
+            Ok(super::analysis_progress(
+                super::JobStatus::Completed,
+                super::ProgressStage::Completed,
+                1.0,
+                "done",
+                None,
+                "mlx",
+            ))
+        },
+    )
+    .await
+    .expect("job completes");
+
+    let bodies = bodies.lock().expect("bodies lock");
+    let sizes: Vec<usize> = bodies
+        .iter()
+        .map(|b| b["body"]["items"].as_array().unwrap().len())
+        .collect();
+    assert_eq!(sizes, vec![2, 2, 2, 1], "7 records in 250-byte chunks");
+    let posted: Vec<Value> = bodies
+        .iter()
+        .flat_map(|b| b["body"]["items"].as_array().unwrap().clone())
+        .collect();
+    assert_eq!(
+        posted,
+        records.iter().map(|r| json!(r)).collect::<Vec<_>>(),
+        "every record exactly once, in order"
+    );
+    assert!(bodies.iter().all(|b| b["body"]["space"] == "sam3-person"));
+    assert_eq!(
+        seen_responses,
+        vec![
+            json!({ "stored": 2 }),
+            json!({ "stored": 2 }),
+            json!({ "stored": 2 }),
+            json!({ "stored": 1 })
+        ],
+        "completed sees every chunk's response in POST order"
     );
 }
 

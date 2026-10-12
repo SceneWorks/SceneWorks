@@ -269,12 +269,12 @@ mod driver {
         let items: Vec<TrainingItem> = image_files(&train_dir)
             .into_iter()
             .map(|image_path| TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(
@@ -388,12 +388,12 @@ mod driver {
         let items: Vec<TrainingItem> = image_files(&train_dir)
             .into_iter()
             .map(|image_path| TrainingItem {
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: caption.clone(),
                 control_image_path: None,
                 subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             })
             .collect();
         assert!(

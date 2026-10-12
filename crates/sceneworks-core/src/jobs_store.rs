@@ -58,6 +58,9 @@ pub use routing::gaps::{
     UnsupportedReason, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
+// The explicit target -> backend-local trainer identity contract; the training catalog derives each
+// target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
+pub(crate) use routing::matrix::expected_backend_local_trainer_id;
 pub use routing::{
     canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
     video_mode_conditioning_requirements, video_ui_modes,
@@ -3966,6 +3969,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Face Analysis — {subject}"))
         }
+        JobType::DatasetSubjectMask => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Subject Masks — {subject}"))
+        }
         JobType::FaceLikenessCompare => {
             // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
             // user-facing subject of the row; fall back to a plain label when the payload omits it.
@@ -5010,6 +5019,9 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // is served by any worker that advertises the training capability — it has no dedicated
         // capability of its own (the real-run gate below additionally requires `lora_train_execute`).
         JobType::ControlTraining => WorkerCapability::LoraTrain.as_str(),
+        // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
+        // to any worker advertising `image_segment` instead of a capability of their own.
+        JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
         // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
         // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
         // may claim it. `audio_generate` is advertised exactly when that lane is linked
@@ -5275,6 +5287,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::CatalogAnalysis
             | JobType::DatasetUpscale
             | JobType::DatasetFaceAnalysis
+            | JobType::DatasetSubjectMask
             | JobType::FaceLikenessCompare
     )
 }
