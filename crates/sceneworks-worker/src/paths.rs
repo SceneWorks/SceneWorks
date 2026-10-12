@@ -595,32 +595,43 @@ pub fn resolve_training_output_dir_under(
     ensure_path_under(path, &allowed_roots, label)
 }
 
-/// The step of a trainer resume bundle file name — `{stem}-step{NNNNNN}.resume.safetensors` (the
-/// engine's `checkpoint::resume_snapshot_filename`) — or `None` for any other file.
-fn training_resume_bundle_step(name: &str) -> Option<u32> {
-    let (_, rest) = name.rsplit_once("-step")?;
+/// The engine's checkpoint stem for an adapter `file_name` (`Path::file_stem`, e.g. `style` for
+/// `style.safetensors`) — the prefix every resume bundle of that run carries.
+pub fn training_resume_stem(file_name: &str) -> &str {
+    Path::new(file_name)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("lora")
+}
+
+/// The step of a resume bundle of `stem`'s run — `{stem}-step{NNNNNN}.resume.safetensors`, or a Wan
+/// MoE expert's `{stem}-{high,low}_noise-step{NNNNNN}.resume.safetensors` (the engine's
+/// `checkpoint::resume_snapshot_filename` / `resume_stem`) — or `None` for any other file.
+fn training_resume_bundle_step(name: &str, stem: &str) -> Option<u32> {
+    let rest = name.strip_prefix(stem)?;
+    let rest = ["-step", "-high_noise-step", "-low_noise-step"]
+        .iter()
+        .find_map(|marker| rest.strip_prefix(marker))?;
     let digits = rest.strip_suffix(".resume.safetensors")?;
     (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
         .then(|| digits.parse().ok())
         .flatten()
 }
 
-/// The highest step of any trainer resume bundle in `output_dir`, i.e. the checkpoint a
+/// The highest step of any resume bundle of `stem`'s run in `output_dir`, i.e. the checkpoint a
 /// `resume: true` run continues from. `None` when the directory is absent or holds none (sc-25785).
-pub fn latest_training_resume_step(output_dir: &Path) -> Option<u32> {
+pub fn latest_training_resume_step(output_dir: &Path, stem: &str) -> Option<u32> {
     std::fs::read_dir(output_dir)
         .ok()?
         .flatten()
-        .filter_map(|entry| training_resume_bundle_step(entry.file_name().to_str()?))
+        .filter_map(|entry| training_resume_bundle_step(entry.file_name().to_str()?, stem))
         .max()
 }
 
-/// Delete every trainer resume bundle (`*-stepNNNNNN.resume.safetensors` and its
-/// `.optim.safetensors` optimizer sibling) in `output_dir`, returning how many files were removed.
-/// A run that starts from step 0 calls this so a later resume can never continue from a stale
-/// higher-step bundle left by an earlier run into the same directory (sc-25785). The user-loadable
-/// `*-stepNNNNNN.safetensors` adapter checkpoints are left alone. An absent directory is a no-op.
-pub fn remove_training_resume_bundles(output_dir: &Path) -> std::io::Result<usize> {
+/// Delete every resume bundle of `stem`'s run (`*.resume.safetensors` and its `.optim.safetensors`
+/// optimizer sibling) in `output_dir`, returning how many files were removed. The user-loadable
+/// `{stem}-stepNNNNNN.safetensors` adapter checkpoints are left alone. An absent directory is a no-op.
+pub fn remove_training_resume_bundles(output_dir: &Path, stem: &str) -> std::io::Result<usize> {
     let entries = match std::fs::read_dir(output_dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
@@ -632,12 +643,39 @@ pub fn remove_training_resume_bundles(output_dir: &Path) -> std::io::Result<usiz
         let name = entry.file_name();
         let Some(name) = name.to_str() else { continue };
         let resume_name = name.replace(".optim.safetensors", ".resume.safetensors");
-        if training_resume_bundle_step(&resume_name).is_some() && entry.file_type()?.is_file() {
+        if training_resume_bundle_step(&resume_name, stem).is_some() && entry.file_type()?.is_file()
+        {
             std::fs::remove_file(entry.path())?;
             removed += 1;
         }
     }
     Ok(removed)
+}
+
+/// Ready a training output dir for a run (sc-25785). A resume run reports the checkpoint step it
+/// continues from. A run from step 0 (a fresh submit, or a "restart" retry into the same dir)
+/// removes the resume bundles an earlier run left, so a later resume continues from THIS run's
+/// checkpoints and never from a stale higher-step one; a removal failure fails the run rather than
+/// leaving that hazard in place.
+pub(crate) fn prepare_training_resume_dir(
+    resume: bool,
+    output_dir: &Path,
+    file_name: &str,
+) -> WorkerResult<Option<u32>> {
+    let stem = training_resume_stem(file_name);
+    if resume {
+        return Ok(latest_training_resume_step(output_dir, stem));
+    }
+    remove_training_resume_bundles(output_dir, stem).map_err(|error| {
+        WorkerError::Io(std::io::Error::new(
+            error.kind(),
+            format!(
+                "Could not clear stale training resume checkpoints in {}: {error}",
+                output_dir.display()
+            ),
+        ))
+    })?;
+    Ok(None)
 }
 
 pub(crate) fn resolve_dataset_item_path(
@@ -890,29 +928,29 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> WorkerResult<String> {
 mod training_resume_bundle_tests {
     use super::*;
 
-    #[test]
-    fn latest_step_and_removal_touch_only_resume_bundles() {
+    const NAMES: [&str; 10] = [
+        "style-step000050.resume.safetensors",
+        "style-step000050.optim.safetensors",
+        "style-high_noise-step000200.resume.safetensors",
+        "style-high_noise-step000200.optim.safetensors",
+        "style-step000300.safetensors",
+        "style.safetensors",
+        "style-stepXYZ.resume.safetensors",
+        "other-step000900.resume.safetensors",
+        "other-step000900.optim.safetensors",
+        "training-config.json",
+    ];
+
+    fn seeded() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("temp dir");
-        let names = [
-            "style-step000050.resume.safetensors",
-            "style-step000050.optim.safetensors",
-            "style_high_noise-step000200.resume.safetensors",
-            "style_high_noise-step000200.optim.safetensors",
-            "style-step000300.safetensors",
-            "style.safetensors",
-            "style-stepXYZ.resume.safetensors",
-            "training-config.json",
-        ];
-        for name in names {
+        for name in NAMES {
             std::fs::write(dir.path().join(name), b"x").expect("write");
         }
-        assert_eq!(latest_training_resume_step(dir.path()), Some(200));
+        dir
+    }
 
-        assert_eq!(
-            remove_training_resume_bundles(dir.path()).expect("remove"),
-            4
-        );
-        let mut left: Vec<_> = std::fs::read_dir(dir.path())
+    fn remaining(dir: &Path) -> Vec<String> {
+        let mut left: Vec<_> = std::fs::read_dir(dir)
             .expect("read")
             .map(|entry| {
                 entry
@@ -923,24 +961,53 @@ mod training_resume_bundle_tests {
             })
             .collect();
         left.sort();
+        left
+    }
+
+    #[test]
+    fn a_resume_run_reports_its_own_stems_latest_step_and_deletes_nothing() {
+        let dir = seeded();
         assert_eq!(
-            left,
+            prepare_training_resume_dir(true, dir.path(), "style.safetensors").expect("prepare"),
+            Some(200),
+            "another stem's higher step is not this run's checkpoint"
+        );
+        assert_eq!(remaining(dir.path()).len(), NAMES.len());
+    }
+
+    #[test]
+    fn a_step_zero_run_removes_only_its_own_resume_bundles() {
+        let dir = seeded();
+        assert_eq!(
+            prepare_training_resume_dir(false, dir.path(), "style.safetensors").expect("prepare"),
+            None
+        );
+        assert_eq!(
+            remaining(dir.path()),
             [
+                "other-step000900.optim.safetensors",
+                "other-step000900.resume.safetensors",
                 "style-step000300.safetensors",
                 "style-stepXYZ.resume.safetensors",
                 "style.safetensors",
                 "training-config.json",
             ]
         );
-        assert_eq!(latest_training_resume_step(dir.path()), None);
+        assert_eq!(latest_training_resume_step(dir.path(), "style"), None);
     }
 
     #[test]
     fn absent_output_dir_has_no_checkpoint_and_removal_is_a_no_op() {
         let dir = tempfile::tempdir().expect("temp dir");
         let missing = dir.path().join("never-created");
-        assert_eq!(latest_training_resume_step(&missing), None);
-        assert_eq!(remove_training_resume_bundles(&missing).expect("no-op"), 0);
+        assert_eq!(
+            prepare_training_resume_dir(true, &missing, "style.safetensors").unwrap(),
+            None
+        );
+        assert_eq!(
+            prepare_training_resume_dir(false, &missing, "style.safetensors").unwrap(),
+            None
+        );
     }
 
     #[test]

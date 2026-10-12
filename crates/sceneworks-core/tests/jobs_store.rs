@@ -9290,3 +9290,55 @@ fn registering_retires_a_previous_unhealthy_reason() {
         "re-registering re-advertises what the worker can serve, so the old remedy must be retired"
     );
 }
+
+/// sc-25785: a worker reports `resumeCheckpointStep` only when it changes, so the latest value
+/// must survive later results that omit it and a store-side interrupt (backend restart) that never
+/// goes through a progress report — the Queue's Resume offer reads it from the interrupted row.
+#[test]
+fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
+    let store = store("resume-checkpoint-carry-forward");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 50 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 100 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "other": true })))
+        .expect("progress");
+    // The worker died with the job: its row no longer names the job, so startup recovery
+    // interrupts it (an exactly-owned job would be preserved for the live worker instead).
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'offline', current_job_id = null",
+            [],
+        )
+        .expect("worker fixture updates");
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
+    assert_eq!(job.result.get("other"), Some(&json!(true)));
+}

@@ -6118,9 +6118,10 @@ async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_
     );
 }
 
-/// sc-25785: a training job that ended without completing records the resume checkpoint on disk,
-/// `{ "resume": true }` resumes its persisted plan in one call, and `{ "resume": false }` restarts
-/// from step 0 even when the persisted plan was itself a resume.
+/// sc-25785: the resume checkpoint a worker reports survives later results that omit it and the
+/// terminal transition; `{ "resume": true }` resumes the persisted plan in one call; a retry is
+/// refused while another run into the same output dir is in flight; and `{ "resume": false }`
+/// restarts from step 0 even when the persisted plan was itself a resume.
 #[tokio::test]
 async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_plan() {
     let _env = isolate_hf_cache();
@@ -6154,9 +6155,29 @@ async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_pl
     for step in ["000050", "000100"] {
         write_test_safetensors(&output_dir.join(format!("{stem}-step{step}.resume.safetensors")));
     }
-    // A user-loadable adapter checkpoint at a higher step is not a resume point.
-    write_test_safetensors(&output_dir.join(format!("{stem}-step000150.safetensors")));
 
+    // The worker reports the checkpoint once, then later results (a preview sample) omit it.
+    let sample = json!({ "step": 100, "relativePath": "samples/s.png", "path": "/tmp/s.png" });
+    for result in [
+        json!({ "resumeCheckpointStep": 100 }),
+        json!({ "trainingSamples": [sample.clone()] }),
+    ] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "running",
+                "stage": "training",
+                "progress": 0.5,
+                "message": "Training step 101 of 200 (loss 0.1000).",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": result
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
     let (status, canceled) = request(
         app.clone(),
         "POST",
@@ -6172,6 +6193,7 @@ async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_pl
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(canceled["result"]["resumeCheckpointStep"], 100);
+    assert_eq!(canceled["result"]["trainingSamples"], json!([sample]));
 
     let (status, resumed) = request(
         app.clone(),
@@ -6187,7 +6209,28 @@ async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_pl
     expected_plan["config"]["advanced"]["resume"] = json!(true);
     assert_eq!(resumed["payload"]["plan"], expected_plan);
 
-    // The resumed run fails before its next checkpoint; restarting it must turn resume back off.
+    // While the resumed run is queued, neither a restart nor a second resume of the source may
+    // start another run into the same output dir.
+    for body in [
+        json!({ "resume": false }),
+        json!({ "resume": true }),
+        json!({}),
+    ] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused.to_string().contains("still queued or running"),
+            "{refused}"
+        );
+    }
+
+    // The resumed run fails; restarting it must turn resume back off.
     let resumed_id = resumed["id"].as_str().expect("resumed id").to_owned();
     claim_training_job(&app, &resumed_id).await;
     let (status, _) = request(
@@ -6219,8 +6262,8 @@ async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_pl
     );
 }
 
-/// sc-25785: resume is refused, typed, when there is nothing to resume — no checkpoint on disk, a
-/// completed run, or a job that is not training.
+/// sc-25785: resume is refused, typed, when there is nothing to resume — no checkpoint of this
+/// run on disk (another stem's bundle does not count), a completed run, or a non-training job.
 #[tokio::test]
 async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     let _env = isolate_hf_cache();
@@ -6236,10 +6279,12 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     .await;
     let project_id = project["id"].as_str().expect("project id").to_owned();
 
-    let (failed_id, _, _) =
+    let (failed_id, failed_dir, _) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
     claim_training_job(&app, &failed_id).await;
-    let (status, failed) = request(
+    std::fs::create_dir_all(&failed_dir).expect("output dir creates");
+    write_test_safetensors(&failed_dir.join("another-run-step000500.resume.safetensors"));
+    let (status, _) = request(
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{failed_id}/progress"),
@@ -6254,7 +6299,6 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(failed["result"].get("resumeCheckpointStep").is_none());
     let (status, refused) = request(
         app.clone(),
         "POST",
@@ -6268,7 +6312,7 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
         "{refused}"
     );
 
-    // A completed run is not resumable even with a bundle on disk.
+    // A completed run is not resumable even with its own bundle on disk.
     let (completed_id, completed_dir, completed_adapter) =
         submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
     claim_training_job(&app, &completed_id).await;
@@ -6304,7 +6348,7 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     assert!(refused.to_string().contains("can be resumed"), "{refused}");
 
     // A non-training job rejects the flag in either direction.
-    let (status, prompt_job) = request(
+    let (status, other_job) = request(
         app.clone(),
         "POST",
         "/api/v1/jobs",
@@ -6312,11 +6356,11 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
-    let prompt_job_id = prompt_job["id"].as_str().expect("job id").to_owned();
+    let other_id = other_job["id"].as_str().expect("job id").to_owned();
     let (status, _) = request(
         app.clone(),
         "POST",
-        &format!("/api/v1/jobs/{prompt_job_id}/cancel"),
+        &format!("/api/v1/jobs/{other_id}/cancel"),
         json!({}),
     )
     .await;
@@ -6324,7 +6368,7 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
     let (status, refused) = request(
         app,
         "POST",
-        &format!("/api/v1/jobs/{prompt_job_id}/retry"),
+        &format!("/api/v1/jobs/{other_id}/retry"),
         json!({ "resume": false }),
     )
     .await;

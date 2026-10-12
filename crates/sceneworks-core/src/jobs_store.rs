@@ -4158,10 +4158,21 @@ fn persist_claim_routing_facts(
 /// result. `existing_result` is the job's current result, which
 /// `update_job_progress` has already read in the same transaction — so this no
 /// longer re-`select`s `result_json` per update (sc-4274 / F-CORE-14).
+///
+/// A training run's latest `resumeCheckpointStep` (sc-25785) and its sample
+/// history also survive a result that omits them: the worker reports each only
+/// when it changes, and the result column is replaced wholesale.
 fn merge_training_sample_history(
     existing_result: Option<&Map<String, Value>>,
     incoming: &mut Map<String, Value>,
 ) {
+    for key in ["resumeCheckpointStep", "trainingSamples"] {
+        if !incoming.contains_key(key) {
+            if let Some(value) = existing_result.and_then(|result| result.get(key)) {
+                incoming.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
     let has_training_samples = incoming
         .get("trainingSamples")
         .and_then(Value::as_array)
