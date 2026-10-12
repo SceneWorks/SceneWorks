@@ -5702,6 +5702,31 @@ input.dataset-name-input.boxed:focus {
   border-top: 1px solid var(--border);
 }
 
+/* Multi-resolution bucket editor (sc-2127): one row per bucket, resolution + repeats + remove. */
+.training-resolution-buckets {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.training-resolution-buckets[aria-invalid="true"] {
+  border-color: var(--danger);
+}
+
+.training-resolution-bucket-row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) minmax(100px, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+}
+
+.training-resolution-buckets > .secondary-action {
+  justify-self: start;
+}
+
 /* Actions close the work-panel: Reset defaults then one filled primary, divided
    from the config above (sc-10492). Both buttons share the control baseline —
    `.primary-action`'s 44px default would otherwise stand taller than the 36px
@@ -13823,6 +13848,20 @@ details[open] > summary.lora-scope-group-heading::before,
   object-fit: cover;
 }
 
+/* Subject-mask overlay (sc-2126): the single-channel mask laid over the thumbnail with the same
+   cover fit, multiplied so the background (black) darkens and the subject (white) shows through. */
+.training-caption-card-thumb img.training-subject-mask-overlay {
+  position: absolute;
+  inset: 0;
+  mix-blend-mode: multiply;
+  opacity: 0.85;
+  pointer-events: none;
+}
+
+.dataset-mask-attention {
+  color: color-mix(in oklch, var(--danger) 75%, var(--text));
+}
+
 .training-caption-card-body {
   display: flex;
   flex-direction: column;
@@ -13892,6 +13931,63 @@ details[open] > summary.lora-scope-group-heading::before,
   display: flex;
   gap: 8px;
   margin-top: auto;
+}
+
+/* sc-24161: an edit-pair item's ordered reference rail (Image 1 … N), above its instruction. */
+.training-edit-refs {
+  display: grid;
+  gap: 6px;
+}
+
+.training-edit-refs-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted, inherit);
+}
+
+.training-edit-refs-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.training-edit-ref {
+  display: grid;
+  gap: 2px;
+  width: 64px;
+  font-size: 11px;
+}
+
+.training-edit-ref-thumb {
+  display: block;
+  width: 64px;
+  height: 64px;
+  overflow: hidden;
+  border-radius: 6px;
+}
+
+.training-edit-ref-thumb img,
+.training-edit-ref-thumb video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.training-edit-ref-actions {
+  display: flex;
+  justify-content: space-between;
+}
+
+.training-edit-ref-move {
+  min-height: 0;
+  height: 20px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 1;
 }
 
 /* The card's right half is only ~170px wide, so these two must not wrap. */
@@ -14370,6 +14466,15 @@ details[open] > summary.lora-scope-group-heading::before,
 .dataset-caption-options {
   display: grid;
   gap: 4px;
+}
+
+/* What the selected caption mode does (sc-24829). */
+.dataset-caption-mode-note,
+.dataset-caption-field-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .dataset-parquet-copy,

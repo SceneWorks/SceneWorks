@@ -108,6 +108,7 @@ conditional/partial.
 | `catalog_analysis` | ⚠️ MLX / candle when constrained vision and CLIP image lanes are linked | `run_utility_job` → `run_catalog_analysis_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 | `dataset_upscale` | ✅ MLX/CoreML on Mac / candle/CUDA off-Mac | `run_utility_job` → `run_dataset_upscale_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `dataset_face_analysis` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_dataset_face_analysis_job`; `mlx_gpu`; `with_candle_capabilities` |
+| `dataset_subject_mask` | ✅ MLX SAM3 on Mac / Candle SAM3 off-Mac (person masks for training) | `run_utility_job` → `run_dataset_subject_mask_job`; routes by the `image_segment` capability (no capability of its own) |
 | `face_likeness_compare` | ✅ MLX face stack on Mac / candle face stack off-Mac | `run_utility_job` → `run_face_likeness_compare_job`; `mlx_gpu`; `with_candle_capabilities` |
 | `prompt_refine` | ⚠️ native TextLlm provider when its registry lane is linked | `run_utility_job` → `run_prompt_refine_job`; `registry_capabilities`; `mac_rust_supported`; `candle_supported` |
 <!-- job-matrix:end -->

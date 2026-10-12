@@ -16,16 +16,25 @@ import {
   ReadinessBadge,
   ReadinessFlagDetails,
 } from "./DatasetDoctor.jsx";
+import { EditReferenceRail } from "./EditReferenceRail.jsx";
 import { datasetItemCount, datasetItemSelectionKey, imageAssetName } from "../../training/datasetHelpers.js";
 import { joyCaptionExtraOptions, joyCaptionLengths, joyCaptionTypes } from "../../training/joyCaptionPrompts.js";
+import {
+  SUBJECT_MASK_ACCEPT,
+  subjectMaskStatusByItemId,
+  subjectMaskUrl,
+} from "../../training/subjectMasks.js";
 
-// Human label for the detected caption source (sc-2025) — read-only on the card.
-function captionSourceLabel(source) {
+// Human label for the detected caption source (sc-2025) — read-only on the card. An auto caption
+// made in a non-default mode (sc-24829) names that mode.
+const captionModeLabels = { subjectOnly: "subject only", triggerOnly: "trigger words" };
+
+function captionSourceLabel(source, mode) {
   if (source === "imported") {
     return "Imported";
   }
   if (source === "auto") {
-    return "Auto";
+    return captionModeLabels[mode] ? `Auto · ${captionModeLabels[mode]}` : "Auto";
   }
   return "Manual";
 }
@@ -85,6 +94,10 @@ export function DatasetEditorPanel({
   captionSession,
   doctorSession,
   config,
+  maskSession = {},
+  // Instruction-edit pairs (sc-24161): per-item ordered reference rails. Absent (or a 0 cap — no
+  // trainable edit target) leaves the editor exactly as it was.
+  editPairSession = {},
 }) {
   const {
     loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset, datasets,
@@ -107,6 +120,20 @@ export function DatasetEditorPanel({
     imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
     gpuOptions, onUploadPreparedBundle,
   } = config;
+  const {
+    referenceCap = 0, referenceDraftById = {}, setItemReferences, addItemReferences,
+    importItemReferences, editPairsMode = false, setEditPairsMode,
+  } = editPairSession;
+  // Only the CURRENT members count: drafts for removed items linger in the map (the save payload
+  // ignores them) and must not lock the toggle on.
+  const hasEditPairs = (memberAssets ?? []).some((asset) => referenceDraftById[asset.id]?.length);
+  // The rails show once the user turns edit pairs on, or whenever the dataset already has some.
+  const showEditPairs = referenceCap > 0 && (editPairsMode || hasEditPairs);
+  const [referencePickerFor, setReferencePickerFor] = React.useState(null);
+  const assetsById = React.useMemo(
+    () => new Map((imageAssets ?? []).map((asset) => [asset.id, asset])),
+    [imageAssets],
+  );
   // Local aliases for the doctor readout's report/loading, still referenced directly by
   // the distributions block and the per-card readiness badges below.
   const { report: readiness = null, loading: readinessLoading = false } = datasetDoctor ?? {};
@@ -118,6 +145,15 @@ export function DatasetEditorPanel({
   const [parquetImporting, setParquetImporting] = React.useState(false);
   const [parquetError, setParquetError] = React.useState("");
   const [preparedUploadingId, setPreparedUploadingId] = React.useState("");
+  // Subject masks (sc-2126): overlay toggle, the card whose replacement mask is uploading, and the
+  // per-card upload error (field-level: shown on the card that owns the upload).
+  const { projectId: maskProjectId, report: maskReport, onGenerateMasks, onUploadMask } = maskSession;
+  const [showMaskOverlay, setShowMaskOverlay] = React.useState(false);
+  const [maskUploadingId, setMaskUploadingId] = React.useState("");
+  const [maskUploadErrors, setMaskUploadErrors] = React.useState({});
+  // Only trust a report for the dataset on screen — item ids repeat across datasets.
+  const activeMaskReport = maskReport && maskReport.datasetId === activeDataset?.id ? maskReport : null;
+  const maskStatusByItemId = React.useMemo(() => subjectMaskStatusByItemId(activeMaskReport), [activeMaskReport]);
   const parquetImportDisabled = !draftName.trim() || memberAssets.length > 0 || parquetImporting;
 
   async function runParquetImport(settings) {
@@ -181,6 +217,23 @@ export function DatasetEditorPanel({
     () => new Map((activeDataset?.items ?? []).map((item, index) => [datasetItemSelectionKey(activeDataset, item, index), item])),
     [activeDataset],
   );
+
+  async function uploadMask(asset, file) {
+    if (!file || typeof onUploadMask !== "function") return;
+    setMaskUploadingId(asset.id);
+    setMaskUploadErrors((errors) => ({ ...errors, [asset.id]: "" }));
+    try {
+      await onUploadMask(asset, file);
+      setShowMaskOverlay(true);
+    } catch (error) {
+      setMaskUploadErrors((errors) => ({
+        ...errors,
+        [asset.id]: errorMessage(error, "Could not upload the subject mask."),
+      }));
+    } finally {
+      setMaskUploadingId("");
+    }
+  }
 
   async function uploadPrepared(asset, file) {
     if (!file || typeof onUploadPreparedBundle !== "function") return;
@@ -352,6 +405,18 @@ export function DatasetEditorPanel({
               <Icon.Folder size={14} />
               Import Parquet
             </button>
+            {referenceCap > 0 ? (
+              <button
+                aria-pressed={showEditPairs}
+                className={showEditPairs ? "secondary-action strong" : "secondary-action"}
+                disabled={hasEditPairs}
+                onClick={() => setEditPairsMode?.(!editPairsMode)}
+                type="button"
+              >
+                <Icon.Sliders size={14} />
+                Edit pairs
+              </button>
+            ) : null}
             <button
               className="secondary-action"
               disabled={!memberAssets.length}
@@ -370,6 +435,18 @@ export function DatasetEditorPanel({
               <Icon.Sliders size={14} />
               {renaming ? "Renaming…" : "Apply ordered names"}
             </button>
+            {typeof onGenerateMasks === "function" ? (
+              <button
+                className="secondary-action"
+                disabled={!activeDataset?.id || !memberAssets.length || savingDataset}
+                onClick={onGenerateMasks}
+                title="Segment the person in every image (SAM3) to build per-image subject masks"
+                type="button"
+              >
+                <Icon.Sliders size={14} />
+                Generate subject masks
+              </button>
+            ) : null}
           </span>
         </div>
 
@@ -443,7 +520,28 @@ export function DatasetEditorPanel({
           </div>
           <span className="dataset-count">
             {health.itemCount} image{health.itemCount === 1 ? "" : "s"} · {captionedCount} captioned
+            {activeMaskReport ? (
+              <>
+                {" · "}
+                <span aria-label="Subject mask coverage">
+                  {activeMaskReport.masked}/{activeMaskReport.total} masked
+                </span>
+                {activeMaskReport.empty ? (
+                  <span className="dataset-mask-attention"> · {activeMaskReport.empty} with no subject</span>
+                ) : null}
+              </>
+            ) : null}
           </span>
+          {activeMaskReport?.masked ? (
+            <button
+              aria-pressed={showMaskOverlay}
+              className={["secondary-action", showMaskOverlay ? "active" : ""].filter(Boolean).join(" ")}
+              onClick={() => setShowMaskOverlay((shown) => !shown)}
+              type="button"
+            >
+              {showMaskOverlay ? "Hide masks" : "Show masks"}
+            </button>
+          ) : null}
           <div className="segmented-control" role="group" aria-label="Filter images">
             <button
               className={captionFilter === "all" ? "active" : ""}
@@ -489,6 +587,9 @@ export function DatasetEditorPanel({
               const readinessEntry = readinessByKey?.get(asset.id);
               const savedItem = savedItemBySelection.get(asset.id);
               const preparedPath = savedItem?.ltxPreparedBundlePath;
+              const maskStatus = savedItem ? maskStatusByItemId.get(savedItem.id) : undefined;
+              const maskSrc = showMaskOverlay && maskStatus?.hasMask ? subjectMaskUrl(maskProjectId, maskStatus) : "";
+              const maskError = maskUploadErrors[asset.id];
               return (
                 <article
                   className={["training-caption-card", disabled ? "disabled" : ""].filter(Boolean).join(" ")}
@@ -496,6 +597,14 @@ export function DatasetEditorPanel({
                 >
                   <button className="training-caption-card-thumb" onClick={() => onPreview(asset, memberAssets)} type="button">
                     <AssetThumbnail asset={asset} />
+                    {maskSrc ? (
+                      <img
+                        alt={`Subject mask for ${name}`}
+                        className="training-subject-mask-overlay"
+                        decoding="async"
+                        src={maskSrc}
+                      />
+                    ) : null}
                     {/* Only flash pending on the first load — during an ack-triggered refetch the
                         prior report's badges hold steady rather than blinking to "·". */}
                     <ReadinessBadge entry={readinessEntry} loading={readinessLoading && !readiness} />
@@ -503,9 +612,20 @@ export function DatasetEditorPanel({
                   <div className="training-caption-card-body">
                     <div className="training-caption-card-meta">
                       <strong title={name}>{name}</strong>
-                      <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source)}</span>
+                      <span className={`training-caption-source source-${source}`}>{captionSourceLabel(source, draft.mode)}</span>
                       {disabled ? (
                         <span className="training-asset-badge">{asset.status?.trashed ? "Trashed" : "Rejected"}</span>
+                      ) : null}
+                      {maskStatus?.hasMask && maskStatus.empty ? (
+                        <span
+                          className="training-asset-badge"
+                          title="No person was detected — the mask is empty. Upload a replacement mask."
+                        >
+                          No subject in mask
+                        </span>
+                      ) : null}
+                      {maskStatus?.hasMask && maskStatus.source === "upload" ? (
+                        <span className="training-asset-badge">Mask uploaded</span>
                       ) : null}
                     </div>
                     <ReadinessFlagDetails
@@ -516,6 +636,16 @@ export function DatasetEditorPanel({
                           : undefined
                       }
                     />
+                    {showEditPairs ? (
+                      <EditReferenceRail
+                        assetsById={assetsById}
+                        cap={referenceCap}
+                        itemName={name}
+                        onAdd={() => setReferencePickerFor({ selectionId: asset.id, name })}
+                        onChange={(ids) => setItemReferences?.(asset.id, ids)}
+                        referenceIds={referenceDraftById[asset.id] ?? []}
+                      />
+                    ) : null}
                     <textarea
                       aria-label={`Caption for ${name}`}
                       className={[
@@ -525,7 +655,11 @@ export function DatasetEditorPanel({
                         .filter(Boolean)
                         .join(" ")}
                       onChange={(event) => updateCaption(asset.id, event.target.value)}
-                      placeholder="Describe this image…"
+                      placeholder={
+                        showEditPairs
+                          ? "Edit instruction"
+                          : "Describe this image…"
+                      }
                       rows={3}
                       value={draft.text ?? ""}
                     />
@@ -546,6 +680,26 @@ export function DatasetEditorPanel({
                         />
                       </label>
                       {preparedPath ? <span className="training-asset-badge">Prepared</span> : null}
+                      {typeof onUploadMask === "function" ? (
+                        <label className="secondary-action">
+                          {maskUploadingId === asset.id
+                            ? "Uploading…"
+                            : maskStatus?.hasMask
+                              ? "Replace mask"
+                              : "Upload mask"}
+                          <input
+                            accept={SUBJECT_MASK_ACCEPT}
+                            aria-label={`Upload subject mask for ${name}`}
+                            disabled={!savedItem?.id || maskUploadingId === asset.id}
+                            hidden
+                            onChange={(event) => {
+                              uploadMask(asset, event.target.files?.[0]);
+                              event.target.value = "";
+                            }}
+                            type="file"
+                          />
+                        </label>
+                      ) : null}
                       <button
                         aria-label={`Remove ${name}`}
                         className="secondary-action"
@@ -564,6 +718,11 @@ export function DatasetEditorPanel({
                         Re-Caption
                       </button>
                     </div>
+                    {maskError ? (
+                      <p className="inline-warning" role="alert">
+                        {maskError}
+                      </p>
+                    ) : null}
                   </div>
                 </article>
               );
@@ -581,6 +740,30 @@ export function DatasetEditorPanel({
           onAdd={addAssets}
           onClose={() => setAddDialogOpen(false)}
           onImport={handleImport}
+        />
+      ) : null}
+      {referencePickerFor ? (
+        <DatasetAddDialog
+          assets={imageAssets}
+          characters={characters}
+          confirmLabel="Add"
+          eyebrow="Reference"
+          fileAccept="image/*"
+          fileHint="Drop files, or"
+          importing={importingAssets}
+          // Never offer the item's own image or a reference it already has.
+          memberIds={[referencePickerFor.selectionId, ...(referenceDraftById[referencePickerFor.selectionId] ?? [])]}
+          onAdd={(ids) => {
+            addItemReferences?.(referencePickerFor.selectionId, ids);
+            setReferencePickerFor(null);
+          }}
+          onClose={() => setReferencePickerFor(null)}
+          onImport={async (files) => {
+            const { selectionId } = referencePickerFor;
+            setReferencePickerFor(null);
+            await importItemReferences?.(selectionId, files);
+          }}
+          title={`Add reference images to ${referencePickerFor.name}`}
         />
       ) : null}
       {captionDialog ? (

@@ -214,6 +214,18 @@ impl From<ProjectStoreError> for ApiError {
                 code: Some(code),
                 context: Some(context),
             },
+            // Field-attributed validation failure (epic 2123 E6): 400 with the stable reason in
+            // `code` and the offending input in `context.field`.
+            ProjectStoreError::FieldInvalid {
+                field,
+                code,
+                detail,
+            } => Self {
+                status: StatusCode::BAD_REQUEST,
+                detail,
+                code: Some(code),
+                context: Some(serde_json::json!({ "field": field })),
+            },
             ProjectStoreError::NotFound(detail) => Self {
                 status: StatusCode::NOT_FOUND,
                 detail,

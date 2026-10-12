@@ -1,0 +1,1003 @@
+{
+  "story": "sc-24163",
+  "epic": "sc-24107",
+  "half": "CUDA",
+  "identity": {
+    "sceneworks": {
+      "base": "190e0c4c7884bfa7898e0991728e91f75b049e18",
+      "branch": "feature/sc-24107-qwen-image-2-1-lora",
+      "editRouteFixCommit": "599233825"
+    },
+    "inference": "457f1a37161d80ee91e138c80e9dac63a93d0868",
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition (97,887 MiB), GPU 1 for SceneWorks jobs, GPU 0/1 for direct engine cells",
+    "driver": "596.36",
+    "cuda": "12.9 (nvcc), CUDA_COMPUTE_CAP=120",
+    "msvc": "14.44 (VS2022 BuildTools)",
+    "weights": {
+      "bf16": "Qwen/Qwen-Image-2.1@790c92633540aa0cb11d9abf19eb46d861714758",
+      "q8q4": "SceneWorks/qwen-image-2-1-mlx@1691de01c24a070131e0a28bf4c065fd027f4fe9",
+      "thirdPartyLora": "prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA@382d066d079854a86c9513f3c5a4026ada21ddbe (Qwen-Image-2.1-Natural-Exposure-LoRA-4000.safetensors, 83,943,952 B, bf16 PEFT lora_A/lora_B.default keys)"
+    },
+    "capturedAt": "2026-10-03"
+  },
+  "a1Training": {
+    "t2iLora": {
+      "target": "qwen_image_2_1_lora",
+      "networkType": "lora",
+      "resolution": 768,
+      "steps": 200,
+      "rank": 16,
+      "alpha": 16,
+      "learningRate": 0.0004,
+      "optimizer": "adamw8bit",
+      "gradientCheckpointing": true,
+      "items": 8,
+      "jobs": [
+        {
+          "id": "job_d3651adefac743519e20c68598e05c91",
+          "role": "first leg, cancelled at step 112 (after the step-100 checkpoint + preview)",
+          "totalMs": 502925,
+          "peakMemoryBytes": 33282850816,
+          "peakMemoryPct": 32.42616486356717,
+          "peakGpuLoadPct": 99,
+          "backend": "cuda"
+        },
+        {
+          "id": "job_546fdb4ce37b8ce1ff7d0ff02f4e3e9b",
+          "role": "retry with plan.config.advanced.resume=true; resumed at step 101 from step000100.resume.safetensors, completed 200",
+          "totalMs": 435621,
+          "peakMemoryBytes": 33450622976,
+          "peakMemoryPct": 32.589618641903414,
+          "peakGpuLoadPct": 99,
+          "backend": "cuda"
+        }
+      ],
+      "lossObserved": {
+        "step2": 0.0229,
+        "step26": 0.0315,
+        "step54": 0.0415,
+        "step69": 0.0365,
+        "step104": 0.012,
+        "step112": 0.008,
+        "resumedStep101": 0.0387,
+        "final200": 0.014556
+      },
+      "checkpoints": [
+        "step000050",
+        "step000100",
+        "step000150",
+        "final"
+      ],
+      "previews": [
+        "samples/step-000100",
+        "samples/step-000200"
+      ],
+      "loraId": "lora_1a3bed8290bd4a6297bf34bd32b92e1d",
+      "adapterBytes": 167851080,
+      "safetensorsMetadata": {
+        "family": "qwen-image-2-1",
+        "baseModel": "qwen_image_2_1",
+        "ss_base_model_version": "qwen_image_2_1",
+        "networkType": "lora",
+        "license": "Qwen Research License Agreement (research/evaluation only)"
+      }
+    },
+    "editLokr": {
+      "target": "qwen_image_2_1_edit_lora",
+      "networkType": "lokr",
+      "resolution": 768,
+      "steps": 200,
+      "rank": 16,
+      "alpha": 16,
+      "learningRate": 0.0004,
+      "optimizer": "adamw8bit",
+      "gradientCheckpointing": true,
+      "items": 6,
+      "referencesPerItem": 1,
+      "refusedFirst": {
+        "id": "job_300dd1be3f1c4a84bdf2131efd03d4b3",
+        "referencesPerItem": 2,
+        "error": "preflight: derived peak ~95.5 GiB exceeds this device's ~80.1 GiB training budget"
+      },
+      "jobs": [
+        {
+          "id": "job_ccce4717f4e0405bb46e8bdcef9f282b",
+          "totalMs": 3839914,
+          "peakMemoryBytes": 75716624384,
+          "peakMemoryPct": 73.7677117492619,
+          "peakGpuLoadPct": 100,
+          "backend": "cuda"
+        }
+      ],
+      "lossPer50": [
+        {
+          "steps": "1-50",
+          "n": 49,
+          "mean": 0.0151,
+          "min": 0.0059,
+          "max": 0.0454
+        },
+        {
+          "steps": "51-100",
+          "n": 50,
+          "mean": 0.0149,
+          "min": 0.0051,
+          "max": 0.0973
+        },
+        {
+          "steps": "101-150",
+          "n": 49,
+          "mean": 0.0132,
+          "min": 0.0041,
+          "max": 0.1977
+        },
+        {
+          "steps": "151-200",
+          "n": 50,
+          "mean": 0.0133,
+          "min": 0.0037,
+          "max": 0.135
+        }
+      ],
+      "final200": 0.006463,
+      "previews": [
+        "samples/step-000100",
+        "samples/step-000200"
+      ],
+      "loraId": "lora_7e4dfa8db03a425fbb255092286aaff6",
+      "adapterBytes": 6759392,
+      "safetensorsMetadata": {
+        "family": "qwen-image-2-1",
+        "baseModel": "qwen_image_2_1",
+        "networkType": "lokr",
+        "trainingMode": "edit",
+        "license": "Qwen Research License Agreement (research/evaluation only)"
+      }
+    }
+  },
+  "a2Renders": {
+    "geometry": "768x768, 20 steps, seed 24163, guidance 1.0",
+    "renders": [
+      {
+        "label": "t2i-bf16-none",
+        "job": "job_df7b65ccf89cbd3d744aa6b07616adda",
+        "wallSeconds": 9.104,
+        "peakMemoryBytes": 38948306944
+      },
+      {
+        "label": "t2i-q8-none",
+        "job": "job_a1cb5f9407153087d2992b7a0f005579",
+        "wallSeconds": 120.526,
+        "peakMemoryBytes": 38948306944
+      },
+      {
+        "label": "t2i-q4-none",
+        "job": "job_d12b4e4b854566dde8c78114cf9bba3c",
+        "wallSeconds": 36.232,
+        "peakMemoryBytes": 27573354496
+      },
+      {
+        "label": "t2i-bf16-lora",
+        "job": "job_7a18348db532bee745f570ace52bd981",
+        "wallSeconds": 27.205,
+        "peakMemoryBytes": 34686894080
+      },
+      {
+        "label": "t2i-q8-lora",
+        "job": "job_c6a6c1c086c5ad0fa0e86fc06fcfd641",
+        "wallSeconds": 141.676,
+        "peakMemoryBytes": 39116079104
+      },
+      {
+        "label": "t2i-q4-lora",
+        "job": "job_f9387080ed896709adb7727249a69fa9",
+        "wallSeconds": 33.215,
+        "peakMemoryBytes": 27573354496
+      },
+      {
+        "label": "stack-bf16-lora1.0-ne1.0",
+        "job": "job_b7746b59bd680af209f6c2866cc09d71",
+        "wallSeconds": 27.216,
+        "peakMemoryBytes": 34854666240
+      },
+      {
+        "label": "stack-bf16-lora1.0-ne0.3",
+        "job": "job_383944184319a251c7290e7c1aefa242",
+        "wallSeconds": 30.218,
+        "peakMemoryBytes": 40223375360
+      },
+      {
+        "label": "stack-bf16-lora0.5-ne1.0",
+        "job": "job_8b55f20067f99d7224fb5fa749cf989c",
+        "wallSeconds": 27.206,
+        "peakMemoryBytes": 40256929792
+      },
+      {
+        "label": "stack-bf16-ne1.0-only",
+        "job": "job_e8b5cfb5439b2cd0c89873a32377fb84",
+        "wallSeconds": 27.201,
+        "peakMemoryBytes": 39485177856
+      },
+      {
+        "label": "ne-edit-bf16-none",
+        "job": "job_2935ad541210941ebe5f50d314b1c8fa",
+        "wallSeconds": 48.27,
+        "peakMemoryBytes": 39116079104
+      },
+      {
+        "label": "ne-edit-q8-none",
+        "job": "job_edcb39c3c66812353175c6c007068fb2",
+        "wallSeconds": 144.627,
+        "peakMemoryBytes": 38612762624
+      },
+      {
+        "label": "ne-edit-q4-none",
+        "job": "job_1e0369e81b970f7ac6116ae8afb7d3c8",
+        "wallSeconds": 51.281,
+        "peakMemoryBytes": 27271364608
+      },
+      {
+        "label": "edit-bf16-none",
+        "job": "job_87db704e8d90593804b61044ba806585",
+        "wallSeconds": 66.363,
+        "peakMemoryBytes": 40827355136
+      },
+      {
+        "label": "edit-bf16-lokr",
+        "job": "job_26d5eabaea8e357fd0a349e1668a88a2",
+        "wallSeconds": 72.438,
+        "peakMemoryBytes": 41183870976
+      },
+      {
+        "label": "ne-edit-bf16-ne",
+        "job": "job_fa4626f7d7c11b4ba6af56959641ad94",
+        "wallSeconds": 45.282,
+        "peakMemoryBytes": 40827355136
+      },
+      {
+        "label": "edit-q8-none",
+        "job": "job_286a505d42ec786de2ba8e79bf3aa3a4",
+        "wallSeconds": 156.702,
+        "peakMemoryBytes": 41183870976
+      },
+      {
+        "label": "edit-q8-lokr",
+        "job": "job_2370fc56cb01d18162bd679dcae48277",
+        "wallSeconds": 159.735,
+        "peakMemoryBytes": 38780534784
+      },
+      {
+        "label": "ne-edit-q8-ne",
+        "job": "job_017b3e67b05f57eefd0f67ace3d2aed4",
+        "wallSeconds": 132.607,
+        "peakMemoryBytes": 29808918528
+      },
+      {
+        "label": "edit-q4-none",
+        "job": "job_7e95c0b98e938dba441468546d4df2d0",
+        "wallSeconds": 75.393,
+        "peakMemoryBytes": 29385293824
+      },
+      {
+        "label": "edit-q4-lokr",
+        "job": "job_5f1068b1ee8fbddcda1a1a829031a2dc",
+        "wallSeconds": 81.402,
+        "peakMemoryBytes": 29808918528
+      },
+      {
+        "label": "ne-edit-q4-ne",
+        "job": "job_de21e261c7a9156802e53a8351e3552f",
+        "wallSeconds": 51.297,
+        "peakMemoryBytes": 21634220032
+      },
+      {
+        "label": "edit-stack-lokr1.0-ne1.0",
+        "job": "job_112a70d9ecd9c8bddd879c673d5bfc20",
+        "wallSeconds": 78.39,
+        "peakMemoryBytes": 41350594560
+      },
+      {
+        "label": "edit-stack-lokr1.0-ne0.3",
+        "job": "job_0e374fd79115d8c8348906a6e4223265",
+        "wallSeconds": 81.462,
+        "peakMemoryBytes": 40928018432
+      }
+    ],
+    "refusedBeforeFix": [
+      {
+        "label": "ne-edit-bf16-ne",
+        "job": "job_4316c08ac26cf3877770279c74381616",
+        "error": "qwen_image_2_1 cannot apply the selected LoRA/LoKr stack through the resolved QwenImage21Edit image route; choose a model/request shape whose active backend supports adapters"
+      },
+      {
+        "label": "ne-edit-q8-ne",
+        "job": "job_d71668c076b8b571b5f54872704b30a6",
+        "error": "qwen_image_2_1 cannot apply the selected LoRA/LoKr stack through the resolved QwenImage21Edit image route; choose a model/request shape whose active backend supports adapters"
+      },
+      {
+        "label": "ne-edit-q4-ne",
+        "job": "job_b4fee90cebd4d3a056b68372fa5c7306",
+        "error": "qwen_image_2_1 cannot apply the selected LoRA/LoKr stack through the resolved QwenImage21Edit image route; choose a model/request shape whose active backend supports adapters"
+      }
+    ],
+    "pixelDiffs": [
+      {
+        "a": "t2i-bf16-none.png",
+        "b": "t2i-bf16-lora.png",
+        "meanAbsDiff": 49.92,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9959,
+        "psnrDb": 11.1,
+        "identical": false
+      },
+      {
+        "a": "t2i-q8-none.png",
+        "b": "t2i-q8-lora.png",
+        "meanAbsDiff": 58.063,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9923,
+        "psnrDb": 9.67,
+        "identical": false
+      },
+      {
+        "a": "t2i-q4-none.png",
+        "b": "t2i-q4-lora.png",
+        "meanAbsDiff": 60.429,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9743,
+        "psnrDb": 9.08,
+        "identical": false
+      },
+      {
+        "a": "t2i-bf16-lora.png",
+        "b": "t2i-q8-lora.png",
+        "meanAbsDiff": 27.756,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.6303,
+        "psnrDb": 12.64,
+        "identical": false
+      },
+      {
+        "a": "t2i-bf16-lora.png",
+        "b": "t2i-q4-lora.png",
+        "meanAbsDiff": 20.583,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.3979,
+        "psnrDb": 14.79,
+        "identical": false
+      },
+      {
+        "a": "t2i-bf16-none.png",
+        "b": "t2i-q8-none.png",
+        "meanAbsDiff": 6.329,
+        "maxAbsDiff": 240,
+        "fracPixelsDiffGt16": 0.1676,
+        "psnrDb": 25.19,
+        "identical": false
+      },
+      {
+        "a": "stack-bf16-lora1.0-ne1.0.png",
+        "b": "stack-bf16-lora1.0-ne0.3.png",
+        "meanAbsDiff": 15.642,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.1902,
+        "psnrDb": 15.43,
+        "identical": false
+      },
+      {
+        "a": "stack-bf16-lora1.0-ne1.0.png",
+        "b": "stack-bf16-lora0.5-ne1.0.png",
+        "meanAbsDiff": 48.047,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.8833,
+        "psnrDb": 9.75,
+        "identical": false
+      },
+      {
+        "a": "t2i-bf16-lora.png",
+        "b": "stack-bf16-lora1.0-ne1.0.png",
+        "meanAbsDiff": 34.466,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.6941,
+        "psnrDb": 11.52,
+        "identical": false
+      },
+      {
+        "a": "t2i-bf16-none.png",
+        "b": "stack-bf16-ne1.0-only.png",
+        "meanAbsDiff": 30.977,
+        "maxAbsDiff": 246,
+        "fracPixelsDiffGt16": 0.6489,
+        "psnrDb": 14.15,
+        "identical": false
+      },
+      {
+        "a": "edit-bf16-none.png",
+        "b": "edit-bf16-lokr.png",
+        "meanAbsDiff": 40.586,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9999,
+        "psnrDb": 12.05,
+        "identical": false
+      },
+      {
+        "a": "edit-q8-none.png",
+        "b": "edit-q8-lokr.png",
+        "meanAbsDiff": 38.107,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9844,
+        "psnrDb": 12.1,
+        "identical": false
+      },
+      {
+        "a": "edit-q4-none.png",
+        "b": "edit-q4-lokr.png",
+        "meanAbsDiff": 36.797,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.8935,
+        "psnrDb": 13.5,
+        "identical": false
+      },
+      {
+        "a": "edit-bf16-lokr.png",
+        "b": "edit-q8-lokr.png",
+        "meanAbsDiff": 3.203,
+        "maxAbsDiff": 202,
+        "fracPixelsDiffGt16": 0.1381,
+        "psnrDb": 28.89,
+        "identical": false
+      },
+      {
+        "a": "edit-bf16-lokr.png",
+        "b": "edit-q4-lokr.png",
+        "meanAbsDiff": 148.832,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9968,
+        "psnrDb": 3.73,
+        "identical": false
+      },
+      {
+        "a": "ne-edit-bf16-none.png",
+        "b": "ne-edit-bf16-ne.png",
+        "meanAbsDiff": 12.457,
+        "maxAbsDiff": 232,
+        "fracPixelsDiffGt16": 0.1994,
+        "psnrDb": 20.61,
+        "identical": false
+      },
+      {
+        "a": "ne-edit-q8-none.png",
+        "b": "ne-edit-q8-ne.png",
+        "meanAbsDiff": 12.393,
+        "maxAbsDiff": 231,
+        "fracPixelsDiffGt16": 0.2143,
+        "psnrDb": 20.56,
+        "identical": false
+      },
+      {
+        "a": "ne-edit-q4-none.png",
+        "b": "ne-edit-q4-ne.png",
+        "meanAbsDiff": 32.014,
+        "maxAbsDiff": 200,
+        "fracPixelsDiffGt16": 0.998,
+        "psnrDb": 17.07,
+        "identical": false
+      },
+      {
+        "a": "edit-stack-lokr1.0-ne1.0.png",
+        "b": "edit-stack-lokr1.0-ne0.3.png",
+        "meanAbsDiff": 40.197,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9997,
+        "psnrDb": 13.06,
+        "identical": false
+      },
+      {
+        "a": "edit-bf16-lokr.png",
+        "b": "edit-stack-lokr1.0-ne1.0.png",
+        "meanAbsDiff": 41.916,
+        "maxAbsDiff": 255,
+        "fracPixelsDiffGt16": 0.9997,
+        "psnrDb": 13.17,
+        "identical": false
+      }
+    ]
+  },
+  "a4": {
+    "live": {
+      "loras": [
+        {
+          "id": "probe_attn_only",
+          "family": "qwen-image-2-1",
+          "families": null,
+          "familyResolution": null,
+          "keys": [
+            "createdAt",
+            "files",
+            "id",
+            "name",
+            "scope",
+            "source",
+            "triggerWords",
+            "updatedAt",
+            "family",
+            "manifestPath",
+            "installedPath",
+            "installState",
+            "updateAvailable",
+            "removable"
+          ]
+        }
+      ],
+      "submits": [
+        {
+          "case": {
+            "lora": "probe_attn_only",
+            "model": "qwen_image_2_1"
+          },
+          "status": 201,
+          "response": {
+            "id": "job_165b8af582965c1e32c9a76a14cd39b8",
+            "status": "queued"
+          }
+        },
+        {
+          "case": {
+            "lora": "probe_attn_only",
+            "model": "qwen_image"
+          },
+          "status": 400,
+          "response": {
+            "detail": "LoRA probe_attn_only is not compatible with model qwen_image: the LoRA is a qwen-image-2-1 adapter, and qwen_image loads qwen-image adapters"
+          }
+        }
+      ]
+    },
+    "declaredFamily": {
+      "loras": [
+        {
+          "id": "probe_attn_only",
+          "family": "qwen-image-2-1",
+          "families": null,
+          "familyResolution": null,
+          "keys": [
+            "createdAt",
+            "files",
+            "id",
+            "name",
+            "scope",
+            "source",
+            "triggerWords",
+            "updatedAt",
+            "family",
+            "manifestPath",
+            "installedPath",
+            "installState",
+            "updateAvailable",
+            "removable"
+          ]
+        }
+      ],
+      "submits": [
+        {
+          "case": {
+            "lora": "probe_attn_only",
+            "model": "qwen_image_2_1"
+          },
+          "status": 201,
+          "response": {
+            "id": "job_165b8af582965c1e32c9a76a14cd39b8",
+            "status": "queued"
+          }
+        },
+        {
+          "case": {
+            "lora": "probe_attn_only",
+            "model": "qwen_image"
+          },
+          "status": 400,
+          "response": {
+            "detail": "LoRA probe_attn_only is not compatible with model qwen_image: the LoRA is a qwen-image-2-1 adapter, and qwen_image loads qwen-image adapters"
+          }
+        }
+      ]
+    }
+  },
+  "a5": {
+    "trainingFootprint": {
+      "method": "engine trainer (candle-gen-qwen-image-2-1 QwenImage21Trainer) driven directly with the preflight budget disabled, same request shape as the A1 runs, 10 steps; CU_MEMPOOL_ATTR_USED_MEM_HIGH (driver live high-water) and RESERVED_MEM_HIGH",
+      "cells": [
+        {
+          "cell": "edit-lokr-768-ckpt-1ref",
+          "steps": 10,
+          "predictedPeakGiB": 51.1,
+          "liveUsedHighBytes": 69364708316,
+          "liveUsedHighGiB": 64.6,
+          "reservedHighGiB": 69.56,
+          "liveOverPredicted": 1.264
+        },
+        {
+          "cell": "edit-lora-768-ckpt-1ref",
+          "steps": 10,
+          "predictedPeakGiB": 51.4,
+          "liveUsedHighBytes": 69641733180,
+          "liveUsedHighGiB": 64.86,
+          "reservedHighGiB": 69.53,
+          "liveOverPredicted": 1.262
+        },
+        {
+          "cell": "t2i-lokr-768-ckpt",
+          "steps": 10,
+          "predictedPeakGiB": 21.8,
+          "liveUsedHighBytes": 29850168644,
+          "liveUsedHighGiB": 27.8,
+          "reservedHighGiB": 29.13,
+          "liveOverPredicted": 1.275
+        },
+        {
+          "cell": "t2i-lora-1024-ckpt",
+          "steps": 10,
+          "predictedPeakGiB": 35.1,
+          "liveUsedHighBytes": 54794203428,
+          "liveUsedHighGiB": 51.03,
+          "reservedHighGiB": 56.5,
+          "liveOverPredicted": 1.454
+        },
+        {
+          "cell": "t2i-lora-768-ckpt",
+          "steps": 10,
+          "predictedPeakGiB": 22.4,
+          "liveUsedHighBytes": 30361842468,
+          "liveUsedHighGiB": 28.28,
+          "reservedHighGiB": 30.16,
+          "liveOverPredicted": 1.263
+        }
+      ]
+    },
+    "inferenceOverlay": {
+      "method": "one process per cell, fresh pool; 768x768, 8 steps; predicted = memory_strategy::adapter_overlay(spec, root, tier).total()",
+      "cells": [
+        {
+          "label": "t2i-bf16-none",
+          "tier": "bf16",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 32335707688,
+          "usedHighBytes": 36498303464,
+          "reservedHighBytes": 38285606912,
+          "loadSeconds": 13.8,
+          "renderSeconds": 3,
+          "liveUsedHighGiB": 33.99,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "t2i-bf16-lora",
+          "tier": "bf16",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 167851080,
+          "predictedResidualBytes": 167851080,
+          "usedAfterLoadBytes": 32503479848,
+          "usedHighBytes": 36749961704,
+          "reservedHighBytes": 39359348736,
+          "loadSeconds": 14,
+          "renderSeconds": 3.2,
+          "liveUsedHighGiB": 34.23,
+          "measuredPeakDeltaBytes": 251658240,
+          "measuredResidentDeltaBytes": 167772160
+        },
+        {
+          "label": "t2i-bf16-lora+ne",
+          "tier": "bf16",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 251795032,
+          "predictedResidualBytes": 251795032,
+          "usedAfterLoadBytes": 32671252008,
+          "usedHighBytes": 37001619944,
+          "reservedHighBytes": 38822477824,
+          "loadSeconds": 14,
+          "renderSeconds": 3.5,
+          "liveUsedHighGiB": 34.46,
+          "measuredPeakDeltaBytes": 503316480,
+          "measuredResidentDeltaBytes": 335544320
+        },
+        {
+          "label": "t2i-q8-none",
+          "tier": "q8",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 19153896104,
+          "usedHighBytes": 23316491880,
+          "reservedHighBytes": 27648851968,
+          "loadSeconds": 131.2,
+          "renderSeconds": 7.7,
+          "liveUsedHighGiB": 21.72,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "t2i-q8-lora",
+          "tier": "q8",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 167851080,
+          "predictedResidualBytes": 167851080,
+          "usedAfterLoadBytes": 19321668264,
+          "usedHighBytes": 23568150120,
+          "reservedHighBytes": 26340229120,
+          "loadSeconds": 110.5,
+          "renderSeconds": 3.8,
+          "liveUsedHighGiB": 21.95,
+          "measuredPeakDeltaBytes": 251658240,
+          "measuredResidentDeltaBytes": 167772160
+        },
+        {
+          "label": "t2i-q8-lora+ne",
+          "tier": "q8",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 251795032,
+          "predictedResidualBytes": 251795032,
+          "usedAfterLoadBytes": 19489440424,
+          "usedHighBytes": 23819808360,
+          "reservedHighBytes": 28655484928,
+          "loadSeconds": 108.8,
+          "renderSeconds": 3.9,
+          "liveUsedHighGiB": 22.18,
+          "measuredPeakDeltaBytes": 503316480,
+          "measuredResidentDeltaBytes": 335544320
+        },
+        {
+          "label": "t2i-q4-none",
+          "tier": "q4",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 13002152744,
+          "usedHighBytes": 17164748520,
+          "reservedHighBytes": 20166213632,
+          "loadSeconds": 31.4,
+          "renderSeconds": 3.4,
+          "liveUsedHighGiB": 15.99,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "t2i-q4-lora",
+          "tier": "q4",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 167851080,
+          "predictedResidualBytes": 167851080,
+          "usedAfterLoadBytes": 13169924904,
+          "usedHighBytes": 17416406760,
+          "reservedHighBytes": 18522046464,
+          "loadSeconds": 19.8,
+          "renderSeconds": 3.6,
+          "liveUsedHighGiB": 16.22,
+          "measuredPeakDeltaBytes": 251658240,
+          "measuredResidentDeltaBytes": 167772160
+        },
+        {
+          "label": "t2i-q4-lora+ne",
+          "tier": "q4",
+          "mode": "t2i",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 251795032,
+          "predictedResidualBytes": 251795032,
+          "usedAfterLoadBytes": 13337697064,
+          "usedHighBytes": 17668065000,
+          "reservedHighBytes": 21005074432,
+          "loadSeconds": 21.2,
+          "renderSeconds": 3.9,
+          "liveUsedHighGiB": 16.45,
+          "measuredPeakDeltaBytes": 503316480,
+          "measuredResidentDeltaBytes": 335544320
+        },
+        {
+          "label": "edit-bf16-none",
+          "tier": "bf16",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 32335707688,
+          "usedHighBytes": 37850383998,
+          "reservedHighBytes": 40164655104,
+          "loadSeconds": 15.4,
+          "renderSeconds": 21.4,
+          "liveUsedHighGiB": 35.25,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "edit-bf16-lokr",
+          "tier": "bf16",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 14548992,
+          "predictedResidualBytes": 14548992,
+          "usedAfterLoadBytes": 32345407016,
+          "usedHighBytes": 37864932990,
+          "reservedHighBytes": 40198209536,
+          "loadSeconds": 16.2,
+          "renderSeconds": 23.7,
+          "liveUsedHighGiB": 35.26,
+          "measuredPeakDeltaBytes": 14548992,
+          "measuredResidentDeltaBytes": 9699328
+        },
+        {
+          "label": "edit-bf16-lokr+ne",
+          "tier": "bf16",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 98492944,
+          "predictedResidualBytes": 98492944,
+          "usedAfterLoadBytes": 32513179176,
+          "usedHighBytes": 38116591230,
+          "reservedHighBytes": 40365981696,
+          "loadSeconds": 15.3,
+          "renderSeconds": 25.3,
+          "liveUsedHighGiB": 35.5,
+          "measuredPeakDeltaBytes": 266207232,
+          "measuredResidentDeltaBytes": 177471488
+        },
+        {
+          "label": "edit-q8-none",
+          "tier": "q8",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 19153896104,
+          "usedHighBytes": 24668572414,
+          "reservedHighBytes": 28789702656,
+          "loadSeconds": 138.2,
+          "renderSeconds": 21.7,
+          "liveUsedHighGiB": 22.97,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "edit-q8-lokr",
+          "tier": "q8",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 14548992,
+          "predictedResidualBytes": 14548992,
+          "usedAfterLoadBytes": 19163595432,
+          "usedHighBytes": 24683121406,
+          "reservedHighBytes": 28789702656,
+          "loadSeconds": 99.8,
+          "renderSeconds": 23.9,
+          "liveUsedHighGiB": 22.99,
+          "measuredPeakDeltaBytes": 14548992,
+          "measuredResidentDeltaBytes": 9699328
+        },
+        {
+          "label": "edit-q8-lokr+ne",
+          "tier": "q8",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 98492944,
+          "predictedResidualBytes": 98492944,
+          "usedAfterLoadBytes": 19331367592,
+          "usedHighBytes": 24934779646,
+          "reservedHighBytes": 28756148224,
+          "loadSeconds": 100,
+          "renderSeconds": 25.3,
+          "liveUsedHighGiB": 23.22,
+          "measuredPeakDeltaBytes": 266207232,
+          "measuredResidentDeltaBytes": 177471488
+        },
+        {
+          "label": "edit-q4-none",
+          "tier": "q4",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 0,
+          "predictedOverlayBytes": 0,
+          "predictedResidualBytes": 0,
+          "usedAfterLoadBytes": 13002152744,
+          "usedHighBytes": 18516829054,
+          "reservedHighBytes": 20837302272,
+          "loadSeconds": 19,
+          "renderSeconds": 21.9,
+          "liveUsedHighGiB": 17.25,
+          "measuredPeakDeltaBytes": 0,
+          "measuredResidentDeltaBytes": 0
+        },
+        {
+          "label": "edit-q4-lokr",
+          "tier": "q4",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 1,
+          "predictedOverlayBytes": 14548992,
+          "predictedResidualBytes": 14548992,
+          "usedAfterLoadBytes": 13011852072,
+          "usedHighBytes": 18531378046,
+          "reservedHighBytes": 20803747840,
+          "loadSeconds": 19.2,
+          "renderSeconds": 24.2,
+          "liveUsedHighGiB": 17.26,
+          "measuredPeakDeltaBytes": 14548992,
+          "measuredResidentDeltaBytes": 9699328
+        },
+        {
+          "label": "edit-q4-lokr+ne",
+          "tier": "q4",
+          "mode": "edit",
+          "size": 768,
+          "steps": 8,
+          "adapters": 2,
+          "predictedOverlayBytes": 98492944,
+          "predictedResidualBytes": 98492944,
+          "usedAfterLoadBytes": 13179624232,
+          "usedHighBytes": 18783036286,
+          "reservedHighBytes": 21005074432,
+          "loadSeconds": 19.4,
+          "renderSeconds": 25.1,
+          "liveUsedHighGiB": 17.49,
+          "measuredPeakDeltaBytes": 266207232,
+          "measuredResidentDeltaBytes": 177471488
+        }
+      ],
+      "invalidated": [
+        {
+          "label": "edit-q4-lokr+ne",
+          "reason": "a self-hosted CUDA CI job (inference run 37122359802) started 17 s into the cell; re-run after the runner went idle (identical usedHighBytes)"
+        }
+      ]
+    },
+    "balloonProbe": {
+      "job": "job_a9a2419bf80140e8b0148e850b05cef8",
+      "balloonGiB": 51,
+      "freeBeforeMiB": 44316,
+      "predictedPeakGiB": 35.1,
+      "liveNeedGiB": 51.02,
+      "admitted": true,
+      "stepsBeforeCancel": 3,
+      "cardUsedMaxMiB": 97312
+    }
+  }
+}
