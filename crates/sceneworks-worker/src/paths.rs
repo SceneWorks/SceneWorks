@@ -657,6 +657,14 @@ pub fn remove_training_resume_bundles(output_dir: &Path, stem: &str) -> std::io:
 /// removes the resume bundles an earlier run left, so a later resume continues from THIS run's
 /// checkpoints and never from a stale higher-step one; a removal failure fails the run rather than
 /// leaving that hazard in place.
+// Only the training execution path (macOS, or off-Mac with backend-candle) calls this.
+#[cfg_attr(
+    not(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )),
+    allow(dead_code)
+)]
 pub(crate) fn prepare_training_resume_dir(
     resume: bool,
     output_dir: &Path,
