@@ -2179,6 +2179,27 @@ pub(super) fn apply_video_admission_outcome(
     Ok(())
 }
 
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn h3_terminal_operator_opt_in(engine_id: &str, setting: Option<&str>) -> bool {
+    matches!(engine_id, "minimax_h3" | "minimax_h3_ref") && setting == Some("1")
+}
+
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[test]
+fn h3_terminal_telemetry_requires_exact_operator_setting_and_engine() {
+    assert!(h3_terminal_operator_opt_in("minimax_h3", Some("1")));
+    assert!(h3_terminal_operator_opt_in("minimax_h3_ref", Some("1")));
+    for engine in ["wan2_2_ti2v_5b", "", "minimax_h3_forged"] {
+        assert!(!h3_terminal_operator_opt_in(engine, Some("1")));
+    }
+    for setting in [None, Some("0"), Some("true"), Some("1 ")] {
+        assert!(!h3_terminal_operator_opt_in("minimax_h3", setting));
+    }
+}
+
 /// Run one generation to a [`DecodedVideo`] (RGB8 frames + fps + optional audio) against an already
 /// loaded video generator, streaming denoise progress via `on_progress` and honoring `cancel`.
 /// The engine fills the audio track (LTX) or leaves it `None` (Wan).
@@ -2195,6 +2216,14 @@ pub(super) fn run_loaded_video_generation(
     let memory_context = input.memory_context;
     let mut req = GenerationRequest {
         veda: input.veda,
+        // Only an operator-controlled terminal worker process can turn this on. Never read
+        // s9Harness or any other submitted job field as measurement authority.
+        h3_terminal_telemetry: h3_terminal_operator_opt_in(
+            input.engine_id,
+            std::env::var("SCENEWORKS_H3_TERMINAL_TELEMETRY")
+                .ok()
+                .as_deref(),
+        ),
         prompt: input.prompt,
         negative_prompt: input.negative_prompt,
         width: input.width,
@@ -2261,7 +2290,7 @@ pub(super) fn run_loaded_video_generation(
             adapter_apply_reports: generator.adapter_apply_reports(),
             veda_execution: generator
                 .veda_execution_report()
-                .filter(|report| report.requested)
+                .filter(|report| report.requested || report.terminal_telemetry.is_some())
                 .map(|report| report.outcome_json()),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
