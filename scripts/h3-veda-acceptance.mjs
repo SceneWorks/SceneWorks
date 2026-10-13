@@ -201,6 +201,16 @@ export function observed(job, metrics, row, arm, runner) {
   assert(report && metrics?.vedaExecution && digest(report) === digest(metrics.vedaExecution), "missing/disagreeing native observed Veda outcome");
   assert(metrics.model === row.model && metrics.quantLabel === row.tier && metrics.width === asset.file.width && metrics.height === asset.file.height && metrics.steps === row.sampling.steps && metrics.backend === runner.reportedBackend, "actual metrics tier/schedule/backend identity differs");
   assert(Number.isFinite(metrics.totalMs) && metrics.totalMs > 0 && Number.isFinite(metrics.peakMemoryBytes) && metrics.peakMemoryBytes > 0, "actual timing/peak metrics absent");
+  const whole = metrics.terminalMemory;
+  assert(whole?.schemaVersion === 1 && whole.scope === "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save" && whole.hostMethod === "current_process_rss_independent_40ms_poll_plus_end_sample" && whole.hostSampleIntervalMs === 40 && whole.hostSampleCount > 0 && whole.hostProcessRssAtStartBytes > 0 && whole.hostProcessRssSampleMaxBytes >= whole.hostProcessRssAtStartBytes, "full-job process memory observation missing");
+  if (row.backend === "mlx") assert(whole.device?.method === "mlx_allocator_job_scoped_peak_no_step_resets" && whole.device.allocatorPeakBytes > 0 && whole.device.allocatorPeakBytes === metrics.peakMemoryBytes, "MLX full-job allocator peak missing or disagrees with product peak");
+  else assert(whole.device?.method === "cuda_current_pool_job_scoped_highwater_reset_before_handler" && whole.device.sameCurrentPool === true && whole.device.usedHighBytes > 0 && whole.device.reservedHighBytes > 0, "CUDA current-pool full-job peak missing");
+  const estimate = report.terminalEstimate;
+  assert(estimate?.schemaVersion === 1 && estimate.method === "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace" && estimate.interpretation === "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling" && [estimate.baseBytes, estimate.headroomBytes, estimate.sparseWorkspaceBoundBytes, estimate.estimatedTotalBytes].every(Number.isSafeInteger) && estimate.baseBytes > 0 && estimate.headroomBytes >= 0 && estimate.sparseWorkspaceBoundBytes >= 0 && estimate.estimatedTotalBytes === estimate.baseBytes + estimate.headroomBytes + estimate.sparseWorkspaceBoundBytes && estimate.hostFullJobEstimateBytes === null, "native absolute admission estimate missing or inconsistent");
+  assert((arm === "dense") === (estimate.sparseWorkspaceBoundBytes === 0), "dense/sparse admission workspace identity differs");
+  if (row.backend === "cuda") assert(arm === "dense" ? estimate.hostWorkspaceBoundBytes === null : Number.isSafeInteger(estimate.hostWorkspaceBoundBytes) && estimate.hostWorkspaceBoundBytes > 0, "CUDA native host workspace bound missing");
+  const measuredDevicePeak = row.backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
+  assert(Number.isSafeInteger(measuredDevicePeak) && measuredDevicePeak > 0, "full-job device peak byte count is not exact");
   assert(report.denseTokenPairs > 0 && Number.isFinite(report.totalAttentionFraction) && report.totalAttentionFraction > 0 && report.totalAttentionFraction <= 1, "attention denominator unobserved");
   const telemetry = report.terminalTelemetry;
   assert(telemetry?.schemaVersion === 1 && telemetry.backend === row.backend && telemetry.hostMethod === "current_process_rss_independent_40ms_poll_plus_completed_step_sample" && telemetry.hostSampleIntervalMs === 40 && telemetry.hostSampleMaxBytes > 0 && telemetry.workspaceComparison === "unavailable: full denoise allocations are not attributable to Veda workspace", "owned terminal producer telemetry missing or wrong scope");
@@ -318,6 +328,18 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         const metricsResult = await api.json(`/api/v1/jobs/${encodeURIComponent(job.id)}/metrics`); assert(metricsResult.status === 200, "metrics readback failed"); attempt.metrics = metricsResult.value;
         try {
           const asset = observed(job, attempt.metrics, row, arm, m.runners[backend]);
+          const admission = attempt.metrics.vedaExecution.terminalEstimate;
+          const whole = attempt.metrics.terminalMemory;
+          const measuredDevicePeak = backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
+          attempt.terminalMemoryComparison = {
+            method: "observed_full_job_allocator_or_current_pool_peak_against_native_admission_floor_plus_workspace",
+            measuredDevicePeakBytes: measuredDevicePeak,
+            admissionCompositionBytes: admission.estimatedTotalBytes,
+            differenceBytes: measuredDevicePeak - admission.estimatedTotalBytes,
+            hostProcessRssSampleMaxBytes: whole.hostProcessRssSampleMaxBytes,
+            hostWorkspaceBoundBytes: admission.hostWorkspaceBoundBytes,
+            interpretation: admission.interpretation,
+          };
           const reread = await api.json(`/api/v1/projects/${encodeURIComponent(m.projectId)}/assets/${encodeURIComponent(asset.id)}`); assert(reread.status === 200 && digest(reread.value.recipe?.rawAdapterSettings?.vedaExecution) === digest(asset.recipe.rawAdapterSettings.vedaExecution), "persisted asset observed outcome differs");
           const dir = path.join(runDir, key); await mkdir(dir, { recursive: true });
           attempt.media = await api.download(reread.value, path.join(dir, `${arm}.mp4`), m.limits.maxMediaBytes); attempt.asset = reread.value; attempt.status = "collected"; if (row.kind === "product_proof") cell.status = "product_proof_observed";
@@ -327,8 +349,7 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       if (cell.arms.dense?.status === "collected" && cell.arms.sparse?.status === "collected") {
         cell.comparison = await compare(cell.arms.dense.media, cell.arms.sparse.media, row, path.join(runDir, digest(row.id)), m.limits.jobTimeoutMs);
         cell.review = { reviewer: "Michael", disposition: "pending" }; cell.status = "media_collected_evidence_incomplete";
-        // Product metrics expose only a combined peak and phase timing. Preserve missing instrumentation.
-        cell.nativeMeasurementGaps = ["per-step timing", "separate host/device peaks", "complete sparse bound versus observed peak"];
+        cell.nativeMeasurementGaps = ["native dense admission term is a floor, so its sum with bounded Veda workspace is not a proven full-job peak ceiling", "full-job host predicted baseline is unavailable; sampled host RSS and CUDA host workspace bound have different scopes", "global allocator/current-pool highwaters cannot attribute bytes to Veda alone"];
       }
       await atomic(campaignFile, state);
     }

@@ -1356,6 +1356,9 @@ pub(super) struct VideoGenInput {
     pub(super) engine_id: &'static str,
     /// H3 optional predictor is resolved offline only for an explicitly enabled request.
     pub(super) veda: Option<gen_core::VedaRequest>,
+    /// Terminal-only admission estimate carried into the provider observation; never supplied by
+    /// a request or treated as measured allocation.
+    pub(super) terminal_memory_estimate: Option<Value>,
     pub(super) veda_predictor: Option<WeightsSource>,
     pub(super) model_dir: PathBuf,
     pub(super) quant: Option<Quant>,
@@ -1489,6 +1492,7 @@ impl Default for VideoGenInput {
             memory_context: None,
             engine_id: "",
             veda: None,
+            terminal_memory_estimate: None,
             veda_predictor: None,
             model_dir: PathBuf::new(),
             quant: None,
@@ -2214,6 +2218,7 @@ pub(super) fn run_loaded_video_generation(
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<DecodedVideo> {
     let memory_context = input.memory_context;
+    let terminal_memory_estimate = input.terminal_memory_estimate.clone();
     let mut req = GenerationRequest {
         veda: input.veda,
         // Only an operator-controlled terminal worker process can turn this on. Never read
@@ -2291,7 +2296,13 @@ pub(super) fn run_loaded_video_generation(
             veda_execution: generator
                 .veda_execution_report()
                 .filter(|report| report.requested || report.terminal_telemetry.is_some())
-                .map(|report| report.outcome_json()),
+                .map(|report| {
+                    let mut outcome = report.outcome_json();
+                    if let Some(estimate) = &terminal_memory_estimate {
+                        outcome["terminalEstimate"] = estimate.clone();
+                    }
+                    outcome
+                }),
         }),
         // Either channel count is the same contract violation. `ImagesRgba` (sc-24111) is
         // unreachable on this path — no video request sets `output_channels` — but the match
@@ -3017,6 +3028,45 @@ pub(super) async fn generate_video_using(
                 };
                 admission_inputs.runtime = admission_runtime;
                 admission_inputs.headroom_bytes = admission_headroom_bytes;
+                if h3_terminal_operator_opt_in(
+                    engine_id,
+                    std::env::var("SCENEWORKS_H3_TERMINAL_TELEMETRY")
+                        .ok()
+                        .as_deref(),
+                ) {
+                    if let Some(contract) = generator.memory_strategy_contract() {
+                        let base = crate::mlx_fit_gate::estimate_floor_weights_bytes(
+                            contract,
+                            &[gen_core::MemoryStrategy::StagedResidency],
+                        );
+                        let workspace = sparse_bound.as_ref().map_or(0, |bound| bound.total_bytes);
+                        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                        let host_workspace_bound = sparse_bound
+                            .as_ref()
+                            .map(crate::video_admission::veda_host_workspace_bytes);
+                        #[cfg(any(target_os = "macos", not(feature = "backend-candle")))]
+                        let host_workspace_bound: Option<u64> = None;
+                        let total = base
+                            .checked_add(spec_headroom_bytes)
+                            .and_then(|bytes| bytes.checked_add(workspace))
+                            .ok_or_else(|| {
+                                WorkerError::InvalidPayload("H3 terminal estimate overflow".into())
+                            })?;
+                        input.terminal_memory_estimate = Some(serde_json::json!({
+                            "schemaVersion": 1,
+                            "method": "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace",
+                            "interpretation": "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling",
+                            "scope": "absolute_device_or_unified_admission_composition; not a measured or Veda-only allocation",
+                            "baseBytes": base,
+                            "headroomBytes": spec_headroom_bytes,
+                            "sparseWorkspaceBoundBytes": workspace,
+                            "hostWorkspaceBoundBytes": host_workspace_bound,
+                            "estimatedTotalBytes": total,
+                            "hostFullJobEstimateBytes": null,
+                            "hostLimit": "host process baseline not declared by native admission contract; do not add RSS to device/unified estimate",
+                        }));
+                    }
+                }
                 if let Some(bound) = &sparse_bound {
                     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
                     crate::video_admission::admit_veda_host_workspace(

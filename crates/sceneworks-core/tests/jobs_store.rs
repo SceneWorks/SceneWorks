@@ -687,6 +687,7 @@ fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
     let sparse = json!({"effective":"sparse","kernel":"actual-native-kernel","plan":"trained",
         "planMatch":"nearest","totalAttentionFraction":0.4375});
     let dense = json!({"effective":"dense","totalAttentionFraction":1.0,"fallbackReason":"missing predictor"});
+    let terminal = json!({"schemaVersion":1,"hostProcessRssSampleMaxBytes":123,"device":{"allocatorPeakBytes":456}});
     for (id, outcome) in [("sparse-run", sparse.clone()), ("dense-run", dense.clone())] {
         store
             .upsert_generation_metrics(
@@ -702,6 +703,7 @@ fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
                 id,
                 &GenerationMetrics {
                     total_ms: Some(1234),
+                    terminal_memory: Some(terminal.clone()),
                     ..Default::default()
                 },
             )
@@ -713,6 +715,14 @@ fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
                 .unwrap()
                 .veda_execution,
             Some(outcome)
+        );
+        assert_eq!(
+            store
+                .get_generation_metrics(id)
+                .unwrap()
+                .unwrap()
+                .terminal_memory,
+            Some(terminal.clone())
         );
     }
     store
@@ -740,11 +750,27 @@ fn veda_metrics_survive_partial_updates_retention_and_later_job_isolation() {
     );
     assert_eq!(
         rows.iter()
+            .find(|r| r.job_id == "sparse-run")
+            .unwrap()
+            .metrics
+            .terminal_memory,
+        Some(terminal.clone())
+    );
+    assert_eq!(
+        rows.iter()
             .find(|r| r.job_id == "dense-run")
             .unwrap()
             .metrics
             .veda_execution,
         Some(dense)
+    );
+    assert_eq!(
+        rows.iter()
+            .find(|r| r.job_id == "dense-run")
+            .unwrap()
+            .metrics
+            .terminal_memory,
+        Some(terminal)
     );
     assert!(rows
         .iter()
