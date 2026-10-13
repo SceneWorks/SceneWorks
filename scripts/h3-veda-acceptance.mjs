@@ -144,7 +144,7 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   for (const s of m.styles) { snapshots.push(await boundFile(s)); snapshots.push(await boundFile(s.compatibilityEvidence)); }
   for (const a of Object.values(m.assets)) { snapshots.push(await boundFile(a)); snapshots.push(await boundFile(a.normalized)); }
   for (const backend of ["mlx", "candle_cuda"]) {
-    const r = m.runners?.[backend]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[backend]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${backend}`); snapshots.push(await boundFile(r.physicalGuardAdapter)); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend && r.kernel && r.physicalGpuId, `runner identity missing: ${backend}`);
+    const r = m.runners?.[backend]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[backend]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${backend}`); snapshots.push(await boundFile(r.physicalGuardAdapter)); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend === (backend === "mlx" ? "mlx" : "cuda") && r.kernel && r.physicalGpuId, `runner identity missing or wrong worker backend: ${backend}`);
     snapshots.push(await boundFile(r.apiBinary)); snapshots.push(await boundFile(r.workerBinary));
     const attestation = JSON.parse(await readFile((await boundFile(r.attestation)).path, "utf8"));
     assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${backend}`);
@@ -208,7 +208,8 @@ export function observed(job, metrics, row, arm, runner) {
   const estimate = report.terminalEstimate;
   assert(estimate?.schemaVersion === 1 && estimate.method === "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace" && estimate.interpretation === "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling" && [estimate.baseBytes, estimate.headroomBytes, estimate.sparseWorkspaceBoundBytes, estimate.estimatedTotalBytes].every(Number.isSafeInteger) && estimate.baseBytes > 0 && estimate.headroomBytes >= 0 && estimate.sparseWorkspaceBoundBytes >= 0 && estimate.estimatedTotalBytes === estimate.baseBytes + estimate.headroomBytes + estimate.sparseWorkspaceBoundBytes && estimate.hostFullJobEstimateBytes === null, "native absolute admission estimate missing or inconsistent");
   assert((arm === "dense") === (estimate.sparseWorkspaceBoundBytes === 0), "dense/sparse admission workspace identity differs");
-  if (row.backend === "cuda") assert(arm === "dense" ? estimate.hostWorkspaceBoundBytes === null : Number.isSafeInteger(estimate.hostWorkspaceBoundBytes) && estimate.hostWorkspaceBoundBytes > 0, "CUDA native host workspace bound missing");
+  assert(Number.isSafeInteger(report.workspaceBytes) && report.workspaceBytes >= 0 && report.workspaceBytes <= estimate.sparseWorkspaceBoundBytes, "native runtime workspace exceeds the pre-admitted problem bound");
+  if (row.backend === "candle_cuda") assert(arm === "dense" ? estimate.hostWorkspaceBoundBytes === null : Number.isSafeInteger(estimate.hostWorkspaceBoundBytes) && estimate.hostWorkspaceBoundBytes > 0, "CUDA native host workspace bound missing");
   const measuredDevicePeak = row.backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
   assert(Number.isSafeInteger(measuredDevicePeak) && measuredDevicePeak > 0, "full-job device peak byte count is not exact");
   assert(report.denseTokenPairs > 0 && Number.isFinite(report.totalAttentionFraction) && report.totalAttentionFraction > 0 && report.totalAttentionFraction <= 1, "attention denominator unobserved");
@@ -223,6 +224,43 @@ export function observed(job, metrics, row, arm, runner) {
   else if (row.expectation === "fallback_dense") assert(report.requested === true && report.effective === "dense" && report.sparseCalls === 0 && report.denseCalls > 0 && typeof row.fallbackReason === "string" && row.fallbackReason.length > 0 && report.fallbackReason === row.fallbackReason, "expected explicit dense fallback not observed");
   else assert(report.requested === true && ["sparse", "mixed"].includes(report.effective) && report.sparseCalls > 0 && report.predictorScoreCalls > 0 && report.kernel === runner.kernel && report.plan && ["exact", "nearest"].includes(report.planMatch) && !report.fallbackReason, "enabled request did not execute learned sparse (fallback is unresolved)");
   return asset;
+}
+
+// The dense arm is an observed baseline for this exact pair, never an ex-ante
+// native peak prediction. Compare like-scoped whole-job counters; the native
+// problem bound is the only additive term. A passing comparison is empirical
+// evidence, not Veda-only allocation attribution or a continuously measured RSS peak.
+export function pairedMemoryEnvelope(dense, sparse, backend) {
+  assert(dense?.status === "collected" && sparse?.status === "collected", "paired memory needs both completed arms");
+  const d = dense.metrics, s = sparse.metrics, dj = dense.job, sj = sparse.job;
+  assert(dj?.id && sj?.id && dj.id !== sj.id && dj.workerId && dj.workerId === sj.workerId, "paired memory worker/job identity differs");
+  assert(["mlx", "candle_cuda"].includes(backend) && d?.backend === (backend === "mlx" ? "mlx" : "cuda") && s?.backend === d.backend, "paired memory backend differs");
+  const dh = dense.request?.advanced?.s9Harness, sh = sparse.request?.advanced?.s9Harness;
+  assert(dh?.arm === "dense" && sh?.arm === "sparse" && dh.campaignId && dh.campaignId === sh.campaignId && dh.caseId && dh.caseId === sh.caseId && dh.fingerprint && dh.fingerprint === sh.fingerprint, "paired memory campaign identity differs");
+  const withoutArm = (request) => { const copy = structuredClone(request); delete copy.advanced.veda; delete copy.advanced.s9Harness; return copy; };
+  assert(digest(withoutArm(dense.request)) === digest(withoutArm(sparse.request)), "paired memory requests differ beyond Veda");
+  const de = d.vedaExecution?.terminalEstimate, se = s.vedaExecution?.terminalEstimate;
+  assert(de?.baseBytes === se?.baseBytes && de?.headroomBytes === se?.headroomBytes && de?.sparseWorkspaceBoundBytes === 0 && se?.sparseWorkspaceBoundBytes > 0, "paired native admission base/problem identity differs");
+  assert(s.vedaExecution.workspaceBytes <= se.sparseWorkspaceBoundBytes, "sparse runtime workspace exceeds admitted problem bound");
+  const deviceMethod = backend === "mlx" ? "mlx_allocator_job_scoped_peak_no_step_resets" : "cuda_current_pool_job_scoped_highwater_reset_before_handler";
+  assert(d.terminalMemory?.scope === "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save" && s.terminalMemory?.scope === d.terminalMemory.scope && d.terminalMemory?.hostMethod === "current_process_rss_independent_40ms_poll_plus_end_sample" && s.terminalMemory?.hostMethod === d.terminalMemory.hostMethod, "paired whole-job memory scopes differ");
+  assert(d.terminalMemory?.device?.method === deviceMethod && s.terminalMemory?.device?.method === deviceMethod, "paired device peak methods differ");
+  const deviceKey = backend === "mlx" ? "allocatorPeakBytes" : "reservedHighBytes";
+  const densePeak = d.terminalMemory.device[deviceKey], sparsePeak = s.terminalMemory.device[deviceKey];
+  const deviceCeiling = densePeak + se.sparseWorkspaceBoundBytes;
+  assert([densePeak, sparsePeak, deviceCeiling].every(Number.isSafeInteger) && densePeak > 0 && sparsePeak > 0, "paired device peak or bound is not an exact byte count");
+  const denseHost = d.terminalMemory.hostProcessRssSampleMaxBytes, sparseHost = s.terminalMemory.hostProcessRssSampleMaxBytes;
+  const hostBound = backend === "candle_cuda" ? se.hostWorkspaceBoundBytes : se.sparseWorkspaceBoundBytes;
+  const hostCeiling = denseHost + hostBound;
+  assert([denseHost, sparseHost, hostBound, hostCeiling].every(Number.isSafeInteger) && denseHost > 0 && sparseHost > 0 && hostBound > 0, "paired host RSS or workspace bound is not an exact byte count");
+  return {
+    schemaVersion: 1, method: "same_worker_dense_observed_whole_job_peak_plus_native_problem_workspace_bound",
+    campaignId: dh.campaignId, caseId: dh.caseId, sourceFingerprint: dh.fingerprint,
+    denseJobId: dj.id, sparseJobId: sj.id, workerId: dj.workerId, backend,
+    device: { method: deviceMethod, denseObservedPeakBytes: densePeak, sparseObservedPeakBytes: sparsePeak, nativeSparseWorkspaceBoundBytes: se.sparseWorkspaceBoundBytes, denseObservedPlusBoundBytes: deviceCeiling, withinEmpiricalEnvelope: sparsePeak <= deviceCeiling },
+    host: { method: d.terminalMemory.hostMethod, scope: "sampled process RSS whole-job maxima; Apple unified RSS overlaps MLX allocation", denseObservedSampleMaxBytes: denseHost, sparseObservedSampleMaxBytes: sparseHost, nativeSparseHostWorkspaceBoundBytes: hostBound, denseObservedPlusBoundBytes: hostCeiling, withinEmpiricalEnvelope: sparseHost <= hostCeiling },
+    limit: "paired observed dense baseline, not ex-ante admission ceiling; sampled host RSS can miss transients; allocator/current-pool peaks cannot isolate Veda allocations",
+  };
 }
 // This adapter must hold the established physical OS lock; campaign.json/marker is not that lock.
 export async function physicalPhase(guard, m, backend, phase, { now } = {}) {
@@ -349,7 +387,16 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       if (cell.arms.dense?.status === "collected" && cell.arms.sparse?.status === "collected") {
         cell.comparison = await compare(cell.arms.dense.media, cell.arms.sparse.media, row, path.join(runDir, digest(row.id)), m.limits.jobTimeoutMs);
         cell.review = { reviewer: "Michael", disposition: "pending" }; cell.status = "media_collected_evidence_incomplete";
-        cell.nativeMeasurementGaps = ["native dense admission term is a floor, so its sum with bounded Veda workspace is not a proven full-job peak ceiling", "full-job host predicted baseline is unavailable; sampled host RSS and CUDA host workspace bound have different scopes", "global allocator/current-pool highwaters cannot attribute bytes to Veda alone"];
+        try {
+          cell.memoryEnvelope = pairedMemoryEnvelope(cell.arms.dense, cell.arms.sparse, backend);
+          if (!cell.memoryEnvelope.device.withinEmpiricalEnvelope || !cell.memoryEnvelope.host.withinEmpiricalEnvelope) {
+            cell.status = "unresolved";
+            cell.memoryEnvelopeError = "observed sparse full-job peak exceeds the same-worker dense observed peak plus native problem workspace bound";
+          }
+        } catch (error) {
+          cell.status = "unresolved"; cell.memoryEnvelopeError = String(error);
+        }
+        cell.nativeMeasurementGaps = ["the paired dense observed peak is an empirical baseline, not an ex-ante device admission ceiling", "sampled host RSS may miss short transients and overlaps unified MLX allocation", "global allocator/current-pool highwaters cannot attribute bytes to Veda alone"];
       }
       await atomic(campaignFile, state);
     }
