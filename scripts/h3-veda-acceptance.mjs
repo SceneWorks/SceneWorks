@@ -228,7 +228,7 @@ export async function acquirePhysicalGuard(m, backend, runDir) {
   assert(adapter.protocol === "epic-25140-physical-guard-v1" && typeof adapter.acquire === "function", "actual physical guard adapter unavailable");
   const guard = await adapter.acquire({ manifest: m, backend, runDir });
   try { await physicalPhase(guard, m, backend, "campaign-start"); } catch (error) { if (guard?.release) await guard.release(); throw error; }
-  assert(typeof guard.release === "function" && typeof guard.retainForOwnedJobs === "function", "physical guard release/owned-job retention adapter missing"); return guard;
+  assert(typeof guard.release === "function" && typeof guard.retainForOwnedJobs === "function" && typeof guard.submit === "function" && typeof guard.attachJob === "function", "physical guard release/owned-job retention adapter missing"); return guard;
 }
 export async function claimLease(m, backend, runDir) {
   const r = m.runners[backend]; assert(path.isAbsolute(r.leasePath), "campaign resume marker path required");
@@ -285,15 +285,15 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         assert(attempt.key === key && attempt.requestSha256 === digest(request), "persisted arm request identity differs");
         let job;
         if (attempt.jobId) { const r = await api.json(`/api/v1/jobs/${encodeURIComponent(attempt.jobId)}`); assert(r.status === 200, "recorded job not readable; do not resubmit"); job = r.value; }
-        else if (attempt.status === "submitting" || attempt.status === "ambiguous") { job = await reconcile(api, attempt); attempt.jobId = job.id; await atomic(campaignFile, state); }
+        else if (attempt.status === "submitting" || attempt.status === "ambiguous") { job = await reconcile(api, attempt); attempt.jobId = job.id; await atomic(campaignFile, state); await guard.attachJob(attempt); }
         else {
           assert(attempt.status === "intent", "failed attempt requires explicit human resolution; no automatic rerender");
           attempt.status = "submitting"; await atomic(campaignFile, state); submitted++;
-          let r; try { r = await api.json("/api/v1/video/jobs", { method: "POST", body: request }); } catch (error) { attempt.status = "ambiguous"; attempt.error = String(error); await atomic(campaignFile, state); throw error; }
+          let r; try { r = await guard.submit(attempt); } catch (error) { attempt.status = "ambiguous"; attempt.error = String(error); await atomic(campaignFile, state); throw error; }
           if (row.kind === "expected_refusal") {
             const text = JSON.stringify(r.value); assert([400, 422].includes(r.status) && text.includes(row.recipe) && /declared.*not|not.*compatible/i.test(text), "expected modelIds refusal absent or unrelated error"); attempt.status = "expected_refusal"; attempt.response = r; cell.status = "expected_refusal_observed"; await atomic(campaignFile, state); continue;
           }
-          assert(r.status === 201 && r.value.id, `product enqueue failed: HTTP ${r.status}`); job = r.value; attempt.jobId = job.id; attempt.status = "enqueued"; await atomic(campaignFile, state);
+          assert(r.status === 201 && r.value.id, `product enqueue failed: HTTP ${r.status}`); job = r.value; attempt.jobId = job.id; attempt.status = "enqueued"; await atomic(campaignFile, state); await guard.attachJob(attempt);
         }
         assert(job.payload?.advanced?.s9Harness?.key === key && job.projectId === m.projectId, "product job request readback differs");
         for (const field of ["model", "mode", "prompt", "seed", "width", "height", "duration", "fps", "sourceAssetId", "lastFrameAssetId", "referenceAssetIds", "sourceClipAssetIds", "referenceAudioAssetIds"]) assert(digest(job.payload[field] ?? null) === digest(request[field] ?? null), `actual request readback differs: ${field}`);
@@ -330,7 +330,7 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
     // An ambiguous enqueue or active timeout keeps the lease for reconciliation/cancel. Never free a GPU that may still be rendering.
     const uncertain = Object.values(state.cells).some((c) => Object.values(c.arms).some((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))));
     if (!uncertain) { await release(); await guard.release(); }
-    else { assert(typeof guard.retainForOwnedJobs === "function", "physical guard cannot retain uncertain owned jobs"); await guard.retainForOwnedJobs(Object.values(state.cells).flatMap((c) => Object.values(c.arms)).filter((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))).map((a) => ({ jobId: a.jobId ?? null, key: a.key, requestSha256: a.requestSha256 }))); }
+    else { assert(typeof guard.retainForOwnedJobs === "function" && typeof guard.submit === "function" && typeof guard.attachJob === "function", "physical guard cannot retain uncertain owned jobs"); await guard.retainForOwnedJobs(Object.values(state.cells).flatMap((c) => Object.values(c.arms)).filter((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))).map((a) => ({ jobId: a.jobId ?? null, key: a.key, requestSha256: a.requestSha256 }))); }
     await atomic(campaignFile, state);
   }
   return state;

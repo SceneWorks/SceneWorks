@@ -1,0 +1,16 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { launchShape, rpc } from "./h3-veda-guard-adapter.mjs";
+function shape() { return { sourceFreeze:{ resourceContract:{ mlx:{ canonicalLocks:["exact-gpu","exact-nax"],physicalGpuId:"device" } } }, runners:{mlx:{ physicalGpuId:"device",apiUrl:"http://127.0.0.1:19173",guardian:{maxSeconds:3600,cleanupSeconds:30,port:19173,dataDir:"/run/data",configDir:"/run/config",pythonPath:"/bound/python3",guardianSource:{path:"/bound/guardian.py"}}}} }; }
+function connection(reply,onRequest=()=>{}) { return ()=>{const s=new EventEmitter();s.setTimeout=(_,callback)=>{s.timeout=callback;};s.destroy=()=>{};s.write=(text)=>{onRequest(JSON.parse(text));queueMicrotask(()=>s.emit("data",Buffer.from(reply)));};queueMicrotask(()=>s.emit("connect"));return s;}; }
+test("guard adapter refuses unbounded, shared workspace, nonisolated API and missing canonical contract",()=>{launchShape(shape(),"mlx","/run");for(const mutate of [(m)=>m.runners.mlx.guardian.maxSeconds=0,(m)=>m.runners.mlx.guardian.cleanupSeconds=61,(m)=>m.runners.mlx.guardian.dataDir="/user/private/data",(m)=>m.runners.mlx.apiUrl="http://remote:19173",(m)=>m.sourceFreeze.resourceContract.mlx.canonicalLocks=[]]){const m=shape();mutate(m);assert.throws(()=>launchShape(m,"mlx","/run"));}});
+test("guardian IPC binds owner token, source fingerprint and exact durable submission",async()=>{const control={port:1,token:"secret",fingerprint:"frozen"};const intent={key:"key",requestSha256:"request",request:{projectId:"owned"}};const value=await rpc(control,"submit",intent,{connect:connection('{"ok":true,"value":{"status":201,"value":{"id":"owned-job"}}}\n',q=>assert.deepEqual(q,{token:"secret",fingerprint:"frozen",method:"submit",arg:intent}))});assert.equal(value.value.id,"owned-job");});
+test("unowned/refused guardian cannot become successful submission",async()=>{await assert.rejects(rpc({port:1,token:"t",fingerprint:"f"},"phase",{phase:"next"},{connect:connection('{"ok":false,"error":"physical foreign activity"}\n')}),/foreign activity/);});
+test("IPC EOF without explicit readback stays ambiguous",async()=>{await assert.rejects(rpc({port:1,token:"t",fingerprint:"f"},"submit",{}, {connect:()=>{const s=new EventEmitter();s.setTimeout=()=>{};s.destroy=()=>{};s.write=()=>queueMicrotask(()=>s.emit("end"));queueMicrotask(()=>s.emit("connect"));return s;}}),/without readback/);});
+test("CPU guardian state/lock/process policy tests use fakes and never launch product",()=>{const file=path.join(path.dirname(fileURLToPath(import.meta.url)),"h3-veda-guardian-tests.py");const candidates=[process.env.S9_GUARD_TEST_PYTHON,"python3","python3.12","python3.14"].filter(Boolean);let python;
+  for(const candidate of candidates){try{const v=JSON.parse(execFileSync(candidate,["-c","import sys,json; print(json.dumps(list(sys.version_info[:2])))"],{encoding:"utf8",timeout:5000}));if(v[0]===3&&v[1]>=10){python=candidate;break;}}catch{}}
+  assert.ok(python,"Python>=3.10 required for unchanged frozen policy");const result=execFileSync(python,[file,"-v"],{encoding:"utf8",timeout:15000,stdio:["ignore","pipe","pipe"]});assert.equal(result,"");});
