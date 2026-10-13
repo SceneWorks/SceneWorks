@@ -685,6 +685,11 @@ mod lens_turbo_q4_mlx_smoke;
 // sc-14979 split, which is exactly the ordering hazard the pin bump closes.
 #[cfg(all(test, target_os = "macos"))]
 mod mage_flow_q8_mlx_smoke;
+// Real-weight MLX smoke for an imported bare-keyed Krea 2 Turbo transformer such as lodestones/Kroma
+// (sc-25855): the load the imported-Krea lane builds, against a checkpoint with no
+// `model.diffusion_model.` key prefix.
+#[cfg(all(test, target_os = "macos"))]
+mod krea_imported_bare_keys_mlx_smoke;
 // Real-weight MLX smoke for the recovered base Lens Q4 worker lane (sc-8767, epic 8506 Group-B).
 // Test-only + macOS-only; drives `crate::inference_runtime::load("lens")` with a Q4 LoadSpec against the packed `q4/`
 // turnkey subdir. On-device evidence that the SceneWorks/lens-mlx pre-quantized q4 tier loads through the
