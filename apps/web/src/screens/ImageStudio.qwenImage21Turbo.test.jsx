@@ -147,6 +147,38 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
     );
   });
 
+  // An imported checkpoint on the same family is not a rewrite target — the worker refuses it — so
+  // the tile must not render even with both rewriters installed.
+  // *Mutation that reds this:* gating `qwenRewriterAppliesTo` on `family === "qwen-image-2-1"`.
+  it("offers no Qwen rewriter for a custom checkpoint on the Qwen Image 2.1 family", async () => {
+    const custom = { ...TURBO, id: "custom_qwen21_finetune", name: "My Qwen 2.1 finetune" };
+    await render(baseContext({ imageModels: [custom], models: [custom, REWRITE_T2I, REWRITE_I2I] }));
+    expect(buttonWithText("Refine my prompt"), "Prompt tools rendered").toBeTruthy();
+    expect(buttonWithText("Qwen rewriter")).toBeUndefined();
+  });
+
+  // The enqueue gate counts DISTINCT references (first occurrence kept), so a restored list that
+  // repeats an id is legal at ten distinct and must not be blocked; eleven distinct must be.
+  // *Mutation that reds this:* counting `referenceAssetIds.length` instead of distinct ids.
+  it("counts a restored list's distinct references against the cap", async () => {
+    const restore = (ids) =>
+      window.localStorage.setItem(
+        "sceneworks-studio-image-project_1",
+        JSON.stringify({ mode: "edit_image", model: TURBO.id, prompt: "combine them", referenceAssetIds: ids }),
+      );
+    const ten = REFS.slice(0, 10).map((ref) => ref.id);
+    restore([...ten, ten[0]]);
+    await render();
+    expect(container.textContent).not.toContain("takes up to 10 reference images");
+    expect(generateButton().disabled).toBe(false);
+    await act(async () => root.render(null));
+
+    restore(REFS.map((ref) => ref.id));
+    await render();
+    expect(container.textContent).toContain("takes up to 10 reference images — remove 1.");
+    expect(generateButton().disabled).toBe(true);
+  });
+
   it("defaults steps to the distilled 8 and sends another count unchanged", async () => {
     const context = await render();
     await click(document.body.querySelector(".advanced-section-toggle"));

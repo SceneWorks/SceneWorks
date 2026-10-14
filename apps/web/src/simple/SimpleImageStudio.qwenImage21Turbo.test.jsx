@@ -144,6 +144,16 @@ describe("SimpleImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
     );
   });
 
+  // *Mutation that reds this:* gating `qwenRewriterAppliesTo` on `family === "qwen-image-2-1"` —
+  // the worker refuses a rewrite targeting an imported checkpoint.
+  it("offers no Qwen rewriter tile for a custom checkpoint on the Qwen Image 2.1 family", async () => {
+    const custom = { ...TURBO, id: "custom_qwen21_finetune", name: "My Qwen 2.1 finetune" };
+    await openImage(baseContext({ imageModels: [custom], models: [custom, REWRITE_T2I, REWRITE_I2I] }));
+    expect(container.querySelector(".su-generate"), "the studio rendered").toBeTruthy();
+    expect(container.textContent).toContain("My Qwen 2.1 finetune");
+    expect(buttonWithText(container, "Qwen rewriter")).toBeUndefined();
+  });
+
   it("offers the seven presets in the size sheet", async () => {
     await openImage();
     const trigger = [...container.querySelectorAll(".su-select")].find((node) =>

@@ -15,7 +15,7 @@ import { createRoot } from "react-dom/client";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click } from "./testUtils/dom.js";
-import { qwenRewriterAppliesTo } from "./constants.js";
+import { QWEN_IMAGE_2_1_MODEL_IDS, qwenRewriterAppliesTo } from "./constants.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(HERE, "../../..");
@@ -52,18 +52,22 @@ function catalogModel(entry) {
 
 describe("the Qwen rewriter gate agrees with the worker (sc-25908)", () => {
   // The worker serves a rewrite only for `sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`;
-  // the UI offers the rewriter by catalog family. The two must name the same models, or the UI
-  // either hides a working rewriter (Turbo, before this story) or offers one the worker refuses.
-  // *Mutation that reds this:* adding a model to the family without the Rust list, or vice versa.
+  // the UI mirrors that id list. The two must name the same models, or the UI either hides a
+  // working rewriter (Turbo, before this story) or offers one the worker refuses.
+  // *Mutation that reds this:* dropping or adding an id on either side.
   it("offers the rewriter for exactly the models the worker accepts as a rewrite target", () => {
     const routing = readFileSync(resolve(REPO, "crates/sceneworks-core/src/jobs_store/routing.rs"), "utf8");
     const declared = /pub const QWEN_IMAGE_2_1_MODEL_IDS: &\[&str\] = &\[([^\]]*)\];/.exec(routing);
     expect(declared, "the Rust rewrite-target list is where this test reads it").toBeTruthy();
     const rustIds = [...declared[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]).sort();
+    expect([...QWEN_IMAGE_2_1_MODEL_IDS].sort()).toEqual(rustIds);
     const offered = manifestModels.filter(qwenRewriterAppliesTo).map((model) => model.id).sort();
     expect(offered).toEqual(rustIds);
     expect(offered).toContain("qwen_image_2_1_turbo");
     expect(qwenRewriterAppliesTo(entryOf("qwen_image"))).toBe(false);
+    // An imported checkpoint on the same family is NOT a rewrite target: the worker refuses it.
+    // *Mutation that reds this:* gating on `family === "qwen-image-2-1"`.
+    expect(qwenRewriterAppliesTo({ id: "custom_qwen21_finetune", family: "qwen-image-2-1" })).toBe(false);
   });
 
   it("points Turbo at its own prompt guide, which ships", () => {
@@ -246,8 +250,11 @@ describe("Training Studio target picker (sc-25908, E9)", () => {
     container.remove();
   });
 
-  // The picker lists the registry the API serves (`GET /training/targets`), and the registry has no
-  // trainer under the Turbo id — so Turbo is never offered, while base's targets are.
+  // Exclusion is REGISTRY-DRIVEN by design: TrainingStudio derives every base it offers only from
+  // `trainingTargets` (the API's `GET /training/targets`), and there is no UI-side filter. So this
+  // proves the shipped registry has no Turbo target and that the picker renders exactly that
+  // registry — not that the UI would hide a Turbo target if the registry ever grew one (the API
+  // refuses such a base: `untrainable_base_model_reason`).
   // *Mutation that reds this:* a registry target with `baseModel: "qwen_image_2_1_turbo"`.
   it("offers base Qwen Image 2.1 targets and nothing that trains on Turbo", async () => {
     const registry = JSON.parse(

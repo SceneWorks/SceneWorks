@@ -1147,11 +1147,15 @@ export function ImageStudio() {
   // Image 2.1 family) on the multi-reference picker, which replaces the source, so the count is
   // exactly the list sent. Null for a model that declares none (FLUX.2-dev): no cap is shown and
   // the enqueue gate stays the only bound, as before.
+  // Counted over DISTINCT ids, as the enqueue gate counts them (`qwen_image_2_1_reference_ids`
+  // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
+  // request the API accepts would be a client stricter than the gate.
   const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
+  const distinctReferenceCount = new Set(referenceAssetIds).size;
   const referenceOverflowError =
-    mode === "edit_image" && maxStudioReferences != null && referenceAssetIds.length > maxStudioReferences
+    mode === "edit_image" && maxStudioReferences != null && distinctReferenceCount > maxStudioReferences
       ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
-          referenceAssetIds.length - maxStudioReferences
+          distinctReferenceCount - maxStudioReferences
         }.`
       : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
