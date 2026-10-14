@@ -96,11 +96,11 @@ jobs:
         with:
           node-version: 22
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'build' || inputs.mode == 'prepare' || inputs.mode == 'resume'
         with:
           python-version: "3.12"
       - name: Bind Python 3.12 interpreter for owned process supervision
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'build' || inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: |
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 12); print(f"S9_GUARD_PYTHON={sys.executable}")' >> "$GITHUB_ENV"
       - name: Assert exact source and named runner before build
@@ -230,11 +230,11 @@ jobs:
         with:
           node-version: 22
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'build' || inputs.mode == 'prepare' || inputs.mode == 'resume'
         with:
           python-version: "3.12"
       - name: Bind Python 3.12 interpreter for owned process supervision
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'build' || inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: |
           $python = (python -c "import sys; assert sys.version_info[:2] == (3, 12); print(sys.executable)").Trim()
           Add-Content -Path $env:GITHUB_ENV -Value "S9_GUARD_PYTHON=$python"
