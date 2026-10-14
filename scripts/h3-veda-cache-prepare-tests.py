@@ -51,6 +51,12 @@ class Tests(unittest.TestCase):
   with patch.object(c,'prove_apfs',return_value={}):
    with self.assertRaises(RuntimeError):c.prepare_locked(p,os.getpid(),self.root,self.cache,self.shared,None)
   r=json.loads((self.root/'cache-progress.json').read_text());self.assertIn('TimeoutError',r['phaseEnded']);self.assertFalse(r['contentVerified'])
+ def test_foreign_inherited_hf_cache_priority_cannot_escape_private_root(self):
+  base={k:'/foreign/shared/cache' for k in c.owned_hf_environment(self.cache)};base.update(HF_HUB_OFFLINE='1',HF_TOKEN='unpersisted fixture secret')
+  for kind in ['api','download_worker']:
+   env=c.cpu_environment(base,self.cache,kind);self.assertEqual({k:env[k] for k in c.owned_hf_environment(self.cache)},c.owned_hf_environment(self.cache));self.assertNotIn('HF_TOKEN',env);self.assertEqual(env['SCENEWORKS_GPU_ID'],'cpu');self.assertEqual(env['SCENEWORKS_WORKER_ONLY'],'1' if kind=='download_worker' else '0')
+   env['HF_HUB_CACHE']='/foreign/shared/cache'
+   with self.assertRaisesRegex(RuntimeError,'escaped'):c.require_owned_hf_environment(env,self.cache)
  def test_actual_owned_cpu_children_are_reaped_after_transport_failure(self):
   gs=importlib.util.spec_from_file_location('guard',Path(__file__).with_name('h3-veda-guardian.py'));g=importlib.util.module_from_spec(gs);gs.loader.exec_module(g)
   binary=self.root/'cpu-child';binary.write_text('#!'+sys.executable+'\nimport time\ntime.sleep(60)\n');binary.chmod(0o700);shader=self.root/'shader';shader.write_bytes(b'cpu fixture')

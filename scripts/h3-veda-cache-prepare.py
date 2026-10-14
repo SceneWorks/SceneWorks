@@ -50,6 +50,16 @@ def verify_file(target,a,check):
     require(target.exists() and target.stat().st_size==a['bytes'] and sha(target,check)==a['sha256'],'frozen payload SHA/size mismatch')
     os.chmod(target.resolve(),0o444)
     return {'repo':a['repo'],'revision':a['revision'],'file':a['file'],'path':str(target),'bytes':a['bytes'],'sha256':a['sha256'],'stat':signature(target),'contentVerified':True}
+def owned_hf_environment(cache):
+    cache=Path(cache)
+    return {'HF_HOME':str(cache),'HUGGINGFACE_HUB_CACHE':str(cache/'hub'),'HF_HUB_CACHE':str(cache/'hub'),'HF_ASSETS_CACHE':str(cache/'assets'),'HF_XET_CACHE':str(cache/'xet'),'TRANSFORMERS_CACHE':str(cache/'transformers')}
+def require_owned_hf_environment(env,cache):
+    require(all(env.get(k)==v for k,v in owned_hf_environment(cache).items()),'actual CPU HF cache environment escaped owned root')
+def cpu_environment(base,cache,kind='api'):
+    env=dict(base);env.update(owned_hf_environment(cache));env.update(SCENEWORKS_GPU_ID='cpu',SCENEWORKS_RUST_WORKER_GPU_ID='cpu',SCENEWORKS_UTILITY_WORKERS='1',SCENEWORKS_UTILITY_JOBS='1',SCENEWORKS_WORKER_ONLY='1' if kind=='download_worker' else '0')
+    for k in ['HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','HF_TOKEN','HUGGING_FACE_HUB_TOKEN','HF_ENDPOINT']:env.pop(k,None)
+    require_owned_hf_environment(env,cache);return env
+
 def request_shape(a,key):
     # Exactly the existing normal ModelDownload executor. Predictor authority is re-derived
     # from builtin managed_file; client SHA cannot replace its catalog identity.
@@ -146,12 +156,12 @@ def prepare_locked(p,controller_pid,root,cache,shared,cache_lock):
             m={'runners':{'mlx':{'guardian':{'dataDir':str(data),'configDir':str(config),'port':port},'apiUrl':f'http://127.0.0.1:{port}','workerId':'epic25140-owned-cpu-download','requestedGpu':'cpu','cacheRoot':str(cache),'apiBinary':p['binary'],'workerBinary':p['binary'],'nativeResources':{'mlxMetallib':p['metallib']}}},'sourceFreeze':{'sceneworks':{'root':str(Path(__file__).resolve().parent.parent)}}}
             class CpuServices(g.Services):
                 def env(self,kind='api'):
-                    env=super().env('api');env.update(SCENEWORKS_GPU_ID='cpu',SCENEWORKS_RUST_WORKER_GPU_ID='cpu',SCENEWORKS_UTILITY_WORKERS='1',SCENEWORKS_UTILITY_JOBS='1',SCENEWORKS_WORKER_ONLY='1' if kind=='download_worker' else '0');[env.pop(k,None) for k in ['HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','HF_TOKEN','HUGGING_FACE_HUB_TOKEN','HF_ENDPOINT']];return env
+                    return cpu_environment(super().env('api'),cache,kind)
             class NoPhysicalLocks: handles=[cache_lock]
             class CpuOnly: locks=NoPhysicalLocks()
             import socket
             with socket.socket() as probe:probe.bind(('127.0.0.1',port))
-            services=CpuServices(m,'mlx',root,CpuOnly());services.start('api');api=g.Product(m['runners']['mlx']['apiUrl'],token)
+            services=CpuServices(m,'mlx',root,CpuOnly());require_owned_hf_environment(services.env('api'),cache);progress['ownedHfEnvironment']=owned_hf_environment(cache);services.start('api');api=g.Product(m['runners']['mlx']['apiUrl'],token)
             until=min(deadline,time.monotonic()+30)
             while time.monotonic()<until:
                 check()
@@ -170,7 +180,7 @@ def prepare_locked(p,controller_pid,root,cache,shared,cache_lock):
                 require(len(found)<=1,'ambiguous duplicate owned managed POST')
                 if found:progress['jobs'][pending['key']]={'jobId':found[0]['id'],'request':pending['request'],'previousJobIds':list(known)};progress.pop('uncertainPost');atom(receipt_path,progress)
                 else:raise RuntimeError('lost POST absent/unknown; retained durable intent, never blindly resubmitted')
-            services.start('download_worker');startup.append(observe('after-startup'));progress['startupEvidence']=startup;atom(receipt_path,progress)
+            require_owned_hf_environment(services.env('download_worker'),cache);services.start('download_worker');startup.append(observe('after-startup'));progress['startupEvidence']=startup;atom(receipt_path,progress)
             for a in [a for a in p['entries'] if a in missing or hashlib.sha256((a['repo']+'@'+a['revision']+'/'+a['file']).encode()).hexdigest() in progress['jobs']]:
                 check();services.owned_pids();key=hashlib.sha256((a['repo']+'@'+a['revision']+'/'+a['file']).encode()).hexdigest();record=progress['jobs'].get(key)
                 if record:

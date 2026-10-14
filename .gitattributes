@@ -48,6 +48,8 @@
 *.mts           text diff
 *.orig          text diff
 *.patch         text diff
+# Unified patches require one-space blank context lines; control-byte scanning stays enabled.
+*.patch         whitespace=-blank-at-eol
 *.plist         text diff
 *.ps1           text diff
 *.py            text diff

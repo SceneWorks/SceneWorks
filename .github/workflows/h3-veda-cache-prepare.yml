@@ -55,11 +55,6 @@ jobs:
           test "$GITHUB_SHA" = "$S9_EXPECTED_SOURCE"
           test "$(git rev-parse HEAD)" = "$S9_EXPECTED_SOURCE"
           test -z "$(git status --porcelain)"
-      - name: Install exact owned CPU Rust toolchain for source build
-        if: inputs.mode == 'build'
-        run: |
-          rustup toolchain install 1.97.1 --profile minimal
-          echo "$RUSTUP_HOME/toolchains/1.97.1-aarch64-apple-darwin/bin" >> "$GITHUB_PATH"
       - name: Build byte-attested ordinary managed downloader with CPU-only worker startup guard
         if: inputs.mode == 'build'
         env:
@@ -79,6 +74,10 @@ jobs:
           name: h3-owned-cpu-cache-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ inputs.run_dir }}/cpu-download-build.json
+            ${{ inputs.run_dir }}/cpu-build/toolchain/receipt.json
+            ${{ inputs.run_dir }}/cpu-build/cargo/receipt.json
+            ${{ inputs.run_dir }}/cpu-build/toolchain/*.log
+            ${{ inputs.run_dir }}/cpu-build/cargo/*.log
             ${{ inputs.run_dir }}/cache-progress.json
             ${{ inputs.run_dir }}/before-startup-*.txt
             ${{ inputs.run_dir }}/after-startup-*.txt
