@@ -29,11 +29,12 @@ function assertTerminalBootstrapSurface(w) {
   assert.equal(calls,0,'registration stub must execute no Python bootstrap');
  } else assert.equal(calls,2,'full feature workflow must bootstrap both physical hosts');
 }
-test('publication stub and CPU cache route preserve owned bootstrap and terminal six-mode scope',()=>{
+test('publication stub and CPU diagnostic/cache routes preserve owned bootstrap and terminal six-mode scope',()=>{
  const w=readFileSync(new URL('../.github/workflows/h3-veda-terminal.yml',import.meta.url),'utf8');assertTerminalBootstrapSurface(w);
  const cache=readFileSync(new URL('../.github/workflows/h3-veda-cache-prepare.yml',import.meta.url),'utf8');
- assert.doesNotMatch(cache,/actions\/setup-python@|RUNNER_TOOL_CACHE|sudo/);assert.match(cache,/options: \[build, prepare\]/);assert.match(cache,/h3-veda-cache-prepare\.mjs build/);assert.match(cache,/h3-veda-cache-prepare\.mjs prepare/);
+ assert.doesNotMatch(cache,/actions\/setup-python@|RUNNER_TOOL_CACHE|sudo/);assert.match(cache,/options: \[build, prepare\]/);assert.match(cache,/run: node scripts\/h3-veda-cache-diagnostic\.mjs "\$S9_RUN_DIR"/);assert.match(cache,/h3-veda-cache-prepare\.mjs prepare/);
  const controller=readFileSync(new URL('h3-veda-cache-prepare.mjs',import.meta.url),'utf8');assert.match(controller,/import \{bootstrap,noSymlinkAncestors\} from '\.\/h3-veda-owned-python\.mjs'/);assert.match(controller,/await bootstrap\(runDir\)/);
+ const diagnostic=readFileSync(new URL('h3-veda-cache-diagnostic.mjs',import.meta.url),'utf8');assert.match(diagnostic,/import \{bootstrap,noSymlinkAncestors\} from '\.\/h3-veda-owned-python\.mjs'/);assert.match(diagnostic,/await bootstrap\(runDir\)/);
 });
 test('full feature bootstrap checks remain enforced after integration and stub cannot hide host jobs',()=>{
  const header=readFileSync(new URL('../.github/workflows/h3-veda-terminal.yml',import.meta.url),'utf8').split(/\njobs:\n/)[0];
