@@ -212,11 +212,11 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // VAE / E-LatentLPIPS weights, and sc-24832's ViTPose+ base and HybrIK / Sapiens re-hosts, plus main's
   // YuE1 / YuE2 / Wan-VACE entries from the final main sync (135 keys), and sc-25213's ostris Z-Image-Turbo
   // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
-  // decoded-x0 losses (137 keys). The Illustrious file censuses below are
+  // decoded-x0 losses (137 keys), then the frozen Veda predictor (138 keys). The Illustrious file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "cc86ec216ff857331e6472015e8a3da10ecac5983bc7f8974d11b6804e44991e");
+    "ae5466660b93a30ea3cd88f14596118ce8e3de52379c6dd6697a05884addcc58");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

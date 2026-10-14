@@ -185,9 +185,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // weights, ViTPose+ base and the HybrIK / Sapiens re-hosts; the epic's final main sync (sc-2124) adds
 // main's YuE1 re-hosts, YuE2's three upstream m-a-p repos and the Wan-VACE base/transformer entries
 // (135 repo@revision keys incl. the two frozen importer authorities; sc-19383 left 117).
+// The final main sync and Veda predictor added another immutable catalog authority (138 keys).
+// The offline pattern gate validates the current catalog against this exact recorded file.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "cc86ec216ff857331e6472015e8a3da10ecac5983bc7f8974d11b6804e44991e";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "ae5466660b93a30ea3cd88f14596118ce8e3de52379c6dd6697a05884addcc58";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
