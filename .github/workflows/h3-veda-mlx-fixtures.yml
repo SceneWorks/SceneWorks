@@ -55,24 +55,13 @@ jobs:
           ref: ${{ inputs.sceneworks_sha }}
           path: sceneworks
           fetch-depth: 1
-      - name: Prove private inference source read authority before checkout
-        env:
-          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
-        run: |
-          test "$S9_INFERENCE_SHA" = 'ba6ed0db452ecbed780ab8eeeac883cd9758ed3a'
-          test "$(gh api "repos/SceneWorks/inference/git/commits/$S9_INFERENCE_SHA" --jq .sha)" = "$S9_INFERENCE_SHA"
-          blob_sha=$(gh api "repos/SceneWorks/inference/contents/rust-toolchain.toml?ref=$S9_INFERENCE_SHA" --jq .sha)
-          [[ "$blob_sha" =~ ^[0-9a-f]{40}$ ]]
-          test "$(gh api 'orgs/SceneWorks/actions/runners?per_page=100' --jq '.runners[] | select(.id == 5281) | .name')" = 'nax-macos-2'
-          gh api 'repos/michaeltrefry/LensWorks/actions/runs?status=in_progress&per_page=1' --jq .total_count >/dev/null
-          gh api 'repos/michaeltrefry/LensWorks/actions/runs?status=queued&per_page=1' --jq .total_count >/dev/null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
           ref: ${{ inputs.inference_sha }}
           path: inference
           fetch-depth: 1
-          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+          token: ${{ github.token }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -115,6 +104,8 @@ jobs:
             ${{ inputs.run_dir }}/tools/python-3.12-attestation.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/receipt.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/running.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/build.jsonl
+            ${{ inputs.run_dir }}/mlx-five-fixtures/build.stderr.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*-receipt.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stdout.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stderr.log

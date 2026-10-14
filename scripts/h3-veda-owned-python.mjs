@@ -76,7 +76,7 @@ export function extractArchive(bytes, destination) {
   const entries = parseArchive(bytes); noSymlinkAncestors(destination);
   check(!existsSync(destination), 'extraction destination already exists'); mkdirSync(destination,{mode:0o700});
   for (const e of entries.filter(x => x.type!=='2')) { const target=path.join(destination,...e.name.split('/')); mkdirSync(path.dirname(target),{recursive:true,mode:0o700}); if(e.type==='5') mkdirSync(target,{recursive:true}); else writeFileSync(target,e.data,{flag:'wx',mode:e.mode}); }
-  for (const e of entries.filter(x => x.type==='2')) symlinkSync(e.link,path.join(destination,...e.name.split('/')));
+  for (const e of entries.filter(x => x.type==='2')) { const target=path.join(destination,...e.name.split('/'));mkdirSync(path.dirname(target),{recursive:true,mode:0o700});symlinkSync(e.link,target); }
   return sha256(Buffer.from(entries.map(e => JSON.stringify([e.name,e.type,e.link,e.mode,sha256(e.data)])).join('\n')));
 }
 export function treeDigest(root, freeze = false) {
