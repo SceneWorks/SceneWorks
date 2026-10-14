@@ -1229,6 +1229,9 @@ pub enum AdvancedShape {
     /// `keypoints`, `hands`, `face` — all three drive the rendered skeleton). Pose-library ids,
     /// and anything else the picker attached, do not travel.
     Poses,
+    /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
+    /// H3 validator refuses malformed values or unknown fields.
+    H3VedaSettings,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
 }
@@ -1646,6 +1649,14 @@ pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
         AdvancedKeySource::VideoStudioBuilder,
         "Authored right-clip conditioning strength for a bridge — the sibling of \
          `videoConditioningStrength`, and dropping it would make a shared bridge replay lopsided.",
+    ),
+    allow_from(
+        "veda",
+        AdvancedShape::H3VedaSettings,
+        AdvancedKeySource::VideoStudioBuilder,
+        "Authored MiniMax-H3 Veda sparsity and full-attention controls. The complete closed wire \
+         object changes the denoising recipe and must travel together; malformed or unknown \
+         members are refused rather than silently producing a different recipe.",
     ),
     allow_from(
         "timelineAction",
@@ -2903,12 +2914,34 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::StructuredPrompt => sanitize_structured_prompt(value),
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
+            AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
         };
         if let Some(sanitized) = sanitized {
             out.insert(key.clone(), sanitized);
         }
     }
     out
+}
+
+/// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire
+/// grammar and `deny_unknown_fields`; this boundary adds a small byte ceiling before parsing, then
+/// keeps the original strings intact so ranges and separators replay exactly as authored.
+fn sanitize_h3_veda_settings(value: &Value) -> Option<Value> {
+    const MAX_CONTROL_TEXT_BYTES: usize = PROSE_MAX_BYTES;
+    const MAX_H3_STEPS: u32 = 200;
+
+    let object = value.as_object()?;
+    if object.values().any(|member| {
+        member
+            .as_str()
+            .is_some_and(|text| text.len() > MAX_CONTROL_TEXT_BYTES)
+    }) {
+        return None;
+    }
+    let mut advanced = JsonObject::new();
+    advanced.insert("veda".to_owned(), value.clone());
+    crate::h3_veda::requested_h3_veda("minimax_h3", &advanced, MAX_H3_STEPS).ok()?;
+    Some(Value::Object(object.clone()))
 }
 
 /// The prose keys inside a sanitized value that are what the user typed, and so are exempt
@@ -3353,6 +3386,59 @@ mod tests {
         assert!(!recipe.contains_key("caption"));
         // `magicPromptBackend: null` is not a scalar we carry.
         assert!(!recipe.contains_key("magicPromptBackend"));
+    }
+
+    #[test]
+    fn veda_keeps_every_valid_wire_control_and_refuses_unknown_or_malformed_members() {
+        let all_layers = (0..50)
+            .map(|index| index.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let all_steps = (0..200)
+            .map(|step| step.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let complete = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": all_layers,
+            "fullAttentionSteps": all_steps
+        });
+        let advanced = json!({"veda": complete})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], complete);
+
+        let controls = json!({
+            "enabled": true,
+            "generated": "32",
+            "reference": "0%",
+            "fullAttentionLayers": "49, 2–0",
+            "fullAttentionSteps": "0; 3"
+        });
+        let advanced = json!({"veda": controls})
+            .as_object()
+            .cloned()
+            .expect("object");
+        assert_eq!(sanitize_advanced(&advanced)["veda"], controls);
+
+        for controls in [
+            json!({"enabled": true, "unknown": "must not be smuggled"}),
+            json!({"enabled": true, "generated": "C:\\weights\\veda"}),
+            json!({"enabled": true, "fullAttentionSteps": "200"}),
+            json!({"enabled": true, "fullAttentionLayers": "50"}),
+        ] {
+            let advanced = json!({"veda": controls})
+                .as_object()
+                .cloned()
+                .expect("object");
+            assert!(
+                !sanitize_advanced(&advanced).contains_key("veda"),
+                "malformed or unknown Veda data must not become a partial recipe"
+            );
+        }
     }
 
     #[test]

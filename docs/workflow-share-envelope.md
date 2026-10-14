@@ -428,6 +428,7 @@ smuggled under a scalar key.
 | `videoRescaleScale` | `Scalar` | **Video.** LTX guidance-rescale factor. |
 | `videoConditioningStrength` | `Scalar` | **Video.** Source-clip conditioning strength for extend / bridge / v2v — the video lane's `strength`. |
 | `bridgeRightVideoConditioningStrength` | `Scalar` | **Video.** The right-clip strength for a bridge. Without it a shared bridge replays lopsided. |
+| `veda` | `H3VedaSettings` | **Video.** The complete MiniMax-H3 Veda control object, validated as one closed request shape so sparsity and full-attention settings replay together. |
 | `timelineAction` | `Scalar` | **Video.** Which timeline operation made the clip (`extend` / `replace` / `bridge`). A closed vocabulary with no id in it; its companion `timelineContext` is withheld. |
 
 <!-- END PINNED: advanced-shared -->
@@ -667,8 +668,9 @@ whether the key describes **what to make** or **what this machine can afford to 
 
 - `allow(key, shape, reason)` — it describes the intended output. It travels, and a stranger opening
   your image sees it. Pick the `shape` that matches: `Scalar` for a string, number or bool (an
-  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel); one
-  of the structured shapes otherwise.
+  object or array under a `Scalar` key is dropped, which is what closes the smuggling channel);
+  `H3VedaSettings` for the complete five-field MiniMax-H3 controls validated by the shared H3
+  request validator; or one of the other structured shapes.
 - `deny(key, reason)` — it describes this install (a tier, a kernel, a GPU) or names something local
   (an id, a path, a preset). It is dropped, and a shared image will not reproduce whatever it did.
 

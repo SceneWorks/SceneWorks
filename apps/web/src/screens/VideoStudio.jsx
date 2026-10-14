@@ -1956,7 +1956,9 @@ export function VideoStudio() {
           mode === "replace_person" && replacementModeApplies(model) ? replacementMode : "face_only",
         loras: selectedLoras.map((lora) => serializeLora(lora, { weight: effectiveLoraWeight(lora) })),
         advanced: {
-          ...vedaAdvancedSettings(veda),
+          // Keep the portable Veda object visible to workflow-share coverage. The helper call hid
+          // its emitted key from the source scanner; this is the same enabled-only wire shape.
+          ...(veda?.enabled ? { veda } : {}),
           resolution,
           durationHint,
           motion,

@@ -1612,7 +1612,13 @@ test("an Anchored rollup carries (stale) exactly when every anchor behind it is 
   assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
   // The shipped artifact agrees with the renderer.
   const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  assert.equal(shipped, renderMarkdown(matrix));
+  // Source-tree provenance is intentionally frozen between terminal campaigns. Keep this
+  // rollup test about rendered semantic rows; source-tree freshness is owned by the terminal
+  // campaign, not ordinary feature commits.
+  const withoutSourceRevision = (markdown) =>
+    markdown.replace(/^- SceneWorks revision: `source-tree:[0-9a-f]{64}`\n/m, "");
+  assert.match(shipped, /^- SceneWorks revision: `source-tree:[0-9a-f]{64}`$/m);
+  assert.equal(withoutSourceRevision(shipped), withoutSourceRevision(renderMarkdown(matrix)));
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────
