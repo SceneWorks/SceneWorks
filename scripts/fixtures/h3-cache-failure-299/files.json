@@ -1,0 +1,9 @@
+{
+  "tiny-dependencies.json": "8cb25cce326cad0e5813ed57f5a9406a494cc1a866479b3802124e124cecafc9",
+  "cargo-receipt.json": "304b73f46a7a3e1d0e24999bcc51c06ba8f1fca2b3ebfc2b1b89c6cffab7a6ae",
+  "cargo-stdout.txt": "b7b6cf51882c73ee4466a3d6de574b28b276037a7b161dcfc98e60041362aa29",
+  "toolchain-receipt.json": "93ec3a376c1f42042e4ed9f5af7cab6090ffac3ae02da6d5b91337e4ea494ae1",
+  "toolchain-stderr.txt": "e7c50dda976127fb8fbbef161d4f85db5444a040294b34783bb909d8d79095a7",
+  "cargo-stderr.txt": "5798e3812553fdd1ed85176b669f928434961383adcd02c31ac28a5c1375d413",
+  "toolchain-stdout.txt": "5b81eb2fe152287c78da145140ecf0e5e3eee71229734b2e4186aa62c4e5eba3"
+}

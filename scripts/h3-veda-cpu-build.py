@@ -47,12 +47,19 @@ def child_closure(child,birth,deadline):
     require(child.poll() is not None and not group_alive(child.pid),'owned descendants not verifiably drained')
     return {'pid':child.pid,'birth':birth,'reaped':True,'descendantsDrained':True,'exitCode':child.returncode}
 
-def supervise(argv,cwd,env,output,max_seconds,parent_pid):
+ENV_ALLOWLIST=("PATH","RUSTUP_HOME","CARGO_HOME","CARGO_TARGET_DIR","CARGO_BUILD_JOBS","RUSTUP_TOOLCHAIN","RUSTC","RUSTC_WRAPPER","RUSTC_WORKSPACE_WRAPPER","RUSTFLAGS","CARGO_ENCODED_RUSTFLAGS","RUSTDOCFLAGS","RUSTDOC","CARGO_BUILD_TARGET","CC","CXX","CFLAGS","CXXFLAGS","LDFLAGS","SDKROOT","MACOSX_DEPLOYMENT_TARGET","DYLD_LIBRARY_PATH","DYLD_FALLBACK_LIBRARY_PATH","LD_LIBRARY_PATH","LIBRARY_PATH","TMPDIR","CARGO_PROFILE_RELEASE_OPT_LEVEL","CARGO_PROFILE_RELEASE_LTO","CARGO_PROFILE_RELEASE_CODEGEN_UNITS","CARGO_PROFILE_RELEASE_DEBUG","CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS","CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS","CARGO_PROFILE_RELEASE_PANIC","CARGO_PROFILE_RELEASE_STRIP")
+def environment_binding(env):
+    return {k:env[k] for k in ENV_ALLOWLIST if k in env}
+
+def supervise(argv,cwd,env,output,max_seconds,parent_pid,context=None):
     """Primitive accepts fake CPU commands in tests; production argv is closed below."""
     output=Path(output);no_links(output);output.mkdir(parents=True,exist_ok=False)
     parent_birth=pid_birth(parent_pid);require(parent_birth is not None,'controller birth unavailable')
     deadline=time.monotonic()+max_seconds;reserve=min(10,max_seconds/4)
     receipt={'schemaVersion':1,'kind':'epic25140_owned_CPU_build_child','argv':argv,'cwd':str(cwd),'maxSeconds':max_seconds,'controller':{'pid':parent_pid,'birth':parent_birth},'startedAt':int(time.time()*1000),'prepared':False,'physicalAdmission':False,'campaignReady':False}
+    if context is not None:
+        require(set(context).issubset({'tools','helper','python','plan','sourceRoot','sourceBindings','environment','diagnosticContext'}),'CPU context cannot override lifetime/result fields')
+        receipt.update(context)
     atom(output/'receipt.json',receipt);child=None;birth=None;error=None
     def interrupted(signum,frame):raise InterruptedError('CPU controller received signal '+str(signum))
     old={s:signal.signal(s,interrupted) for s in (signal.SIGTERM,signal.SIGINT)}
@@ -112,6 +119,7 @@ if __name__=='__main__':
     try:
         plan_path=Path(sys.argv[1]);require(sha(plan_path)==sys.argv[3],'CPU plan bytes changed');plan=json.loads(plan_path.read_text())
         argv,cwd,env,seconds,tools=closed_command(plan);output=Path(plan['runDir'])/'cpu-build'/plan['mode']
-        receipt=supervise(argv,cwd,env,output,seconds,int(sys.argv[2]));receipt.update(tools=tools,helper=plan['helper'],python=plan['python'],plan=binding(plan_path),sourceRoot=plan['sourceRoot'],sourceBindings=plan['sourceBindings']);atom(output/'receipt.json',receipt)
+        context={'tools':tools,'helper':plan['helper'],'python':plan['python'],'plan':binding(plan_path),'sourceRoot':plan['sourceRoot'],'sourceBindings':plan['sourceBindings'],'environment':environment_binding(env)}
+        receipt=supervise(argv,cwd,env,output,seconds,int(sys.argv[2]),context=context)
         print(json.dumps(receipt))
     except Exception as e:print(str(e),file=sys.stderr);raise SystemExit(1)

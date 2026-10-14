@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "kind": "epic25140_owned_CPU_build_child",
+  "argv": [
+    "/Users/MTrefry/.cargo/bin/rustup",
+    "toolchain",
+    "install",
+    "1.97.1",
+    "--profile",
+    "minimal",
+    "--no-self-update"
+  ],
+  "cwd": "/Volumes/Models/epic-25140-owned-cache-299c99e8d",
+  "maxSeconds": 600,
+  "controller": {
+    "pid": 96632,
+    "birth": "Wed Oct 14 04:18:35 2026"
+  },
+  "startedAt": 1791965925338,
+  "prepared": true,
+  "physicalAdmission": false,
+  "campaignReady": false,
+  "pid": 96939,
+  "birth": "Wed Oct 14 04:18:45 2026",
+  "rc": 0,
+  "closure": {
+    "pid": 96939,
+    "birth": "Wed Oct 14 04:18:45 2026",
+    "reaped": true,
+    "descendantsDrained": true,
+    "exitCode": 0
+  },
+  "error": null,
+  "endedAt": 1791965931326,
+  "elapsedSeconds": 5.987752416054718,
+  "stdout": {
+    "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/cpu-build/toolchain/stdout.log",
+    "bytes": 80,
+    "sha256": "5b81eb2fe152287c78da145140ecf0e5e3eee71229734b2e4186aa62c4e5eba3"
+  },
+  "stderr": {
+    "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/cpu-build/toolchain/stderr.log",
+    "bytes": 228,
+    "sha256": "e7c50dda976127fb8fbbef161d4f85db5444a040294b34783bb909d8d79095a7"
+  },
+  "tools": {
+    "rustup": {
+      "path": "/Users/MTrefry/.cargo/bin/rustup",
+      "bytes": 11053296,
+      "sha256": "aeb4105778ca1bd3c6b0e75768f581c656633cd51368fa61289b6a71696ac7e1"
+    }
+  },
+  "helper": {
+    "path": "/Users/MTrefry/actions-runner-nax/_work/SceneWorks/SceneWorks/cache-source/scripts/h3-veda-cpu-build.py",
+    "bytes": 8922,
+    "sha256": "5d70326cf817d65ef9c2c0553807504117df65e0eda6aeb30f9530fd37daeb0f"
+  },
+  "python": {
+    "path": "/opt/homebrew/Cellar/python@3.12/3.12.13_4/Frameworks/Python.framework/Versions/3.12/bin/python3.12",
+    "bytes": 34640,
+    "sha256": "94be2db6796807c796419e7adbc45cbff3e71966c107c2adcbf931cf70393941"
+  },
+  "plan": {
+    "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/cpu-build-toolchain-plan.json",
+    "bytes": 1878,
+    "sha256": "b1519ca35557eef05743cd13770d29becf808df19773162a4f9f870f54bb3eaa"
+  },
+  "sourceRoot": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source",
+  "sourceBindings": [
+    {
+      "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source/Cargo.toml",
+      "bytes": 10213,
+      "sha256": "f6602ad15ee2e9b766b2395ff1106b011ce0dbcc784dced378c7b709760cae4e"
+    },
+    {
+      "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source/Cargo.lock",
+      "bytes": 250471,
+      "sha256": "7aac23f02383cca19d8dde9789d53798996f9cfdba01346130902e4ee433d704"
+    },
+    {
+      "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source/crates/sceneworks-worker/Cargo.toml",
+      "bytes": 9288,
+      "sha256": "a1fb3cd1bf5124b980cbc3b381e58a071dd80503d5bebc2d4142d4cff9512e72"
+    },
+    {
+      "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source/crates/sceneworks-memory-adapter/Cargo.toml",
+      "bytes": 5507,
+      "sha256": "4de54751dbd1ca9c58f83e57bfe279e9e07539490c5d5b0ed48e3b2c2399be01"
+    },
+    {
+      "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source/crates/sceneworks-worker/src/lib.rs",
+      "bytes": 150771,
+      "sha256": "4331e70a7f71a70f239c7b9b56e5c2d8501ecadd4083c1c46e10bdfc97f3fbc1"
+    }
+  ]
+}

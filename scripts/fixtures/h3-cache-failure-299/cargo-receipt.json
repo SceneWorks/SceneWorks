@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 1,
+  "kind": "epic25140_owned_CPU_build_child",
+  "argv": [
+    "/Volumes/Models/epic-25140-owned-cache-299c99e8d/tools/rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/cargo",
+    "build",
+    "--release",
+    "--locked",
+    "--message-format=json-render-diagnostics",
+    "-p",
+    "sceneworks-rust-api"
+  ],
+  "cwd": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/download-source",
+  "maxSeconds": 3600,
+  "controller": {
+    "pid": 96632,
+    "birth": "Wed Oct 14 04:18:35 2026"
+  },
+  "startedAt": 1791965931702,
+  "prepared": false,
+  "physicalAdmission": false,
+  "campaignReady": false,
+  "pid": 97109,
+  "birth": "Wed Oct 14 04:18:51 2026",
+  "rc": 101,
+  "closure": {
+    "pid": 97109,
+    "birth": "Wed Oct 14 04:18:51 2026",
+    "reaped": true,
+    "descendantsDrained": true,
+    "exitCode": 101
+  },
+  "error": null,
+  "endedAt": 1791965973230,
+  "elapsedSeconds": 41.52829379198374,
+  "stdout": {
+    "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/cpu-build/cargo/stdout.log",
+    "bytes": 21867,
+    "sha256": "b7b6cf51882c73ee4466a3d6de574b28b276037a7b161dcfc98e60041362aa29"
+  },
+  "stderr": {
+    "path": "/Volumes/Models/epic-25140-owned-cache-299c99e8d/cpu-build/cargo/stderr.log",
+    "bytes": 17525,
+    "sha256": "5798e3812553fdd1ed85176b669f928434961383adcd02c31ac28a5c1375d413"
+  }
+}

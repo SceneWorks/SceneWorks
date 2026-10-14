@@ -40,7 +40,17 @@ class Tests(unittest.TestCase):
  def test_nonzero_cpu_command_is_closed_but_not_prepared(self):
   with self.assertRaises(RuntimeError):self.run_child('import time;time.sleep(.2);raise SystemExit(7)')
   r=self.receipt();self.assertEqual(r['rc'],7);self.assertTrue(r['closure']['reaped']);self.assertFalse(r['prepared'])
+ def test_failure_receipt_seals_context_before_nonzero_child(self):
+  context={'tools':{'rustc':{'path':'/owned/rustc','sha256':'a'*64}},'environment':{'RUSTFLAGS':'original'},'sourceBindings':[{'sha256':'b'*64}]}
+  with self.assertRaises(RuntimeError):b.supervise(self.command('import time;time.sleep(.2);raise SystemExit(7)'),self.root,os.environ.copy(),self.root/'child',3,os.getpid(),context)
+  r=self.receipt();self.assertEqual(r['tools'],context['tools']);self.assertEqual(r['environment'],context['environment']);self.assertEqual(r['sourceBindings'],context['sourceBindings']);self.assertFalse(r['prepared']);self.assertEqual(r['rc'],7)
+ def test_context_cannot_forge_result_or_lifetime(self):
+  with self.assertRaisesRegex(RuntimeError,'override'):b.supervise(self.command('pass'),self.root,os.environ.copy(),self.root/'child',3,os.getpid(),{'prepared':True})
+ def test_context_survives_timeout_and_secret_environment_is_not_recorded(self):
+  with self.assertRaises(RuntimeError):b.supervise(self.command('import time;time.sleep(60)'),self.root,os.environ.copy(),self.root/'child',.6,os.getpid(),{'tools':{'cargo':'actual'},'environment':b.environment_binding({'GH_TOKEN':'secret','RUSTC_WRAPPER':'/owned/wrapper'})})
+  r=self.receipt();self.assertEqual(r['tools'],{'cargo':'actual'});self.assertEqual(r['environment'],{'RUSTC_WRAPPER':'/owned/wrapper'});self.assertTrue(r['closure']['descendantsDrained'])
  def plan(self,mode='toolchain'):
+
   source=self.root/'download-source';bindings=[]
   for name in ['Cargo.toml','Cargo.lock','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml','crates/sceneworks-worker/src/lib.rs']:
    p=source/name;p.parent.mkdir(parents=True,exist_ok=True)

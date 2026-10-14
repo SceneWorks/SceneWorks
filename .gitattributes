@@ -126,3 +126,6 @@ pre-push        text diff
 docs/calibration/sc-16170/*.log binary
 docs/calibration/sc-15833/**/*.log binary
 docs/calibration/sc-18810/*.log binary
+
+# Preserve the exact sealed Rustup stdout bytes, including its final blank line.
+scripts/fixtures/h3-cache-failure-299/toolchain-stdout.txt whitespace=-blank-at-eof
