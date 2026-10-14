@@ -4,7 +4,6 @@ import { mkdtemp, mkdir, writeFile, readFile, rm, symlink, cp, stat, realpath } 
 import path from "node:path";
 import os from "node:os";
 import { ROOT, hashFile, digest, validateShape, catalogs, matrix } from "./h3-veda-acceptance.mjs";
-import { sealActiveBinary } from "./h3-veda-actions.mjs";
 import { assertSetupSource, physicalMetadata, declaredCacheRoots, cacheMetadata, inventory, stage } from "./h3-veda-host-setup.mjs";
 const H = "a".repeat(40), I = "c".repeat(40);
 const templateFile = "config/terminal-evidence/epic-25140-host-template.json";
@@ -61,8 +60,8 @@ test("stage copies every exact source byte and keeps missing counterpart evidenc
   const m = await json(r.manifestPath), plan = await json(path.join(ROOT, planFile));
   for (const [key, a] of Object.entries(plan.assets)) { assert.equal(await hashFile(m.assets[key].path), a.sha256); assert.equal((await stat(m.assets[key].path)).size, a.bytes); assert.equal(m.assets[key].assetId, "UNBOUND"); }
   assert.equal(m.runners.mlx.physicalGpuId, physical.physicalGpuId); assert.equal(m.runners.candle_cuda.physicalGpuId, null); assert.equal(m.runners.candle_cuda.workerBinary, null); assert.equal(m.sourceFreeze.stage, "preparation-unbound");
+  assert.equal(m.preparation.missingBindings.productImports, true, "only actual owned API imports can clear this binding");
   assert.throws(() => validateShape(m, { models: [] }), /permanent inference/);
-  await assert.rejects(sealActiveBinary({ manifestPath: r.manifestPath }), /preparation manifest remains unresolved/);
 });
 test("stage rejects stale inventory, changed source and overwrite before modifying the target", async (t) => {
   const o = await observation(t);
@@ -81,9 +80,15 @@ test("corrupt source bundle cannot materialize a single carrier", async (t) => {
   await assert.rejects(stage({ observation: o, root, sourceCheck }), /source carrier differs/); await assert.rejects(stat(o.ownedStageRoot), /ENOENT/);
 });
 test("inventory and stage workflow branches cannot reach builds, tokens, imports or GPU campaign", async () => {
-  const w = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8"); assert.match(w, /options: \[inventory, stage, prepare, resume, review\]/); assert.equal((w.match(/CPU-only host inventory or synthetic corpus staging/g) ?? []).length, 2);
-  for (const step of ["Generate masked job-owned private API token", "Build normal product API", "Build normal Candle/CUDA", "Prepare or verify owned private corpus", "Run bounded guardian-owned native campaign"]) {
-    const blocks = w.split("      - name: ").filter((b) => b.startsWith(step)); assert.ok(blocks.length > 0); for (const b of blocks) assert.match(b, /^.*\n        if: inputs.mode == 'prepare' \|\| inputs.mode == 'resume'/);
+  const w = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8"); assert.match(w, /options: \[inventory, stage, build, prepare, resume, review\]/); assert.equal((w.match(/CPU-only host inventory or synthetic corpus staging/g) ?? []).length, 2);
+  for (const [step, condition] of [
+    ["Generate masked job-owned private API token", "inputs.mode == 'prepare' || inputs.mode == 'resume'"],
+    ["Build durable normal product API", "inputs.mode == 'build'"],
+    ["Build durable normal Candle/CUDA", "inputs.mode == 'build'"],
+    ["Prepare or verify owned private corpus", "inputs.mode == 'prepare' || inputs.mode == 'resume'"],
+    ["Run bounded guardian-owned native campaign", "inputs.mode == 'resume'"],
+  ]) {
+    const blocks = w.split("      - name: ").filter((b) => b.startsWith(step)); assert.ok(blocks.length > 0); for (const b of blocks) assert.equal(b.split("\n")[1].trim(), `if: ${condition}`);
   }
   for (const field of ["manifest_path", "corpus_root", "offline_cache_root", "run_dir"]) assert.match(w.slice(w.indexOf(`      ${field}:`), w.indexOf(`      ${field}:`) + 330), /required: false/);
 });

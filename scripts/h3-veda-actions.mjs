@@ -228,10 +228,31 @@ export async function verifyDurableProduct(m, backend, runDir, { sceneWorksSha, 
   return { binary, attestation: attestationBinding, buildIdentitySha256: attestation.buildIdentitySha256 };
 }
 
+// A source-frozen preparation manifest may leave only the product import IDs
+// unbound: prepare creates those through the normal owned API and reads them back.
+export function assertOwnedImportReadiness(m) {
+  const missing = m.preparation?.missingBindings;
+  check(m.sourceFreeze?.stage === "permanent-inference-main-pin" && m.preparation?.campaignReady === false && missing?.productImports === true, "source-frozen preparation with actual product imports pending required");
+  check(Array.isArray(m.preparation.unresolved) && m.preparation.unresolved.length === 1 && m.preparation.unresolved[0] === "normal owned corpus imports/readbacks required", "other preparation gaps remain unresolved");
+  for (const [key, value] of Object.entries(missing)) if (key !== "productImports") {
+    check(value === false || value === null || (Array.isArray(value) && value.length === 0), `preparation binding still missing: ${key}`);
+  }
+  for (const backend of ["mlx", "candle_cuda"]) {
+    const runner = m.runners?.[backend], resource = m.sourceFreeze.resourceContract?.[backend];
+    check(typeof runner?.physicalGpuId === "string" && runner.physicalGpuId.length > 0 && resource?.physicalGpuId === runner.physicalGpuId, `physical resource identity unbound: ${backend}`);
+    for (const name of ["apiBinary", "workerBinary", "attestation"]) {
+      const file = runner[name];
+      check(typeof file?.path === "string" && file.path.length > 0 && Number.isSafeInteger(file.bytes) && file.bytes > 0 && HEX.test(file.sha256 ?? ""), `source-built binary descriptor unbound: ${backend}/${name}`);
+    }
+    check(runner.apiBinary.sha256 === runner.workerBinary.sha256 && runner.apiBinary.bytes === runner.workerBinary.bytes && runner.apiBinary.path === runner.workerBinary.path, `API/worker binary identity differs: ${backend}`);
+  }
+}
+
 export async function preflight({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha }) {
   check(absolute(manifestPath), "absolute frozen manifest input required");
   check(process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN, "source-bound Actions execution and scoped live runner token required");
   const m = await json(manifestPath);
+  assertOwnedImportReadiness(m);
   const g = assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest: m, runDir, cacheRoot });
   check(git(ROOT, "rev-parse", "HEAD") === sceneWorksSha && git(ROOT, "status", "--porcelain") === "", "SceneWorks checkout dirty/stale");
   check(git(m.sourceFreeze.inference.root, "rev-parse", "HEAD") === inferenceSha && git(m.sourceFreeze.inference.root, "status", "--porcelain") === "", "inference checkout dirty/stale");
@@ -355,6 +376,8 @@ export async function prepare({ manifestPath, planPath, corpusRoot, backend, run
   manifest.cpuImportApiClosures = { ...(manifest.cpuImportApiClosures ?? {}), [backend]: receipt.apiProcessClosure };
   const bound = bindCorpusPlan(manifest, plan, receipt);
   check(bound.projectId === receipt.projectId, "bound project differs from owned import");
+  bound.preparation = { ...bound.preparation, campaignReady: false, productImported: true,
+    missingBindings: { ...bound.preparation.missingBindings, productImports: false }, unresolved: [] };
   const marker = { campaignId: bound.campaignId, sourceFreezeSha256: digest(bound.sourceFreeze), projectId: bound.projectId };
   await writeFile(path.join(bound.runners[backend].guardian.dataDir, "s9-workspace-owner.json"), JSON.stringify(marker) + "\n", { flag: "wx" });
   const output = path.join(runDir, "manifest.bound.json"); await writeFile(output, JSON.stringify(bound, null, 2) + "\n", { flag: "wx" });

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, assertOwnedImportReadiness, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct } from "./h3-veda-actions.mjs";
 import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -14,6 +14,24 @@ function m(root, backend = "mlx") {
   return { sourceFreeze: { sceneworks: { root: ROOT, head: H }, inference: { head: H }, inferencePin: H }, runners: { [backend]: { apiUrl: "http://127.0.0.1:13579", guardian: { port: 13579, dataDir: path.join(root, "data"), configDir: path.join(root, "config") } } } };
 }
 const options = (root, backend = "mlx") => ({ backend, runnerName: backend === "mlx" ? "nax-macos-2" : "cuda-windows-2", expectedRunner: backend === "mlx" ? "nax-macos-2" : "cuda-windows-2", sceneWorksSha: H, inferenceSha: H, manifest: m(root, backend), runDir: root, cacheRoot: path.join(root, "cache") });
+
+test("owned import begins only from source-frozen readiness with product IDs as the sole gap", () => {
+  const descriptor = { path: "/host-owned/product", bytes: 12, sha256: "b".repeat(64) };
+  const runner = (physicalGpuId) => ({ physicalGpuId, apiBinary: descriptor, workerBinary: { ...descriptor }, attestation: { path: "/host-owned/attestation.json", bytes: 42, sha256: "c".repeat(64) } });
+  const ready = { sourceFreeze: { stage: "permanent-inference-main-pin", resourceContract: { mlx: { physicalGpuId: "Mac-physical" }, candle_cuda: { physicalGpuId: "GPU-physical" } } },
+    runners: { mlx: runner("Mac-physical"), candle_cuda: runner("GPU-physical") },
+    preparation: { campaignReady: false, unresolved: ["normal owned corpus imports/readbacks required"], missingBindings: { permanentSourceFreeze: false, binaries: [], counterpartInventory: null, modelPayloadVerification: false, cacheSelection: false, activeDeviceSelection: false, productImports: true, productProofSetup: [], unknownArtifactHashes: [] } } };
+  assertOwnedImportReadiness(ready);
+  for (const change of [
+    (v) => v.sourceFreeze.stage = "preparation-unbound",
+    (v) => v.preparation.missingBindings.productImports = false,
+    (v) => v.preparation.missingBindings.modelPayloadVerification = true,
+    (v) => v.preparation.unresolved.push("counterpart cache unknown"),
+    (v) => v.runners.candle_cuda.apiBinary = null,
+    (v) => v.runners.candle_cuda.workerBinary.sha256 = "d".repeat(64),
+    (v) => v.sourceFreeze.resourceContract.candle_cuda.physicalGpuId = "other GPU",
+  ]) { const candidate = structuredClone(ready); change(candidate); assert.throws(() => assertOwnedImportReadiness(candidate)); }
+});
 
 test("Actions host/source/run roots refuse unknown or mismatched physical identity", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "s9-actions-")); t.after(() => rm(root, { recursive: true, force: true }));
@@ -244,6 +262,8 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
 test("workflow binds explicit runner, source, owned import and guardian, with no blanket artifact upload", async () => {
   const workflow = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8");
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
+  assert.deepEqual([...workflow.slice(workflow.indexOf("    inputs:"), workflow.indexOf("\npermissions:")).matchAll(/^      ([a-z_]+):$/gm)].map((m) => m[1]),
+    ["backend", "mode", "review_case_ids", "sceneworks_sha", "inference_main_sha", "expected_runner", "manifest_path", "corpus_root", "offline_cache_root", "run_dir"]);
   assert.match(workflow, /options: \[inventory, stage, build, prepare, resume, review\]/);
   assert.match(workflow, /review_case_ids:/);
   assert.match(workflow, /h3-veda-actions\.mjs review/);
