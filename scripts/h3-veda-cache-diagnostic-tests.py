@@ -5,7 +5,38 @@ from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('diagnostic',Path(__file__).with_name('h3-veda-cache-diagnostic.py'));d=importlib.util.module_from_spec(spec);spec.loader.exec_module(d)
 F=Path(__file__).parent/'fixtures/h3-cache-failure-299'
 class Tests(unittest.TestCase):
+ def xattr_probe(self,root,names='com.example.binary\n',hex_value='00 FF 01 80\n',rc=0):
+  calls=[]
+  def probe(name,argv):
+   calls.append((name,argv));out=root/(name+'.txt');out.write_text(names if name=='macro-xattr-list' else hex_value)
+   return {'rc':rc,'stdout':d.b.binding(out)}
+  return probe,calls
+ def test_portable_collector_needs_no_os_xattr_api_and_hashes_binary_bytes(self):
+  from types import SimpleNamespace
+  import hashlib
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp).resolve();file=root/'owned';file.write_bytes(b'CPU fixture');probe,calls=self.xattr_probe(root)
+   with patch.object(d,'os',SimpleNamespace()):
+    stat=d.dylib_stat(file);attrs=d.collect_xattrs(file,probe)
+   self.assertTrue(stat['device']);self.assertEqual(attrs['attributes']['com.example.binary']['sha256'],hashlib.sha256(bytes([0,255,1,128])).hexdigest());self.assertEqual(calls[0][1],['/usr/bin/xattr',str(file)]);self.assertEqual(calls[1][1],['/usr/bin/xattr','-p','-x','com.example.binary',str(file)])
+ def test_xattr_empty_census_is_explicit_and_not_an_omitted_collection(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp).resolve();probe,calls=self.xattr_probe(root,names='');r=d.collect_xattrs(root/'owned',probe);self.assertEqual(r['attributes'],{});self.assertEqual(len(calls),1);self.assertEqual(r['mechanism'],'supervised_/usr/bin/xattr_hex')
+ def test_xattr_cli_failure_or_invalid_hex_never_becomes_empty_metadata(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp).resolve();probe,calls=self.xattr_probe(root,rc=1)
+   with self.assertRaisesRegex(RuntimeError,'enumeration failed'):d.collect_xattrs(root/'owned',probe)
+   probe,calls=self.xattr_probe(root,hex_value='NOT HEX')
+   with self.assertRaisesRegex(RuntimeError,'invalid xattr'):d.collect_xattrs(root/'owned',probe)
+ def test_xattr_duplicate_or_option_name_refuses_before_value_command(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp).resolve()
+   for names in ['com.example\ncom.example\n','-w\n']:
+    probe,calls=self.xattr_probe(root,names=names)
+    with self.assertRaisesRegex(RuntimeError,'name census'):d.collect_xattrs(root/'owned',probe)
+    self.assertEqual(len(calls),1)
  def test_actual_full_cargo_json_and_failure_recipe(self):
+
   t,c,a=d.frozen(F);self.assertEqual(c['rc'],101);self.assertEqual(a['target']['kind'],['proc-macro']);self.assertEqual(c['argv'][1:],['build','--release','--locked','--message-format=json-render-diagnostics','-p','sceneworks-rust-api']);self.assertNotIn('tools',c);self.assertTrue(t['prepared'])
  def test_tampered_original_logs_cannot_be_diagnostic_authority(self):
   import shutil

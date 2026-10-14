@@ -62,6 +62,28 @@ def vendor(fixture,root):
     (source/'Cargo.lock').write_text(lock);(source/'.cargo').mkdir();(source/'.cargo/config.toml').write_text('[source.crates-io]\nreplace-with="owned-vendor"\n[source.owned-vendor]\ndirectory='+json.dumps(str(v))+'\n[net]\noffline=true\n')
     return source,receipts
 
+def dylib_stat(path):
+    s=Path(path).stat()
+    return {'device':s.st_dev,'mode':s.st_mode,'mtimeNs':s.st_mtime_ns}
+
+def collect_xattrs(path,probe):
+    """Darwin exposes xattrs through its source-bound CLI, not Python's os API."""
+    r=probe('macro-xattr-list',['/usr/bin/xattr',str(path)])
+    b.require(r.get('rc')==0,'actual xattr name enumeration failed')
+    out=Path(r['stdout']['path']);b.require(b.binding(out)==r['stdout'] and r['stdout']['bytes']<=16384,'xattr enumeration bytes changed/oversized')
+    names=out.read_text(encoding='utf8').splitlines()
+    b.require(len(names)<=64 and len(set(names))==len(names) and all(n and not n.startswith('-') and all(32<=ord(c)<127 for c in n) for n in names),'unsafe/duplicate/oversized xattr name census')
+    result={}
+    for i,name in enumerate(names):
+        value=probe('macro-xattr-value-'+str(i).zfill(3),['/usr/bin/xattr','-p','-x',name,str(path)])
+        b.require(value.get('rc')==0,'actual xattr binary read failed')
+        output=Path(value['stdout']['path']);b.require(b.binding(output)==value['stdout'] and value['stdout']['bytes']<=3*1024*1024,'xattr hex readback changed/oversized')
+        text=''.join(output.read_text(encoding='ascii').split())
+        b.require(len(text)%2==0 and all(c in '0123456789abcdefABCDEF' for c in text),'invalid xattr CLI hex bytes')
+        raw=bytes.fromhex(text);b.require(len(raw)<=1024*1024,'xattr binary bytes oversized')
+        result[name]={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest(),'sourceReceipt':value['stdout']}
+    return {'attributes':result,'enumerationReceipt':r['stdout'],'mechanism':'supervised_/usr/bin/xattr_hex'}
+
 def runtime_libraries(bins):
     files=sorted((bins.parent/'lib').glob('librustc_driver-*.dylib'));b.require(0<len(files)<=16,'owned rustc-driver library census missing/oversized')
     for p in files:b.no_links(p)
@@ -79,9 +101,10 @@ def main(plan,parent):
         bins=OLD/'tools/rustup/toolchains/1.97.1-aarch64-apple-darwin/bin';tools={}
         for n in ['rustc','cargo']:
             b.no_links(bins/n);tools[n]=b.binding(bins/n)
+        b.no_links('/usr/bin/xattr');tools['xattr']=b.binding('/usr/bin/xattr')
         env={k:v for k,v in os.environ.items() if k not in ['GH_TOKEN','GITHUB_TOKEN','INFERENCE_READ_TOKEN','HF_TOKEN','HUGGING_FACE_HUB_TOKEN','PMETAL_METALLIB_PATH','PMETAL_MLX_PREBUILT_DIR']}
         env.update(RUSTUP_HOME=str(OLD/'tools/rustup'),CARGO_HOME=str(root/'tools/cargo'),RUSTUP_TOOLCHAIN='1.97.1',CARGO_BUILD_JOBS='2',RUSTC=tools['rustc']['path'],PATH=str(bins)+os.pathsep+env.get('PATH',''))
-        Path(env['CARGO_HOME']).mkdir(parents=True);result.update(tools=tools,inheritedEnvironment=b.environment_binding(os.environ),runtimeLibraries=runtime_libraries(bins),volumeDevices={'external':root.stat().st_dev,'internal':internal.stat().st_dev,'failedRoot':OLD.stat().st_dev},environment=b.environment_binding(env),commandResolution={n:shutil.which(n,path=env['PATH']) for n in ['rustc','cargo','cc','clang','ld']},configurationBindings=[b.binding(p) for p in [OLD/'download-source/.cargo/config',OLD/'download-source/.cargo/config.toml',OLD/'tools/cargo/config',OLD/'tools/cargo/config.toml',Path.home()/'.cargo/config',Path.home()/'.cargo/config.toml'] if p.is_file() and not p.is_symlink()],dylibStat={'device':DYLIB.stat().st_dev,'mode':DYLIB.stat().st_mode,'mtimeNs':DYLIB.stat().st_mtime_ns,'xattrs':{n:hashlib.sha256(os.getxattr(DYLIB,n)).hexdigest() for n in os.listxattr(DYLIB)}},controlledDifferences=['private CARGO_HOME and target paths','tiny six-package locked graph, not whole API graph','historical flags/config not recorded; current allowlisted values captured'])
+        Path(env['CARGO_HOME']).mkdir(parents=True);result.update(tools=tools,inheritedEnvironment=b.environment_binding(os.environ),runtimeLibraries=runtime_libraries(bins),volumeDevices={'external':root.stat().st_dev,'internal':internal.stat().st_dev,'failedRoot':OLD.stat().st_dev},environment=b.environment_binding(env),commandResolution={n:shutil.which(n,path=env['PATH']) for n in ['rustc','cargo','cc','clang','ld']},configurationBindings=[b.binding(p) for p in [OLD/'download-source/.cargo/config',OLD/'download-source/.cargo/config.toml',OLD/'tools/cargo/config',OLD/'tools/cargo/config.toml',Path.home()/'.cargo/config',Path.home()/'.cargo/config.toml'] if p.is_file() and not p.is_symlink()],dylibStat=dylib_stat(DYLIB),controlledDifferences=['private CARGO_HOME and target paths','tiny six-package locked graph, not whole API graph','historical flags/config not recorded; current allowlisted values captured'])
         b.atom(out,result)
         b.require(not env.get('RUSTC_WRAPPER') and not env.get('RUSTC_WORKSPACE_WRAPPER'),'inherited unbound compiler wrapper; metadata retained, no arbitrary execution')
         def probe(name,argv,cwd=root,seconds=60,probe_env=None):
@@ -92,6 +115,8 @@ def main(plan,parent):
             r=json.loads((target/'receipt.json').read_text());result['steps'].append({'name':name,'receipt':b.binding(target/'receipt.json'),'rc':r.get('rc'),'closure':r.get('closure'),'error':r.get('error')});b.atom(out,result)
             b.require(r.get('closure',{}).get('reaped') and r['closure'].get('descendantsDrained'),'probe closure missing; stop diagnostic')
             b.require(r.get('error') is None,'probe timeout/controller/launch failure; diagnostic incomplete')
+            return r
+        result['dylibStat']['xattrs']=collect_xattrs(DYLIB,probe);b.atom(out,result)
         for name,argv in [('rustc-version',[tools['rustc']['path'],'-Vv']),('cargo-version',[tools['cargo']['path'],'-Vv']),('rustc-sysroot',[tools['rustc']['path'],'--print','sysroot']),('rustc-linkage',['/usr/bin/otool','-L',tools['rustc']['path']]),('cargo-linkage',['/usr/bin/otool','-L',tools['cargo']['path']]),('macro-file',['/usr/bin/file',str(DYLIB)]),('macro-linkage',['/usr/bin/otool','-L',str(DYLIB)]),('macro-load-commands',['/usr/bin/otool','-l',str(DYLIB)]),('macro-signature',['/usr/bin/codesign','-dv','--verbose=4',str(DYLIB)]),('source-head',['/usr/bin/git','-C',str(OLD/'download-source'),'rev-parse','HEAD']),('disk-state',['/bin/df','-h',str(OLD),str(internal)])]:
             probe(name,argv)
             if name in ['rustc-version','cargo-version','source-head']:

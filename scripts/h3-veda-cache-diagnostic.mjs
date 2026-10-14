@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {assertOwnedCpuRun,assertPrivateCpuRoot} from './h3-veda-cache-prepare.mjs';
 import {bootstrap,noSymlinkAncestors} from './h3-veda-owned-python.mjs';
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+export const FAILED_DIAGNOSTIC_ROOT='/Volumes/Models/epic-25140-cache-diagnostic-69fae2f10';
 export const PRIOR={head:'299c99e8dbeb5ad37a9fa8ad3e7ba51e79f67328',runId:38534168074,jobId:115752914601,runDir:'/Volumes/Models/epic-25140-owned-cache-299c99e8d'};
 const require=(v,m)=>{if(!v)throw Error('H3 diagnostic refusal: '+m);};
 export function priorAuthority(run,job){
@@ -15,7 +16,7 @@ export function priorAuthority(run,job){
  return {run,job};
 }
 export function diagnosticRoots(runDir,internal){
- assertPrivateCpuRoot(runDir,['/Volumes/Models/huggingface',PRIOR.runDir]);
+ assertPrivateCpuRoot(runDir,['/Volumes/Models/huggingface',PRIOR.runDir,FAILED_DIAGNOSTIC_ROOT]);
  require(path.isAbsolute(internal)&&!internal.startsWith('/Volumes/')&&internal!==ROOT&&!internal.startsWith(ROOT+path.sep),'actual internal RUNNER_TEMP root required');
  noSymlinkAncestors(internal);return {runDir,internal};
 }

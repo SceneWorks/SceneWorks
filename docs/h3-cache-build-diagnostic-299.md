@@ -22,7 +22,11 @@ with durable context written before launch, bounded log receipts and reaped,
 drained closure. Metadata probes are bounded to 60 seconds; each tiny build to
 600 seconds; the diagnostic has an original 1800-second deadline. Timeout,
 controller loss, launch error or uncertain closure produces a refusal and a
-nonzero controller exit. A compiler's ordinary nonzero status is retained as
+nonzero controller exit. Darwin xattrs are enumerated and read losslessly through supervised `/usr/bin/xattr`
+CLI calls, with exact binary SHA256 values and immutable stdout receipts; missing
+CLI capability/read failure refuses rather than omitting hashes. Python `os` xattr
+APIs are not required. The failed diagnostic69fa root is also excluded from fresh
+output roots. A compiler's ordinary nonzero status is retained as
 an observed diagnostic result, never a successful preparation.
 
 The actual old owned rustc/cargo paths, byte hashes, `-Vv`, sysroot, command
