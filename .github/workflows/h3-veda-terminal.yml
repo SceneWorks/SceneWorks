@@ -79,6 +79,10 @@ jobs:
           ref: ${{ inputs.sceneworks_sha }}
           path: sceneworks
           fetch-depth: 1
+      - name: Verify configured cross-repository read credential
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: gh api repos/SceneWorks/inference --jq .full_name
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -202,6 +206,10 @@ jobs:
           ref: ${{ inputs.sceneworks_sha }}
           path: sceneworks
           fetch-depth: 1
+      - name: Verify configured cross-repository read credential
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: gh api repos/SceneWorks/inference --jq .full_name
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
