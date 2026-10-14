@@ -152,6 +152,14 @@ pub enum ProjectStoreError {
     /// read/created but not modified in place (e.g. a macOS inherited ACL or an
     /// endpoint-security/backup agent that blocks in-place file rewrites).
     StorageNotWritable(String),
+    /// A request value that failed validation, attributed to the named input field so a client can
+    /// render the error beside that field instead of parsing `detail` (epic 2123 E6). `code` is a
+    /// stable machine-readable reason (e.g. `subject_mask_too_large`).
+    FieldInvalid {
+        field: &'static str,
+        code: &'static str,
+        detail: String,
+    },
 }
 
 impl std::fmt::Display for ProjectStoreError {
@@ -164,6 +172,7 @@ impl std::fmt::Display for ProjectStoreError {
             Self::NotFound(detail) => write!(formatter, "{detail}"),
             Self::TimelineConflict { code, context } => write!(formatter, "{code}: {context}"),
             Self::StorageNotWritable(detail) => write!(formatter, "{detail}"),
+            Self::FieldInvalid { detail, .. } => write!(formatter, "{detail}"),
         }
     }
 }
@@ -2052,6 +2061,73 @@ impl ProjectStore {
     ) -> ProjectStoreResult<Option<DatasetFaceRecords>> {
         let (project_path, _project_guard) = self.lock_project(project_id)?;
         TrainingDatasetStore::new(project_path).read_dataset_faces(project_id, dataset_id)
+    }
+
+    /// The images a `dataset_subject_mask` job segments (sc-2126). Locked wrapper over
+    /// [`TrainingDatasetStore::subject_mask_targets`] (it may backfill legacy content hashes).
+    pub fn training_dataset_subject_mask_targets(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_ids: Option<&[String]>,
+    ) -> ProjectStoreResult<(
+        Vec<crate::training_subject_masks::SubjectMaskTarget>,
+        PathBuf,
+        String,
+    )> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        let targets = TrainingDatasetStore::new(project_path.clone())
+            .subject_mask_targets(project_id, dataset_id, item_ids)?;
+        let root = crate::training_store::dataset_root(&project_path, dataset_id);
+        let project_stem = project_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        Ok((targets, root, project_stem))
+    }
+
+    /// Persist generated or uploaded subject masks (sc-2126). Locked wrapper over
+    /// [`TrainingDatasetStore::write_subject_masks`].
+    pub fn write_training_dataset_subject_masks(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        writes: Vec<crate::training_subject_masks::SubjectMaskWrite>,
+        source: crate::training_subject_masks::SubjectMaskSource,
+    ) -> ProjectStoreResult<crate::training_subject_masks::SubjectMaskReport> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path)
+            .write_subject_masks(project_id, dataset_id, writes, source)
+    }
+
+    /// Install a user-uploaded replacement subject mask (sc-2126). Locked wrapper over
+    /// [`TrainingDatasetStore::upload_subject_mask`].
+    pub fn upload_training_dataset_subject_mask(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+        item_id: &str,
+        source_path: &Path,
+    ) -> ProjectStoreResult<crate::training_subject_masks::SubjectMaskReport> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).upload_subject_mask(
+            project_id,
+            dataset_id,
+            item_id,
+            source_path,
+        )
+    }
+
+    /// A dataset's subject-mask coverage (sc-2126). Locked wrapper over
+    /// [`TrainingDatasetStore::subject_mask_report`].
+    pub fn training_dataset_subject_mask_report(
+        &self,
+        project_id: &str,
+        dataset_id: &str,
+    ) -> ProjectStoreResult<crate::training_subject_masks::SubjectMaskReport> {
+        let (project_path, _project_guard) = self.lock_project(project_id)?;
+        TrainingDatasetStore::new(project_path).subject_mask_report(project_id, dataset_id)
     }
 
     pub fn batch_rename_training_dataset_items(

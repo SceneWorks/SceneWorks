@@ -357,10 +357,11 @@ pub(crate) fn qwen_mlx_eligible(payload: &Map<String, Value>) -> bool {
 /// to route correctly when an API client, a saved recipe or a shared workflow supplies one. See
 /// [`qwen_image_2_1_reference_ids`] for the order both backends and the worker read.
 ///
-/// `loras` is deliberately NOT inspected. The engine refuses adapters with a typed `Unsupported`,
-/// which surfaces as an actionable job failure; refusing here instead would leave the job
-/// unclaimable by anything on a Mac-only install and it would sit queued forever — the Anima defect
-/// of sc-10523.
+/// `loras` is deliberately NOT inspected. The 2.1 provider applies user LoRA/LoKr on both backends
+/// (epic 24107: MLX sc-24156, Candle sc-24157), and whatever it still cannot apply (an unmatched
+/// key, LoHa on a packed tier) is the engine's typed `Unsupported`, which surfaces as an actionable
+/// job failure; refusing here instead would leave the job unclaimable by anything on a Mac-only
+/// install and it would sit queued forever — the Anima defect of sc-10523.
 pub(crate) fn qwen_image_2_1_mlx_eligible(payload: &Map<String, Value>) -> bool {
     // sc-24113 (#2916) landed a version of this predicate that refused `maskAssetId` outright. That
     // is over-refusal against the S3 contract: 2.1 has no mask TENSOR, but a mask IMAGE is an

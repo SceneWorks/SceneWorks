@@ -78,7 +78,10 @@ the matching platform — tell us in the PR what you were able to test.
 ## Running the checks locally
 
 CI runs the same commands, so running them before you push is the fastest way to
-a green PR. From the repo root:
+a green PR. **`npm run preflight -- --base <PR target>`** picks every check below that
+your diff can trip, runs them all, and stamps the commit on a pass; the pre-push hook
+(`npm run hooks:install`) refuses an unstamped push to a branch with an open PR. The
+individual commands, from the repo root:
 
 **Rust** (formatting, lints, tests, build — this is the full gate CI runs):
 
@@ -114,7 +117,8 @@ npm run rust:check:neither
 On Linux/Windows that's a native clippy — the host already *is* the neither build. On
 macOS it runs the same clippy inside a Linux Docker container, because a native macOS
 clippy always compiles `base.rs` and can never see the trap. It's also wired into the
-optional pre-push hook (installed by `npm run hooks:install`; skip a run with
+optional pre-push hook on Linux/Windows hosts (on macOS, CI's parity lane owns it — the dev
+Mac does not run the container) (installed by `npm run hooks:install`; skip a run with
 `SKIP_NEITHER_CHECK=1` or `git push --no-verify`).
 
 > **The base.rs / candle cfg rule.** Any `sceneworks-worker` item — a `use`, struct, or

@@ -8520,9 +8520,9 @@ fn write_imported_lora_advertisement(object: &mut JsonObject, serves_loras: bool
     }
 }
 
-/// A manifest that DECLARES `loraCompatibility.families: []` (e.g. `qwen_image_2_1`, whose engine
-/// refuses adapters) is refused by `validate_lora_specs_for_model` with "has no declared LoRA
-/// families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
+/// A manifest that DECLARES `loraCompatibility.families: []` (as `qwen_image_2_1` did until
+/// sc-24156 gave it the `qwen-image-2-1` family) is refused by `validate_lora_specs_for_model`
+/// with "has no declared LoRA families" — but the web's `loraMatchesModel` reads an empty family set as "cannot gate" and stays
 /// permissive, so it offered every LoRA and auto-applied the Krea `image_edit` LoRA in edit mode.
 /// Stamp the same `supported: false` the imported withdrawal writes, so the web fails closed on
 /// exactly the models the API refuses. An explicit `supported` already on the entry is kept.
@@ -13680,6 +13680,63 @@ mod variant_delete_tests {
         assert!(repo.is_dir(), "shared repo cache survives a scoped delete");
     }
 
+    /// sc-25213 (finding 6): the two de-distill training adapter entries share ONE repo snapshot
+    /// (`ostris/zimage_turbo_training_adapter@654cd1bf`, one file each), so deleting one must take
+    /// only its own file — the sc-19078 sibling scoping applies because each entry declares its file.
+    /// Run against the SHIPPED catalog entries (their real `files` / `paths.model`). Mutation: give
+    /// both entries the same `files` or drop one entry's `files` ⇒ the sibling's blob is removed ⇒ red.
+    #[tokio::test]
+    async fn deleting_one_training_adapter_keeps_the_other_versions_file() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let catalog = manifest["models"].as_array().unwrap().clone();
+        let entry = |id: &str| catalog.iter().find(|m| m["id"] == id).unwrap().clone();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let repo =
+            huggingface_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter").unwrap();
+        seed(
+            &repo,
+            "zimage_turbo_training_adapter_v1.safetensors",
+            "v1blob",
+            64,
+        );
+        seed(
+            &repo,
+            "zimage_turbo_training_adapter_v2.safetensors",
+            "v2blob",
+            128,
+        );
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+
+        let v1 = entry("zimage_turbo_training_adapter_v1");
+        remove_whole_model_artifacts(
+            &catalog,
+            "zimage_turbo_training_adapter_v1",
+            &v1,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!repo.join("blobs/v1blob").exists(), "v1 removed");
+        assert!(!repo
+            .join("snapshots/rev/zimage_turbo_training_adapter_v1.safetensors")
+            .exists());
+        assert!(repo.join("blobs/v2blob").exists(), "v2 blob retained");
+        assert!(std::fs::read(
+            repo.join("snapshots/rev/zimage_turbo_training_adapter_v2.safetensors")
+        )
+        .is_ok());
+    }
+
     /// The exclusive-repo case is UNCHANGED: with no sibling claiming the repo, a whole-model delete
     /// still removes the repo cache wholesale, including files no `files` scope names.
     ///
@@ -14140,20 +14197,21 @@ mod imported_lora_advertisement_tests {
         );
     }
 
-    /// A manifest-declared `families: []` (Qwen Image 2.1) is refused by the LoRA validator, so the
-    /// catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers every
-    /// LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
+    /// A manifest-declared `families: []` (any model that ships without LoRA support; historically
+    /// Qwen Image 2.1, before sc-24156 gave it its own family) is refused by the LoRA validator, so
+    /// the catalog must say `supported: false` — otherwise the web's "cannot gate" branch offers
+    /// every LoRA and auto-applies the Krea `image_edit` LoRA in edit mode. Non-empty and absent
     /// advertisements, and an explicit `supported`, are left alone.
     #[test]
     fn a_declared_empty_lora_advertisement_is_marked_unsupported() {
-        let mut qwen =
-            json!({ "id": "qwen_image_2_1", "loraCompatibility": { "families": [], "types": [] } })
+        let mut no_lora =
+            json!({ "id": "no_lora_model", "loraCompatibility": { "families": [], "types": [] } })
                 .as_object()
                 .expect("object")
                 .clone();
-        mark_empty_lora_advertisement_unsupported(&mut qwen);
+        mark_empty_lora_advertisement_unsupported(&mut no_lora);
         assert_eq!(
-            qwen["loraCompatibility"],
+            no_lora["loraCompatibility"],
             json!({ "families": [], "types": [], "supported": false })
         );
 

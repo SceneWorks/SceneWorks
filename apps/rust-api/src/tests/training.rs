@@ -113,6 +113,147 @@ fn ltx_workflow_options(name: &str) -> (Option<Value>, Option<Value>) {
     }
 }
 
+/// sc-24826 review, updated for sc-24827: the targets endpoint advertises adapter-noise support
+/// per target. Every LoRA/LoKr trainer declares weight AND gradient noise on both backends, so both
+/// platform catalogs advertise both flags on every target except the Krea control branch (a
+/// full-weight ControlNet branch whose trainer declares neither).
+#[test]
+fn platform_effective_training_catalog_advertises_adapter_noise_support() {
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for target in &registry.targets {
+            let adapter = target.id != "krea_2_control";
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(target),
+                adapter,
+                "{} weight noise (candle={candle})",
+                target.id
+            );
+            assert_eq!(
+                sceneworks_core::training::target_supports_gradient_noise(target),
+                adapter,
+                "{} gradient noise (candle={candle})",
+                target.id
+            );
+        }
+    }
+}
+
+/// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
+/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
+/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_depth_anchoring_support() {
+    let advertising = |candle: bool| -> Vec<String> {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| {
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(target)
+            })
+            .map(|target| target.id.clone())
+            .collect()
+    };
+    let mlx = advertising(false);
+    assert_eq!(
+        mlx,
+        advertising(true),
+        "MLX and Candle advertise the same targets"
+    );
+    let all: Vec<String> = crate::training::effective_training_targets_for_candle(false)
+        .targets
+        .iter()
+        .map(|target| target.id.clone())
+        .filter(|id| id != "krea_2_control")
+        .collect();
+    assert_eq!(mlx, all);
+    assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
+    assert!(mlx
+        .iter()
+        .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
+}
+
+/// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
+/// exactly the depth-anchoring targets (the same decoder arms). Mutation: drop a body flag from one
+/// target ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_body_loss_support() {
+    use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+    let ids = |candle: bool, keep: &dyn Fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| keep(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = ids(false, &|t| {
+        sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(t)
+    });
+    for loss in BodyLoss::ALL {
+        let mlx = ids(false, &|t| target_supports(t, loss));
+        assert_eq!(mlx, ids(true, &|t| target_supports(t, loss)), "{loss:?}");
+        assert_eq!(mlx, depth, "{loss:?}");
+    }
+}
+
+/// sc-24831: the targets endpoint advertises the identity and face-landmark losses identically on
+/// both platforms (static flags, sc-24830) — on exactly the targets advertising depth anchoring
+/// (same builder arms + x0 decoder). Mutation: stop deriving the flags from depth ⇒ red.
+#[test]
+fn platform_effective_training_catalog_projects_face_loss_support() {
+    use sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring;
+    use sceneworks_core::training::face_losses::{
+        target_supports_face_landmark_loss, target_supports_identity_loss,
+    };
+    let advertising = |candle: bool, f: fn(&sceneworks_core::training::TrainingTarget) -> bool| {
+        crate::training::effective_training_targets_for_candle(candle)
+            .targets
+            .iter()
+            .filter(|target| f(target))
+            .map(|target| target.id.clone())
+            .collect::<Vec<_>>()
+    };
+    let depth = advertising(false, target_supports_depth_anchoring);
+    assert!(depth.iter().any(|id| id == "z_image_turbo_lora"));
+    for candle in [false, true] {
+        assert_eq!(advertising(candle, target_supports_identity_loss), depth);
+        assert_eq!(
+            advertising(candle, target_supports_face_landmark_loss),
+            depth
+        );
+    }
+}
+
+/// sc-24833: the targets endpoint advertises the latent-perceptual losses identically on both
+/// platforms (static per-target flags, sc-24830) — exactly `VAE_ANCHOR_TARGETS` /
+/// `LATENT_LPIPS_TARGETS`. Mutation: drop a target from either table ⇒ red.
+#[test]
+fn platform_effective_training_catalog_advertises_latent_perceptual_support() {
+    use sceneworks_core::training::latent_perceptual::{
+        target_supports, LATENT_LOSSES, LATENT_LPIPS_TARGETS, VAE_ANCHOR_TARGETS,
+    };
+    for (spec, table) in [
+        (LATENT_LOSSES[0], &VAE_ANCHOR_TARGETS[..]),
+        (LATENT_LOSSES[1], &LATENT_LPIPS_TARGETS[..]),
+    ] {
+        let mut expected: Vec<String> = table.iter().map(|s| s.to_string()).collect();
+        expected.sort();
+        for candle in [false, true] {
+            let mut ids: Vec<String> =
+                crate::training::effective_training_targets_for_candle(candle)
+                    .targets
+                    .iter()
+                    .filter(|target| target_supports(&spec, target))
+                    .map(|target| target.id.clone())
+                    .collect();
+            ids.sort();
+            assert_eq!(ids, expected, "{} (candle {candle})", spec.support_limit);
+        }
+    }
+}
+
 #[test]
 fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_limits() {
     let mlx = crate::training::effective_training_targets_for_candle(false);
@@ -372,6 +513,374 @@ async fn parquet_import_job_queues_for_empty_dataset_and_finalizes_staged_items(
         .join("images")
         .join("pq_abc.png")
         .exists());
+}
+
+// sc-24829: caption modes. The API validates the mode, carries it on the job payload, refuses a
+// trigger-only job whose images lack trigger words, sends a trigger-only job without a model
+// source (it loads no captioner), and persists the mode a caption sidecar reports.
+#[tokio::test]
+async fn caption_job_modes_validate_and_the_stored_caption_records_the_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Caption Modes" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let mut asset_ids = Vec::new();
+    for (name, bytes) in [
+        ("A.png", b"png-a".as_slice()),
+        ("B.png", b"png-b".as_slice()),
+    ] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            bytes,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Mira",
+            "items": [
+                { "assetId": asset_ids[0], "caption": { "text": "", "triggerWords": ["miraStyle"] } },
+                { "assetId": asset_ids[1], "caption": { "text": "", "triggerWords": [] } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let first_id = dataset["items"][0]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+    let jobs_url =
+        format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-jobs");
+
+    // An unknown mode is a field error, not a silent `default`.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "faceOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode must be one of default, subjectOnly, or triggerOnly."
+    );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "mode");
+
+    // subjectOnly owns its prompt; a caller prompt alongside it is refused, not ignored.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "subjectOnly", "options": { "captionPrompt": "Describe the room." } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode subjectOnly uses its own prompt; leave captionPrompt empty."
+    );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "mode");
+
+    // An absent mode is `default`, and a default job carries the captioner's model source.
+    let (status, default_job) = request(app.clone(), "POST", &jobs_url, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(default_job["payload"]["mode"], "default");
+    assert!(
+        default_job["payload"].get("modelManifestEntry").is_some()
+            || default_job["payload"].get("modelManifestEntries").is_some(),
+        "{}",
+        default_job["payload"]
+    );
+
+    let (status, subject_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "subjectOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(subject_job["payload"]["mode"], "subjectOnly");
+
+    // triggerOnly over an image with no trigger words would write an empty caption: refused.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        error["detail"],
+        "Caption mode triggerOnly needs trigger words on every image; 1 image(s) have none."
+    );
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "triggerWords");
+
+    // Scoped to the image that has trigger words it queues — with no model source, since the
+    // worker loads no captioner for it.
+    let (status, trigger_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "itemIds": [first_id] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(trigger_job["payload"]["mode"], "triggerOnly");
+    assert!(trigger_job["payload"].get("modelManifestEntry").is_none());
+    assert!(trigger_job["payload"].get("modelManifestEntries").is_none());
+
+    // The worker's caption-sidecars write stores the mode on the caption.
+    let (status, sidecars) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/caption-sidecars"),
+        json!({ "items": [{
+            "itemId": first_id,
+            "caption": {
+                "text": "miraStyle, a red jacket",
+                "source": "auto",
+                "triggerWords": ["miraStyle"],
+                "mode": "subjectOnly"
+            }
+        }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        sidecars["dataset"]["items"][0]["caption"]["mode"],
+        "subjectOnly"
+    );
+    let (status, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["items"][0]["caption"]["mode"], "subjectOnly");
+    assert_eq!(detail["items"][0]["caption"]["source"], "auto");
+    // A manual caption carries no mode.
+    assert!(detail["items"][1]["caption"].get("mode").is_none());
+}
+
+// sc-24829: the caption dialog's trigger words ride the caption-job request. They fill every
+// captioned item that has none of its own — in every mode — so a trigger-only job over a dataset
+// whose items carry no trigger words queues with exactly those words, and default / subject-only
+// jobs prepend them the same way. Limits mirror the dialog (E6). An unknown `caption.mode` on the
+// dataset write paths is a field error, never stored.
+#[tokio::test]
+async fn caption_job_request_trigger_words_fill_items_and_caption_mode_is_validated_on_writes() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Caption Trigger Words" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let mut asset_ids = Vec::new();
+    for (name, bytes) in [
+        ("A.png", b"png-a".as_slice()),
+        ("B.png", b"png-b".as_slice()),
+    ] {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            name,
+            "image/png",
+            bytes,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        asset_ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    let datasets_url = format!("/api/v1/projects/{project_id}/training/datasets");
+
+    // Dataset create with an unknown caption mode is refused (materialize_item).
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &datasets_url,
+        json!({
+            "name": "Bad Mode",
+            "items": [{ "assetId": asset_ids[0], "caption": { "text": "x", "mode": "faceOnly" } }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "mode", "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("caption.mode \"faceOnly\"")),
+        "{error}"
+    );
+
+    // Item 0 has no trigger words; item 1 has its own.
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_url,
+        json!({
+            "name": "Mira",
+            "items": [
+                { "assetId": asset_ids[0], "caption": { "text": "", "triggerWords": [] } },
+                { "assetId": asset_ids[1], "caption": { "text": "", "triggerWords": ["ownWord"] } }
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let first_id = dataset["items"][0]["id"]
+        .as_str()
+        .expect("item id")
+        .to_owned();
+    let jobs_url = format!("{datasets_url}/{dataset_id}/caption-jobs");
+
+    // Without request trigger words a trigger-only job is refused (item 0 has none)...
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // ...with them it queues: item 0 takes the request words (trimmed), item 1 keeps its own.
+    let (status, trigger_job) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": ["miraStyle", " red coat "] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{trigger_job}");
+    let items = &trigger_job["payload"]["items"];
+    assert_eq!(items[0]["triggerWords"], json!(["miraStyle", "red coat"]));
+    assert_eq!(items[1]["triggerWords"], json!(["ownWord"]));
+
+    // Default and subject-only jobs fill the same way (the worker prepends them).
+    for mode in ["default", "subjectOnly"] {
+        let (status, job) = request(
+            app.clone(),
+            "POST",
+            &jobs_url,
+            json!({ "mode": mode, "triggerWords": ["miraStyle"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{mode}: {job}");
+        assert_eq!(
+            job["payload"]["items"][0]["triggerWords"],
+            json!(["miraStyle"]),
+            "{mode}"
+        );
+        assert_eq!(
+            job["payload"]["items"][1]["triggerWords"],
+            json!(["ownWord"]),
+            "{mode}"
+        );
+    }
+
+    // Limits (E6): at most 16 words, none empty, each at most 64 characters.
+    let too_many = (0..17).map(|index| format!("w{index}")).collect::<Vec<_>>();
+    for (body, detail) in [
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": too_many }),
+            "triggerWords: use at most 16 trigger words.",
+        ),
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": ["ok", "   "] }),
+            "triggerWords: trigger words must not be empty.",
+        ),
+        (
+            json!({ "mode": "triggerOnly", "triggerWords": ["a".repeat(65)] }),
+            "triggerWords: each trigger word must be at most 64 characters.",
+        ),
+    ] {
+        let (status, error) = request(app.clone(), "POST", &jobs_url, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(error["detail"], detail);
+        assert_eq!(error["code"], "training_field_error", "{detail}");
+        assert_eq!(error["context"]["field"], "triggerWords", "{detail}");
+    }
+    // The boundary values are accepted.
+    let sixteen = (0..16).map(|index| format!("w{index}")).collect::<Vec<_>>();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": sixteen }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &jobs_url,
+        json!({ "mode": "triggerOnly", "triggerWords": ["a".repeat(64)] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    // An unknown mode on the worker's caption-sidecars route is refused (apply_caption_patches)
+    // and nothing is stored.
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!("{datasets_url}/{dataset_id}/caption-sidecars"),
+        json!({ "items": [{
+            "itemId": first_id,
+            "caption": { "text": "miraStyle", "source": "auto", "triggerWords": ["miraStyle"], "mode": "faceOnly" }
+        }] }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "mode", "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("caption.mode \"faceOnly\"")),
+        "{error}"
+    );
+    let (_, detail) = request(
+        app.clone(),
+        "GET",
+        &format!("{datasets_url}/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert!(detail["items"][0]["caption"].get("mode").is_none());
+    assert_eq!(detail["items"][0]["caption"]["text"], "");
 }
 
 #[tokio::test]
@@ -2066,7 +2575,7 @@ async fn create_training_job_resolves_plan_and_queues_lora_train() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
             error["detail"],
-            "Training preset 'z_image_turbo_lora.character.prodigyopt.balanced' is version 1, but the request pinned version 99."
+            "Training preset 'z_image_turbo_lora.character.prodigyopt.balanced' is version 2, but the request pinned version 99."
         );
 }
 
@@ -2183,6 +2692,577 @@ async fn create_training_job_returns_typed_target_capability_errors_before_alloc
     let (status, jobs) = request(app, "GET", "/api/v1/jobs?status=queued", Value::Null).await;
     assert_eq!(status, StatusCode::OK);
     assert!(jobs.as_array().expect("queued job list").is_empty());
+}
+
+/// sc-24826 (epic 2123 E6): `advanced.weightNoiseSigma` is validated at the API boundary with a
+/// field-level error — negative, above the shared limit, non-numeric, or combined with a full
+/// fine-tune — before any dataset lookup. An in-range value passes validation (and then hits the
+/// missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_weight_noise_with_a_field_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Weight noise boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |sigma: Value, network_type: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["weightNoiseSigma"] = sigma;
+        config["advanced"]["networkType"] = json!(network_type);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Weight noise",
+                "dryRun": true
+            }),
+        )
+    };
+
+    let above = sceneworks_core::training::WEIGHT_NOISE_SIGMA_MAX + 0.001;
+    for (sigma, network_type) in [
+        (json!(-0.01), "lora"),
+        (json!(above), "lora"),
+        (json!("0.0125"), "lora"),
+        (json!(0.0125), "full"),
+    ] {
+        let (status, error) = submit(sigma.clone(), network_type).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{sigma}/{network_type}");
+        assert_eq!(
+            error["code"], "training_field_error",
+            "{sigma}/{network_type}"
+        );
+        assert_eq!(
+            error["context"]["field"], "weightNoiseSigma",
+            "{sigma}/{network_type}"
+        );
+    }
+
+    // In-range values pass validation: since sc-24827 the Z-Image trainer declares weight noise
+    // on both platforms, and the targets endpoint advertises it. (A target without the flag is a
+    // submit-time field error — pinned in the core `adapter_noise_is_gated_on_the_target_flags`.)
+    assert_eq!(
+        target["limits"]["supportsWeightNoise"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises weight-noise support"
+    );
+    for sigma in [
+        json!(0),
+        json!(0.0125),
+        json!(sceneworks_core::training::WEIGHT_NOISE_SIGMA_MAX),
+    ] {
+        let (status, error) = submit(sigma.clone(), "lora").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{sigma}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{sigma}");
+    }
+}
+
+/// sc-25213 (e): the de-distill training adapter round-trips through the API boundary. The
+/// targets endpoint advertises `supportsTrainingAdapter` on Z-Image-Turbo; the presets' `v2-default`
+/// and both picker versions pass validation (then hit the missing-dataset tripwire); an unknown
+/// version or repo is a field error naming the key, before any dataset lookup.
+#[tokio::test]
+async fn create_training_job_validates_the_training_adapter_selection() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training adapter boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    assert_eq!(
+        target["limits"]["supportsTrainingAdapter"].as_bool(),
+        Some(true),
+        "the targets endpoint advertises training-adapter support"
+    );
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |repo: &str, version: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["trainingAdapterRepo"] = json!(repo);
+        config["advanced"]["trainingAdapterVersion"] = json!(version);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Training adapter",
+                "dryRun": true
+            }),
+        )
+    };
+    let repo = "ostris/zimage_turbo_training_adapter";
+    for version in ["v1", "v2", "v2-default"] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{version}: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{version}");
+    }
+    for (repo, version, field) in [
+        (repo, "v9", "trainingAdapterVersion"),
+        ("someone/else", "v2", "trainingAdapterRepo"),
+    ] {
+        let (status, error) = submit(repo, version).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{repo}/{version}");
+        assert_eq!(error["code"], "training_field_error", "{repo}/{version}");
+        assert_eq!(error["context"]["field"], field, "{repo}/{version}");
+    }
+}
+
+/// sc-25213 (finding 5): a REAL run whose selected de-distill adapter is not installed is refused at
+/// submit with a field error on `trainingAdapterVersion` (the worker's own check stays as defence in
+/// depth); installing exactly that version's file clears it, and installing only the OTHER version
+/// does not. Mutation: drop the API install check ⇒ the first submit queues ⇒ red.
+#[tokio::test]
+async fn real_run_refuses_an_uninstalled_training_adapter_with_a_field_error() {
+    use sceneworks_core::training::training_adapter::{
+        ZIMAGE_TURBO_TRAINING_ADAPTER_V1 as V1, ZIMAGE_TURBO_TRAINING_ADAPTER_V2 as V2,
+    };
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    seed_installed_base_model(&settings.data_dir);
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Adapter install gate" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Aurora set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "auroraStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let mut config = target["defaults"].clone();
+    config["advanced"]["trainingAdapterRepo"] = json!("ostris/zimage_turbo_training_adapter");
+    config["advanced"]["trainingAdapterVersion"] = json!("v2-default");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = || {
+        request(
+            app.clone(),
+            "POST",
+            &jobs_path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": dataset_id,
+                "config": config,
+                "outputName": "Aurora Style",
+                "dryRun": false
+            }),
+        )
+    };
+    let hub = sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir);
+    let install = |model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel| {
+        let snapshot = hub
+            .join(format!("models--{}", model.repo.replace('/', "--")))
+            .join("snapshots")
+            .join(model.revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(snapshot.join(model.file), b"weights").unwrap();
+    };
+
+    let refused = |status: StatusCode, error: &Value| {
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+        assert_eq!(error["code"], "training_field_error", "{error}");
+        assert_eq!(
+            error["context"]["field"], "trainingAdapterVersion",
+            "{error}"
+        );
+        assert!(error["detail"].as_str().unwrap().contains(V2.id), "{error}");
+    };
+    let (status, error) = submit().await;
+    refused(status, &error);
+    // Only v1 installed: the plan's v2 is still missing.
+    install(&V1);
+    let (status, error) = submit().await;
+    refused(status, &error);
+    install(&V2);
+    let (status, job) = submit().await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(
+        job["payload"]["plan"]["config"]["advanced"]["trainingAdapterVersion"],
+        "v2-default"
+    );
+}
+
+/// sc-24827 (epic 2123 E6): `advanced.gradientNoiseEta` / `gradientNoiseGamma` are validated at
+/// the API boundary with field-level errors — negative, above the shared limit, non-numeric, or
+/// (eta) combined with a full fine-tune — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_gradient_noise_with_a_field_error() {
+    use sceneworks_core::training::{
+        GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_KEY,
+        GRADIENT_NOISE_GAMMA_MAX,
+    };
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Gradient noise boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |key: &str, value: Value, network_type: &str| {
+        let mut config = target["defaults"].clone();
+        config["advanced"][key] = value;
+        config["advanced"]["networkType"] = json!(network_type);
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Gradient noise",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (key, value, network_type) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(-0.01), "lora"),
+        (
+            GRADIENT_NOISE_ETA_KEY,
+            json!(GRADIENT_NOISE_ETA_MAX + 0.001),
+            "lora",
+        ),
+        (GRADIENT_NOISE_ETA_KEY, json!("0.01"), "lora"),
+        (GRADIENT_NOISE_ETA_KEY, json!(0.01), "full"),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(-0.5), "lora"),
+        (
+            GRADIENT_NOISE_GAMMA_KEY,
+            json!(GRADIENT_NOISE_GAMMA_MAX + 0.001),
+            "lora",
+        ),
+    ] {
+        let (status, error) = submit(key, value.clone(), network_type).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key}={value}/{network_type}"
+        );
+        assert_eq!(error["code"], "training_field_error", "{key}={value}");
+        assert_eq!(error["context"]["field"], key, "{key}={value}");
+    }
+
+    for (key, value) in [
+        (GRADIENT_NOISE_ETA_KEY, json!(0)),
+        (GRADIENT_NOISE_ETA_KEY, json!(GRADIENT_NOISE_ETA_MAX)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(0.55)),
+        (GRADIENT_NOISE_GAMMA_KEY, json!(GRADIENT_NOISE_GAMMA_MAX)),
+    ] {
+        let (status, error) = submit(key, value.clone(), "lora").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key}={value}: {error}");
+        assert_eq!(
+            error["detail"], "Training dataset not found",
+            "{key}={value}"
+        );
+    }
+}
+
+/// sc-2127 (epic 2123 E6): `advanced.resolutionBuckets` is validated at the API boundary with a
+/// field-level error — an empty list, a non-positive repeat, an off-stride or unsupported
+/// resolution, a duplicate — before any dataset lookup. A well-formed 16:4:1 list passes validation
+/// (and then hits the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_malformed_resolution_buckets_with_a_field_error() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Resolution bucket boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |buckets: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["resolutionBuckets"] = buckets;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Resolution buckets",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for buckets in [
+        json!([]),
+        json!([{ "resolution": 512, "repeats": 0 }]),
+        json!([{ "resolution": 512, "repeats": -4 }]),
+        json!([{ "resolution": 500, "repeats": 1 }]),
+        json!([{ "resolution": 1536, "repeats": 1 }]),
+        json!([{ "resolution": 512, "repeats": 1 }, { "resolution": 512, "repeats": 2 }]),
+    ] {
+        let (status, error) = submit(buckets.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{buckets}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{buckets}");
+        assert_eq!(error["context"]["field"], "resolutionBuckets", "{buckets}");
+    }
+
+    let (status, error) = submit(json!([
+        { "resolution": 512, "repeats": 16 },
+        { "resolution": 768, "repeats": 4 },
+        { "resolution": 1024, "repeats": 1 },
+    ]))
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["detail"], "Training dataset not found");
+    assert_eq!(target["limits"]["supportsResolutionBuckets"], json!(true));
+
+    // sc-2127 review: LTX-2.5's trainer declares no bucket support on either platform, so the
+    // targets endpoint withholds the flag and a bucket list there is refused at submit with the
+    // field error — never queued for the worker preflight to refuse.
+    let ltx25 = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    assert!(ltx25["limits"].get("supportsResolutionBuckets").is_none());
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["resolutionBuckets"] = json!([
+        { "resolution": ltx25["limits"]["resolutions"][0].clone(), "repeats": 2 },
+    ]);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Resolution buckets",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "resolutionBuckets");
+}
+
+/// sc-24828 (epic 2123 E6): the subject-masked-loss keys are validated at the API boundary with a
+/// field-level error naming the offending key — a non-boolean toggle, a background weight outside
+/// [0, max], a subject weight outside (0, max] — before any dataset lookup. In-range values pass
+/// validation (and then hit the missing-dataset tripwire).
+#[tokio::test]
+async fn create_training_job_rejects_out_of_range_subject_mask_weights_with_a_field_error() {
+    use sceneworks_core::training::SUBJECT_MASK_WEIGHT_MAX;
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Subject mask boundary" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |toggle: Value, background: Value, subject: Value| {
+        let mut config = target["defaults"].clone();
+        config["advanced"]["subjectMaskLoss"] = toggle;
+        config["advanced"]["subjectMaskBackgroundWeight"] = background;
+        config["advanced"]["subjectMaskSubjectWeight"] = subject;
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": "z_image_turbo_lora",
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Subject mask",
+                "dryRun": true
+            }),
+        )
+    };
+
+    for (toggle, background, subject, field) in [
+        (json!("on"), json!(0.1), json!(1), "subjectMaskLoss"),
+        (
+            json!(true),
+            json!(-0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            json!(1),
+            "subjectMaskBackgroundWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(0),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!(SUBJECT_MASK_WEIGHT_MAX + 0.1),
+            "subjectMaskSubjectWeight",
+        ),
+        (
+            json!(true),
+            json!(0.1),
+            json!("1"),
+            "subjectMaskSubjectWeight",
+        ),
+    ] {
+        let (status, error) = submit(toggle.clone(), background.clone(), subject.clone()).await;
+        let case = format!("{toggle}/{background}/{subject}");
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{case}: {error}");
+        assert_eq!(error["code"], "training_field_error", "{case}");
+        assert_eq!(error["context"]["field"], field, "{case}");
+    }
+
+    for (background, subject) in [
+        (json!(0), json!(1)),
+        (json!(SUBJECT_MASK_WEIGHT_MAX), json!(0.5)),
+    ] {
+        let (status, error) = submit(json!(true), background.clone(), subject.clone()).await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "{background}/{subject}: {error}"
+        );
+        assert_eq!(error["detail"], "Training dataset not found");
+    }
+
+    // sc-24828 review: the targets endpoint advertises subject-masked loss per target, and a
+    // target that does not (LTX-2.5 — its trainers train from prepared latent bundles) refuses it at
+    // submit with the `subjectMaskLoss` field error instead of queueing a job the worker refuses.
+    let targets = registry["targets"].as_array().expect("target list");
+    let advertises = |id: &str| {
+        targets
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))["limits"]["supportsSubjectMaskLoss"]
+            == json!(true)
+    };
+    assert!(advertises("z_image_turbo_lora"));
+    assert!(!advertises("ltx_2_5_video_lora"));
+    assert!(!advertises("krea_2_control"));
+    let ltx25 = targets
+        .iter()
+        .find(|target| target["id"] == "ltx_2_5_video_lora")
+        .expect("LTX-2.5 target")
+        .clone();
+    let mut config = ltx25["defaults"].clone();
+    config["advanced"]["subjectMaskLoss"] = json!(true);
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &path,
+        json!({
+            "targetId": "ltx_2_5_video_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Subject mask",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert_eq!(error["code"], "training_field_error");
+    assert_eq!(error["context"]["field"], "subjectMaskLoss");
 }
 
 #[tokio::test]
@@ -5504,5 +6584,1091 @@ async fn a_torn_full_finetune_checkpoint_is_refused_with_a_reason() {
             .iter()
             .any(|model| model["catalogScope"] == json!("user")),
         "a torn checkpoint must not register a user model"
+    );
+}
+
+/// Epic 2123 feature review (E6): every decoded-x0 / latent aux section's submit-time refusal
+/// reaches the HTTP route as a `training_field_error` naming that section's weight key — out of
+/// range, a full fine-tune on Mage, and a no-video LTX-2.5 workflow — while the same weight on a
+/// supporting LoRA config passes validation (and then hits the missing-dataset tripwire), so each
+/// refusal below is the combination, not the value. E-LatentLPIPS, which Mage and LTX-2.5 do not
+/// advertise, gets its support refusal there and its full fine-tune refusal on Z-Image. Mutation:
+/// attach any section's refusal to a different field, drop its `*_combination_refusal` check, or
+/// skip the full fine-tune refusal for E-LatentLPIPS ⇒ red.
+#[tokio::test]
+async fn create_training_job_reports_each_aux_section_on_its_weight_key() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Aux field errors" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = |id: &str| {
+        registry["targets"]
+            .as_array()
+            .expect("target list")
+            .iter()
+            .find(|target| target["id"] == id)
+            .unwrap_or_else(|| panic!("{id} target"))
+            .clone()
+    };
+    let (z_image, mage, ltx25) = (
+        target("z_image_turbo_lora"),
+        target("mage_flow_base_lora"),
+        target("ltx_2_5_video_lora"),
+    );
+    let path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let submit = |target: &Value, extra: Value| {
+        let mut config = target["defaults"].clone();
+        for (key, value) in extra.as_object().expect("extra advanced keys") {
+            config["advanced"][key] = value.clone();
+        }
+        request(
+            app.clone(),
+            "POST",
+            &path,
+            json!({
+                "targetId": target["id"],
+                "datasetId": "ds_missing",
+                "config": config,
+                "outputName": "Aux",
+                "dryRun": true
+            }),
+        )
+    };
+    // (weight key, Mage and LTX-2.5 advertise it). E-LatentLPIPS has no Mage / LTX weights: there
+    // every case is its support refusal, and the one combination it can hit — a full fine-tune — is
+    // asked on a target that does advertise it (below the loop).
+    for (key, advertised_on_mage_and_ltx) in [
+        ("depthAnchoringWeight", true),
+        ("bodyProportionWeight", true),
+        ("bodyShapeWeight", true),
+        ("normalWeight", true),
+        ("identityLossWeight", true),
+        ("faceLandmarkLossWeight", true),
+        ("vaeAnchorWeight", true),
+        ("latentLpipsWeight", false),
+    ] {
+        let (status, error) = submit(&z_image, json!({ key: 1000.0 })).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "{key} out of range: {error}"
+        );
+        assert_eq!(error["code"], "training_field_error", "{key}: {error}");
+        assert_eq!(error["context"]["field"], key, "{key}: {error}");
+
+        let (status, error) = submit(&z_image, json!({ key: 0.01 })).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{key} in range: {error}");
+        assert_eq!(error["detail"], "Training dataset not found", "{key}");
+
+        // Not advertised on Mage / LTX-2.5, the same cases are E-LatentLPIPS's support refusal
+        // (still a field error on its weight key).
+        for (case, target, extra) in [
+            (
+                "mage full",
+                &mage,
+                json!({ key: 0.01, "networkType": "full" }),
+            ),
+            (
+                "ltx-2.5 t2a",
+                &ltx25,
+                json!({ key: 0.01, "ltxWorkflow": "t2a_lora" }),
+            ),
+        ] {
+            let (status, error) = submit(target, extra).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{key} {case}: {error}");
+            assert_eq!(
+                error["code"], "training_field_error",
+                "{key} {case}: {error}"
+            );
+            assert_eq!(error["context"]["field"], key, "{key} {case}: {error}");
+            let detail = error["detail"].as_str().unwrap_or_default();
+            let expected = if advertised_on_mage_and_ltx {
+                if case == "mage full" {
+                    "not a full fine-tune"
+                } else {
+                    "generates none"
+                }
+            } else {
+                "does not support"
+            };
+            assert!(detail.contains(expected), "{key} {case}: {error}");
+        }
+    }
+    // E-LatentLPIPS's combination refusal (a full fine-tune) on a target that advertises it.
+    let (status, error) = submit(
+        &z_image,
+        json!({ "latentLpipsWeight": 0.01, "networkType": "full" }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "latentLpipsWeight full: {error}"
+    );
+    assert_eq!(error["code"], "training_field_error", "{error}");
+    assert_eq!(error["context"]["field"], "latentLpipsWeight", "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("not a full fine-tune")),
+        "{error}"
+    );
+}
+
+/// Epic 2123 JSON-null policy: an explicit `null` on every technique key means absent — the job
+/// passes validation exactly as if the keys were omitted (and then hits the missing-dataset
+/// tripwire). Mutation: read any one key with `advanced.get` instead of `technique_value` ⇒ that key
+/// becomes a type error and this goes red.
+#[tokio::test]
+async fn create_training_job_treats_null_technique_keys_as_absent() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Null technique keys" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+    let (_, registry) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = registry["targets"]
+        .as_array()
+        .expect("target list")
+        .iter()
+        .find(|target| target["id"] == "z_image_turbo_lora")
+        .expect("Z-Image target")
+        .clone();
+    let mut config = target["defaults"].clone();
+    for key in sceneworks_core::training::TECHNIQUE_KEYS {
+        config["advanced"][key] = Value::Null;
+    }
+    let (status, error) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": "z_image_turbo_lora",
+            "datasetId": "ds_missing",
+            "config": config,
+            "outputName": "Nulls",
+            "dryRun": true
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{error}");
+    assert_eq!(error["detail"], "Training dataset not found");
+}
+
+/// sc-24829 (epic 2123 E6): the caption dialog's trigger-word limits are the API's. The web
+/// constant lives in `apps/web/src/training/joyCaptionPrompts.js`; read it so the two cannot drift.
+/// Mutation: change either side's number ⇒ red.
+#[test]
+fn web_caption_trigger_word_limits_match_the_api() {
+    let source = include_str!("../../../web/src/training/joyCaptionPrompts.js");
+    let prefix = "export const captionTriggerWordLimits = ";
+    let line = source
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .expect("captionTriggerWordLimits is exported by joyCaptionPrompts.js");
+    let read = |name: &str| -> usize {
+        let start = line
+            .find(&format!("{name}: "))
+            .unwrap_or_else(|| panic!("{name} missing from {line}"))
+            + name.len()
+            + 2;
+        line[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .unwrap_or_else(|error| panic!("{name} is not a numeric literal: {line} ({error})"))
+    };
+    assert_eq!(
+        read("maxWords"),
+        crate::training::TRAINING_CAPTION_TRIGGER_WORDS_MAX
+    );
+    assert_eq!(
+        read("maxLength"),
+        crate::training::TRAINING_CAPTION_TRIGGER_WORD_MAX_CHARS
+    );
+}
+
+/// Materialize a resolvable HF-cache snapshot for `repo` (refs/main → `revision`), returning its dir.
+fn seed_hf_snapshot(data_dir: &std::path::Path, repo: &str, revision: &str) -> std::path::PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, repo).expect("repo cache path");
+    let snapshot = repo_root.join("snapshots").join(revision);
+    std::fs::create_dir_all(&snapshot).expect("snapshot dir");
+    std::fs::create_dir_all(repo_root.join("refs")).expect("refs dir");
+    std::fs::write(repo_root.join("refs").join("main"), revision).expect("refs/main");
+    snapshot
+}
+
+fn qwen_image_2_1_training_target() -> sceneworks_core::training::TrainingTarget {
+    crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("Qwen Image 2.1 training target")
+}
+
+/// sc-24159: 2.1 trains the dense bf16 base only (QLoRA is an epic non-goal). Its bf16 tier is the
+/// upstream `Qwen/Qwen-Image-2.1` snapshot and its q8/q4 tiers a SEPARATE SceneWorks re-host, so a
+/// host that installed only a quantized tier must hear "install the bf16 tier", not "not installed".
+#[test]
+fn qwen_image_2_1_training_needs_the_bf16_tier_not_a_quantized_one() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().expect("tempdir");
+    let data_dir = temp.path().join("data");
+    let target = qwen_image_2_1_training_target();
+
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Missing,
+        "nothing installed is the generic install message"
+    );
+
+    // Only the q4 generation tier from the re-host.
+    let rehost = seed_hf_snapshot(&data_dir, "SceneWorks/qwen-image-2-1-mlx", "rehost-rev");
+    std::fs::create_dir_all(rehost.join("q4").join("transformer")).expect("q4 tier");
+    let status = training_base_model_status(&data_dir, &target);
+    assert_eq!(status, TrainingBaseStatus::TrainingTierMissing);
+    let message = training_base_unavailable_message(status, &target.base_model)
+        .expect("a quantized-only install blocks a real run");
+    assert!(
+        message.contains("bf16") && message.contains("qwen_image_2_1"),
+        "the refusal must say to install the bf16 tier: {message}"
+    );
+
+    // The dense upstream snapshot is the training base, resolved flat (no `bf16/` subdir).
+    let dense = seed_hf_snapshot(&data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+    assert_eq!(
+        training_base_model_status(&data_dir, &target),
+        TrainingBaseStatus::Ready
+    );
+    assert_eq!(
+        resolve_base_model_path(&target, &data_dir),
+        dense.display().to_string(),
+        "training reads the dense upstream snapshot, never the q8/q4 re-host"
+    );
+}
+
+/// Pin the split-repo map to the manifest so the quantized-only detection cannot drift from what
+/// the catalog actually installs: the 2.1 quantized repos are exactly the manifest's non-bf16 tier
+/// repos, and the target's dense repo is exactly its `bf16` tier repo.
+#[test]
+fn quantized_generation_repos_match_the_manifest_tiers() {
+    use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
+    use sceneworks_core::jsonc::strip_jsonc_comments;
+    use std::collections::BTreeSet;
+
+    let raw = BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    let catalog: Value = serde_json::from_str(&strip_jsonc_comments(raw)).expect("manifest parses");
+    let downloads = catalog["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == json!("qwen_image_2_1"))
+        .and_then(|model| model["downloads"].as_array())
+        .expect("qwen_image_2_1 downloads")
+        .clone();
+    let repos_for = |bf16: bool| -> BTreeSet<String> {
+        downloads
+            .iter()
+            .filter(|download| (download["variant"] == json!("bf16")) == bf16)
+            .filter_map(|download| download["repo"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let target = qwen_image_2_1_training_target();
+    assert_eq!(
+        repos_for(true),
+        BTreeSet::from([target.base_model_repo.clone().expect("dense repo")])
+    );
+    assert_eq!(
+        repos_for(false),
+        crate::training::quantized_generation_repos("qwen_image_2_1")
+            .iter()
+            .map(|repo| (*repo).to_owned())
+            .collect::<BTreeSet<_>>()
+    );
+}
+
+/// sc-24159 (epic 24107 E12): the research-only restriction is shown before a 2.1 run starts, and the
+/// API is the backstop — a real run without the acknowledgment is refused with the same code as the
+/// pre-download gate. With it, the run queues and the adapter's library entry records the base model,
+/// the `qwen-image-2-1` family and the Qwen RESEARCH licence.
+#[tokio::test]
+async fn qwen_image_2_1_real_training_requires_the_licence_and_records_it_on_the_adapter() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let dense = seed_hf_snapshot(&settings.data_dir, "Qwen/Qwen-Image-2.1", "dense-rev");
+    std::fs::write(dense.join("config.json"), "{}").expect("dense snapshot marker");
+
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "Portrait.PNG",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let asset_id = asset["id"].as_str().expect("asset id").to_owned();
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "Qwen set",
+            "items": [{ "assetId": asset_id, "caption": { "text": "qwnStyle portrait" } }]
+        }),
+    )
+    .await;
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let target = qwen_image_2_1_training_target();
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let body_with = |acknowledged: Option<bool>, dry_run: bool| {
+        let mut body = json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Qwen Style",
+            "dryRun": dry_run
+        });
+        if let Some(acknowledged) = acknowledged {
+            body["licenseAcknowledged"] = json!(acknowledged);
+        }
+        body
+    };
+    let body_for = |acknowledged: Option<bool>| body_with(acknowledged, false);
+
+    // The acceptance travels with an accepted job (so retry/duplicate re-validate), and is never
+    // stamped onto one that did not assert it — flipping that stored dry run to a real run through
+    // duplicate is refused by the raw-job gate.
+    let (status, acked_dry) =
+        request(app.clone(), "POST", &jobs_path, body_with(Some(true), true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{acked_dry}");
+    assert_eq!(acked_dry["payload"]["licenseAcknowledged"], json!(true));
+    // E12 on every host: the adapter entry this job would register records base, family, licence.
+    let dry_entry = &acked_dry["payload"]["manifestEntry"];
+    assert_eq!(dry_entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(dry_entry["family"], "qwen-image-2-1");
+    assert_eq!(dry_entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    let (status, bare_dry) = request(app.clone(), "POST", &jobs_path, body_with(None, true)).await;
+    assert_eq!(status, StatusCode::CREATED, "{bare_dry}");
+    assert!(bare_dry["payload"].get("licenseAcknowledged").is_none());
+    let bare_id = bare_dry["id"].as_str().expect("job id");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{bare_id}/duplicate"),
+        json!({ "payloadChanges": { "dryRun": false } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], json!("license_acknowledgment_required"));
+
+    for acknowledged in [None, Some(false)] {
+        let (status, body) = request(app.clone(), "POST", &jobs_path, body_for(acknowledged)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{acknowledged:?}: {body}");
+        assert_eq!(body["code"], json!("license_acknowledgment_required"));
+        let detail = body["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("Qwen RESEARCH LICENSE AGREEMENT"),
+            "the refusal names the licence: {detail}"
+        );
+    }
+
+    // sc-24160: both native backends train 2.1, so an accepted real run queues on every host (the
+    // off-Mac host refusal no longer applies to it).
+    let (status, job) = request(app.clone(), "POST", &jobs_path, body_for(Some(true))).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["licenseAcknowledged"], json!(true));
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["baseModel"], "qwen_image_2_1");
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+    assert_eq!(
+        entry["licenseUrl"],
+        json!(sceneworks_core::training::QWEN_IMAGE_2_1_LICENSE_URL)
+    );
+}
+
+/// sc-24159: off-Mac only candle workers train, so a real run for a kernel with no candle trainer is
+/// refused at submit rather than queued forever. Generic over the candle-routed kernel list; sc-24160
+/// added the 2.1 candle lane, so Qwen Image 2.1 is now submittable off-Mac too.
+#[test]
+fn training_host_gate_refuses_kernels_no_local_worker_can_run() {
+    let targets = crate::builtin_training_targets().targets;
+    let qwen = qwen_image_2_1_training_target();
+    // sc-24160: the Candle trainer lifts the off-Mac refusal for 2.1.
+    assert!(
+        crate::training::training_host_unavailable_message(&qwen, false).is_none(),
+        "Qwen Image 2.1 has a candle trainer — it must be submittable off-Mac"
+    );
+    // The gate itself stays live for any kernel without a candle trainer.
+    let mut mlx_only = qwen.clone();
+    mlx_only.kernel = "hypothetical_mlx_only_lora".to_owned();
+    let message = crate::training::training_host_unavailable_message(&mlx_only, false)
+        .expect("a kernel with no candle trainer is refused off-Mac");
+    assert!(
+        message.contains("Apple Silicon") && message.contains(&mlx_only.name),
+        "{message}"
+    );
+    assert!(crate::training::training_host_unavailable_message(&mlx_only, true).is_none());
+    // sc-24162: the 2.1 instruction-EDIT kernel has its Candle trainer too, so it is submittable
+    // off-Mac like its T2I sibling.
+    let edit = targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target ships");
+    assert!(
+        crate::training::training_host_unavailable_message(edit, false).is_none(),
+        "the edit kernel has a candle trainer — it must be submittable off-Mac"
+    );
+    // Every candle-routed target stays submittable off-Mac.
+    for target in targets.iter().filter(|target| {
+        sceneworks_core::jobs_store::training_kernel_is_candle_routed(&target.kernel)
+    }) {
+        assert!(
+            crate::training::training_host_unavailable_message(target, false).is_none(),
+            "{}",
+            target.id
+        );
+    }
+}
+
+/// sc-24159: the raw `POST /api/v1/jobs` route cannot queue a licence-bound training plan around the
+/// typed route's gate — whether the plan names the target by id or only by kernel — while an
+/// acknowledged payload (what the typed route stores) and an explicit dry run still pass.
+#[tokio::test]
+async fn raw_jobs_route_enforces_the_training_licence_gate() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |target_id: &str, extra: Value| {
+        let mut payload = json!({
+            "dryRun": false,
+            "plan": { "target": {
+                "targetId": target_id,
+                "kernel": "qwen_image_2_1_lora",
+                "baseModel": "qwen_image_2_1"
+            } }
+        });
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": payload })
+    };
+    for body in [
+        raw("qwen_image_2_1_lora", json!({})),
+        raw("forged_target", json!({})),
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": false }),
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}: {response}");
+        assert_eq!(response["code"], json!("license_acknowledgment_required"));
+    }
+    for body in [
+        raw(
+            "qwen_image_2_1_lora",
+            json!({ "licenseAcknowledged": true }),
+        ),
+        raw("qwen_image_2_1_lora", json!({ "dryRun": true })),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_ne!(
+            response["code"],
+            json!("license_acknowledgment_required"),
+            "{body}: {response}"
+        );
+    }
+}
+
+/// sc-24161 review: the raw route refuses a hand-built plan whose edit-pair shape contradicts its
+/// kernel at submit — references under the T2I kernel, a reference-less item under the edit kernel —
+/// while a consistent plan passes this gate.
+#[tokio::test]
+async fn raw_jobs_route_refuses_edit_shape_kernel_mismatches() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |kernel: &str, items: Value| {
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": {
+            "dryRun": true,
+            "plan": {
+                "target": { "targetId": kernel, "kernel": kernel, "baseModel": "qwen_image_2_1" },
+                "dataset": { "items": items }
+            }
+        } })
+    };
+    let with_refs =
+        json!({ "imagePath": "/x/a.png", "caption": "edit", "referenceImagePaths": ["/x/r.png"] });
+    let plain = json!({ "imagePath": "/x/b.png", "caption": "plain" });
+    for (body, needle) in [
+        (
+            raw("qwen_image_2_1_lora", json!([with_refs.clone()])),
+            "captioned images only",
+        ),
+        (
+            raw(
+                "qwen_image_2_1_edit_lora",
+                json!([with_refs.clone(), plain.clone()]),
+            ),
+            "item 1",
+        ),
+    ] {
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        assert!(
+            response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(needle),
+            "{body}: {response}"
+        );
+    }
+    for body in [
+        raw("qwen_image_2_1_edit_lora", json!([with_refs.clone()])),
+        raw("qwen_image_2_1_lora", json!([plain.clone()])),
+    ] {
+        let (_, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert!(
+            !response["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("referenceImagePaths"),
+            "{body}: {response}"
+        );
+    }
+}
+
+/// A target with no licence restriction is untouched by the gate, and its adapters carry no licence
+/// fields (the existing library entries keep their exact shape).
+#[test]
+fn unrestricted_targets_need_no_licence_acknowledgment() {
+    let target = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "z_image_turbo_lora")
+        .expect("z-image target");
+    assert!(
+        crate::training::training_license_acknowledgment_error(&target, &Default::default())
+            .is_none()
+    );
+    assert!(crate::training::trained_adapter_license_fields(&target).is_empty());
+}
+
+/// Upload `count` distinct image assets into `project_id`, returning their ids in upload order.
+async fn upload_distinct_assets(
+    app: &axum::Router,
+    project_id: &str,
+    stem: &str,
+    count: usize,
+) -> Vec<String> {
+    let mut ids = Vec::with_capacity(count);
+    for index in 0..count {
+        let (status, asset) = request_multipart_upload(
+            app.clone(),
+            &format!("/api/v1/projects/{project_id}/assets"),
+            &format!("{stem}{index}.PNG"),
+            "image/png",
+            format!("png-bytes-{stem}-{index}").as_bytes(),
+        )
+        .await;
+        assert!(status.is_success(), "upload {stem}{index}: {asset}");
+        ids.push(asset["id"].as_str().expect("asset id").to_owned());
+    }
+    ids
+}
+
+/// sc-24161: an instruction-edit dataset item stores its ORDERED references (target = item image,
+/// instruction = caption), a full-replacement save re-materializes them in the new order, and a dry
+/// run against the 2.1 edit target threads them into the plan in exactly that order — with the
+/// adapter recorded as an edit adapter. The API refuses an item above the reference cap (naming the
+/// cap), an edit dataset on a text-to-image target, and a plain dataset on the edit target.
+#[tokio::test]
+async fn qwen_image_2_1_edit_dataset_round_trips_ordered_references_and_refuses_over_cap() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen Edit Training" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let targets = upload_distinct_assets(&app, &project_id, "Target", 2).await;
+    let refs = upload_distinct_assets(&app, &project_id, "Ref", 11).await;
+    let datasets_path = format!("/api/v1/projects/{project_id}/training/datasets");
+    let instruction = "Put the hat from image 2 on the person in image 1";
+
+    // Deliberately not upload order: the stored order is semantic.
+    let order = [&refs[2], &refs[0], &refs[1]];
+    let (status, dataset) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Hat edits",
+            "items": [{
+                "assetId": targets[0],
+                "caption": { "text": instruction },
+                "references": order.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert!(status.is_success(), "{dataset}");
+    let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
+    let stored = dataset["items"][0]["references"]
+        .as_array()
+        .expect("stored references")
+        .clone();
+    assert_eq!(
+        stored
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        order.iter().map(|id| id.as_str()).collect::<Vec<_>>(),
+        "references keep the order they were given"
+    );
+    for (index, reference) in stored.iter().enumerate() {
+        let path = reference["path"].as_str().expect("reference path");
+        assert!(
+            path.starts_with("images/refs/") && path.contains(&format!("_ref{}", index + 1)),
+            "reference {index} is materialized into the dataset: {path}"
+        );
+    }
+
+    // A full-replacement save (what the studio sends) re-orders them; GET returns the new order.
+    let reversed = [&refs[1], &refs[0], &refs[2]];
+    let mut items = dataset["items"].as_array().expect("items").clone();
+    items[0]["references"] = json!(reversed
+        .iter()
+        .map(|id| json!({ "assetId": id }))
+        .collect::<Vec<_>>());
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        &format!("{datasets_path}/{dataset_id}"),
+        json!({ "items": items }),
+    )
+    .await;
+    assert!(status.is_success(), "{updated}");
+    let (_, fetched) = request(
+        app.clone(),
+        "GET",
+        &format!("{datasets_path}/{dataset_id}"),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(
+        fetched["items"][0]["references"]
+            .as_array()
+            .expect("fetched references")
+            .iter()
+            .map(|reference| reference["assetId"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        reversed.iter().map(|id| id.as_str()).collect::<Vec<_>>()
+    );
+
+    let edit = crate::builtin_training_targets()
+        .targets
+        .into_iter()
+        .find(|target| target.id == "qwen_image_2_1_edit_lora")
+        .expect("2.1 edit target");
+    let jobs_path = format!("/api/v1/projects/{project_id}/training/jobs");
+    let dry_run = |target: &sceneworks_core::training::TrainingTarget, dataset_id: &str| {
+        json!({
+            "targetId": target.id,
+            "datasetId": dataset_id,
+            "config": target.defaults,
+            "outputName": "Hat Edit",
+            "dryRun": true
+        })
+    };
+    let (status, job) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &dataset_id)).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let plan_item = &job["payload"]["plan"]["dataset"]["items"][0];
+    assert_eq!(plan_item["caption"], json!(instruction));
+    let plan_refs = plan_item["referenceImagePaths"]
+        .as_array()
+        .expect("plan carries the ordered references")
+        .iter()
+        .map(|path| std::path::PathBuf::from(path.as_str().expect("path string")))
+        .collect::<Vec<_>>();
+    assert_eq!(plan_refs.len(), 3);
+    for (index, path) in plan_refs.iter().enumerate() {
+        assert!(path.is_absolute() && path.is_file(), "{}", path.display());
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&format!("_ref{}", index + 1))),
+            "plan reference {index} out of order: {}",
+            path.display()
+        );
+    }
+    // Byte identity: the plan's first reference is the asset the user put FIRST (refs[1]).
+    assert_eq!(
+        std::fs::read(&plan_refs[0]).expect("read first reference"),
+        b"png-bytes-Ref-1".to_vec()
+    );
+    assert_eq!(
+        job["payload"]["plan"]["target"]["kernel"],
+        "qwen_image_2_1_edit_lora"
+    );
+    let entry = &job["payload"]["manifestEntry"];
+    assert_eq!(entry["family"], "qwen-image-2-1");
+    assert_eq!(entry["trainingMode"], "edit");
+    assert_eq!(entry["license"], "Qwen RESEARCH LICENSE AGREEMENT");
+
+    // An edit dataset on the text-to-image target is refused (never T2I trained on edit targets).
+    let t2i = qwen_image_2_1_training_target();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&t2i, &dataset_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("captioned images only"),
+        "{body}"
+    );
+
+    // A plain captioned dataset on the edit target is refused.
+    let (_, plain) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Plain",
+            "items": [{ "assetId": targets[1], "caption": { "text": "a portrait" } }]
+        }),
+    )
+    .await;
+    let plain_id = plain["id"].as_str().expect("plain dataset id").to_owned();
+    let (status, body) = request(app.clone(), "POST", &jobs_path, dry_run(&edit, &plain_id)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("at least one reference image"),
+        "{body}"
+    );
+
+    // Over the cap: 11 references on one item is refused, and the message names the cap (10).
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        &datasets_path,
+        json!({
+            "name": "Too many",
+            "items": [{
+                "assetId": targets[1],
+                "caption": { "text": instruction },
+                "references": refs.iter().map(|id| json!({ "assetId": id })).collect::<Vec<_>>()
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("11 reference images") && detail.contains("at most 10"),
+        "the refusal names the count and the cap: {detail}"
+    );
+}
+
+/// sc-25785: the resume checkpoint a worker reports survives later results that omit it and the
+/// terminal transition; `{ "resume": true }` resumes the persisted plan in one call; a retry is
+/// refused while another run into the same output dir is in flight; and `{ "resume": false }`
+/// restarts from step 0 even when the persisted plan was itself a resume.
+#[tokio::test]
+async fn training_retry_resume_flag_resumes_or_restarts_without_resending_the_plan() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (job_id, output_dir, adapter_path) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    let (_, original) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{job_id}"),
+        Value::Null,
+    )
+    .await;
+    claim_training_job(&app, &job_id).await;
+
+    let stem = adapter_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("adapter stem");
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    for step in ["000050", "000100"] {
+        write_test_safetensors(&output_dir.join(format!("{stem}-step{step}.resume.safetensors")));
+    }
+
+    // The worker reports the checkpoint once, then later results (a preview sample) omit it.
+    let sample = json!({ "step": 100, "relativePath": "samples/s.png", "path": "/tmp/s.png" });
+    for result in [
+        json!({ "resumeCheckpointStep": 100 }),
+        json!({ "trainingSamples": [sample.clone()] }),
+    ] {
+        let (status, _) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/progress"),
+            json!({
+                "status": "running",
+                "stage": "training",
+                "progress": 0.5,
+                "message": "Training step 101 of 200 (loss 0.1000).",
+                "workerId": TEST_TRAINING_WORKER_ID,
+                "result": result
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    let (status, canceled) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "canceled",
+            "stage": "canceled",
+            "progress": 1,
+            "message": "LoRA training canceled by user.",
+            "workerId": TEST_TRAINING_WORKER_ID
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(canceled["result"]["resumeCheckpointStep"], 100);
+    assert_eq!(canceled["result"]["trainingSamples"], json!([sample]));
+
+    let (status, resumed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{resumed}");
+    assert_ne!(resumed["id"], job_id);
+    let mut expected_plan = original["payload"]["plan"].clone();
+    assert_ne!(expected_plan["config"]["advanced"]["resume"], true);
+    expected_plan["config"]["advanced"]["resume"] = json!(true);
+    assert_eq!(resumed["payload"]["plan"], expected_plan);
+
+    // While the resumed run is queued, neither a restart nor a second resume of the source may
+    // start another run into the same output dir.
+    for body in [
+        json!({ "resume": false }),
+        json!({ "resume": true }),
+        json!({}),
+    ] {
+        let (status, refused) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{job_id}/retry"),
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused.to_string().contains("still queued or running"),
+            "{refused}"
+        );
+    }
+
+    // The resumed run fails; restarting it must turn resume back off.
+    let resumed_id = resumed["id"].as_str().expect("resumed id").to_owned();
+    claim_training_job(&app, &resumed_id).await;
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, restarted) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{resumed_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{restarted}");
+    assert_eq!(
+        restarted["payload"]["plan"]["config"]["advanced"]["resume"],
+        false
+    );
+}
+
+/// sc-25785: resume is refused, typed, when there is nothing to resume — no checkpoint of this
+/// run on disk (another stem's bundle does not count), a completed run, or a non-training job.
+#[tokio::test]
+async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Training Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+
+    let (failed_id, failed_dir, _) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &failed_id).await;
+    std::fs::create_dir_all(&failed_dir).expect("output dir creates");
+    write_test_safetensors(&failed_dir.join("another-run-step000500.resume.safetensors"));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/progress"),
+        json!({
+            "status": "failed",
+            "stage": "failed",
+            "progress": 1,
+            "message": "Training failed.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "error": "out of memory"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{failed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("no saved checkpoint"),
+        "{refused}"
+    );
+
+    // A completed run is not resumable even with its own bundle on disk.
+    let (completed_id, completed_dir, completed_adapter) =
+        submit_real_training_job(app.clone(), &project_id, &settings.data_dir).await;
+    claim_training_job(&app, &completed_id).await;
+    stage_trained_adapter(&completed_dir, &completed_adapter);
+    let stem = completed_adapter
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .expect("stem");
+    write_test_safetensors(&completed_dir.join(format!("{stem}-step000050.resume.safetensors")));
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "Trained LoRA saved.",
+            "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": completed_adapter.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{completed_id}/retry"),
+        json!({ "resume": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(refused.to_string().contains("can be resumed"), "{refused}");
+
+    // A non-training job rejects the flag in either direction.
+    let (status, other_job) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({ "type": "model_download", "payload": { "modelId": "resume_probe" }, "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_id = other_job["id"].as_str().expect("job id").to_owned();
+    let (status, _) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{other_id}/cancel"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, refused) = request(
+        app,
+        "POST",
+        &format!("/api/v1/jobs/{other_id}/retry"),
+        json!({ "resume": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("only to training jobs"),
+        "{refused}"
     );
 }

@@ -406,6 +406,13 @@ pub(crate) async fn retry_job(
     request: AxumRequest,
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     let mut payload = retry_job_request_from_body(request).await?;
+    apply_training_retry_resume(
+        &state,
+        &job_id,
+        payload.resume,
+        &mut payload.payload_changes,
+    )
+    .await?;
     if let Some(job) = crate::generation::replay_vector_prompt_workflow(
         state.clone(),
         &job_id,
@@ -436,6 +443,137 @@ pub(crate) async fn retry_job(
     publish(&state, "job.updated", &job);
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
+}
+
+/// sc-25785: fold a retry's `resume` choice (when given) into the training plan the retry will run, so a caller
+/// resumes (or restarts) a training job in one call without resending the plan. The plan is the
+/// caller's `payloadChanges.plan` when supplied, else the persisted one, with `advanced.resume`
+/// set to `resume`. Resuming is refused, typed, unless the job ended without completing and its
+/// output directory holds a resume checkpoint of that plan's run — the trainer would otherwise
+/// start from step 0 while the caller believed it resumed. Either way the retry is refused while
+/// another run into the same output directory is still in flight: a restart would delete that
+/// run's resume bundles, and a second resume would train two runs into one directory.
+async fn apply_training_retry_resume(
+    state: &AppState,
+    job_id: &str,
+    resume: Option<bool>,
+    payload_changes: &mut JsonObject,
+) -> Result<(), ApiError> {
+    let job = store_call(state.clone(), {
+        let job_id = job_id.to_owned();
+        move |store, _timeout| store.get_job(&job_id)
+    })
+    .await?;
+    if !matches!(job.job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        return match resume {
+            None => Ok(()),
+            Some(_) => Err(ApiError::bad_request(
+                "resume applies only to training jobs (lora_train, control_training).",
+            )),
+        };
+    }
+    let mut plan = payload_changes
+        .get("plan")
+        .or_else(|| job.payload.get("plan"))
+        .and_then(Value::as_object)
+        .cloned()
+        .ok_or_else(|| ApiError::bad_request("Training job has no plan to retry."))?;
+    if resume == Some(true)
+        && !matches!(
+            job.status,
+            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+        )
+    {
+        return Err(ApiError::bad_request(
+            "Only a failed, canceled or interrupted training job can be resumed.",
+        ));
+    }
+    let output_dir = plan
+        .get("output")
+        .and_then(|output| output.get("outputDir"))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    if let Some(output_dir) = output_dir.as_deref() {
+        let active = store_call(state.clone(), move |store, _timeout| {
+            let mut active = Vec::new();
+            for status in [
+                JobStatus::Queued,
+                JobStatus::Preparing,
+                JobStatus::Downloading,
+                JobStatus::LoadingModel,
+                JobStatus::Running,
+                JobStatus::Saving,
+            ] {
+                active.extend(store.list_jobs(None, Some(status.as_str()), 500)?);
+            }
+            Ok(active)
+        })
+        .await?;
+        if active.iter().any(|other| {
+            matches!(
+                other.job_type,
+                JobType::LoraTrain | JobType::ControlTraining
+            ) && other
+                .payload
+                .get("plan")
+                .and_then(|plan| plan.pointer("/output/outputDir"))
+                .and_then(Value::as_str)
+                == Some(output_dir)
+        }) {
+            return Err(ApiError::bad_request(
+                "Another run of this training job is still queued or running; wait for it to finish or cancel it first.",
+            ));
+        }
+    }
+    let Some(resume) = resume else {
+        return Ok(());
+    };
+    if resume {
+        let plan_value = Value::Object(plan.clone());
+        let state_for_scan = state.clone();
+        let step = tokio::task::spawn_blocking(move || {
+            training_plan_resume_checkpoint_step(&state_for_scan, &plan_value)
+        })
+        .await
+        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))?;
+        if step.is_none() {
+            return Err(ApiError::bad_request(
+                "This training job has no saved checkpoint to resume from; restart it from step 0 instead.",
+            ));
+        }
+    }
+    let config = plan
+        .entry("config")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan config must be an object."))?;
+    config
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(JsonObject::new()))
+        .as_object_mut()
+        .ok_or_else(|| ApiError::bad_request("Training plan advanced must be an object."))?
+        .insert("resume".to_owned(), Value::Bool(resume));
+    payload_changes.insert("plan".to_owned(), Value::Object(plan));
+    Ok(())
+}
+
+/// The latest resume-checkpoint step of a training plan's run in its `output.outputDir`, after
+/// confining that directory exactly as the worker does and matching the engine's checkpoint stem
+/// (`output.fileName`). `None` when the plan names no valid output dir or the dir holds no resume
+/// bundle of that run. Blocking filesystem work (sc-25785).
+fn training_plan_resume_checkpoint_step(state: &AppState, plan: &Value) -> Option<u32> {
+    let output_dir = plan.pointer("/output/outputDir").and_then(Value::as_str)?;
+    let file_name = plan.pointer("/output/fileName").and_then(Value::as_str)?;
+    let output_dir = sceneworks_worker::resolve_training_output_dir_under(
+        &state.settings.data_dir,
+        output_dir,
+        "Training outputDir",
+    )
+    .ok()?;
+    sceneworks_worker::latest_training_resume_step(
+        &output_dir,
+        sceneworks_worker::training_resume_stem(file_name),
+    )
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
@@ -1104,6 +1242,18 @@ async fn validate_raw_job_payload(
             | JobType::LoraImport
     ) {
         crate::models::ensure_job_payload_license_acknowledged(state, payload).await?;
+    }
+    // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
+    // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
+    if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
+            return Err(error);
+        }
+        // sc-24161: a hand-built plan whose edit-pair shape contradicts its kernel is refused here,
+        // not first discovered by the worker.
+        if let Some(error) = crate::training::raw_training_payload_edit_shape_error(payload) {
+            return Err(error);
+        }
     }
     if matches!(job_type, JobType::ModelConvert) {
         let output_dir = payload

@@ -752,6 +752,11 @@ export function WorkerProgressCard({
   const canClear = !!onClear && isTerminal;
   const canRetryBase = actionStatuses.has(job.status) && attempts < MAX_ATTEMPTS;
   const canRetry = onRetry && canRetryBase && !isModelDownload;
+  // sc-25785: a training retry either resumes from the checkpoint the API recorded when the run
+  // stopped, or explicitly restarts from step 0 (a bare retry would inherit a resumed plan's flag).
+  const isTraining = job.type === "lora_train" || job.type === "control_training";
+  const resumeStep = job.result?.resumeCheckpointStep;
+  const canResumeTraining = canRetry && isTraining && job.status !== "completed" && Number.isInteger(resumeStep);
   const canResumeDownload = onRetry && canRetryBase && isModelDownload && job.status !== "completed";
   const canFreshDownload =
     onFreshRetry &&
@@ -887,8 +892,19 @@ export function WorkerProgressCard({
             Retry Download
           </button>
         ) : null}
+        {canResumeTraining ? (
+          <button className="secondary-action" onClick={() => onRetry(job, { resume: true })} type="button">
+            Resume from step {resumeStep}
+          </button>
+        ) : null}
         {canRetry ? (
-          <button className="secondary-action" onClick={() => onRetry(job)} type="button">Retry</button>
+          <button
+            className="secondary-action"
+            onClick={() => (isTraining ? onRetry(job, { resume: false }) : onRetry(job))}
+            type="button"
+          >
+            {isTraining ? "Restart from step 0" : "Retry"}
+          </button>
         ) : null}
         {canDuplicate ? (
           <>

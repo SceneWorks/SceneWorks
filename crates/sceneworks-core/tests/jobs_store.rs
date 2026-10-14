@@ -6912,9 +6912,14 @@ fn candle_worker_claims_candle_native_training_kernels() {
         ("mage_flow_lora", "mage_flow_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "lokr"),
         ("mage_flow_lora", "mage_flow_base", "full"),
+        // sc-24160: the Qwen Image 2.1 Candle trainer, both adapter kinds.
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "lokr"),
     ];
     for (kernel, base_model, network_type) in cases {
-        let store = store(&format!("candle-training-{kernel}-{base_model}"));
+        let store = store(&format!(
+            "candle-training-{kernel}-{base_model}-{network_type}"
+        ));
         register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
         let job = store
             .create_job(mlx_training_job(
@@ -6945,6 +6950,10 @@ fn candle_worker_rejects_invalid_training_base_and_network_cross_product() {
         ("anima_lora", "anima_turbo", "lora"),
         ("mage_flow_lora", "mage_flow_edit_base", "lora"),
         ("mage_flow_lora", "mage_flow_base", "mystery"),
+        // sc-24160: the 2.1 trainer never takes the distinct 2512 bases nor a non-adapter run.
+        ("qwen_image_2_1_lora", "qwen_image", "lora"),
+        ("qwen_image_2_1_lora", "qwen_image_edit", "lokr"),
+        ("qwen_image_2_1_lora", "qwen_image_2_1", "full"),
     ];
     for (kernel, base_model, network_type) in cases {
         let store = store(&format!(
@@ -7030,6 +7039,109 @@ fn mage_flow_training_is_claimable_by_the_mlx_worker_for_lora_and_full() {
             });
         assert_eq!(claimed.id, job.id, "{base_model}/{network_type}");
     }
+}
+
+/// sc-24159/sc-24160 (epic 24107 S11/S12): a Qwen Image 2.1 T2I training job is native-only — MLX
+/// on a Mac, Candle off-Mac — for both adapter kinds. A generic descriptor still refuses it (there is
+/// no generic 2.1 trainer), while BOTH the mlx and the candle worker claim it.
+#[test]
+fn qwen_image_2_1_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!("qwen-2-1-training-{native_worker}-{network_type}"));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "a generic worker must refuse qwen_image_2_1_lora/{network_type} — no 2.1 trainer"
+            );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
+        }
+    }
+}
+
+/// sc-24161/sc-24162 (epic 24107 S13/S14): a Qwen Image 2.1 instruction-EDIT training job is
+/// claimed by BOTH native workers (the MLX and the Candle 2.1 trainers train edit pairs), for both
+/// network types, and never by a generic worker; a forged plan naming another base is refused by
+/// the candle exception.
+#[test]
+fn qwen_image_2_1_edit_training_is_claimable_by_the_native_mlx_and_candle_workers() {
+    for (native_worker, gpu_id) in [("worker-mlx", "mlx"), ("worker-candle", "0")] {
+        for network_type in ["lora", "lokr"] {
+            let store = store(&format!(
+                "qwen-2-1-edit-training-{native_worker}-{network_type}"
+            ));
+            register_gpu_worker(&store, "worker-torch", "cuda:0", training_caps());
+            let job = store
+                .create_job(mlx_training_job(
+                    "qwen_image_2_1_edit_lora",
+                    "qwen_image_2_1",
+                    network_type,
+                    false,
+                    "auto",
+                ))
+                .expect("job creates");
+            assert!(
+                store
+                    .claim_next_job("worker-torch")
+                    .expect("torch claim ok")
+                    .is_none(),
+                "a generic worker must refuse qwen_image_2_1_edit_lora/{network_type}"
+            );
+            let caps = if gpu_id == "mlx" {
+                training_caps()
+            } else {
+                candle_training_caps()
+            };
+            register_gpu_worker(&store, native_worker, gpu_id, caps);
+            let claimed = store
+                .claim_next_job(native_worker)
+                .unwrap_or_else(|error| panic!("{native_worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| {
+                    panic!("{native_worker} must claim qwen_image_2_1_edit_lora/{network_type}")
+                });
+            assert_eq!(claimed.id, job.id, "{native_worker}/{network_type}");
+        }
+    }
+    // Base gate: the edit kernel over the 2512 base never reaches the candle 2.1 trainer.
+    let store = store("qwen-2-1-edit-training-forged-base");
+    register_gpu_worker(&store, "worker-candle", "0", candle_training_caps());
+    store
+        .create_job(mlx_training_job(
+            "qwen_image_2_1_edit_lora",
+            "qwen_image",
+            "lora",
+            false,
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(store
+        .claim_next_job("worker-candle")
+        .expect("candle claim ok")
+        .is_none());
 }
 
 #[test]
@@ -9275,4 +9387,56 @@ fn registering_retires_a_previous_unhealthy_reason() {
         worker.status_reason, None,
         "re-registering re-advertises what the worker can serve, so the old remedy must be retired"
     );
+}
+
+/// sc-25785: a worker reports `resumeCheckpointStep` only when it changes, so the latest value
+/// must survive later results that omit it and a store-side interrupt (backend restart) that never
+/// goes through a progress report — the Queue's Resume offer reads it from the interrupted row.
+#[test]
+fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
+    let store = store("resume-checkpoint-carry-forward");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 50 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "resumeCheckpointStep": 100 })))
+        .expect("progress");
+    store
+        .update_job_progress(&created.id, report(json!({ "other": true })))
+        .expect("progress");
+    // The worker died with the job: its row no longer names the job, so startup recovery
+    // interrupts it (an exactly-owned job would be preserved for the live worker instead).
+    Connection::open(store.db_path())
+        .expect("db opens")
+        .execute(
+            "update workers set status = 'offline', current_job_id = null",
+            [],
+        )
+        .expect("worker fixture updates");
+    store
+        .mark_interrupted_on_startup()
+        .expect("startup interrupt succeeds");
+
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
+    assert_eq!(job.result.get("other"), Some(&json!(true)));
 }

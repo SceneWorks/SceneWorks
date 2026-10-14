@@ -48,9 +48,9 @@ pub use routing::catalog::{
     imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
     imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
-    mac_capabilities, model_candle_support, model_mac_support, video_job_type_for_mode,
-    ImportedProviderSurface, MacCapabilities, ModelCandleSupport, MAC_NOT_AVAILABLE_LABEL,
-    MLX_ROUTED_TRAINING_KERNELS,
+    mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
+    video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
+    MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
 };
 pub use routing::gaps::{
     candle_supported, convert_artifact_required_here, mac_rust_supported,
@@ -58,6 +58,9 @@ pub use routing::gaps::{
     UnsupportedReason, CANDLE_NATIVE_CONVERTERS, NATIVE_CONVERTERS,
 };
 pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
+// The explicit target -> backend-local trainer identity contract; the training catalog derives each
+// target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
+pub(crate) use routing::matrix::expected_backend_local_trainer_id;
 pub use routing::{
     canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
     video_mode_conditioning_requirements, video_ui_modes,
@@ -3992,6 +3995,12 @@ fn derive_job_title(job_type: &JobType, payload: &Map<String, Value>) -> Option<
                 .to_owned();
             Some(format!("Dataset Face Analysis — {subject}"))
         }
+        JobType::DatasetSubjectMask => {
+            let subject = first_str(payload, &["datasetName", "datasetId"])
+                .unwrap_or("(unnamed dataset)")
+                .to_owned();
+            Some(format!("Subject Masks — {subject}"))
+        }
         JobType::FaceLikenessCompare => {
             // sc-4415: compare a candidate asset to a source identity reference. The candidate is the
             // user-facing subject of the row; fall back to a plain label when the payload omits it.
@@ -4184,10 +4193,21 @@ fn persist_claim_routing_facts(
 /// result. `existing_result` is the job's current result, which
 /// `update_job_progress` has already read in the same transaction — so this no
 /// longer re-`select`s `result_json` per update (sc-4274 / F-CORE-14).
+///
+/// A training run's latest `resumeCheckpointStep` (sc-25785) and its sample
+/// history also survive a result that omits them: the worker reports each only
+/// when it changes, and the result column is replaced wholesale.
 fn merge_training_sample_history(
     existing_result: Option<&Map<String, Value>>,
     incoming: &mut Map<String, Value>,
 ) {
+    for key in ["resumeCheckpointStep", "trainingSamples"] {
+        if !incoming.contains_key(key) {
+            if let Some(value) = existing_result.and_then(|result| result.get(key)) {
+                incoming.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
     let has_training_samples = incoming
         .get("trainingSamples")
         .and_then(Value::as_array)
@@ -5025,6 +5045,9 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // is served by any worker that advertises the training capability — it has no dedicated
         // capability of its own (the real-run gate below additionally requires `lora_train_execute`).
         JobType::ControlTraining => WorkerCapability::LoraTrain.as_str(),
+        // Dataset subject masks (sc-2126) run the same SAM3 checkpoint as smart-select, so they route
+        // to any worker advertising `image_segment` instead of a capability of their own.
+        JobType::DatasetSubjectMask => WorkerCapability::ImageSegment.as_str(),
         // A download that ends in a LOCAL DERIVATION (sc-22999: YuE2's q8 / q4 tiers) runs the
         // audio lane's snapshot preparer after the fetch, so only a worker that links the audio lane
         // may claim it. `audio_generate` is advertised exactly when that lane is linked
@@ -5290,6 +5313,7 @@ fn job_requires_gpu(job_type: &JobType) -> bool {
             | JobType::CatalogAnalysis
             | JobType::DatasetUpscale
             | JobType::DatasetFaceAnalysis
+            | JobType::DatasetSubjectMask
             | JobType::FaceLikenessCompare
     )
 }

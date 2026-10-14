@@ -514,7 +514,15 @@ jobs:
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
     if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
-    # The PR/main path needs only `nax`. The workflow_dispatch calibration paths
+    # The default PR/main path needs only `nax`. A final same-repo PR to `main`
+    # whose title starts with `[Mac2]`, and the resulting main push whose merge
+    # subject starts with `[Mac2]`, use the `rw-mage` label to select nax-macos-2.
+    # The marker is deliberately in the initial PR title and merge subject: adding
+    # a label after the PR is opened races the workflow's initial event payload.
+    # This selection does not apply to workflow_dispatch, feature-target PRs,
+    # forks, or merge groups; the job-level `if:` above remains their authority.
+    #
+    # The workflow_dispatch calibration paths
     # additionally need the HF snapshots, and those are HOST STATE that does not travel
     # with a label — the same defect class this repo just fixed for release.yml's signing
     # cert. Left on bare `nax` with a multi-box pool:
@@ -532,7 +540,7 @@ jobs:
     # WARNING: at least one runner must carry `weights`, or a calibration dispatch has no
     # eligible runner and queues indefinitely instead of failing. See the label topology
     # table in docs/rust-mlx-build.md.
-    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
+    runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.run_memory_calibration || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","macOS","ARM64","nax","weights"]') || ((github.event_name == 'pull_request' && startsWith(github.event.pull_request.title, '[Mac2]')) || (github.event_name == 'push' && startsWith(github.event.head_commit.message, '[Mac2]'))) && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","nax"]') }}
     env:
       CARGO_NET_OFFLINE: "true"
       # Survives `actions/checkout`'s `clean: true` between jobs on this persistent box. See

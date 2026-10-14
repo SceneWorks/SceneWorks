@@ -1176,6 +1176,27 @@ async fn models_catalog_carries_mac_support_and_capabilities_endpoint() {
         .unwrap()
         .iter()
         .any(|k| k == "kolors_lora"));
+    // sc-24161/sc-24162: the off-Mac twin lists the candle-routed training kernels — both Qwen
+    // Image 2.1 kernels since the Candle edit trainer — and is exactly that set.
+    let candle_kernels: Vec<_> = caps["training"]["candleSupportedKernels"]
+        .as_array()
+        .expect("candleSupportedKernels")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(candle_kernels.contains(&"qwen_image_2_1_lora"));
+    assert!(candle_kernels.contains(&"qwen_image_2_1_edit_lora"));
+    for kernel in &candle_kernels {
+        assert!(
+            sceneworks_core::jobs_store::training_kernel_is_candle_routed(kernel),
+            "{kernel} is advertised off-Mac but has no candle lane"
+        );
+    }
+    assert!(caps["training"]["supportedKernels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "qwen_image_2_1_edit_lora"));
 }
 
 #[tokio::test]
@@ -6383,6 +6404,183 @@ async fn update_lora_edits_trigger_words_and_notes() {
     assert_eq!(entry["notes"], "revised note");
 }
 
+/// A minimal complete safetensors with the given `__metadata__` and F32 `[1]` tensors.
+fn write_stamped_safetensors(path: &std::path::Path, metadata: Value, keys: &[String]) {
+    let mut object = serde_json::Map::new();
+    object.insert("__metadata__".to_owned(), metadata);
+    for key in keys {
+        object.insert(
+            key.clone(),
+            json!({"dtype": "F32", "shape": [1], "data_offsets": [0, 4]}),
+        );
+    }
+    let header = serde_json::to_vec(&Value::Object(object)).expect("header serializes");
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(&header);
+    bytes.extend_from_slice(&[0u8; 4]);
+    std::fs::write(path, bytes).expect("adapter writes");
+}
+
+/// sc-24163 (epic 24107 E10): a stored LoRA whose file does not resolve a family can be assigned
+/// one in place via PATCH, and the job gate then uses it. A file that DOES resolve keeps its
+/// detected family (PATCH refused, naming it), and an unknown family id is refused.
+#[tokio::test]
+async fn update_lora_assigns_a_family_only_when_the_header_is_unresolved() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let settings = test_settings(&temp_dir);
+    let manifest_dir = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&manifest_dir).expect("manifest dir");
+    // The shipped model catalog (read from disk in production), so both Qwen rows exist.
+    let builtin_models = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+        .iter()
+        .find(|(name, _)| *name == "builtin.models.jsonc")
+        .map(|(_, contents)| *contents)
+        .expect("builtin.models.jsonc embedded");
+    std::fs::write(manifest_dir.join("builtin.models.jsonc"), builtin_models)
+        .expect("seed builtin models");
+    let lora_dir = temp_dir.path().join("data/loras");
+    std::fs::create_dir_all(&lora_dir).expect("lora dir");
+    // Bare ai-toolkit `qwen_image` stamp, attention-only keys inside 2.1's 32 blocks: unresolved.
+    let attention: Vec<String> = (0..32)
+        .map(|block| format!("transformer.transformer_blocks.{block}.attn.to_q.lora_A.weight"))
+        .collect();
+    write_stamped_safetensors(
+        &lora_dir.join("unresolved.safetensors"),
+        json!({ "ss_base_model_version": "qwen_image" }),
+        &attention,
+    );
+    // The same keys stamped for 2512 explicitly: resolves to qwen-image.
+    write_stamped_safetensors(
+        &lora_dir.join("resolved.safetensors"),
+        json!({ "ss_base_model_version": "Qwen-Image-2512" }),
+        &attention,
+    );
+    std::fs::write(
+        manifest_dir.join("user.loras.jsonc"),
+        r#"{ "schemaVersion": 1, "loras": [
+            { "id": "unresolved_lora", "name": "Unresolved",
+              "source": { "provider": "local", "path": "loras/unresolved.safetensors" } },
+            { "id": "resolved_lora", "name": "Resolved", "family": "qwen-image",
+              "source": { "provider": "local", "path": "loras/resolved.safetensors" } },
+            { "id": "missing_lora", "name": "Not downloaded",
+              "source": { "provider": "local", "path": "loras/not-there.safetensors" } }
+        ] }"#,
+    )
+    .expect("seed manifest");
+    let app = create_app(settings).expect("app creates");
+
+    // No inspectable header (here: not installed yet) means the family cannot be called
+    // unresolved yet, so assignment is refused (typed) rather than recorded uninspected. The
+    // installed-but-unreadable arm is pinned by `family_assignment_needs_an_inspected_header`.
+    for (id, expect_installed) in [("missing_lora", false)] {
+        let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = loras
+            .as_array()
+            .expect("catalog array")
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap_or_else(|| panic!("{id} listed"))
+            .clone();
+        assert_eq!(
+            row["installState"] == "installed",
+            expect_installed,
+            "precondition for {id}: {row}"
+        );
+        let (status, refusal) = request(
+            app.clone(),
+            "PATCH",
+            &format!("/api/v1/loras/{id}?scope=global"),
+            json!({ "family": "qwen-image-2-1" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {refusal}");
+        assert_eq!(
+            refusal["code"], "lora_family_not_inspectable",
+            "{id}: {refusal}"
+        );
+    }
+
+    // Unknown family id → refused, typed.
+    let (status, refusal) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/unresolved_lora?scope=global",
+        json!({ "family": "not-a-family" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    assert_eq!(refusal["code"], "lora_family_unknown", "{refusal}");
+
+    // Header resolves → assignment refused, naming the detected family.
+    let (status, refusal) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/resolved_lora?scope=global",
+        json!({ "family": "qwen-image-2-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    assert_eq!(refusal["code"], "lora_family_detected", "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("a qwen-image adapter")),
+        "{refusal}"
+    );
+
+    // Unresolved → assigned qwen-image-2-1 and persisted.
+    let (status, updated) = request(
+        app.clone(),
+        "PATCH",
+        "/api/v1/loras/unresolved_lora?scope=global",
+        json!({ "family": "qwen-image-2-1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{updated}");
+    assert_eq!(updated["family"], "qwen-image-2-1");
+
+    let (status, loras) = request(app.clone(), "GET", "/api/v1/loras", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let catalog = loras.as_array().expect("catalog array").clone();
+    let entry = catalog
+        .iter()
+        .find(|item| item["id"] == "unresolved_lora")
+        .expect("assigned LoRA listed");
+    assert_eq!(
+        crate::loras::lora_families(entry),
+        vec!["qwen-image-2-1".to_owned()]
+    );
+    let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let models = models.as_array().expect("models array").clone();
+    let attached = [json!({ "id": "unresolved_lora", "weight": 1.0 })];
+    crate::validate_lora_specs_for_model(
+        &models,
+        &catalog,
+        "qwen_image_2_1",
+        &attached,
+        false,
+        "LoRA",
+    )
+    .expect("the assigned 2.1 LoRA is accepted on qwen_image_2_1");
+    let error = crate::validate_lora_specs_for_model(
+        &models,
+        &catalog,
+        "qwen_image",
+        &attached,
+        false,
+        "LoRA",
+    )
+    .expect_err("the assigned 2.1 LoRA is refused on the 2512 model");
+    assert!(
+        error.detail.contains("a qwen-image-2-1 adapter")
+            && error.detail.contains("loads qwen-image adapters"),
+        "the refusal names both families: {}",
+        error.detail
+    );
+}
+
 /// epic 10451 / sc-10452: with an operator-configured external root, the LoRAs in a
 /// ComfyUI `models/loras` tree are surfaced by `GET /api/v1/loras` — read in place,
 /// never copied — and are read-only: not removable, and `DELETE` refuses them. We
@@ -6428,6 +6626,22 @@ async fn external_root_loras_are_listed_read_only() {
 
     let id = external["id"].as_str().expect("id");
     assert!(id.starts_with("external_"), "ids are namespaced: {id}");
+
+    // sc-24163: assigning a family is refused too, and the refusal says how to get one.
+    let (status, refusal) = request(
+        app.clone(),
+        "PATCH",
+        &format!("/api/v1/loras/{id}?scope=external"),
+        json!({ "family": "wan-video" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+    assert!(
+        refusal["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("Import a copy to choose its family")),
+        "{refusal}"
+    );
 
     let (status, _) = request(
         app,

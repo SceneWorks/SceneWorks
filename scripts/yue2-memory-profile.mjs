@@ -768,7 +768,10 @@ async function atomicJson(file, value) {
 export async function readDurableWatchdogEvents(file, sync = (handle) => handle.sync()) {
   let handle;
   try {
-    handle = await open(file, "r");
+    // Windows rejects fsync on a read-only file handle (EPERM). Open the journal read/write so the
+    // durability barrier has the same meaning on every supported host; the reader still performs
+    // no writes.
+    handle = await open(file, "r+");
   } catch (error) {
     if (error.code === "ENOENT") return null;
     throw error;

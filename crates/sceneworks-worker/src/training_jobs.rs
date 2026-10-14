@@ -11,7 +11,7 @@
 //!
 //! Routing (sc-3049, sc-7817): the API sends native-trainable families
 //! (`z_image_lora`/`sdxl_lora`/`kolors_lora`/`lens_lora`/`krea_lora`/`sd3_lora`/`wan_lora`/
-//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`)
+//! `wan_moe_lora`/`ltx_mlx_lora`/`anima_lora`/`mage_flow_lora`/`qwen_image_2_1_lora`)
 //! here (`jobs_store::training_job_is_mlx_eligible` on Mac, `…_is_candle_eligible` off-Mac).
 //! `kolors_lora` joined the native trainers in sc-4732 (engine trainer sc-4568); `lens_lora` in
 //! sc-5180; `krea_lora` in sc-7577/7578; `sd3_lora` (Large + MMDiT-X Medium training bases) in
@@ -23,7 +23,31 @@
 use super::*;
 use sceneworks_core::contracts::ExtraFields;
 use sceneworks_core::file_lock::FileLock;
-use sceneworks_core::training::{TrainingPlan, TRAINING_PLAN_VERSION};
+use sceneworks_core::training::body_losses::{
+    body_loss_combination_refusal, body_loss_settings, BodyLoss,
+};
+use sceneworks_core::training::depth_anchoring::{
+    depth_anchoring_combination_refusal, depth_anchoring_settings, x0_decoder_for_trainer,
+    DEPTH_ANCHORING_WEIGHT_KEY,
+};
+use sceneworks_core::training::face_losses::{
+    face_landmark_loss_settings, face_loss_combination_refusal, identity_loss_settings,
+    FACE_LANDMARK_LOSS_WEIGHT_KEY, IDENTITY_LOSS_WEIGHT_KEY,
+};
+use sceneworks_core::training::latent_perceptual::{
+    latent_loss_combination_refusal, latent_loss_settings, latent_lpips_model_for_trainer,
+    LATENT_LPIPS, VAE_ANCHOR,
+};
+use sceneworks_core::training::{
+    parse_resolution_buckets, subject_mask_loss_weights, technique_value, TrainingPlan,
+    GRADIENT_NOISE_ETA_KEY, GRADIENT_NOISE_ETA_MAX, GRADIENT_NOISE_GAMMA_DEFAULT,
+    GRADIENT_NOISE_GAMMA_KEY, GRADIENT_NOISE_GAMMA_MAX, RESOLUTION_BUCKETS_KEY,
+    SUBJECT_MASK_LOSS_KEY, TRAINING_PLAN_VERSION, WEIGHT_NOISE_SIGMA_KEY, WEIGHT_NOISE_SIGMA_MAX,
+};
+use sceneworks_core::training_subject_masks::{
+    lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
+    SubjectMaskLookup,
+};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -102,6 +126,18 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
     // for payload-supplied weight filenames (`safe_weight_filename`). Shared by the dry run and the
     // real run (both call this), so both reject the same forged filename before any join.
     safe_weight_filename(&plan.output.file_name, "Training fileName")?;
+    // sc-24161: the T2I and edit kernels share one engine trainer (cap 10), so the engine floor
+    // alone cannot tell an edit adapter trained under the T2I target from the intended one. The
+    // kernel decides: an edit kernel needs references on every item, any other kernel on none.
+    if let Some(message) = sceneworks_core::training::edit_pair_kernel_shape_error(
+        &plan.target.kernel,
+        plan.dataset
+            .items
+            .iter()
+            .map(|item| item.reference_image_paths.len()),
+    ) {
+        return Err(WorkerError::InvalidPayload(message));
+    }
     let mut missing = Vec::new();
     for item in &plan.dataset.items {
         let image_path = resolve_dataset_item_path(
@@ -112,6 +148,19 @@ pub(crate) fn validate_training_plan(settings: &Settings, plan: &TrainingPlan) -
         )?;
         if !image_path.exists() {
             missing.push(image_path.display().to_string());
+        }
+        // An instruction-edit pair's ordered references (sc-24161) are dataset images too: confined
+        // under the dataset root and required on disk, exactly like the target.
+        for reference in &item.reference_image_paths {
+            let reference_path = resolve_dataset_item_path(
+                settings,
+                &plan.dataset.root_path,
+                reference,
+                "Training dataset referenceImagePaths",
+            )?;
+            if !reference_path.exists() {
+                missing.push(reference_path.display().to_string());
+            }
         }
         // Resolve and validate the prepared-bundle contract here, but do not hash the source.
         // `preflight_training_run` materializes each distinct bundle exactly once into a private
@@ -749,14 +798,16 @@ impl PreparedTrainingRun {
 fn preflight_training_run(
     settings: &Settings,
     plan: &TrainingPlan,
+    masks_pending: bool,
 ) -> WorkerResult<PreparedTrainingRun> {
     validate_training_plan(settings, plan)?;
     let engine_id = validate_training_target_config(plan)?;
     let mut prepared_inputs = PreparedTrainingInputs::default();
-    let request = match training_request_from_plan(settings, plan, &mut prepared_inputs) {
-        Ok(request) => request,
-        Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
-    };
+    let request =
+        match training_request_from_plan(settings, plan, &mut prepared_inputs, masks_pending) {
+            Ok(request) => request,
+            Err(error) => return finish_prepared_input_operation(Err(error), prepared_inputs),
+        };
     if let Err(error) = validate_weights_free_training_request(plan, engine_id, &request) {
         drop(request);
         return finish_prepared_input_operation(Err(error), prepared_inputs);
@@ -775,9 +826,14 @@ fn preflight_training_run(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 )))]
-fn preflight_training_run(settings: &Settings, plan: &TrainingPlan) -> WorkerResult<()> {
+fn preflight_training_run(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    masks_pending: bool,
+) -> WorkerResult<()> {
     validate_training_plan(settings, plan)?;
     validate_training_target_config(plan)?;
+    preflight_subject_mask_paths(settings, plan, masks_pending)?;
     // This build cannot construct a typed engine request, but it still verifies each stored
     // prepared-bundle receipt exactly once before accepting a dry-run plan.
     let mut prepared_inputs = PreparedTrainingInputs::default();
@@ -808,6 +864,7 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
         ))
     })?;
     let advanced = &plan.config.advanced;
+    let base_model = plan.target.base_model.as_str();
     let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
     let supported = match network_type.as_str() {
         "lora" => descriptor.supports_lora,
@@ -819,6 +876,194 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     if !supported {
         return Err(WorkerError::InvalidPayload(format!(
             "Native trainer '{engine_id}' does not support networkType '{network_type}'."
+        )));
+    }
+
+    // Epic 2123 weight noising (sc-24826): perturbs adapter factors only, so it is refused for a
+    // full base fine-tune (E5), and refused for any trainer whose descriptor does not declare it
+    // (E3) — before any load, on both the dry and the real path.
+    let weight_noise_sigma = preflight_weight_noise_sigma(advanced)?;
+    if weight_noise_sigma > 0.0 {
+        if network_type == "full" {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Weight noise ({WEIGHT_NOISE_SIGMA_KEY}) perturbs adapter weights only and cannot \
+                 be combined with networkType 'full'."
+            )));
+        }
+        if !descriptor.techniques.weight_noise {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support weight noise \
+                 ({WEIGHT_NOISE_SIGMA_KEY})."
+            )));
+        }
+    }
+
+    // Epic 2123 gradient noise (sc-24827): same contract — adapter gradients only (refused for a
+    // full base fine-tune, E5) and only on a trainer that declares it (E3). Gamma is read strictly
+    // even while eta is off, so a malformed value never silently maps to the default.
+    let gradient_noise_eta = preflight_bounded_f64(
+        advanced,
+        GRADIENT_NOISE_ETA_KEY,
+        GRADIENT_NOISE_ETA_MAX,
+        0.0,
+    )?;
+    preflight_bounded_f64(
+        advanced,
+        GRADIENT_NOISE_GAMMA_KEY,
+        GRADIENT_NOISE_GAMMA_MAX,
+        GRADIENT_NOISE_GAMMA_DEFAULT,
+    )?;
+    if gradient_noise_eta > 0.0 {
+        if network_type == "full" {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Gradient noise ({GRADIENT_NOISE_ETA_KEY}) perturbs adapter gradients only and \
+                 cannot be combined with networkType 'full'."
+            )));
+        }
+        if !descriptor.techniques.gradient_noise {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support gradient noise \
+                 ({GRADIENT_NOISE_ETA_KEY})."
+            )));
+        }
+    }
+
+    // Epic 2123 depth anchoring (sc-2125): strictly parsed (the same parser the API validates
+    // with), refused for any trainer whose descriptor does not declare it (E3) or whose latent
+    // family has no cataloged tiny x0 decoder — before any load, on both the dry and the real path.
+    // Whether the auxiliary weights are installed is checked where the request is built
+    // (`apply_depth_anchoring`), which has the data dir.
+    let depth = depth_anchoring_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if depth.is_some() {
+        if !descriptor.techniques.depth_anchoring {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support depth anchoring \
+                 ({DEPTH_ANCHORING_WEIGHT_KEY})."
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no x0 decoder for depth anchoring \
+                 ({DEPTH_ANCHORING_WEIGHT_KEY})."
+            )));
+        }
+        if let Some(reason) = depth_anchoring_combination_refusal(base_model, &plan.config) {
+            return Err(combination_refused(DEPTH_ANCHORING_WEIGHT_KEY, reason));
+        }
+    }
+
+    // Epic 2123 body losses (sc-24832): strictly parsed (the API's parser); each enabled loss is
+    // refused for a trainer whose descriptor does not declare it (E3), whose latent family has no
+    // cataloged tiny x0 decoder, or whose frozen model is not cataloged — before any load, on both
+    // the dry and the real path. Installation is checked where the request is built
+    // (`apply_body_losses`).
+    let body = body_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    for loss in BodyLoss::ALL {
+        if body.schedule(loss).is_none() {
+            continue;
+        }
+        let key = loss.weight_key();
+        let declared = match loss {
+            BodyLoss::Proportion => descriptor.techniques.body_proportion_loss,
+            BodyLoss::Shape => descriptor.techniques.body_shape_loss,
+            BodyLoss::Normal => descriptor.techniques.normal_loss,
+        };
+        if !declared {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the {} ({key}).",
+                loss.label()
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no tiny x0 decoder for the {} ({key}).",
+                loss.label()
+            )));
+        }
+        if !loss.weights_cataloged() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "The {} ({key}) needs a frozen model that is not in the model catalog yet.",
+                loss.label()
+            )));
+        }
+        if let Some(reason) = body_loss_combination_refusal(base_model, &plan.config) {
+            return Err(combination_refused(&key, reason));
+        }
+    }
+    // Epic 2123 face losses (sc-24831): the ArcFace identity and FaceMesh landmark losses ride the
+    // same decoded-x0 path as depth anchoring, so they are refused the same way — strictly parsed
+    // (the API's parser), refused for a trainer that does not declare them (E3) or whose latent
+    // family has no cataloged tiny x0 decoder. Installation is checked by `apply_face_losses`.
+    let identity = identity_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let landmark = face_landmark_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    for (enabled, declared, name, label, key) in [
+        (
+            identity.is_some(),
+            descriptor.techniques.identity_loss,
+            "the identity loss",
+            "The identity loss",
+            IDENTITY_LOSS_WEIGHT_KEY,
+        ),
+        (
+            landmark.is_some(),
+            descriptor.techniques.face_landmark_loss,
+            "the face-landmark loss",
+            "The face-landmark loss",
+            FACE_LANDMARK_LOSS_WEIGHT_KEY,
+        ),
+    ] {
+        if !enabled {
+            continue;
+        }
+        if !declared {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support {name} ({key})."
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no x0 decoder for {name} ({key})."
+            )));
+        }
+        if let Some(reason) = face_loss_combination_refusal(base_model, &plan.config, label) {
+            return Err(combination_refused(key, reason));
+        }
+    }
+    // Epic 2123 latent-space perceptual losses (sc-24833): strictly parsed (the API's parser),
+    // refused for a trainer whose descriptor does not declare the technique (E3), and — VAE anchor
+    // — for a family with no cataloged tiny x0 decoder / — E-LatentLPIPS — for a family with no
+    // published weights. Installed weights are checked in `apply_latent_perceptual`.
+    preflight_latent_perceptual(plan, engine_id, &descriptor.techniques)?;
+
+    // Epic 2123 multi-resolution buckets (sc-2127): a malformed list is a typed payload error (never
+    // a silent single-resolution run), and a trainer whose descriptor does not declare bucket support
+    // refuses it (E3) — before any load, on both the dry and the real path.
+    let buckets = parse_resolution_buckets(advanced).map_err(|message| {
+        WorkerError::InvalidPayload(format!("Training config field {message}"))
+    })?;
+    if buckets.is_some() && !descriptor.techniques.resolution_buckets {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support multi-resolution buckets \
+             ({RESOLUTION_BUCKETS_KEY})."
+        )));
+    }
+
+    // Epic 2123 subject-masked loss (sc-24828): malformed weights are refused here exactly as at
+    // submit time (one shared reader), and a trainer whose descriptor does not declare the
+    // technique is refused before any load (E3). Per-image mask coverage is checked by
+    // `preflight_subject_mask_paths`, which needs the dataset on disk.
+    if subject_mask_loss_weights(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .is_some()
+        && !descriptor.techniques.subject_mask_loss
+    {
+        return Err(WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' does not support subject-masked loss \
+             ({SUBJECT_MASK_LOSS_KEY})."
         )));
     }
 
@@ -882,14 +1127,19 @@ fn training_request_from_plan(
     settings: &Settings,
     plan: &TrainingPlan,
     prepared_inputs: &mut PreparedTrainingInputs,
+    masks_pending: bool,
 ) -> WorkerResult<TrainingRequest> {
+    // Subject-masked loss (sc-24828): one mask path per item when on (refused here, naming the
+    // images, when any lacks a non-empty mask); `None` keeps every item mask-free.
+    let mask_paths = preflight_subject_mask_paths(settings, plan, masks_pending)?;
     let items = plan
         .dataset
         .items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             Ok(TrainingItem {
-                subject_mask_path: None,
+                subject_mask_path: mask_paths.as_ref().map(|paths| paths[index].clone()),
                 image_path: resolve_dataset_item_path(
                     settings,
                     &plan.dataset.root_path,
@@ -914,15 +1164,41 @@ fn training_request_from_plan(
                     &plan.dataset.root_path,
                     &item.extra,
                 )?,
-                // Instruction-edit references (sc-24161, inference Qwen Image 2.1 LoRA): this tree's
-                // dataset plan carries none yet, so every item trains captioned/control-only.
-                reference_image_paths: Vec::new(),
+                // Instruction-edit pairs (sc-24161): the ORDERED references resolve under the
+                // dataset root exactly like the target image, in plan order — the engine numbers
+                // them, so the order is semantic. Empty for every captioned/control item.
+                reference_image_paths: item
+                    .reference_image_paths
+                    .iter()
+                    .map(|path| {
+                        resolve_dataset_item_path(
+                            settings,
+                            &plan.dataset.root_path,
+                            path,
+                            "Training dataset referenceImagePaths",
+                        )
+                    })
+                    .collect::<WorkerResult<Vec<_>>>()?,
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
+    let mut config = finalize_training_config(map_training_config(&plan.config), plan);
+    apply_depth_anchoring(settings, plan, &mut config)?;
+    apply_body_losses(settings, plan, &mut config)?;
+    apply_face_losses(settings, plan, &mut config)?;
+    apply_latent_perceptual(settings, plan, &mut config)?;
+    apply_training_adapter(settings, plan, &mut config)?;
+    // The weights were validated by `validate_training_target_config` (same reader), so a
+    // malformed value is already refused; this propagates rather than defaulting regardless.
+    config.subject_mask_loss = subject_mask_loss_weights(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .map(|(background, subject)| gen_core::SubjectMaskLoss {
+            background_weight: background as f32,
+            subject_weight: subject as f32,
+        });
     Ok(TrainingRequest {
         items,
-        config: finalize_training_config(map_training_config(&plan.config), plan),
+        config,
         output_dir: resolve_training_output_dir(
             settings,
             &plan.output.output_dir,
@@ -932,6 +1208,33 @@ fn training_request_from_plan(
         trigger_words: plan.output.trigger_words.clone(),
         cancel: CancelFlag::new(),
     })
+}
+
+/// Map a trainer `validate` failure to a worker error class by WHAT failed, not by which call hit
+/// it. Every trainer loads its base lazily (MLX `LazyTrainer`, sc-2124; candle, sc-7817), so a
+/// base-load failure — a backend/device error, a missing tensor, an I/O error — can surface from
+/// `validate` (custom `lora_target_modules` validate on the loaded base) as well as from `train`,
+/// and it is an engine failure (`Engine`, as `train` maps it), never a rejected plan. Only the
+/// plan-refusal variants (`Unsupported`, `GeometryRefused`, and the floors' contextual `Msg`) are
+/// `InvalidPayload`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn trainer_validate_error(engine_id: &str, error: gen_core::Error) -> WorkerError {
+    match error {
+        gen_core::Error::Unsupported(_)
+        | gen_core::Error::GeometryRefused { .. }
+        | gen_core::Error::Msg(_) => {
+            WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+        }
+        gen_core::Error::Backend(_)
+        | gen_core::Error::MissingTensor(_)
+        | gen_core::Error::Io(_) => {
+            WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
+        }
+        gen_core::Error::Canceled => WorkerError::Engine(format!("training failed: {error}")),
+    }
 }
 
 #[cfg(any(
@@ -952,6 +1255,17 @@ fn validate_weights_free_training_request(
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Epic 2123: the engine's own technique floor over the fully mapped request (weight / gradient
+    // noise, schedule shape, declared support, aux model directories present), so the worker
+    // refuses exactly what the trainer would — before any model load.
+    gen_core::train::validate_training_techniques(&descriptor, request).map_err(|error| {
+        WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
+    })?;
+    // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
+    // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
+    gen_core::train::validate_edit_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -1102,6 +1416,580 @@ fn preflight_u32(advanced: &JsonObject, key: &str, default: u32) -> WorkerResult
     }
 }
 
+/// Epic 2123 depth anchoring (sc-2125): map the strictly parsed `advanced.depthAnchoring*` keys onto
+/// the engine's typed [`gen_core::DepthAnchoringConfig`] and resolve the two auxiliary checkpoints
+/// it loads — the trainer family's x0 decoder (its cataloged tiny decoder, e.g. TAEF1 for Z-Image,
+/// TAESDXL for SDXL, TAEW2.1 for Wan/Krea/Anima — or, for a family with none, no directory: the
+/// trainer decodes through its own base-model VAE; sc-24830) and the selected Depth-Anything-V2 —
+/// from the installed model library. A missing checkpoint is refused, naming the catalog model to
+/// install; nothing is downloaded mid-job. Off (the default) leaves the config untouched, so a
+/// legacy plan maps exactly as before.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_depth_anchoring(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::depth_anchoring::depth_anything_v2_model;
+
+    let Some(depth) = depth_anchoring_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let da2 = depth_anything_v2_model(depth.model).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!("Unknown Depth Anything V2 size '{}'.", depth.model))
+    })?;
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, "Depth anchoring")?;
+    config.depth_anchoring = gen_core::DepthAnchoringConfig {
+        schedule: gen_core::AuxLossSchedule {
+            weight: depth.weight as f32,
+            t_min: depth.min_t as f32,
+            t_max: depth.max_t as f32,
+            every_n: depth.every,
+        },
+        model_size: gen_core::DepthModelSize::parse(depth.model).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Unknown Depth Anything V2 size '{}'.",
+                depth.model
+            ))
+        })?,
+        model_dir: Some(installed_aux_model_dir(settings, da2, "Depth anchoring")?),
+    };
+    Ok(())
+}
+
+/// Epic 2123 body losses (sc-24832): map the strictly parsed `advanced` body-loss keys onto the
+/// engine's typed [`gen_core::BodyLossesConfig`] and resolve every checkpoint the enabled losses
+/// load — the trainer family's tiny x0 decoder, ViTPose+ (the proportion encoder and every body
+/// loss's person detector), and the shape/normal loss's own model — from the installed model
+/// library. A missing or uncataloged checkpoint is refused naming the model; nothing is downloaded
+/// mid-job. All off (the default) leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_body_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
+
+    let body = body_loss_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if !body.any_enabled() {
+        return Ok(());
+    }
+    const PURPOSE: &str = "The body losses";
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, PURPOSE)?;
+    let schedule = |loss: BodyLoss| {
+        body.schedule(loss)
+            .map(|s| gen_core::AuxLossSchedule {
+                weight: s.weight as f32,
+                t_min: s.min_t as f32,
+                t_max: s.max_t as f32,
+                every_n: s.every,
+            })
+            .unwrap_or_default()
+    };
+    let own_dir = |loss: BodyLoss| -> WorkerResult<Option<PathBuf>> {
+        if body.schedule(loss).is_none() {
+            return Ok(None);
+        }
+        let model = loss.own_model().ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "The {} needs a frozen model that is not in the model catalog yet.",
+                loss.label()
+            ))
+        })?;
+        installed_aux_model_dir(settings, model, PURPOSE).map(Some)
+    };
+    config.body_losses = gen_core::BodyLossesConfig {
+        proportion: schedule(BodyLoss::Proportion),
+        include_head: body.include_head,
+        shape: schedule(BodyLoss::Shape),
+        shape_min_cos: body.shape_min_cos as f32,
+        normal: schedule(BodyLoss::Normal),
+        normal_restrict_to_subject: body.normal_restrict_to_subject,
+        pose_model_dir: Some(installed_aux_model_dir(
+            settings,
+            &VITPOSE_PLUS_BASE_MODEL,
+            PURPOSE,
+        )?),
+        shape_model_dir: own_dir(BodyLoss::Shape)?,
+        normal_model_dir: own_dir(BodyLoss::Normal)?,
+    };
+    Ok(())
+}
+
+/// The x0 decoder directory every decoded-x0 perceptual loss (depth anchoring, the identity and
+/// face-landmark losses, the body losses) hands the trainer as `perceptual_decoder_dir` — ONE resolution for all of
+/// them, so a family's decoder is wired once (sc-24830's [`X0DecoderSource`] mapping). `None` for
+/// a trainer that decodes through its own base-model VAE ([`X0DecoderSource::BaseModelVae`],
+/// Mage-Flow): its descriptor declares `techniques.builtin_x0_decoder`, so the engine floor does not
+/// ask for a directory and the trainer never reads one. `technique` labels the refusal.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn perceptual_decoder_dir(
+    settings: &Settings,
+    engine_id: &str,
+    technique: &str,
+) -> WorkerResult<Option<PathBuf>> {
+    use sceneworks_core::training::depth_anchoring::X0DecoderSource;
+    let decoder = x0_decoder_for_trainer(engine_id).ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "Native trainer '{engine_id}' has no x0 decoder for {}.",
+            technique.to_lowercase()
+        ))
+    })?;
+    match decoder {
+        X0DecoderSource::Catalog(model) => {
+            installed_aux_model_dir(settings, model, technique).map(Some)
+        }
+        // The trainer decodes through its own VAE (from the base model it loads), so there is no
+        // decoder directory to hand it.
+        X0DecoderSource::BaseModelVae => Ok(None),
+    }
+}
+
+/// Epic 2123 latent-space perceptual losses (sc-24833), the shared dry/real preflight half: each
+/// technique strictly parsed, refused unless the trainer's descriptor declares it, and refused when
+/// its catalog dependency cannot exist for the trainer's family (the VAE anchor's tiny x0 decoder,
+/// E-LatentLPIPS's family weights).
+fn preflight_latent_perceptual(
+    plan: &TrainingPlan,
+    engine_id: &str,
+    techniques: &gen_core::TrainingTechniques,
+) -> WorkerResult<()> {
+    let parse = |spec| {
+        latent_loss_settings(spec, &plan.config.advanced)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    };
+    let refused = |spec| {
+        latent_loss_combination_refusal(spec, &plan.target.base_model, &plan.config)
+            .map_or(Ok(()), |reason| {
+                Err(combination_refused(spec.weight_key, reason))
+            })
+    };
+    if parse(&VAE_ANCHOR)?.is_some() {
+        if !techniques.vae_anchor_loss {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the VAE anchor loss ({}).",
+                VAE_ANCHOR.weight_key
+            )));
+        }
+        if x0_decoder_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no x0 decoder for the VAE anchor loss ({}).",
+                VAE_ANCHOR.weight_key
+            )));
+        }
+        refused(&VAE_ANCHOR)?;
+    }
+    if parse(&LATENT_LPIPS)?.is_some() {
+        if !techniques.latent_lpips_loss {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' does not support the E-LatentLPIPS loss ({}).",
+                LATENT_LPIPS.weight_key
+            )));
+        }
+        if latent_lpips_model_for_trainer(engine_id).is_none() {
+            return Err(WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no E-LatentLPIPS weights for its latent family \
+                 ({}).",
+                LATENT_LPIPS.weight_key
+            )));
+        }
+        refused(&LATENT_LPIPS)?;
+    }
+    Ok(())
+}
+
+/// Epic 2123 latent-space perceptual losses (sc-24833): map the strictly parsed `advanced.vaeAnchor*`
+/// / `advanced.latentLpips*` keys onto the engine's typed configs and resolve the checkpoints they
+/// load from the installed model library — the VAE anchor's tiny x0 decoder (shared with depth
+/// anchoring) and FLUX.2 VAE (the `flux2_vae` component, or any installed FLUX.2 [dev] tier at the
+/// same pinned revision), E-LatentLPIPS's family weights. A missing checkpoint is refused naming
+/// the catalog model to install; nothing is downloaded mid-job. Off (the default) leaves the
+/// config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_latent_perceptual(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::latent_perceptual::{
+        LatentLossSettings, FLUX2_VAE_MODEL, FLUX2_VAE_TIER_DIRS,
+    };
+    let advanced = &plan.config.advanced;
+    let parse = |spec| {
+        latent_loss_settings(spec, advanced)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
+    };
+    let (vae_anchor, latent_lpips) = (parse(&VAE_ANCHOR)?, parse(&LATENT_LPIPS)?);
+    if vae_anchor.is_none() && latent_lpips.is_none() {
+        return Ok(());
+    }
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let schedule = |s: &LatentLossSettings| gen_core::AuxLossSchedule {
+        weight: s.weight as f32,
+        t_min: s.min_t as f32,
+        t_max: s.max_t as f32,
+        every_n: s.every,
+    };
+    if let Some(va) = &vae_anchor {
+        // The same decoder resolution as every decoded-x0 loss (a shared field): a cataloged tiny
+        // decoder, or none for a trainer that decodes through its own VAE.
+        config.perceptual_decoder_dir =
+            perceptual_decoder_dir(settings, engine_id, "The VAE anchor loss")?;
+        let vae_dir = crate::model_jobs::huggingface_pinned_snapshot_dir(
+            &settings.data_dir,
+            FLUX2_VAE_MODEL.repo,
+            FLUX2_VAE_MODEL.revision,
+        )
+        .and_then(|snapshot| {
+            FLUX2_VAE_TIER_DIRS
+                .iter()
+                .map(|tier| snapshot.join(tier))
+                .find(|dir| dir.join("diffusion_pytorch_model.safetensors").is_file())
+        })
+        .ok_or_else(|| not_installed(&FLUX2_VAE_MODEL, "The VAE anchor loss"))?;
+        config.vae_anchor = gen_core::VaeAnchorConfig {
+            schedule: schedule(va),
+            model_dir: Some(vae_dir),
+        };
+    }
+    if let Some(lp) = &latent_lpips {
+        let weights = latent_lpips_model_for_trainer(engine_id).ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Native trainer '{engine_id}' has no E-LatentLPIPS weights for its latent family."
+            ))
+        })?;
+        config.latent_lpips = gen_core::LatentLpipsConfig {
+            schedule: schedule(lp),
+            model_dir: Some(installed_aux_model_dir(
+                settings,
+                weights,
+                "The E-LatentLPIPS loss",
+            )?),
+        };
+    }
+    Ok(())
+}
+
+/// The installed snapshot directory of an auxiliary training model (its pinned revision with the
+/// weight file present), installed through the Model Manager into the app-managed Hugging Face
+/// cache — never a job-time side cache (epic 17625 AC9). Otherwise a typed refusal naming the
+/// model and the `technique` that needs it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn installed_aux_model_dir(
+    settings: &Settings,
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+    technique: &str,
+) -> WorkerResult<PathBuf> {
+    installed_aux_training_model_dir(&settings.data_dir, model)
+        .ok_or_else(|| not_installed(model, technique))
+}
+
+/// The installed snapshot directory of an auxiliary training model — the pinned `repo@revision`
+/// snapshot that actually holds `model.file` — or `None`. The ONE install check the worker's
+/// resolution ([`installed_aux_model_dir`]) and the API's submit-time refusal (sc-25213) share, so
+/// the two cannot disagree about what "installed" means.
+pub fn installed_aux_training_model_dir(
+    data_dir: &Path,
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+) -> Option<PathBuf> {
+    crate::model_jobs::huggingface_pinned_snapshot_dir(data_dir, model.repo, model.revision)
+        .filter(|dir| dir.join(model.file).is_file())
+}
+
+/// The typed refusal for an auxiliary training model that is not installed, naming the catalog
+/// entry to install and the `technique` that needs it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn not_installed(
+    model: &sceneworks_core::training::depth_anchoring::AuxTrainingModel,
+    technique: &str,
+) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{technique} needs the '{}' model ({}), which is not installed. Install it from the \
+         Models screen.",
+        model.label, model.id
+    ))
+}
+
+/// The de-distill training adapter (sc-25213): resolve the plan's `trainingAdapterRepo` /
+/// `trainingAdapterVersion` (`v1`, `v2`, or the presets' `v2-default`) to the installed adapter
+/// `.safetensors` and hand the trainer its path (`TrainingConfig::training_adapter`). A missing file
+/// is refused naming the catalog model to install — never a silent bare-base run; nothing is
+/// downloaded mid-job. No adapter keys (the default) leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_training_adapter(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::training_adapter::training_adapter_model;
+    let Some(model) = training_adapter_model(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let dir = installed_aux_model_dir(settings, model, "The de-distill training adapter")?;
+    config.training_adapter = Some(dir.join(model.file));
+    Ok(())
+}
+
+/// Epic 2123 face losses (sc-24831): map the strictly parsed `advanced.identityLoss*` /
+/// `advanced.faceLandmarkLoss*` keys onto the engine's typed [`gen_core::IdentityLossConfig`] /
+/// [`gen_core::FaceLandmarkLossConfig`] and resolve what they load from the installed model library:
+/// the trainer family's x0 decoder (the same [`perceptual_decoder_dir`] depth anchoring uses), the
+/// `instantid_face_stack` bundle (its SCRFD detector for both losses; its glintr100 ArcFace for the
+/// identity loss — the shipped ArcFace, in place of upstream's buffalo_l `w600k_r50`, see
+/// `sceneworks_core::training::face_losses`) and, for the landmark loss, the rehosted FaceMesh-v2.
+/// A missing checkpoint is refused naming the catalog model; off leaves the config untouched.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn apply_face_losses(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    config: &mut TrainingConfig,
+) -> WorkerResult<()> {
+    use sceneworks_core::training::face_losses::{
+        FaceLossSchedule, FACEMESH_V2_MODEL, FACE_STACK_ARCFACE, FACE_STACK_SCRFD,
+    };
+
+    let advanced = &plan.config.advanced;
+    let identity = identity_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let landmark = face_landmark_loss_settings(advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    if identity.is_none() && landmark.is_none() {
+        return Ok(());
+    }
+    let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "No native trainer for kernel '{}' (base model '{}').",
+                plan.target.kernel, plan.target.base_model
+            ))
+        })?;
+    let technique = if identity.is_some() {
+        "The identity loss"
+    } else {
+        "The face-landmark loss"
+    };
+    let schedule = |s: &FaceLossSchedule| gen_core::AuxLossSchedule {
+        weight: s.weight as f32,
+        t_min: s.min_t as f32,
+        t_max: s.max_t as f32,
+        every_n: s.every,
+    };
+    config.perceptual_decoder_dir = perceptual_decoder_dir(settings, engine_id, technique)?;
+    config.face_analysis_dir = Some(installed_aux_model_dir(
+        settings,
+        &FACE_STACK_SCRFD,
+        technique,
+    )?);
+    if let Some(id) = identity {
+        // The ArcFace lives in the same pinned bundle snapshot; require its file too.
+        installed_aux_model_dir(settings, &FACE_STACK_ARCFACE, "The identity loss")?;
+        config.identity_loss = gen_core::IdentityLossConfig {
+            schedule: schedule(&id.schedule),
+            min_cos: id.min_cos as f32,
+            reference_mode: gen_core::IdentityReferenceMode::parse(id.reference).ok_or_else(
+                || {
+                    WorkerError::InvalidPayload(format!(
+                        "Unknown identity reference mode '{}'.",
+                        id.reference
+                    ))
+                },
+            )?,
+        };
+    }
+    if let Some(lm) = landmark {
+        config.face_landmark_loss = gen_core::FaceLandmarkLossConfig {
+            schedule: schedule(&lm),
+            model_dir: Some(installed_aux_model_dir(
+                settings,
+                &FACEMESH_V2_MODEL,
+                "The face-landmark loss",
+            )?),
+        };
+    }
+    Ok(())
+}
+
+/// Most images a missing-subject-mask refusal names before summarising the rest as "and N more".
+const MISSING_SUBJECT_MASK_NAME_CAP: usize = 10;
+
+/// Subject-masked loss preflight (epic 2123, sc-24828), shared by the dry and real paths: `None`
+/// when the plan does not turn masked loss on (no file is read); otherwise each dataset image's
+/// stored subject mask, in plan order. Every image must carry a **non-empty** mask — an all-black
+/// "no subject found" mask counts as missing, because with a zero background weight it would
+/// silently drop the image from the loss — else the job is refused with a payload error naming the
+/// images (the first [`MISSING_SUBJECT_MASK_NAME_CAP`], then "and N more"). Masks are matched by
+/// the SHA-256 of each image's current bytes (the key the mask job stored them under).
+fn preflight_subject_mask_paths(
+    settings: &Settings,
+    plan: &TrainingPlan,
+    masks_pending: bool,
+) -> WorkerResult<Option<Vec<PathBuf>>> {
+    let masked_loss = subject_mask_loss_weights(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?
+        .is_some();
+    // sc-24832: the normal loss restricted to the subject reads the same per-image masks.
+    let body = body_loss_settings(&plan.config.advanced)
+        .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    let restricted_normals = body.normal.is_some() && body.normal_restrict_to_subject;
+    if !masked_loss && !restricted_normals {
+        return Ok(None);
+    }
+    let root = normalize_app_managed_path(settings, &plan.dataset.root_path, "Dataset root")?;
+    let index = read_subject_mask_index_at(&root).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "Could not read the dataset's subject mask index: {error}"
+        ))
+    })?;
+    let mut paths = Vec::with_capacity(plan.dataset.items.len());
+    let mut missing = Vec::new();
+    for item in &plan.dataset.items {
+        let image_path = resolve_dataset_item_path(
+            settings,
+            &plan.dataset.root_path,
+            &item.image_path,
+            "Training dataset imagePath",
+        )?;
+        let name = image_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| image_path.display().to_string());
+        match lookup_subject_mask_for_image(&root, &index, &image_path) {
+            Ok(SubjectMaskLookup::Present(path)) => paths.push(path),
+            Ok(SubjectMaskLookup::Empty) => missing.push(format!("{name} (no subject found)")),
+            // A dry run of a job whose missing masks the real run generates first (sc-2124):
+            // validate against the path the generated mask is stored at.
+            Ok(SubjectMaskLookup::Missing) if masks_pending => {
+                paths.push(root.join(subject_mask_relative_path(
+                    &sceneworks_core::media_convert::file_content_hash(&image_path).map_err(
+                        |error| {
+                            WorkerError::InvalidPayload(format!(
+                                "Could not read training image {name} to match its subject \
+                                 mask: {error}"
+                            ))
+                        },
+                    )?,
+                )))
+            }
+            Ok(SubjectMaskLookup::Missing) => missing.push(name),
+            Err(error) => {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "Could not read training image {name} to match its subject mask: {error}"
+                )))
+            }
+        }
+    }
+    if missing.is_empty() {
+        return Ok(Some(paths));
+    }
+    let shown = missing.len().min(MISSING_SUBJECT_MASK_NAME_CAP);
+    let mut names = missing[..shown].join(", ");
+    if missing.len() > shown {
+        names.push_str(&format!(" and {} more", missing.len() - shown));
+    }
+    let technique = if masked_loss {
+        "Subject-masked loss"
+    } else {
+        "The subject-restricted normal loss"
+    };
+    Err(WorkerError::InvalidPayload(format!(
+        "{technique} needs a subject mask on every dataset image, but {} of {} have none: \
+         {names}. Generate subject masks for the dataset (or replace the empty ones), then retry.",
+        missing.len(),
+        plan.dataset.items.len()
+    )))
+}
+
+/// Strictly read `advanced.weightNoiseSigma` (absent ⇒ 0 = off): a finite number within the
+/// submit-time bound `0..=WEIGHT_NOISE_SIGMA_MAX`, else a typed payload error — never a silent 0.
+fn preflight_weight_noise_sigma(advanced: &JsonObject) -> WorkerResult<f64> {
+    preflight_bounded_f64(
+        advanced,
+        WEIGHT_NOISE_SIGMA_KEY,
+        WEIGHT_NOISE_SIGMA_MAX,
+        0.0,
+    )
+}
+
+/// The payload error for a decoded-x0 / latent aux loss whose target + config combination the
+/// engine refuses (a full base fine-tune, a no-video LTX-2.5 workflow) — the reason comes from the
+/// same core `*_combination_refusal` helper submit-time validation uses, so a plan that bypassed
+/// the API is refused here before any load with the identical reason.
+fn combination_refused(key: &str, reason: String) -> WorkerError {
+    WorkerError::InvalidPayload(format!("{reason} ({key})"))
+}
+
+/// Strictly read an optional `advanced[key]` (absent or JSON null ⇒ `default`, the epic 2123 null
+/// policy): a finite number within the submit-time bound `0..=max`, else a typed payload error —
+/// never a silent default.
+fn preflight_bounded_f64(
+    advanced: &JsonObject,
+    key: &str,
+    max: f64,
+    default: f64,
+) -> WorkerResult<f64> {
+    let Some(value) = technique_value(advanced, key) else {
+        return Ok(default);
+    };
+    value
+        .as_f64()
+        .filter(|number| number.is_finite() && (0.0..=max).contains(number))
+        .ok_or_else(|| {
+            WorkerError::InvalidPayload(format!(
+                "Training config field '{key}' must be a number between 0 and {max}."
+            ))
+        })
+}
+
 /// Dry-run: validate the plan and active trainer descriptor, then report what a real run would
 /// produce, with no model load or training. Cross-platform: the shared preflight touches only the
 /// registry, plan, and dataset images. Mirrors the Python `_run_lora_train_dry_run`.
@@ -1112,6 +2000,9 @@ async fn run_training_dry_run(
     plan: &TrainingPlan,
 ) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
+    // sc-2124: images the API queued for subject-mask generation (`subjectMaskPrepass`) have no
+    // mask yet; a dry run generates nothing, so it validates them as the masks the real run writes.
+    let masks_pending = job.payload.contains_key("subjectMaskPrepass");
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
     update_job(
         api,
@@ -1130,12 +2021,12 @@ async fn run_training_dry_run(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    preflight_training_run(settings, plan)?.close()?;
+    preflight_training_run(settings, plan, masks_pending)?.close()?;
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
-    preflight_training_run(settings, plan)?;
+    preflight_training_run(settings, plan, masks_pending)?;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
@@ -1330,6 +2221,15 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "mage_flow_base" => Some("mage_flow_base"),
             _ => None,
         },
+        // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
+        // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
+        // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
+        // the 2.1 trainer over a different architecture.
+        "qwen_image_2_1_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
+        // Qwen Image 2.1 instruction-edit LoRA/LoKr (epic 24107 S13, sc-24161): the SAME engine
+        // trainer — it trains edit mode when the items carry ordered references. Base-gated like
+        // the T2I kernel so no other base can load the 2.1 trainer.
+        "qwen_image_2_1_edit_lora" => (base_model == "qwen_image_2_1").then_some("qwen_image_2_1"),
         _ => None,
     }
 }
@@ -1410,6 +2310,24 @@ fn advanced_bool(advanced: &JsonObject, key: &str, default: bool) -> bool {
                 .or_else(|| value.as_str()?.trim().parse().ok())
         })
         .unwrap_or(default)
+}
+
+/// The `LoadSpec.precision` a trainer is loaded with. Generally it tracks `train_dtype` (the MLX
+/// Lens trainer loads its DiT at the training precision — sc-5148). The Qwen Image 2.1 trainer is
+/// the exception (sc-24159): it loads the dense bf16 base only and refuses any other
+/// `LoadSpec.precision`, taking its compute dtype from `train_dtype` alone — so an f32 run must still
+/// load at Bf16 or it dies at load. The engine id is shared by the MLX and Candle (sc-24160) 2.1
+/// trainers, so the one rule covers both native backends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn training_load_precision(engine_id: &str, train_dtype: &str) -> Precision {
+    if engine_id != "qwen_image_2_1" && train_dtype.trim().eq_ignore_ascii_case("f32") {
+        Precision::Fp32
+    } else {
+        Precision::Bf16
+    }
 }
 
 /// Normalize the advanced `mixedPrecision` string onto the engine's `train_dtype`
@@ -1534,6 +2452,43 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         // Preserve submitted resume intent. Each backend either implements it or the shared
         // dry/real preflight rejects it before any model load.
         resume: advanced_bool(advanced, "resume", false),
+        // Epic 2123 weight noising (sc-24826). Absent ⇒ 0 ⇒ off, so legacy plans train exactly as
+        // before. A malformed / out-of-range value never reaches here: the shared dry/real
+        // preflight (`preflight_weight_noise_sigma`) refuses it first.
+        weight_noise_sigma: advanced_f32(advanced, WEIGHT_NOISE_SIGMA_KEY, 0.0),
+        // Epic 2123 gradient noise (sc-24827). Absent eta ⇒ 0 ⇒ off; absent gamma ⇒ the upstream
+        // 0.55. Malformed / out-of-range values are refused by the shared preflight first.
+        gradient_noise_eta: advanced_f32(advanced, GRADIENT_NOISE_ETA_KEY, 0.0),
+        gradient_noise_gamma: advanced_f32(
+            advanced,
+            GRADIENT_NOISE_GAMMA_KEY,
+            GRADIENT_NOISE_GAMMA_DEFAULT as f32,
+        ),
+        // Epic 2123 multi-resolution buckets (sc-2127). Absent ⇒ empty ⇒ off (one bucket at
+        // `resolution`, exactly as before).
+        resolution_buckets: map_resolution_buckets(advanced),
+        // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
+        // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
+        // the plan enables it.
+        depth_anchoring: Default::default(),
+        perceptual_decoder_dir: None,
+        // Epic 2123 body losses (sc-24832) start off here; `apply_body_losses` fills them in.
+        body_losses: Default::default(),
+        // Epic 2123 face losses (sc-24831) likewise start off; `apply_face_losses` fills them in.
+        identity_loss: Default::default(),
+        face_landmark_loss: Default::default(),
+        face_analysis_dir: None,
+        // Epic 2123 subject-masked loss (sc-24828) is resolved by `training_request_from_plan`,
+        // whose fallible reader refuses malformed weights instead of defaulting them to off.
+        subject_mask_loss: None,
+        // Epic 2123 latent-space perceptual losses (sc-24833) start off here;
+        // `apply_latent_perceptual` fills them in when the plan enables them.
+        vae_anchor: Default::default(),
+        latent_lpips: Default::default(),
+        // The de-distill training adapter (sc-25213) starts off here; `apply_training_adapter`
+        // (which owns the strict parse and the installed-file resolution, and so can fail) fills
+        // it in when the plan names one.
+        training_adapter: None,
         // ControlNet control type (sc-10163) — set by a control-branch target's `advanced.controlType`
         // (e.g. "pose"); absent for LoRA/LoKr targets ⇒ None. Drives the control trainer's overlay
         // `kind` metadata and is required by its validate; ignored by LoRA trainers.
@@ -1567,6 +2522,32 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
     }
 }
 
+/// Map `advanced.resolutionBuckets` onto the engine's typed list (absent ⇒ empty ⇒ off). The shared
+/// dry/real preflight refuses a malformed list before this runs; should one ever reach here anyway
+/// it maps **fail-closed** to a zero bucket, which the engine's technique floor refuses
+/// (`resolution_buckets[0] needs a resolution and a repeat count >= 1`) instead of silently
+/// training at one resolution.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBucket> {
+    match parse_resolution_buckets(advanced) {
+        Ok(None) => Vec::new(),
+        Ok(Some(buckets)) => buckets
+            .into_iter()
+            .map(|bucket| gen_core::ResolutionBucket {
+                resolution: bucket.resolution,
+                repeats: bucket.repeats,
+            })
+            .collect(),
+        Err(_) => vec![gen_core::ResolutionBucket {
+            resolution: 0,
+            repeats: 0,
+        }],
+    }
+}
+
 /// Default number of preview images rendered per sample step when the plan doesn't set
 /// `advanced.sampleCount`. Matches the four default prompts the UI prefills, so legacy payloads
 /// preview exactly as before this knob existed (sc-8671).
@@ -1591,7 +2572,8 @@ fn resolve_sample_prompts(pool: Vec<String>, count: u32) -> Vec<String> {
 /// backward materializes a gradient for the FROZEN base weight too, so a dense backward over a
 /// multi-billion-parameter DiT OOMs even alone on a 96 GB card (epic 5164: the candle Z-Image trainer
 /// got checkpointing in sc-5246, and the Wan A14B trainer needs it too). Scoped to exactly the
-/// candle-trainable big-DiT families: Z-Image, LTX-2.3, and both Wan A14B MoE variants. The dense
+/// candle-trainable big-DiT families: Z-Image, LTX-2.3, both Wan A14B MoE variants, and Qwen Image
+/// 2.1 (sc-24160). The dense
 /// Wan TI2V-5B trainer can honor the submitted value and is not forced. Krea 2 Raw is a 12B DiT
 /// (epic 7565 P4, sc-8614) —
 /// the same dense-backward OOM class, so it is forced too (the sc-7900 big-DiT backstop). SDXL's
@@ -1614,6 +2596,10 @@ fn candle_requires_gradient_checkpointing(plan: &TrainingPlan) -> bool {
             plan.target.base_model.as_str(),
             "wan_2_2_t2v_14b" | "wan_2_2_i2v_14b"
         ),
+        // Qwen Image 2.1 (sc-24160) trains LoRA/LoKr over its dense bf16 multi-billion-parameter
+        // MMDiT — the same frozen-weight-gradient OOM class, so force checkpointing on.
+        // sc-24162: the instruction-edit kernel trains the same MMDiT (plus reference tokens).
+        "qwen_image_2_1_lora" | "qwen_image_2_1_edit_lora" => true,
         _ => false,
     }
 }
@@ -1790,6 +2776,49 @@ const TRAINING_COMPONENT_TIER: &str = "bf16";
 /// The adapter is written by the engine into the plan's `output.outputDir`; the API registers it
 /// from the staged manifest entry. Backend-neutral: `load_trainer(engine_id, …)` resolves whichever
 /// backend's trainer is registered under `engine_id`.
+/// A real run's preparation up to its weights-free preflight (sc-2124): first the subject-mask
+/// prepass generates the masks the API found missing (`subjectMaskPrepass`; a no-op without it),
+/// posting progress in `0.01..=0.04`; then "Preparing LoRA training." at 0.05, so progress only
+/// moves forward; then the strict preflight against the masks now stored. `make_segmenter` is the
+/// prepass's segmenter factory ([`crate::subject_mask_jobs::installed_sam3_segmenter`] in
+/// production).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+async fn prepare_training_run<M>(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &TrainingPlan,
+    make_segmenter: M,
+) -> WorkerResult<PreparedTrainingRun>
+where
+    M: FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>,
+{
+    crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+        api,
+        settings,
+        job,
+        make_segmenter,
+    )
+    .await?;
+    update_job(
+        api,
+        &job.id,
+        training_progress(
+            JobStatus::Preparing,
+            ProgressStage::Preparing,
+            0.05,
+            "Preparing LoRA training.",
+            None,
+            backend_label(&settings.gpu_id),
+        ),
+    )
+    .await?;
+    preflight_training_run(settings, plan, false)
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -1802,21 +2831,14 @@ pub(crate) async fn run_training_execution(
 ) -> WorkerResult<()> {
     let backend = backend_label(&settings.gpu_id);
     heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
-    update_job(
+    let prepared_run = prepare_training_run(
         api,
-        &job.id,
-        training_progress(
-            JobStatus::Preparing,
-            ProgressStage::Preparing,
-            0.05,
-            "Preparing LoRA training.",
-            None,
-            backend,
-        ),
+        settings,
+        job,
+        plan,
+        crate::subject_mask_jobs::installed_sam3_segmenter(settings),
     )
     .await?;
-
-    let prepared_run = preflight_training_run(settings, plan)?;
 
     let weights_dir = match resolve_app_managed_model_dir(
         settings,
@@ -1846,6 +2868,16 @@ pub(crate) async fn run_training_execution(
     if let Err(error) = tokio::fs::create_dir_all(&prepared_run.request.output_dir).await {
         return prepared_run.finish(Err(error.into()));
     }
+    // sc-25785: a step-0 run clears an earlier run's resume bundles; a resume run reports the
+    // checkpoint it continues from, so the job records it from its first progress update.
+    let resume_checkpoint_step = match prepare_training_resume_dir(
+        prepared_run.request.config.resume,
+        &prepared_run.request.output_dir,
+        &prepared_run.request.file_name,
+    ) {
+        Ok(step) => step,
+        Err(error) => return prepared_run.finish(Err(error)),
+    };
     // sc-14056: the interim `networkType == "full"` rejection that used to sit here is gone. It
     // existed because this worker pinned a sceneworks-gen-core without `TrainingConfig.full_finetune`
     // and `mage_flow_lora` was in no routed training set, so a full request would have been mapped
@@ -1857,8 +2889,8 @@ pub(crate) async fn run_training_execution(
     //
     // Apply backend-specific safety overrides before the config reaches the engine: candle can't run
     // a dense backward over the big-DiT families without a CUDA OOM, so `finalize_training_config`
-    // forces gradient checkpointing on for them (Z-Image and both Wan A14B variants) regardless of
-    // the plan value.
+    // forces gradient checkpointing on for them (see `candle_requires_gradient_checkpointing`)
+    // regardless of the plan value.
     // On macOS this is the identity. See its doc comment for the why.
     let sample_config = prepared_run.request.config.clone();
     let total_steps = prepared_run.request.config.steps;
@@ -1884,19 +2916,15 @@ pub(crate) async fn run_training_execution(
             // bf16). The MLX Lens trainer loads its DiT at this precision and enforces `train_dtype`
             // against it (sc-5148), so f32 training must load at Fp32; the cast-based MLX trainers
             // (z-image/kolors/sdxl/wan/ltx) load dense and ignore `precision`, so this is inert for
-            // them — the default bf16 path is byte-identical to before. The candle trainers are lazy
-            // (sc-7817): they build the frozen base inside `train()` at the request's `train_dtype`,
-            // so `LoadSpec.precision` is likewise inert for them and this mapping stays harmless.
-            let load_precision = if request
-                .config
-                .train_dtype
-                .trim()
-                .eq_ignore_ascii_case("f32")
-            {
-                Precision::Fp32
-            } else {
-                Precision::Bf16
-            };
+            // them — the default bf16 path is byte-identical to before. Every trainer is lazy: the
+            // candle trainers build the frozen base inside `train()` at the request's `train_dtype`
+            // (sc-7817), and the MLX trainers (`mlx_gen::train::lazy::LazyTrainer`, sc-2124) keep
+            // this spec and load the base on first need — in `train()`, or in `validate()` when
+            // custom `lora_target_modules` need the loaded model. So `load_trainer` below reads no
+            // weights, and a base-load failure surfaces from `validate`/`train` instead (see
+            // `trainer_validate_error`). Qwen Image 2.1 is pinned to Bf16 on BOTH native backends
+            // (`training_load_precision`).
+            let load_precision = training_load_precision(engine_id, &request.config.train_dtype);
             let mut spec = LoadSpec::new(WeightsSource::Dir(weights_dir));
             spec.precision = load_precision;
             // LTX-2.3's bundled Gemma-3 TE (sc-9989); `None` for every other family (TE lives
@@ -1912,11 +2940,9 @@ pub(crate) async fn run_training_execution(
                     .map_err(|error| {
                         WorkerError::Engine(format!("{engine_id} trainer load failed: {error}"))
                     })?;
-                trainer.validate(&request).map_err(|error| {
-                    WorkerError::InvalidPayload(format!(
-                        "{engine_id} trainer rejected the plan: {error}"
-                    ))
-                })?;
+                trainer
+                    .validate(&request)
+                    .map_err(|error| trainer_validate_error(engine_id, error))?;
                 // If the consumer loop has returned early (a POST failure / 409 dropped `rx`), the
                 // channel is closed. Detect that here and trip the engine cancel flag so the trainer
                 // bails at its next cooperative check instead of silently running to completion on a
@@ -1950,6 +2976,7 @@ pub(crate) async fn run_training_execution(
         sample_config,
         backend,
         total_steps,
+        resume_checkpoint_step,
         rx,
         cancel,
         blocking,
@@ -2248,6 +3275,7 @@ async fn consume_training_events(
     sample_config: TrainingConfig,
     backend: &str,
     total_steps: u32,
+    mut resume_checkpoint_step: Option<u32>,
     mut rx: tokio::sync::mpsc::Receiver<TrainEvent>,
     cancel: CancelFlag,
     blocking: tokio::task::JoinHandle<WorkerResult<()>>,
@@ -2262,6 +3290,7 @@ async fn consume_training_events(
     let mut canceled = false;
     let mut last_cancel_check = Instant::now();
     let mut checkpoints: Vec<Value> = Vec::new();
+    let mut reported_resume_step: Option<u32> = None;
 
     // sc-5637 — preview-sample plumbing, now owned by `SamplePersister` (sc-8921): the resolved sample
     // config + destination paths + the accumulated cumulative/this-cadence record lists. The event
@@ -2320,6 +3349,7 @@ async fn consume_training_events(
                     }
                     if let TrainingProgress::Checkpoint { step } = progress {
                         checkpoints.push(json!({ "step": step }));
+                        resume_checkpoint_step = Some(step);
                     }
                     // sc-5637 — a preview sample: persist it + stream the updated cumulative/this-cadence
                     // lists so Training Studio shows it live. Handled here (not in `map_training_progress`)
@@ -2350,10 +3380,22 @@ async fn consume_training_events(
                     }
                     let (status, stage, fraction, message) =
                         map_training_progress(progress, total_steps);
+                    // sc-25785: record the latest resume checkpoint whenever it changes, so a run
+                    // that stops by ANY path — cancel, failure, or a crash the API later marks
+                    // interrupted — still offers Resume. The jobs store carries it forward.
+                    let result = (resume_checkpoint_step != reported_resume_step).then(|| {
+                        reported_resume_step = resume_checkpoint_step;
+                        let mut result = JsonObject::new();
+                        result.insert(
+                            "resumeCheckpointStep".to_owned(),
+                            json!(resume_checkpoint_step),
+                        );
+                        result
+                    });
                     update_job(
                         api,
                         &job.id,
-                        training_progress(status, stage, fraction, &message, None, backend),
+                        training_progress(status, stage, fraction, &message, result, backend),
                     )
                     .await?;
                     // No per-event heartbeat here: the `heartbeat_interval.tick()` arm above already
@@ -2661,6 +3703,17 @@ fn training_result(
     result.insert("rank".to_owned(), json!(plan.config.rank));
     result.insert("alpha".to_owned(), json!(plan.config.alpha));
     result.insert("resolution".to_owned(), json!(plan.config.resolution));
+    // sc-2127: a bucketed run trains at every listed resolution (which replace `resolution`), so
+    // record the rows it actually trained on. Absent for a single-resolution run.
+    if let Ok(Some(buckets)) = parse_resolution_buckets(&plan.config.advanced) {
+        result.insert(
+            RESOLUTION_BUCKETS_KEY.to_owned(),
+            json!(buckets
+                .iter()
+                .map(|bucket| json!({ "resolution": bucket.resolution, "repeats": bucket.repeats }))
+                .collect::<Vec<_>>()),
+        );
+    }
     result.insert("triggerWords".to_owned(), json!(plan.output.trigger_words));
     result.insert("planVersion".to_owned(), json!(plan.plan_version));
     // Record the REAL backend that ran the training (mlx on macOS, candle off-Mac, cpu fallback),
@@ -2712,6 +3765,46 @@ mod tests {
     // per-MODULE lock is distinct from `video_jobs`' and `image_jobs`' in exactly the same way, and
     // those modules write `HF_HUB_CACHE` too (sc-12380).
     use crate::test_env::EnvVars;
+
+    /// A lazily loaded base can fail from `validate`: those load-class errors are `Engine`, while
+    /// the plan-refusal variants stay `InvalidPayload`. Mutation: map `Backend | MissingTensor |
+    /// Io` back to `InvalidPayload` (the pre-lazy mapping) ⇒ the first loop fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn trainer_validate_error_maps_load_failures_to_engine() {
+        let load_failures = [
+            gen_core::Error::backend(std::io::Error::other("metal device lost")),
+            gen_core::Error::MissingTensor("transformer.blocks.0.attn.q.weight".to_owned()),
+            gen_core::Error::Io(std::io::Error::other("no such file")),
+        ];
+        for error in load_failures {
+            let mapped = trainer_validate_error("z_image_turbo", error);
+            assert!(
+                matches!(&mapped, WorkerError::Engine(message) if message.contains("trainer load failed")),
+                "{mapped:?}"
+            );
+        }
+        let refusals = [
+            gen_core::Error::Unsupported("weight noise".to_owned()),
+            gen_core::Error::Msg("lora_rank must be at least 1".to_owned()),
+            gen_core::Error::GeometryRefused {
+                reason: "too large".to_owned(),
+                requested_width: 4096,
+                requested_height: 4096,
+                alternative: None,
+            },
+        ];
+        for error in refusals {
+            let mapped = trainer_validate_error("z_image_turbo", error);
+            assert!(
+                matches!(&mapped, WorkerError::InvalidPayload(message) if message.contains("rejected the plan")),
+                "{mapped:?}"
+            );
+        }
+    }
 
     /// sc-9989/sc-13870: only LTX-2.3 gets a trainer `LoadSpec::text_encoder` override, on both
     /// native backends, and only from the
@@ -3096,7 +4189,7 @@ mod tests {
                 std::fs::rename(&replacement, source)
             }
         });
-        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs)
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs, false)
             .expect("map request through verified snapshot");
         assert!(
             request
@@ -3153,6 +4246,147 @@ mod tests {
             !snapshot_root.exists(),
             "snapshot set must be removed after use"
         );
+    }
+
+    /// sc-24161: the worker maps a plan's instruction-edit items onto engine `TrainingItem`s whose
+    /// `reference_image_paths` carry the references IN PLAN ORDER (resolved under the dataset root,
+    /// target = item image, instruction = caption), and a plain plan still builds items with no
+    /// references at all. A reference escaping the dataset root is refused, like the target.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_edit_references_in_order_and_plain_items_carry_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let dataset_root = data_dir.join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("create refs dir");
+        let target = dataset_root.join("images").join("item_0001.png");
+        std::fs::write(&target, b"target").expect("write target");
+        // Deliberately NOT lexical order: the stored order is semantic and must survive verbatim.
+        let ordered = [
+            "item_0001_ref3.png",
+            "item_0001_ref1.png",
+            "item_0001_ref2.png",
+        ];
+        for name in ordered {
+            std::fs::write(refs_dir.join(name), name.as_bytes()).expect("write reference");
+        }
+
+        let mut value = plan_json(
+            &data_dir,
+            "qwen_image_2_1_edit_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        );
+        value["dataset"]["items"][0]["caption"] = json!("put the hat from image 2 on image 1");
+        value["dataset"]["items"][0]["referenceImagePaths"] = json!(ordered
+            .iter()
+            .map(|name| format!("images/refs/{name}"))
+            .collect::<Vec<_>>());
+        let plan = parse(value);
+        validate_training_plan(&settings, &plan).expect("edit plan validates");
+        let mut prepared_inputs = PreparedTrainingInputs::default();
+        let request = training_request_from_plan(&settings, &plan, &mut prepared_inputs, false)
+            .expect("edit plan maps to a request");
+        let item = &request.items[0];
+        assert!(item.is_edit_pair());
+        assert_eq!(item.image_path, target.canonicalize().unwrap());
+        assert_eq!(item.caption, "put the hat from image 2 on image 1");
+        assert_eq!(
+            item.reference_image_paths,
+            ordered
+                .iter()
+                .map(|name| refs_dir.join(name).canonicalize().unwrap())
+                .collect::<Vec<_>>(),
+            "references must reach the engine in plan order"
+        );
+        assert_eq!(item.control_image_path, None);
+
+        // A plain T2I plan builds captioned items with NO references.
+        let plain = parse(plan_json(
+            &data_dir,
+            "qwen_image_2_1_lora",
+            "qwen_image_2_1",
+            "lora",
+            &[&target.display().to_string()],
+        ));
+        let request = training_request_from_plan(&settings, &plain, &mut prepared_inputs, false)
+            .expect("plain plan maps to a request");
+        assert!(request.items.iter().all(|item| !item.is_edit_pair()));
+        assert!(request.items[0].reference_image_paths.is_empty());
+
+        // A missing reference is reported like a missing target image, and one escaping the dataset
+        // root is refused outright.
+        let mut missing = plan.clone();
+        missing.dataset.items[0]
+            .reference_image_paths
+            .push("images/refs/absent.png".to_owned());
+        let error = validate_training_plan(&settings, &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
+        let mut escaping = plan.clone();
+        let outside = data_dir.join("outside.png");
+        std::fs::write(&outside, b"outside").expect("write outside");
+        escaping.dataset.items[0].reference_image_paths = vec![outside.display().to_string()];
+        assert!(
+            training_request_from_plan(&settings, &escaping, &mut prepared_inputs, false).is_err()
+        );
+        prepared_inputs.close().expect("close prepared inputs");
+    }
+
+    /// sc-24161 review: both 2.1 kernels map to the one `qwen_image_2_1` engine trainer, so the
+    /// worker itself refuses a plan whose edit shape contradicts its KERNEL — references under the
+    /// T2I kernel (would train an edit adapter as a T2I target) and a reference-less item under the
+    /// edit kernel (would train T2I as an edit target) — whatever route queued it.
+    #[test]
+    fn worker_refuses_plans_whose_edit_shape_contradicts_the_kernel() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let image = data_dir.join("datasets").join("ds-1").join("a.png");
+        let plan_for = |kernel: &str, refs: &[Value]| {
+            let mut value = plan_json(
+                &data_dir,
+                kernel,
+                "qwen_image_2_1",
+                "lora",
+                &[&image.display().to_string(), &image.display().to_string()],
+            );
+            value["dataset"]["items"][1]["referenceImagePaths"] = json!(refs);
+            parse(value)
+        };
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_lora") && error.contains("captioned images only"),
+            "{error}"
+        );
+        // Item 0 has no references under the edit kernel (item 1 does): mixed is refused too.
+        let error = validate_training_plan(
+            &settings,
+            &plan_for("qwen_image_2_1_edit_lora", &[json!("images/refs/r.png")]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("qwen_image_2_1_edit_lora") && error.contains("item 0"),
+            "{error}"
+        );
+        // A plain T2I plan passes the shape floor (it then reports the missing images instead).
+        let error = validate_training_plan(&settings, &plan_for("qwen_image_2_1_lora", &[]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing"), "{error}");
     }
 
     /// A complete resolved plan as the API serializes it, parameterized by the
@@ -3236,6 +4470,719 @@ mod tests {
         serde_json::from_value(value).expect("plan deserializes")
     }
 
+    /// A dataset of `count` distinct images `img00.png…` under `<data>/datasets/ds-1/images`, with
+    /// a stored subject mask for each index in `masked` (all-black when also in `empty`) — the
+    /// on-disk state the sc-2126 mask job leaves (content-hash keyed PNG + index record).
+    fn subject_mask_dataset(
+        data_dir: &Path,
+        count: usize,
+        masked: &[usize],
+        empty: &[usize],
+    ) -> Vec<String> {
+        use sceneworks_core::training_subject_masks::{
+            subject_mask_relative_path, DatasetSubjectMasks, SubjectMaskRecord, SubjectMaskSource,
+            SUBJECT_MASK_INDEX_NAME,
+        };
+        let root = data_dir.join("datasets").join("ds-1");
+        std::fs::create_dir_all(root.join("images")).expect("images dir");
+        std::fs::create_dir_all(root.join("masks")).expect("masks dir");
+        let mut index = DatasetSubjectMasks::default();
+        let mut paths = Vec::new();
+        for i in 0..count {
+            let path = root.join("images").join(format!("img{i:02}.png"));
+            image::RgbImage::from_pixel(8, 8, image::Rgb([i as u8, 7, 9]))
+                .save(&path)
+                .expect("write image");
+            if masked.contains(&i) {
+                let hash = sceneworks_core::media_convert::file_content_hash(&path).expect("hash");
+                let is_empty = empty.contains(&i);
+                image::GrayImage::from_pixel(8, 8, image::Luma([if is_empty { 0 } else { 255 }]))
+                    .save(root.join(subject_mask_relative_path(&hash)))
+                    .expect("write mask");
+                index.masks.insert(
+                    hash,
+                    SubjectMaskRecord {
+                        source: SubjectMaskSource::Auto,
+                        empty: is_empty,
+                        width: 8,
+                        height: 8,
+                        updated_at: "2026-10-04T00:00:00Z".to_owned(),
+                        revision: String::new(),
+                    },
+                );
+            }
+            paths.push(path.display().to_string());
+        }
+        std::fs::write(
+            root.join(SUBJECT_MASK_INDEX_NAME),
+            serde_json::to_vec(&index).expect("index json"),
+        )
+        .expect("write index");
+        paths
+    }
+
+    fn masked_plan(data_dir: &Path, images: &[String], on: bool) -> TrainingPlan {
+        let refs: Vec<&str> = images.iter().map(String::as_str).collect();
+        let mut value = plan_json(data_dir, "z_image_lora", "z_image_turbo", "lora", &refs);
+        value["config"]["advanced"]["subjectMaskLoss"] = json!(on);
+        value["config"]["advanced"]["subjectMaskBackgroundWeight"] = json!(0);
+        value["config"]["advanced"]["subjectMaskSubjectWeight"] = json!(1);
+        parse(value)
+    }
+
+    /// sc-24832: the subject-restricted normal loss reads the same per-image masks, so worker
+    /// preflight resolves them (and refuses a dataset missing any, naming it) even with masked loss
+    /// off; unrestricted normals read none. Mutation: drop `restricted_normals` from the preflight's
+    /// gate ⇒ no masks resolved, no refusal ⇒ red.
+    #[test]
+    fn subject_mask_preflight_covers_the_restricted_normal_loss() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let plan_for = |images: &[String], restrict: bool| {
+            let mut plan = masked_plan(&data_dir, images, false);
+            plan.config
+                .advanced
+                .insert("normalWeight".to_owned(), json!(0.1));
+            plan.config
+                .advanced
+                .insert("normalRestrictToSubject".to_owned(), json!(restrict));
+            plan
+        };
+        let partial = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        match preflight_subject_mask_paths(&settings, &plan_for(&partial, true), false) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(
+                    message.contains("subject-restricted normal loss"),
+                    "{message}"
+                );
+                assert!(message.contains("img01.png"), "{message}");
+            }
+            other => panic!("expected a payload refusal, got {other:?}"),
+        }
+        assert!(
+            preflight_subject_mask_paths(&settings, &plan_for(&partial, false), false)
+                .unwrap()
+                .is_none()
+        );
+        let dir2 = tempfile::tempdir().expect("tempdir");
+        let data_dir2 = dir2.path().canonicalize().expect("canonical data root");
+        let settings2 = test_settings(&data_dir2);
+        let full = subject_mask_dataset(&data_dir2, 2, &[0, 1], &[]);
+        let mut full_plan = masked_plan(&data_dir2, &full, false);
+        full_plan
+            .config
+            .advanced
+            .insert("normalWeight".to_owned(), json!(0.1));
+        full_plan
+            .config
+            .advanced
+            .insert("normalRestrictToSubject".to_owned(), json!(true));
+        let paths = preflight_subject_mask_paths(&settings2, &full_plan, false)
+            .unwrap()
+            .expect("masks resolved for restricted normals");
+        assert_eq!(paths.len(), 2);
+    }
+
+    /// What the stub API saw during a training run's subject-mask prepass (sc-2124).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[derive(Clone, Default)]
+    struct PrepassApi {
+        progress: std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+        posted: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        dataset_root: std::sync::Arc<std::sync::Mutex<PathBuf>>,
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_job_value(payload: Value) -> Value {
+        json!({
+            "id": "train-job", "type": "lora_train", "status": "running",
+            "projectId": "proj", "projectName": null, "payload": payload, "result": {},
+            "requestedGpu": "auto", "assignedGpu": null, "workerId": "test-worker",
+            "progress": 0.0, "stage": "queued", "message": "queued", "error": null,
+            "etaSeconds": null, "elapsedSeconds": null, "attempts": 1,
+            "sourceJobId": null, "duplicateOfJobId": null, "cancelRequested": false,
+            "createdAt": "2026-10-10T00:00:00Z", "updatedAt": "2026-10-10T00:00:00Z",
+            "startedAt": null, "completedAt": null, "canceledAt": null, "lastHeartbeatAt": null
+        })
+    }
+
+    /// A stub rust-api: progress/heartbeat/job routes, and a `/subject-masks` route that stores
+    /// each POSTed mask the way the store does (PNG at its content-hash path + an index record), so
+    /// the preflight that follows the prepass reads them.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    async fn spawn_prepass_api(dataset_root: PathBuf) -> (String, PrepassApi) {
+        use axum::{
+            extract::{Path as AxumPath, State},
+            response::{IntoResponse, Response},
+            routing::{get, post},
+            Json, Router,
+        };
+        use base64::Engine as _;
+        async fn job_route() -> Response {
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn progress_route(
+            State(state): State<PrepassApi>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            if let Some(progress) = body["progress"].as_f64() {
+                state.progress.lock().unwrap().push(progress);
+            }
+            Json(prepass_job_value(json!({}))).into_response()
+        }
+        async fn heartbeat_route() -> Response {
+            Json(json!({})).into_response()
+        }
+        async fn masks_route(
+            State(state): State<PrepassApi>,
+            AxumPath((_project, _dataset)): AxumPath<(String, String)>,
+            Json(body): Json<Value>,
+        ) -> Response {
+            use sceneworks_core::training_subject_masks::{
+                subject_mask_relative_path, SubjectMaskRecord, SubjectMaskSource,
+                SUBJECT_MASK_INDEX_NAME,
+            };
+            let root = state.dataset_root.lock().unwrap().clone();
+            let mut index = read_subject_mask_index_at(&root).unwrap();
+            let items = body["items"].as_array().unwrap();
+            for item in items {
+                let hash = item["contentHash"].as_str().unwrap().to_owned();
+                let png = base64::engine::general_purpose::STANDARD
+                    .decode(item["maskPng"].as_str().unwrap())
+                    .unwrap();
+                std::fs::write(root.join(subject_mask_relative_path(&hash)), png).unwrap();
+                index.masks.insert(
+                    hash.clone(),
+                    SubjectMaskRecord {
+                        source: SubjectMaskSource::Auto,
+                        empty: false,
+                        width: 8,
+                        height: 8,
+                        updated_at: "2026-10-10T00:00:00Z".to_owned(),
+                        revision: String::new(),
+                    },
+                );
+                state.posted.lock().unwrap().push(hash);
+            }
+            std::fs::write(
+                root.join(SUBJECT_MASK_INDEX_NAME),
+                serde_json::to_vec(&index).unwrap(),
+            )
+            .unwrap();
+            Json(json!({ "stored": items.len() })).into_response()
+        }
+        let state = PrepassApi::default();
+        *state.dataset_root.lock().unwrap() = dataset_root;
+        let app = Router::new()
+            .route("/api/v1/jobs/:job_id", get(job_route))
+            .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+            .route(
+                "/api/v1/workers/:worker_id/heartbeat",
+                post(heartbeat_route),
+            )
+            .route(
+                "/api/v1/projects/:project_id/training/datasets/:dataset_id/subject-masks",
+                post(masks_route),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{address}"), state)
+    }
+
+    /// A stub segmenter: a full-white mask per image, counting the images it was asked to segment.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn white_mask_segmenter(
+        seen: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> impl FnOnce(gen_core::CancelFlag) -> WorkerResult<crate::subject_mask_jobs::SegmentBatch>
+    {
+        move |_cancel| {
+            Ok(Box::new(move |count, mut load, mut finish| {
+                seen.fetch_add(count, std::sync::atomic::Ordering::SeqCst);
+                (0..count)
+                    .map(|index| {
+                        let image = load(index)?;
+                        let (w, h) = image.dimensions();
+                        finish(index, &image, vec![vec![255u8; (w * h) as usize]])
+                    })
+                    .collect()
+            }))
+        }
+    }
+
+    /// The `subjectMaskPrepass` the API stamps for `images` (every image, as at submit time).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn prepass_payload(data_dir: &Path, images: &[String]) -> Value {
+        let root = data_dir.join("datasets").join("ds-1");
+        json!({ "subjectMaskPrepass": {
+            "projectId": "proj",
+            "datasetId": "ds-1",
+            "datasetRoot": root.display().to_string(),
+            "items": images.iter().enumerate().map(|(i, image)| json!({
+                "itemId": format!("item_{i}"),
+                "imagePath": image,
+                "contentHash": sceneworks_core::media_convert::file_content_hash(Path::new(image)).unwrap(),
+            })).collect::<Vec<_>>(),
+        } })
+    }
+
+    /// sc-2124 review: a real run's preparation generates the subject masks the API found missing
+    /// BEFORE its strict preflight — a masked run on a dataset with unmasked images is prepared with
+    /// a mask path on every item — and progress only moves forward (prepass in 0.01..=0.04, then
+    /// 0.05). Mutation: skip the prepass in `prepare_training_run` ⇒ the preflight refuses ⇒ red;
+    /// post 0.05 first ⇒ the progress check ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn real_run_preparation_generates_missing_masks_before_the_strict_preflight() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 2, &[], &[]);
+        let (url, api_state) = spawn_prepass_api(data_dir.join("datasets").join("ds-1")).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let prepared = prepare_training_run(
+            &api,
+            &settings,
+            &job,
+            &masked_plan(&data_dir, &images, true),
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("masks generated, then the strict preflight passes");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(prepared.request.items.iter().all(|item| item
+            .subject_mask_path
+            .as_ref()
+            .is_some_and(|path| path.is_file())));
+        let progress = api_state.progress.lock().unwrap().clone();
+        assert!(
+            progress.windows(2).all(|pair| pair[0] <= pair[1]),
+            "progress went backwards: {progress:?}"
+        );
+        assert_eq!(progress.last(), Some(&0.05), "{progress:?}");
+        assert!(
+            progress.first().is_some_and(|first| *first < 0.05),
+            "{progress:?}"
+        );
+        prepared.close().expect("close");
+    }
+
+    /// sc-2124 review: the prepass's image list is a submit-time snapshot; at run time only images
+    /// that STILL have no mask are segmented, so an existing mask — here a user upload — is never
+    /// re-segmented nor overwritten (and a fully masked dataset segments nothing). Mutation: drop the
+    /// run-time re-read ⇒ the uploaded image is segmented and POSTed ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[tokio::test]
+    async fn prepass_segments_only_images_still_without_a_mask_and_never_overwrites_an_upload() {
+        use sceneworks_core::training_subject_masks::{
+            subject_mask_relative_path, SubjectMaskSource, SUBJECT_MASK_INDEX_NAME,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        let root = data_dir.join("datasets").join("ds-1");
+        // Image 0's mask is a user upload made after submit.
+        let mut index = read_subject_mask_index_at(&root).unwrap();
+        let uploaded =
+            sceneworks_core::media_convert::file_content_hash(Path::new(&images[0])).unwrap();
+        index.masks.get_mut(&uploaded).unwrap().source = SubjectMaskSource::Upload;
+        std::fs::write(
+            root.join(SUBJECT_MASK_INDEX_NAME),
+            serde_json::to_vec(&index).unwrap(),
+        )
+        .unwrap();
+        let uploaded_bytes =
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap();
+
+        let (url, api_state) = spawn_prepass_api(root.clone()).await;
+        let mut settings = test_settings(&data_dir);
+        settings.api_url = url;
+        let api = ApiClient::new(&settings);
+        let job: JobSnapshot =
+            serde_json::from_value(prepass_job_value(prepass_payload(&data_dir, &images))).unwrap();
+        let seen = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("prepass");
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "only the unmasked images"
+        );
+        let posted = api_state.posted.lock().unwrap().clone();
+        assert_eq!(posted.len(), 2);
+        assert!(
+            !posted.contains(&uploaded),
+            "the uploaded mask was overwritten"
+        );
+        assert_eq!(
+            std::fs::read(root.join(subject_mask_relative_path(&uploaded))).unwrap(),
+            uploaded_bytes
+        );
+        let index = read_subject_mask_index_at(&root).unwrap();
+        assert_eq!(index.masks[&uploaded].source, SubjectMaskSource::Upload);
+
+        // Every image masked now: a retry segments and posts nothing.
+        crate::subject_mask_jobs::run_training_subject_mask_prepass_with(
+            &api,
+            &settings,
+            &job,
+            white_mask_segmenter(seen.clone()),
+        )
+        .await
+        .expect("retry");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert_eq!(api_state.posted.lock().unwrap().len(), 2);
+    }
+
+    /// sc-2124: a dry run of a job whose missing masks the real run generates first
+    /// (`subjectMaskPrepass`) validates each ungenerated image against the path its generated mask
+    /// is stored at, instead of refusing it — but an empty ("no subject found") mask still refuses,
+    /// since generating again finds no subject either. Mutation: ignore `masks_pending` ⇒ the
+    /// pending case refuses ⇒ red; treat Empty as pending ⇒ the empty case passes ⇒ red.
+    #[test]
+    fn pending_subject_masks_validate_against_their_generated_path_but_empty_still_refuses() {
+        use sceneworks_core::training_subject_masks::subject_mask_relative_path;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 3, &[0], &[]);
+        let root = data_dir.join("datasets").join("ds-1");
+        let paths =
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), true)
+                .expect("pending masks validate")
+                .expect("masked loss on");
+        let expected: Vec<PathBuf> = images
+            .iter()
+            .map(|image| {
+                let hash = sceneworks_core::media_convert::file_content_hash(Path::new(image))
+                    .expect("hash");
+                root.join(subject_mask_relative_path(&hash))
+            })
+            .collect();
+        assert_eq!(paths, expected);
+        // Not pending (the real run, after the prepass): the same dataset refuses.
+        assert!(matches!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), false),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("2 of 3 have none")
+        ));
+        let with_empty = subject_mask_dataset(&data_dir, 2, &[0, 1], &[1]);
+        assert!(matches!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &with_empty, true), true),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("img01.png (no subject found)")
+        ));
+    }
+
+    /// sc-24828 AC: a masked-loss job on a dataset missing any mask is refused at worker preflight,
+    /// and the error names the missing images — an all-black ("no subject") mask counts as
+    /// missing, and the list is capped at ten names plus "and N more".
+    #[test]
+    fn subject_mask_preflight_names_the_images_missing_a_mask() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 13, &[0, 1], &[1]);
+        let message = match preflight_subject_mask_paths(
+            &settings,
+            &masked_plan(&data_dir, &images, true),
+            false,
+        ) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected a payload refusal, got {other:?}"),
+        };
+        assert!(message.contains("12 of 13 have none"), "{message}");
+        assert!(
+            message.contains("img01.png (no subject found), img02.png"),
+            "{message}"
+        );
+        assert!(message.contains("img10.png and 2 more"), "{message}");
+        assert!(
+            !message.contains("img00.png"),
+            "masked image named: {message}"
+        );
+        assert!(!message.contains("img11.png"), "past the cap: {message}");
+
+        // Off ⇒ nothing is read and nothing is refused.
+        assert_eq!(
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, false), false)
+                .expect("off"),
+            None
+        );
+    }
+
+    /// sc-24828 (epic 2123 E3): the shared dry/real preflight admits subject-masked loss where the
+    /// active trainer declares it (Z-Image, on either backend) and refuses it where it does not
+    /// (LTX-2.5 trains from prepared latent bundles, which no image mask can align with) — and a
+    /// malformed weight is refused rather than defaulted.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_subject_mask_loss_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, advanced: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, entry) in advanced {
+                value["config"]["advanced"][*key] = entry.clone();
+            }
+            parse(value)
+        };
+        let on = [("subjectMaskLoss", json!(true))];
+        assert!(
+            crate::inference_runtime::trainer_descriptor("z_image_turbo")
+                .expect("z_image_turbo trainer registered")
+                .techniques
+                .subject_mask_loss
+        );
+        validate_training_target_config(&plan("z_image_lora", "z_image_turbo", &on))
+            .expect("Z-Image admits subject-masked loss");
+        match validate_training_target_config(&plan("ltx_mlx_lora", "ltx_2_5", &on)) {
+            Err(WorkerError::InvalidPayload(message)) => assert!(
+                message.contains("does not support subject-masked loss"),
+                "{message}"
+            ),
+            other => panic!("LTX-2.5 must refuse subject-masked loss, got {other:?}"),
+        }
+        match validate_training_target_config(&plan(
+            "z_image_lora",
+            "z_image_turbo",
+            &[
+                ("subjectMaskLoss", json!(true)),
+                ("subjectMaskSubjectWeight", json!(0)),
+            ],
+        )) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("subjectMaskSubjectWeight"), "{message}")
+            }
+            other => panic!("a zero subject weight must be refused, got {other:?}"),
+        }
+    }
+
+    /// Epic 2123 feature review (E3): the shared dry/real preflight refuses every decoded-x0 aux
+    /// section on the combinations the engine refuses — a Mage full base fine-tune and a no-video
+    /// LTX-2.5 workflow — through the same core `*_combination_refusal` helpers submit-time
+    /// validation uses, so a plan that bypassed the API never reaches a load. The same section on a
+    /// Mage LoRA run is admitted, so the refusal is the combination. Mutation: drop any one
+    /// section's `*_combination_refusal` call from `validate_training_target_config` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_aux_losses_on_engine_refused_combinations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, network: &str, advanced: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, network, &[&image]);
+            for (key, entry) in advanced {
+                value["config"]["advanced"][*key] = entry.clone();
+            }
+            parse(value)
+        };
+        let refused =
+            |result: WorkerResult<&'static str>, key: &str, why: &str, case: &str| match result {
+                Err(WorkerError::InvalidPayload(message)) => assert!(
+                    message.contains(why) && message.contains(&format!("({key})")),
+                    "{key} {case}: {message}"
+                ),
+                other => panic!("{key} {case}: expected a refusal, got {other:?}"),
+            };
+        // E-LatentLPIPS is absent: no trainer that offers a full fine-tune (Mage) or an LTX-2.5
+        // workflow has E-LatentLPIPS weights, so it is refused earlier as unsupported there.
+        for key in [
+            "depthAnchoringWeight",
+            "bodyProportionWeight",
+            "bodyShapeWeight",
+            "normalWeight",
+            "identityLossWeight",
+            "faceLandmarkLossWeight",
+            "vaeAnchorWeight",
+        ] {
+            let on = (key, json!(0.05));
+            validate_training_target_config(&plan(
+                "mage_flow_lora",
+                "mage_flow_base",
+                "lora",
+                std::slice::from_ref(&on),
+            ))
+            .unwrap_or_else(|error| panic!("{key}: Mage LoRA admits it, got {error:?}"));
+            refused(
+                validate_training_target_config(&plan(
+                    "mage_flow_lora",
+                    "mage_flow_base",
+                    "full",
+                    std::slice::from_ref(&on),
+                )),
+                key,
+                "not a full fine-tune",
+                "mage full",
+            );
+            refused(
+                validate_training_target_config(&plan(
+                    "ltx_mlx_lora",
+                    "ltx_2_5",
+                    "lora",
+                    &[on, ("ltxWorkflow", json!("t2a_lora"))],
+                )),
+                key,
+                "generates none",
+                "ltx-2.5 t2a",
+            );
+        }
+    }
+
+    /// Epic 2123 JSON-null policy: the worker preflight reads a JSON `null` on every technique key as
+    /// absent — exactly what submit-time validation admitted. Mutation: read the noise keys with
+    /// `advanced.get` in `preflight_bounded_f64` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_treats_null_technique_keys_as_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        for key in sceneworks_core::training::TECHNIQUE_KEYS {
+            value["config"]["advanced"][key] = Value::Null;
+        }
+        validate_training_target_config(&parse(value))
+            .expect("null technique keys mean absent in the worker too");
+    }
+
+    /// sc-24828: full coverage resolves one mask per image, in plan order.
+    #[test]
+    fn subject_mask_preflight_resolves_every_mask_in_plan_order() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 3, &[0, 1, 2], &[]);
+        let paths =
+            preflight_subject_mask_paths(&settings, &masked_plan(&data_dir, &images, true), false)
+                .expect("full coverage")
+                .expect("on");
+        assert_eq!(paths.len(), 3);
+        for (path, image) in paths.iter().zip(&images) {
+            let hash =
+                sceneworks_core::media_convert::file_content_hash(Path::new(image)).expect("hash");
+            assert_eq!(
+                path,
+                &data_dir
+                    .join("datasets")
+                    .join("ds-1")
+                    .join("masks")
+                    .join(format!("{hash}.png"))
+            );
+        }
+    }
+
+    /// sc-24828: the typed request carries the engine `subject_mask_loss` weights and each item's
+    /// mask path when on — and neither when off, so a legacy plan maps exactly as before.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_request_carries_subject_mask_loss_and_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().canonicalize().expect("canonical data root");
+        let settings = test_settings(&data_dir);
+        let images = subject_mask_dataset(&data_dir, 2, &[0, 1], &[]);
+
+        let mut prepared = PreparedTrainingInputs::default();
+        let on = training_request_from_plan(
+            &settings,
+            &masked_plan(&data_dir, &images, true),
+            &mut prepared,
+            false,
+        )
+        .expect("on");
+        assert_eq!(
+            on.config.subject_mask_loss,
+            Some(gen_core::SubjectMaskLoss {
+                background_weight: 0.0,
+                subject_weight: 1.0
+            })
+        );
+        assert!(on
+            .items
+            .iter()
+            .all(|item| item.subject_mask_path.as_ref().is_some_and(|p| p.is_file())));
+
+        let mut prepared = PreparedTrainingInputs::default();
+        let off = training_request_from_plan(
+            &settings,
+            &masked_plan(&data_dir, &images, false),
+            &mut prepared,
+            false,
+        )
+        .expect("off");
+        assert_eq!(off.config.subject_mask_loss, None);
+        assert!(off
+            .items
+            .iter()
+            .all(|item| item.subject_mask_path.is_none()));
+
+        // A missing mask refuses the request build (the real and dry paths share it).
+        std::fs::remove_dir_all(data_dir.join("datasets").join("ds-1").join("masks"))
+            .expect("drop masks");
+        let mut prepared = PreparedTrainingInputs::default();
+        assert!(matches!(
+            training_request_from_plan(
+                &settings,
+                &masked_plan(&data_dir, &images, true),
+                &mut prepared,
+                false
+            ),
+            Err(WorkerError::InvalidPayload(message)) if message.contains("img00.png, img01.png")
+        ));
+    }
+
     /// sc-4887: only an explicit bf16 selects bf16; every other value (incl. the
     /// engine-unsupported fp16, "no", empty) falls back to full-precision f32.
     #[cfg(any(
@@ -3291,6 +5238,1652 @@ mod tests {
         let mapped = map_training_config(&parse(value).config);
         assert_eq!(mapped.train_dtype, "f32");
         assert!(mapped.gradient_checkpointing);
+    }
+
+    /// sc-24828 review: the catalog's static `supportsSubjectMaskLoss` flag (which gates the web
+    /// toggle and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.subject_mask_loss` for every target this runtime can train — MLX on macOS,
+    /// Candle off-Mac, with no projection on either. The targets that do not support it are pinned
+    /// exactly, so a trainer gaining or losing the technique without the catalog following fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_subject_mask_loss_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        let mut unsupported = Vec::new();
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            let advertised = sceneworks_core::training::target_supports_subject_mask_loss(&target);
+            assert_eq!(
+                advertised, descriptor.techniques.subject_mask_loss,
+                "{} ({engine_id}): catalog supportsSubjectMaskLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            if !advertised {
+                unsupported.push(target.id.clone());
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 10,
+            "only {checked} builtin targets resolved to a linked trainer"
+        );
+        // LTX-2.5 refuses on both backends; the Krea ControlNet trainer exists only on Candle.
+        let expected: &[&str] = if cfg!(target_os = "macos") {
+            &["ltx_2_5_video_lora"]
+        } else {
+            &["krea_2_control", "ltx_2_5_video_lora"]
+        };
+        assert_eq!(unsupported, expected);
+    }
+
+    /// sc-24826 review, extended by sc-24827: the catalog's `supportsWeightNoise` and
+    /// `supportsGradientNoise` flags (which gate the web toggles and submit-time validation) must
+    /// equal the linked trainer descriptor's `techniques.weight_noise` / `techniques.gradient_noise`
+    /// for every target this runtime can train. The builtin catalog is served unprojected on both
+    /// platforms (every LoRA/LoKr trainer declares both techniques on MLX and Candle), so this runs
+    /// against the MLX descriptors on macOS and the Candle descriptors off-Mac. Flip either side and
+    /// this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_technique_flags_match_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            assert_eq!(
+                sceneworks_core::training::target_supports_weight_noise(&target),
+                descriptor.techniques.weight_noise,
+                "{} ({engine_id}): catalog supportsWeightNoise disagrees with the trainer descriptor",
+                target.id
+            );
+            assert_eq!(
+                sceneworks_core::training::target_supports_gradient_noise(&target),
+                descriptor.techniques.gradient_noise,
+                "{} ({engine_id}): catalog supportsGradientNoise disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            // sc-25213: the de-distill training adapter flag.
+            assert_eq!(
+                sceneworks_core::training::training_adapter::target_supports_training_adapter(
+                    &target
+                ),
+                descriptor.techniques.training_adapter,
+                "{} ({engine_id}): catalog supportsTrainingAdapter disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-2125 / sc-24830: the catalog's `supportsDepthAnchoring` flag (which gates the web toggle
+    /// and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.depth_anchoring` for every target this runtime can train — the builtin catalog
+    /// (served identically on both platforms) against the MLX descriptors on macOS and the Candle
+    /// descriptors off-Mac — and every declaring trainer must have an x0 decoder source. Mutation:
+    /// drop the flag from one target (or mark the Krea ControlNet target) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_depth_anchoring_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            if descriptor.techniques.depth_anchoring {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) declares depth anchoring but has no x0 decoder source",
+                    target.id
+                );
+            }
+            assert_eq!(
+                sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    &target
+                ),
+                descriptor.techniques.depth_anchoring,
+                "{} ({engine_id}): catalog supportsDepthAnchoring disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-24832: each body loss's catalog flag (`supportsBodyProportionLoss` / `…ShapeLoss` /
+    /// `…NormalLoss`, which gate the web toggles and submit-time validation) must equal "the linked
+    /// trainer descriptor declares it AND it has an x0 decoder AND its frozen models are cataloged"
+    /// for every target this
+    /// runtime can train (the flags are static per target, identical on both platforms).
+    /// Mutation: drop `supportsBodyProportionLoss` from the Z-Image target ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_body_loss_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::body_losses::{target_supports, BodyLoss};
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            for loss in BodyLoss::ALL {
+                let declared = match loss {
+                    BodyLoss::Proportion => descriptor.techniques.body_proportion_loss,
+                    BodyLoss::Shape => descriptor.techniques.body_shape_loss,
+                    BodyLoss::Normal => descriptor.techniques.normal_loss,
+                };
+                assert_eq!(
+                    target_supports(&target, loss),
+                    declared
+                        && x0_decoder_for_trainer(engine_id).is_some()
+                        && loss.weights_cataloged(),
+                    "{} ({engine_id}): catalog {} disagrees with the trainer descriptor / \
+                     cataloged weights",
+                    target.id,
+                    loss.support_limit()
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-2127 review: the catalog's `supportsResolutionBuckets` flag (which gates the web toggle
+    /// and submit-time validation) must equal the linked trainer descriptor's
+    /// `techniques.resolution_buckets` for every target this runtime can train — the builtin
+    /// catalog (served unprojected on both platforms since sc-24827) against the MLX descriptors on
+    /// macOS and the Candle descriptors off-Mac. Flip either side and this fails.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_resolution_buckets_flag_matches_the_linked_trainer_descriptors() {
+        let mut checked = 0;
+        let mut withheld = Vec::new();
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            let advertised = sceneworks_core::training::target_supports_resolution_buckets(&target);
+            assert_eq!(
+                advertised, descriptor.techniques.resolution_buckets,
+                "{} ({engine_id}): catalog supportsResolutionBuckets disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            if !advertised {
+                withheld.push(target.id.clone());
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+        // The refusal side is exercised, not just the agreeing side.
+        assert_eq!(withheld, ["ltx_2_5_video_lora"]);
+    }
+
+    /// sc-24826/sc-24827 (epic 2123): `advanced.weightNoiseSigma` / `gradientNoiseEta` /
+    /// `gradientNoiseGamma` reach the engine's typed fields; absent stays off (eta 0, sigma 0, gamma
+    /// the upstream 0.55), so a legacy plan maps exactly as before.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_wires_adapter_noise_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let legacy = map_training_config(&parse(value.clone()).config);
+        assert_eq!(legacy.weight_noise_sigma, 0.0);
+        assert_eq!(legacy.gradient_noise_eta, 0.0);
+        assert_eq!(legacy.gradient_noise_gamma, 0.55);
+
+        let mut noisy = value;
+        noisy["config"]["advanced"]["weightNoiseSigma"] = json!(0.0125);
+        noisy["config"]["advanced"]["gradientNoiseEta"] = json!(0.02);
+        noisy["config"]["advanced"]["gradientNoiseGamma"] = json!(0.75);
+        let mapped = map_training_config(&parse(noisy).config);
+        assert_eq!(mapped.weight_noise_sigma, 0.0125);
+        assert_eq!(mapped.gradient_noise_eta, 0.02);
+        assert_eq!(mapped.gradient_noise_gamma, 0.75);
+    }
+
+    /// Every SceneWorks training kernel the worker can route, with a base model it accepts.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    const ROUTED_TRAINING_TARGETS: &[(&str, &str)] = &[
+        ("z_image_lora", "z_image_turbo"),
+        ("sdxl_lora", "sdxl"),
+        ("kolors_lora", "kolors"),
+        ("lens_lora", "lens"),
+        ("krea_lora", "krea_2_raw"),
+        ("krea_control", "krea_2_raw"),
+        ("sd3_lora", "sd3_5_large"),
+        ("sd3_lora", "sd3_5_medium"),
+        ("ltx_mlx_lora", "ltx_2_3"),
+        ("ltx_mlx_lora", "ltx_2_5"),
+        ("wan_lora", "wan_2_2"),
+        ("wan_moe_lora", "wan_2_2_t2v_14b"),
+        ("wan_moe_lora", "wan_2_2_i2v_14b"),
+        ("anima_lora", "anima_base"),
+        ("mage_flow_lora", "mage_flow_base"),
+    ];
+
+    /// sc-24826/sc-24827 (epic 2123 E3/E5): the shared dry/real preflight admits weight noise and
+    /// gradient noise on every LoRA/LoKr trainer the active runtime registers (S2 put both on every
+    /// trainer, both backends), refuses them on a trainer that does not declare them (the Krea
+    /// control-branch trainer), refuses them with a full base fine-tune, and refuses out-of-range /
+    /// malformed values.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_gates_adapter_noise_on_the_trainer_descriptor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, network: &str, key: &str, value: Value| {
+            let mut plan = plan_json(dir.path(), kernel, base, network, &[&image]);
+            plan["config"]["advanced"][key] = value;
+            parse(plan)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let techniques = [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(0.0125), "weight noise"),
+            (GRADIENT_NOISE_ETA_KEY, json!(0.01), "gradient noise"),
+        ];
+
+        let mut admitted = 0;
+        let mut refused = 0;
+        for &(kernel, base) in ROUTED_TRAINING_TARGETS {
+            let engine_id = engine_trainer_id_for(kernel, base).expect("routed kernel");
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue; // not registered on this backend (e.g. the candle-only Krea control trainer)
+            };
+            let network = if descriptor.supports_lora {
+                "lora"
+            } else {
+                "control"
+            };
+            // Off is always admitted — the gate must not refuse a plan that does not ask for it.
+            for (key, _, _) in techniques.clone() {
+                validate_training_target_config(&plan(kernel, base, network, key, json!(0)))
+                    .unwrap_or_else(|e| panic!("{kernel}/{base}: {key}=0 refused: {e}"));
+            }
+            let adapter_trainer = descriptor.supports_lora || descriptor.supports_lokr;
+            assert_eq!(
+                descriptor.techniques.weight_noise && descriptor.techniques.gradient_noise,
+                adapter_trainer,
+                "{engine_id}: every LoRA/LoKr trainer declares both adapter-noise techniques; a \
+                 non-adapter trainer declares neither"
+            );
+            for (key, on, name) in techniques.clone() {
+                let request = plan(kernel, base, network, key, on);
+                if adapter_trainer {
+                    validate_training_target_config(&request)
+                        .unwrap_or_else(|e| panic!("{kernel}/{base}: {name} refused: {e}"));
+                    admitted += 1;
+                } else {
+                    assert!(
+                        err(request).contains(&format!("does not support {name}")),
+                        "{kernel}/{base}: {name}"
+                    );
+                    refused += 1;
+                }
+            }
+        }
+        assert!(admitted > 0, "at least one adapter trainer is registered");
+        if cfg!(not(target_os = "macos")) {
+            assert!(
+                refused > 0,
+                "the candle Krea control trainer must be probed"
+            );
+        }
+
+        // Full base fine-tune + either noise is refused (Mage is the full-tune-capable trainer).
+        for (key, on, _) in techniques.clone() {
+            assert!(
+                err(plan("mage_flow_lora", "mage_flow_base", "full", key, on))
+                    .contains("networkType 'full'"),
+                "{key}"
+            );
+        }
+
+        // Out of range / malformed never silently maps to the default.
+        for (key, bad) in [
+            (WEIGHT_NOISE_SIGMA_KEY, json!(-0.01)),
+            (WEIGHT_NOISE_SIGMA_KEY, json!(0.5)),
+            (WEIGHT_NOISE_SIGMA_KEY, json!("0.0125")),
+            (GRADIENT_NOISE_ETA_KEY, json!(-0.01)),
+            (
+                GRADIENT_NOISE_ETA_KEY,
+                json!(GRADIENT_NOISE_ETA_MAX + 0.001),
+            ),
+            (GRADIENT_NOISE_ETA_KEY, json!("0.01")),
+            (GRADIENT_NOISE_GAMMA_KEY, json!(-0.5)),
+            (
+                GRADIENT_NOISE_GAMMA_KEY,
+                json!(GRADIENT_NOISE_GAMMA_MAX + 0.001),
+            ),
+            (GRADIENT_NOISE_GAMMA_KEY, json!("0.55")),
+        ] {
+            assert!(
+                err(plan(
+                    "z_image_lora",
+                    "z_image_turbo",
+                    "lora",
+                    key,
+                    bad.clone()
+                ))
+                .contains("must be a number between"),
+                "{key}={bad}"
+            );
+        }
+    }
+
+    /// sc-2127 (epic 2123): `advanced.resolutionBuckets` reaches the engine's typed
+    /// `resolution_buckets` row-for-row; absent stays empty (off), so a legacy plan maps exactly as
+    /// before; a malformed list maps fail-closed to a bucket the engine floor refuses.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_wires_resolution_buckets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        assert!(map_training_config(&parse(value.clone()).config)
+            .resolution_buckets
+            .is_empty());
+
+        let mut bucketed = value;
+        bucketed["config"]["advanced"]["resolutionBuckets"] = json!([
+            { "resolution": 512, "repeats": 16 },
+            { "resolution": 768, "repeats": 4 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        let rb = |resolution, repeats| gen_core::ResolutionBucket {
+            resolution,
+            repeats,
+        };
+        assert_eq!(
+            map_training_config(&parse(bucketed.clone()).config).resolution_buckets,
+            vec![rb(512, 16), rb(768, 4), rb(1024, 1)]
+        );
+
+        let mut malformed = bucketed;
+        malformed["config"]["advanced"]["resolutionBuckets"] =
+            json!([{ "resolution": 512, "repeats": 0 }]);
+        assert_eq!(
+            map_training_config(&parse(malformed).config).resolution_buckets,
+            vec![rb(0, 0)]
+        );
+        // The worker cap is the engine cap.
+        assert_eq!(
+            sceneworks_core::training::RESOLUTION_BUCKETS_MAX,
+            gen_core::MAX_RESOLUTION_BUCKETS
+        );
+    }
+
+    /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
+    /// refuses a well-formed one exactly when the active trainer's descriptor does not declare
+    /// `techniques.resolution_buckets` (admitted where it does).
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_resolution_buckets_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, buckets: Value| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            value["config"]["advanced"]["resolutionBuckets"] = buckets;
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let good = json!([
+            { "resolution": 512, "repeats": 2 },
+            { "resolution": 1024, "repeats": 1 },
+        ]);
+        // Image LoRA trainers declare buckets on both backends; LTX-2.5 trains on prepared latent
+        // packs with no spatial edge, so it declares none and must refuse.
+        for (kernel, base, expected) in [
+            ("z_image_lora", "z_image_turbo", true),
+            ("sdxl_lora", "sdxl", true),
+            ("ltx_mlx_lora", "ltx_2_5", false),
+        ] {
+            let declared = crate::inference_runtime::trainer_descriptor(
+                engine_trainer_id_for(kernel, base).expect("native trainer"),
+            )
+            .expect("trainer registered")
+            .techniques
+            .resolution_buckets;
+            assert_eq!(declared, expected, "{base} bucket declaration");
+            let bucketed = plan(kernel, base, good.clone());
+            if declared {
+                validate_training_target_config(&bucketed)
+                    .unwrap_or_else(|e| panic!("{base} declares buckets but refused them: {e:?}"));
+            } else {
+                assert!(
+                    err(bucketed).contains("does not support multi-resolution buckets"),
+                    "{base}"
+                );
+            }
+        }
+
+        // Malformed lists never silently map to a single-resolution run.
+        for bad in [
+            json!([]),
+            json!([{ "resolution": 512, "repeats": 0 }]),
+            json!([{ "resolution": 512, "repeats": -1 }]),
+            json!([{ "resolution": 500, "repeats": 1 }]),
+            json!("512"),
+        ] {
+            assert!(
+                err(plan("z_image_lora", "z_image_turbo", bad.clone()))
+                    .contains("resolutionBuckets"),
+                "{bad}"
+            );
+        }
+    }
+
+    /// sc-2125 / sc-24830 (epic 2123 E3): the shared dry/real preflight refuses depth anchoring on a
+    /// trainer whose descriptor does not declare it (the Krea ControlNet branch), refuses malformed
+    /// values naming the key, and admits it where the active runtime's trainer declares it — SDXL,
+    /// Z-Image and Mage on both backends. Mutation: drop the `descriptor.techniques.depth_anchoring`
+    /// check ⇒ the Krea ControlNet refusal no longer names unsupported depth anchoring ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_depth_anchoring_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let on = [("depthAnchoringWeight", json!(0.1))];
+
+        // Off is always admitted.
+        assert!(validate_training_target_config(&plan("sdxl_lora", "sdxl", &[])).is_ok());
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("depthAnchoringWeight", json!(0))]
+        ))
+        .is_ok());
+
+        // The Krea ControlNet branch trains no x0-decodable LoRA. It is a Candle-only trainer (not
+        // registered in the MLX runtime); where it is registered its control request is refused.
+        let control_on = [
+            ("depthAnchoringWeight", json!(0.1)),
+            ("networkType", json!("control")),
+        ];
+        let control = err(plan("krea_control", "krea_2_raw", &control_on));
+        if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+            assert!(
+                control.contains("does not support depth anchoring"),
+                "{control}"
+            );
+            assert!(validate_training_target_config(&plan(
+                "krea_control",
+                "krea_2_raw",
+                &[("networkType", json!("control"))]
+            ))
+            .is_ok());
+        } else {
+            assert!(control.contains("not registered"), "{control}");
+        }
+
+        // Every LoRA trainer declares it on both backends (sc-24830): SDXL (TAESDXL), Z-Image
+        // (TAEF1) and Mage (its own VAE) are admitted on the active runtime.
+        for (kernel, base) in [
+            ("sdxl_lora", "sdxl"),
+            ("z_image_lora", "z_image_turbo"),
+            ("mage_flow_lora", "mage_flow_base"),
+        ] {
+            validate_training_target_config(&plan(kernel, base, &on))
+                .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
+        }
+
+        // Malformed values never silently map to off — each is refused naming its key.
+        for (key, bad) in [
+            ("depthAnchoringWeight", json!(-0.1)),
+            ("depthAnchoringWeight", json!("0.1")),
+            ("depthAnchoringModel", json!("giant")),
+            ("depthAnchoringMaxT", json!(1.5)),
+            ("depthAnchoringEvery", json!(0)),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
+
+    /// Lay down a fake installed HF snapshot file (`models--<org>--<name>/snapshots/<rev>/<file>`)
+    /// under `hub` and return the snapshot directory.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    fn fake_snapshot(hub: &Path, repo: &str, revision: &str, file: &str) -> PathBuf {
+        let snapshot = hub
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(snapshot.join(file).parent().unwrap()).unwrap();
+        std::fs::write(snapshot.join(file), b"weights").unwrap();
+        snapshot
+    }
+
+    /// sc-24830: each family's depth-anchoring plan hands the trainer ITS x0 decoder — the
+    /// installed snapshot of the family's tiny decoder at the pinned revision (a decoder file in a
+    /// repo subdirectory included), or, for Mage-Flow (no tiny decoder, decodes through its own
+    /// VAE), no directory at all. A missing decoder is refused naming it.
+    /// Mutation: map every trainer to TAEF1 in `x0_decoder_for_trainer` ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn depth_anchoring_resolves_each_familys_x0_decoder() {
+        use sceneworks_core::training::depth_anchoring::{
+            DEPTH_ANYTHING_V2_MODELS, TAELTX2_3_MODEL, TAEQI2_1_MODEL, TAESD3_MODEL, TAESDXL_MODEL,
+            TAEW2_1_MODEL, TAEW2_2_MODEL,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let small = &DEPTH_ANYTHING_V2_MODELS[0];
+        fake_snapshot(&hub, small.repo, small.revision, small.file);
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            value["config"]["advanced"]["depthAnchoringWeight"] = json!(0.1);
+            parse(value)
+        };
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        for (kernel, base, model) in [
+            ("sdxl_lora", "sdxl", &TAESDXL_MODEL),
+            ("sd3_lora", "sd3_5_large", &TAESD3_MODEL),
+            ("wan_moe_lora", "wan_2_2_t2v_14b", &TAEW2_1_MODEL),
+            ("wan_lora", "wan_2_2", &TAEW2_2_MODEL),
+            ("ltx_mlx_lora", "ltx_2_3", &TAELTX2_3_MODEL),
+            ("qwen_image_2_1_lora", "qwen_image_2_1", &TAEQI2_1_MODEL),
+        ] {
+            let plan = plan(kernel, base);
+            let mut config = map_training_config(&plan.config);
+            match apply_depth_anchoring(&settings, &plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => {
+                    assert!(message.contains(model.id), "{kernel}: {message}")
+                }
+                other => panic!("{kernel}: expected a not-installed refusal, got {other:?}"),
+            }
+            let snapshot = fake_snapshot(&hub, model.repo, model.revision, model.file);
+            let mut config = map_training_config(&plan.config);
+            apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
+            assert_eq!(
+                canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+                canon(&snapshot),
+                "{kernel}"
+            );
+        }
+        // Mage-Flow decodes through its own VAE (`builtin_x0_decoder`): no decoder directory.
+        let mage = plan("mage_flow_lora", "mage_flow_base");
+        let mut config = map_training_config(&mage.config);
+        apply_depth_anchoring(&settings, &mage, &mut config).unwrap();
+        assert_eq!(config.perceptual_decoder_dir, None);
+    }
+
+    /// sc-25213 (d): the plan's `trainingAdapterVersion` maps to the right installed adapter file —
+    /// `v1` → `…_v1.safetensors`; `v2`, the presets' `v2-default` and blank → `…_v2.safetensors` —
+    /// handed to the trainer as `training_adapter`; a missing file is refused naming the catalog
+    /// model to install; an unknown version is refused naming the field; no adapter keys leave
+    /// the config untouched. Mutations: map `v2-default` to v1 ⇒ red; resolve the directory without
+    /// the file check ⇒ the missing-file case resolves ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn training_adapter_version_maps_to_the_installed_file() {
+        use sceneworks_core::training::training_adapter::{
+            ZIMAGE_TURBO_TRAINING_ADAPTER_V1 as V1, ZIMAGE_TURBO_TRAINING_ADAPTER_V2 as V2,
+        };
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |version: Option<&str>| {
+            let mut value = plan_json(
+                dir.path(),
+                "z_image_lora",
+                "z_image_turbo",
+                "lora",
+                &[&image],
+            );
+            let advanced = &mut value["config"]["advanced"];
+            advanced["trainingAdapterRepo"] = json!("ostris/zimage_turbo_training_adapter");
+            if let Some(version) = version {
+                advanced["trainingAdapterVersion"] = json!(version);
+            }
+            parse(value)
+        };
+        let resolve = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            apply_training_adapter(&settings, plan, &mut config).map(|()| config.training_adapter)
+        };
+
+        // Nothing installed yet: a named refusal, never a bare-base run.
+        match resolve(&plan(Some("v2-default"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(
+                    message.contains(V2.id) && message.contains("not installed"),
+                    "{message}"
+                )
+            }
+            other => panic!("expected a not-installed refusal, got {other:?}"),
+        }
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        let v1 = fake_snapshot(&hub, V1.repo, V1.revision, V1.file).join(V1.file);
+        // Same snapshot dir: v2's file is still missing ⇒ still refused.
+        assert!(resolve(&plan(Some("v2"))).is_err());
+        let v2 = fake_snapshot(&hub, V2.repo, V2.revision, V2.file).join(V2.file);
+        for (version, want) in [
+            (Some("v1"), &v1),
+            (Some("V1"), &v1),
+            (Some("v2"), &v2),
+            (Some("v2-default"), &v2),
+            (Some(""), &v2),
+            (None, &v2),
+        ] {
+            let got = resolve(&plan(version))
+                .unwrap()
+                .expect("an adapter plan sets the path");
+            assert_eq!(canon(&got), canon(want), "{version:?}");
+        }
+
+        match resolve(&plan(Some("v3"))) {
+            Err(WorkerError::InvalidPayload(message)) => {
+                assert!(message.contains("trainingAdapterVersion"), "{message}")
+            }
+            other => panic!("expected an unknown-version refusal, got {other:?}"),
+        }
+
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        value["config"]["advanced"]
+            .as_object_mut()
+            .unwrap()
+            .retain(|key, _| !key.starts_with("trainingAdapter"));
+        let off = parse(value);
+        assert_eq!(resolve(&off).unwrap(), None);
+    }
+
+    /// The worker's x0-decoder table and the engine descriptors agree on which trainers decode
+    /// through their own VAE: `x0_decoder_for_trainer(id) == BaseModelVae` exactly when the
+    /// active platform's descriptor declares `techniques.builtin_x0_decoder`. Mutation: map
+    /// `mage_flow_base` to a cataloged decoder (or drop `BaseModelVae`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn base_model_vae_decoder_matches_builtin_x0_decoder_descriptors() {
+        use sceneworks_core::training::depth_anchoring::X0DecoderSource;
+        let descriptors: Vec<_> = crate::inference_runtime::media()
+            .trainers()
+            .map(|registration| (registration.descriptor)())
+            .collect();
+        assert!(
+            !descriptors.is_empty(),
+            "no trainers registered on this platform"
+        );
+        let mut builtin = 0;
+        for descriptor in descriptors {
+            let id = descriptor.id;
+            let base_vae = x0_decoder_for_trainer(id) == Some(X0DecoderSource::BaseModelVae);
+            assert_eq!(
+                base_vae, descriptor.techniques.builtin_x0_decoder,
+                "{id}: x0_decoder_for_trainer BaseModelVae vs descriptor builtin_x0_decoder"
+            );
+            builtin += usize::from(base_vae);
+        }
+        assert!(
+            builtin > 0,
+            "no trainer declares builtin_x0_decoder on this platform"
+        );
+    }
+
+    /// sc-2125: an enabled depth-anchoring plan maps onto the engine's typed config — schedule,
+    /// model size — and resolves the TAEF1 decoder and the selected Depth-Anything-V2 from the
+    /// installed library at their pinned revisions; a missing (or wrong-revision) checkpoint is
+    /// refused naming the catalog model to install; off leaves the config untouched. Mutation:
+    /// resolve with the unpinned `huggingface_snapshot_dir` ⇒ the wrong-revision case resolves ⇒
+    /// red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn depth_anchoring_maps_the_schedule_and_resolves_installed_aux_models() {
+        use sceneworks_core::training::depth_anchoring::{DEPTH_ANYTHING_V2_MODELS, TAEF1_MODEL};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("depthAnchoringWeight", json!(0.05)),
+            ("depthAnchoringModel", json!("base")),
+            ("depthAnchoringMinT", json!(0.2)),
+            ("depthAnchoringMaxT", json!(0.9)),
+            ("depthAnchoringEvery", json!(3)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_depth_anchoring(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a not-installed refusal, got {other:?}"),
+            }
+        };
+
+        // Off: untouched, and nothing needs to be installed.
+        let mut config = map_training_config(&off_plan.config);
+        apply_depth_anchoring(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.depth_anchoring.schedule.is_enabled());
+        assert_eq!(config.perceptual_decoder_dir, None);
+        assert_eq!(config.depth_anchoring.model_dir, None);
+
+        // Nothing installed ⇒ the decoder is named first.
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        let base = &DEPTH_ANYTHING_V2_MODELS[1];
+        assert!(refusal(&plan).contains(base.id));
+        // The wrong revision of the right repo does not count as installed.
+        fake_snapshot(
+            &hub,
+            base.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            base.file,
+        );
+        assert!(refusal(&plan).contains(base.id));
+        let da2 = fake_snapshot(&hub, base.repo, base.revision, base.file);
+
+        let mut config = map_training_config(&plan.config);
+        apply_depth_anchoring(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        assert_eq!(
+            canon(config.depth_anchoring.model_dir.as_ref().unwrap()),
+            canon(&da2)
+        );
+        assert_eq!(
+            config.depth_anchoring.model_size,
+            gen_core::DepthModelSize::Base
+        );
+        assert_eq!(
+            config.depth_anchoring.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.05,
+                t_min: 0.2,
+                t_max: 0.9,
+                every_n: 3,
+            }
+        );
+
+        // DA2 Small resolves through the same pinned catalog install (no job-time side cache).
+        let mut small = plan.clone();
+        small
+            .config
+            .advanced
+            .insert("depthAnchoringModel".to_owned(), json!("small"));
+        let small_model = &DEPTH_ANYTHING_V2_MODELS[0];
+        assert!(refusal(&small).contains(small_model.id));
+        let small_dir = fake_snapshot(
+            &hub,
+            small_model.repo,
+            small_model.revision,
+            small_model.file,
+        );
+        let mut config = map_training_config(&small.config);
+        apply_depth_anchoring(&settings, &small, &mut config).unwrap();
+        assert_eq!(
+            canon(config.depth_anchoring.model_dir.as_ref().unwrap()),
+            canon(&small_dir)
+        );
+    }
+
+    /// sc-24832: the worker preflight refuses an enabled body loss on a trainer whose descriptor
+    /// does not declare it, a loss whose frozen model is not cataloged, and malformed values
+    /// (naming the key); it admits the proportion loss where the active runtime's trainer declares
+    /// it (Z-Image on MLX). Mutation: drop the per-loss `declared` check ⇒ the SDXL case is
+    /// admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_body_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let on = [("bodyProportionWeight", json!(0.1))];
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("bodyProportionWeight", json!(0))]
+        ))
+        .is_ok());
+        let sdxl_declares = crate::inference_runtime::trainer_descriptor("sdxl")
+            .map(|d| d.techniques.body_proportion_loss)
+            .unwrap_or(false);
+        if !sdxl_declares {
+            assert!(err(plan("sdxl_lora", "sdxl", &on))
+                .contains("does not support the body proportion loss"));
+        }
+        let declared = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques;
+        let z_image = plan("z_image_lora", "z_image_turbo", &on);
+        if declared.body_proportion_loss {
+            validate_training_target_config(&z_image).expect("a declaring Z-Image admits it");
+        } else {
+            assert!(err(z_image).contains("does not support the body proportion loss"));
+        }
+        // Shape/normal follow the descriptor too (their models are cataloged).
+        for (key, declared) in [
+            ("bodyShapeWeight", declared.body_shape_loss),
+            ("normalWeight", declared.normal_loss),
+        ] {
+            let p = plan("z_image_lora", "z_image_turbo", &[(key, json!(0.1))]);
+            if declared {
+                validate_training_target_config(&p).unwrap_or_else(|e| panic!("{key}: {e:?}"));
+            } else {
+                assert!(err(p).contains("does not support the"), "{key}");
+            }
+        }
+        for (key, bad) in [
+            ("bodyProportionWeight", json!(-0.1)),
+            ("bodyShapeMaxT", json!(1.5)),
+            ("normalEvery", json!(0)),
+            ("bodyShapeMinCos", json!("x")),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
+    /// sc-24831 (S1 mechanism): the catalog's `supportsIdentityLoss` / `supportsFaceLandmarkLoss`
+    /// flags equal the linked trainer descriptor's `techniques.identity_loss` /
+    /// `techniques.face_landmark_loss` for every target this runtime trains — the static builtin
+    /// catalog against the active platform's descriptors — and a declaring trainer always resolves
+    /// an x0 decoder source. Mutations: stop deriving either flag from depth anchoring ⇒ red; set it
+    /// on a target whose trainer does not declare it ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_face_loss_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::face_losses::{
+            target_supports_face_landmark_loss, target_supports_identity_loss,
+        };
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            if descriptor.techniques.identity_loss || descriptor.techniques.face_landmark_loss {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) declares a face loss but has no x0 decoder source",
+                    target.id
+                );
+            }
+            assert_eq!(
+                target_supports_identity_loss(&target),
+                descriptor.techniques.identity_loss,
+                "{} ({engine_id}): catalog supportsIdentityLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            assert_eq!(
+                target_supports_face_landmark_loss(&target),
+                descriptor.techniques.face_landmark_loss,
+                "{} ({engine_id}): catalog supportsFaceLandmarkLoss disagrees with the trainer \
+                 descriptor",
+                target.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+    /// sc-24833 (S1 mechanism): the catalog's `supportsVaeAnchorLoss` / `supportsLatentLpipsLoss`
+    /// flags must equal the linked trainer descriptor's `techniques.vae_anchor_loss` /
+    /// `techniques.latent_lpips_loss` for every target this runtime can train (static per-target
+    /// flags, identical on both platforms, compared with the active platform's descriptors); and a
+    /// target advertising the decoded-x0 VAE anchor must have an x0 decoder. Mutation: drop a target
+    /// from `VAE_ANCHOR_TARGETS` / `LATENT_LPIPS_TARGETS` (or add `krea_2_control`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn catalog_latent_perceptual_flags_match_the_linked_trainer_descriptors() {
+        use sceneworks_core::training::latent_perceptual::target_supports;
+        let mut checked = 0;
+        for target in sceneworks_core::training::builtin_training_targets().targets {
+            let Some(engine_id) = engine_trainer_id_for(&target.kernel, &target.base_model) else {
+                continue;
+            };
+            let Some(descriptor) = crate::inference_runtime::trainer_descriptor(engine_id) else {
+                continue;
+            };
+            if target_supports(&VAE_ANCHOR, &target) {
+                assert!(
+                    x0_decoder_for_trainer(engine_id).is_some(),
+                    "{} ({engine_id}) advertises the VAE anchor without an x0 decoder",
+                    target.id
+                );
+            }
+            for (spec, declared) in [
+                (&VAE_ANCHOR, descriptor.techniques.vae_anchor_loss),
+                (&LATENT_LPIPS, descriptor.techniques.latent_lpips_loss),
+            ] {
+                assert_eq!(
+                    target_supports(spec, &target),
+                    declared,
+                    "{} ({engine_id}): catalog {} disagrees with the trainer descriptor",
+                    target.id,
+                    spec.support_limit
+                );
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no builtin target resolved to a linked trainer"
+        );
+    }
+
+    /// sc-24831 (E3): the shared dry/real preflight refuses a face loss on a trainer whose
+    /// descriptor does not declare it (the Krea ControlNet branch, where registered), refuses
+    /// malformed values naming the key, and admits both losses on every LoRA trainer the active
+    /// runtime registers (SDXL, Z-Image, Mage). Mutation: drop the `declared` check ⇒ the control
+    /// case is admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_face_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let identity = [("identityLossWeight", json!(0.1))];
+        let landmark = [("faceLandmarkLossWeight", json!(0.1))];
+
+        assert!(validate_training_target_config(&plan(
+            "sdxl_lora",
+            "sdxl",
+            &[("identityLossWeight", json!(0))]
+        ))
+        .is_ok());
+        for (key, name) in [
+            ("identityLossWeight", "the identity loss"),
+            ("faceLandmarkLossWeight", "the face-landmark loss"),
+        ] {
+            let control_on = [(key, json!(0.1)), ("networkType", json!("control"))];
+            let control = err(plan("krea_control", "krea_2_raw", &control_on));
+            if crate::inference_runtime::trainer_descriptor("krea_2_control").is_some() {
+                assert!(
+                    control.contains(&format!("does not support {name}")),
+                    "{control}"
+                );
+            } else {
+                assert!(control.contains("not registered"), "{control}");
+            }
+        }
+        for (kernel, base) in [
+            ("sdxl_lora", "sdxl"),
+            ("z_image_lora", "z_image_turbo"),
+            ("mage_flow_lora", "mage_flow_base"),
+        ] {
+            for on in [&identity, &landmark] {
+                validate_training_target_config(&plan(kernel, base, on))
+                    .unwrap_or_else(|e| panic!("{kernel}: {e:?}"));
+            }
+        }
+
+        for (key, bad) in [
+            ("identityLossWeight", json!(-0.1)),
+            ("identityLossWeight", json!(1.5)),
+            ("identityLossMinCos", json!(1.5)),
+            ("identityLossReference", json!("random")),
+            ("identityLossMaxT", json!(2)),
+            ("identityLossEvery", json!(0)),
+            ("faceLandmarkLossWeight", json!("0.1")),
+            ("faceLandmarkLossEvery", json!(17)),
+        ] {
+            let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+            assert!(message.contains(key), "{key}={bad}: {message}");
+        }
+    }
+
+    /// sc-24832: an enabled body-loss plan maps onto the engine's typed `BodyLossesConfig` — per-loss
+    /// schedules with upstream's default windows, the knobs — and resolves the tiny decoder and
+    /// ViTPose+ from the installed library at their pinned revisions; a missing (or wrong-revision)
+    /// checkpoint is refused naming the catalog model; an enabled loss whose model is not cataloged
+    /// is refused; off leaves the config untouched. Mutation: drop `pose_model_dir` resolution
+    /// (`None`) ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn body_losses_map_the_schedules_and_resolve_installed_aux_models() {
+        use sceneworks_core::training::body_losses::VITPOSE_PLUS_BASE_MODEL;
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("bodyProportionWeight", json!(0.15)),
+            ("bodyProportionIncludeHead", json!(true)),
+            ("bodyProportionEvery", json!(1)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_body_losses(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_body_losses(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.body_losses.any_enabled());
+        assert_eq!(config.body_losses.pose_model_dir, None);
+        assert_eq!(config.perceptual_decoder_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(VITPOSE_PLUS_BASE_MODEL.id));
+        fake_snapshot(
+            &hub,
+            VITPOSE_PLUS_BASE_MODEL.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            VITPOSE_PLUS_BASE_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(VITPOSE_PLUS_BASE_MODEL.id));
+        let vitpose = fake_snapshot(
+            &hub,
+            VITPOSE_PLUS_BASE_MODEL.repo,
+            VITPOSE_PLUS_BASE_MODEL.revision,
+            VITPOSE_PLUS_BASE_MODEL.file,
+        );
+
+        let mut config = map_training_config(&plan.config);
+        apply_body_losses(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        let body = &config.body_losses;
+        assert_eq!(
+            canon(body.pose_model_dir.as_ref().unwrap()),
+            canon(&vitpose)
+        );
+        assert_eq!(
+            body.proportion,
+            gen_core::AuxLossSchedule {
+                weight: 0.15,
+                t_min: 0.0,
+                t_max: 0.5,
+                every_n: 1,
+            }
+        );
+        assert!(body.include_head);
+        assert!(!body.shape.is_enabled() && !body.normal.is_enabled());
+        assert_eq!(body.shape_model_dir, None);
+        assert_eq!(body.normal_model_dir, None);
+
+        // Shape + normal resolve their own models at the pinned revisions (missing ⇒ named).
+        use sceneworks_core::training::body_losses::{
+            HYBRIK_RESNET34_MODEL, SAPIENS_NORMAL_0_3B_MODEL,
+        };
+        let mut all = plan.clone();
+        for (key, v) in [
+            ("bodyShapeWeight", json!(0.2)),
+            ("bodyShapeMinCos", json!(0.5)),
+            ("normalWeight", json!(0.3)),
+            ("normalRestrictToSubject", json!(true)),
+        ] {
+            all.config.advanced.insert(key.to_owned(), v);
+        }
+        assert!(refusal(&all).contains(HYBRIK_RESNET34_MODEL.id));
+        let hybrik = fake_snapshot(
+            &hub,
+            HYBRIK_RESNET34_MODEL.repo,
+            HYBRIK_RESNET34_MODEL.revision,
+            HYBRIK_RESNET34_MODEL.file,
+        );
+        assert!(refusal(&all).contains(SAPIENS_NORMAL_0_3B_MODEL.id));
+        let sapiens = fake_snapshot(
+            &hub,
+            SAPIENS_NORMAL_0_3B_MODEL.repo,
+            SAPIENS_NORMAL_0_3B_MODEL.revision,
+            SAPIENS_NORMAL_0_3B_MODEL.file,
+        );
+        let mut config = map_training_config(&all.config);
+        apply_body_losses(&settings, &all, &mut config).unwrap();
+        let body = &config.body_losses;
+        assert_eq!(
+            canon(body.shape_model_dir.as_ref().unwrap()),
+            canon(&hybrik)
+        );
+        assert_eq!(
+            canon(body.normal_model_dir.as_ref().unwrap()),
+            canon(&sapiens)
+        );
+        assert_eq!(
+            (body.shape.weight, body.shape.t_min, body.shape.t_max),
+            (0.2, 0.4, 0.8)
+        );
+        assert_eq!(body.shape_min_cos, 0.5);
+        assert_eq!(body.normal.weight, 0.3);
+        assert!(body.normal_restrict_to_subject);
+    }
+    /// sc-24831: an enabled identity loss maps onto the engine's typed config (schedule, gate,
+    /// reference mode) and resolves the TAEF1 decoder and the `instantid_face_stack` bundle from the
+    /// installed library at its pinned revision, requiring BOTH files; a missing / wrong-revision /
+    /// half-installed bundle is refused naming the catalog model; an enabled landmark loss maps its
+    /// schedule and resolves the pinned FaceMesh-v2 (refused naming it until installed); off leaves
+    /// the config untouched. Mutations: skip the ArcFace file check ⇒ the half-installed case
+    /// resolves ⇒ red; drop the `min_cos` mapping ⇒ red; resolve the landmark model from the face
+    /// stack ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn identity_loss_maps_the_schedule_and_resolves_the_installed_face_stack() {
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        use sceneworks_core::training::face_losses::{FACE_STACK_ARCFACE, FACE_STACK_SCRFD};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("identityLossWeight", json!(0.05)),
+            ("identityLossMinT", json!(0.1)),
+            ("identityLossMaxT", json!(0.8)),
+            ("identityLossEvery", json!(1)),
+            ("identityLossMinCos", json!(0.35)),
+            ("identityLossReference", json!("per_image")),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value.clone());
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_face_losses(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_face_losses(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.identity_loss.schedule.is_enabled());
+        assert_eq!(config.face_analysis_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(FACE_STACK_SCRFD.id));
+        fake_snapshot(
+            &hub,
+            FACE_STACK_SCRFD.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            FACE_STACK_SCRFD.file,
+        );
+        assert!(refusal(&plan).contains(FACE_STACK_SCRFD.id));
+        let stack = fake_snapshot(
+            &hub,
+            FACE_STACK_SCRFD.repo,
+            FACE_STACK_SCRFD.revision,
+            FACE_STACK_SCRFD.file,
+        );
+        // Half installed (no ArcFace file) is not installed.
+        assert!(refusal(&plan).contains(FACE_STACK_ARCFACE.id));
+        std::fs::write(stack.join(FACE_STACK_ARCFACE.file), b"weights").unwrap();
+
+        let mut config = map_training_config(&plan.config);
+        apply_face_losses(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.face_analysis_dir.as_ref().unwrap()),
+            canon(&stack)
+        );
+        assert!(config.perceptual_decoder_dir.is_some());
+        assert_eq!(
+            config.identity_loss,
+            gen_core::IdentityLossConfig {
+                schedule: gen_core::AuxLossSchedule {
+                    weight: 0.05,
+                    t_min: 0.1,
+                    t_max: 0.8,
+                    every_n: 1,
+                },
+                min_cos: 0.35,
+                reference_mode: gen_core::IdentityReferenceMode::PerImage,
+            }
+        );
+
+        // Landmark loss on top: refused naming FaceMesh-v2 until it is installed, then mapped.
+        use sceneworks_core::training::face_losses::FACEMESH_V2_MODEL;
+        value["config"]["advanced"]["faceLandmarkLossWeight"] = json!(0.2);
+        value["config"]["advanced"]["faceLandmarkLossEvery"] = json!(4);
+        let both = parse(value);
+        assert!(refusal(&both).contains(FACEMESH_V2_MODEL.id));
+        let mesh = fake_snapshot(
+            &hub,
+            FACEMESH_V2_MODEL.repo,
+            FACEMESH_V2_MODEL.revision,
+            FACEMESH_V2_MODEL.file,
+        );
+        let mut config = map_training_config(&both.config);
+        apply_face_losses(&settings, &both, &mut config).unwrap();
+        assert_eq!(
+            canon(config.face_landmark_loss.model_dir.as_ref().unwrap()),
+            canon(&mesh)
+        );
+        assert_eq!(
+            config.face_landmark_loss.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.2,
+                t_min: 0.0,
+                t_max: 0.5,
+                every_n: 4,
+            }
+        );
+        assert_eq!(
+            canon(config.face_analysis_dir.as_ref().unwrap()),
+            canon(&stack)
+        );
+    }
+    /// sc-24833 (epic 2123 E3): the shared dry/real preflight refuses each latent-perceptual loss on
+    /// a trainer whose descriptor does not declare it, refuses malformed values naming the key, and
+    /// admits it where the trainer declares it (Z-Image both; Krea-2 the VAE anchor only, having no
+    /// E-LatentLPIPS weights). Mutation: drop the `techniques.latent_lpips_loss` check ⇒ the Krea
+    /// E-LatentLPIPS case is admitted ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn preflight_refuses_latent_perceptual_losses_the_trainer_cannot_honor() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let plan = |kernel: &str, base: &str, extra: &[(&str, Value)]| {
+            let mut value = plan_json(dir.path(), kernel, base, "lora", &[&image]);
+            for (key, v) in extra {
+                value["config"]["advanced"][*key] = v.clone();
+            }
+            parse(value)
+        };
+        let err = |plan: TrainingPlan| match validate_training_target_config(&plan) {
+            Err(WorkerError::InvalidPayload(message)) => message,
+            other => panic!("expected an InvalidPayload refusal, got {other:?}"),
+        };
+        let z = crate::inference_runtime::trainer_descriptor("z_image_turbo")
+            .expect("z_image_turbo trainer registered")
+            .techniques;
+        for (spec, label, declared) in [
+            (&VAE_ANCHOR, "VAE anchor", z.vae_anchor_loss),
+            (&LATENT_LPIPS, "E-LatentLPIPS", z.latent_lpips_loss),
+        ] {
+            let on = [(spec.weight_key, json!(0.5))];
+            assert!(validate_training_target_config(&plan(
+                "krea_lora",
+                "krea_2_raw",
+                &[(spec.weight_key, json!(0))]
+            ))
+            .is_ok());
+            // Krea-2 (TAEW2.1 decoder) declares the VAE anchor but has no E-LatentLPIPS weights.
+            let krea = plan("krea_lora", "krea_2_raw", &on);
+            if spec.weight_key == VAE_ANCHOR.weight_key {
+                validate_training_target_config(&krea)
+                    .unwrap_or_else(|e| panic!("Krea-2 admits the VAE anchor: {e:?}"));
+            } else {
+                assert!(
+                    err(krea).contains(&format!("does not support the {label} loss")),
+                    "{label}"
+                );
+            }
+            assert!(
+                declared,
+                "Z-Image declares the {label} loss on both platforms"
+            );
+            validate_training_target_config(&plan("z_image_lora", "z_image_turbo", &on))
+                .unwrap_or_else(|e| panic!("Z-Image admits the {label} loss: {e:?}"));
+            for (key, bad) in [
+                (spec.weight_key, json!(-0.1)),
+                (spec.weight_key, json!("0.5")),
+                (spec.max_t_key, json!(1.5)),
+                (spec.every_key, json!(0)),
+            ] {
+                let message = err(plan("z_image_lora", "z_image_turbo", &[(key, bad.clone())]));
+                assert!(message.contains(key), "{key}={bad}: {message}");
+            }
+        }
+    }
+
+    /// sc-24833: enabled latent-perceptual losses map onto the engine's typed configs — schedules
+    /// with upstream's defaults — and resolve their checkpoints from the installed library at the
+    /// pinned revisions: the VAE anchor takes the TAEF1 decoder plus the FLUX.2 VAE from whichever
+    /// FLUX.2 [dev] tier is installed (the `flux2_vae` component installs `bf16/vae`, a q4 install
+    /// serves too); E-LatentLPIPS takes the Z-Image (FLUX.1) family weights. Missing / wrong-revision
+    /// checkpoints are refused naming the model; off leaves the config untouched. Mutations: resolve
+    /// the VAE with the unpinned revision ⇒ the wrong-revision case resolves ⇒ red; map Z-Image to
+    /// the SDXL weights ⇒ the resolution names the wrong model ⇒ red.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn latent_perceptual_losses_map_schedules_and_resolve_installed_aux_models() {
+        use sceneworks_core::training::depth_anchoring::TAEF1_MODEL;
+        use sceneworks_core::training::latent_perceptual::{ELATENTLPIPS_MODELS, FLUX2_VAE_MODEL};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hub = dir.path().join("cache").join("huggingface").join("hub");
+        let _env = crate::test_env::EnvVars::set(&[("HF_HUB_CACHE", hub.to_str().unwrap())]);
+        let settings = test_settings(dir.path());
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let image = image.display().to_string();
+        let mut value = plan_json(
+            dir.path(),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[&image],
+        );
+        let off_plan = parse(value.clone());
+        for (key, v) in [
+            ("vaeAnchorWeight", json!(0.5)),
+            ("vaeAnchorEvery", json!(2)),
+            ("latentLpipsWeight", json!(2.0)),
+            ("latentLpipsMinT", json!(0.1)),
+        ] {
+            value["config"]["advanced"][key] = v;
+        }
+        let plan = parse(value);
+        let refusal = |plan: &TrainingPlan| {
+            let mut config = map_training_config(&plan.config);
+            match apply_latent_perceptual(&settings, plan, &mut config) {
+                Err(WorkerError::InvalidPayload(message)) => message,
+                other => panic!("expected a not-installed refusal, got {other:?}"),
+            }
+        };
+
+        let mut config = map_training_config(&off_plan.config);
+        apply_latent_perceptual(&settings, &off_plan, &mut config).unwrap();
+        assert!(!config.vae_anchor.schedule.is_enabled());
+        assert!(!config.latent_lpips.schedule.is_enabled());
+        assert_eq!(config.perceptual_decoder_dir, None);
+        assert_eq!(config.vae_anchor.model_dir, None);
+        assert_eq!(config.latent_lpips.model_dir, None);
+
+        assert!(refusal(&plan).contains(TAEF1_MODEL.id));
+        let taef1 = fake_snapshot(
+            &hub,
+            TAEF1_MODEL.repo,
+            TAEF1_MODEL.revision,
+            TAEF1_MODEL.file,
+        );
+        assert!(refusal(&plan).contains(FLUX2_VAE_MODEL.id));
+        fake_snapshot(
+            &hub,
+            FLUX2_VAE_MODEL.repo,
+            "0123456789abcdef0123456789abcdef01234567",
+            "q4/vae/diffusion_pytorch_model.safetensors",
+        );
+        assert!(
+            refusal(&plan).contains(FLUX2_VAE_MODEL.id),
+            "wrong revision"
+        );
+        let flux2 = fake_snapshot(
+            &hub,
+            FLUX2_VAE_MODEL.repo,
+            FLUX2_VAE_MODEL.revision,
+            "q4/vae/diffusion_pytorch_model.safetensors",
+        );
+        let flux = &ELATENTLPIPS_MODELS[2];
+        assert!(refusal(&plan).contains(flux.id));
+        let sdxl = &ELATENTLPIPS_MODELS[0];
+        fake_snapshot(&hub, sdxl.repo, sdxl.revision, sdxl.file);
+        assert!(
+            refusal(&plan).contains(flux.id),
+            "SDXL weights do not serve Z-Image"
+        );
+        let lpips = fake_snapshot(&hub, flux.repo, flux.revision, flux.file);
+
+        let mut config = map_training_config(&plan.config);
+        apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap();
+        assert_eq!(
+            canon(config.perceptual_decoder_dir.as_ref().unwrap()),
+            canon(&taef1)
+        );
+        assert_eq!(
+            canon(config.vae_anchor.model_dir.as_ref().unwrap()),
+            canon(&flux2.join("q4").join("vae"))
+        );
+        assert_eq!(
+            canon(config.latent_lpips.model_dir.as_ref().unwrap()),
+            canon(&lpips)
+        );
+        assert_eq!(
+            config.vae_anchor.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 0.5,
+                t_min: 0.0,
+                t_max: 0.5,
+                every_n: 2,
+            }
+        );
+        assert_eq!(
+            config.latent_lpips.schedule,
+            gen_core::AuxLossSchedule {
+                weight: 2.0,
+                t_min: 0.1,
+                t_max: 0.5,
+                every_n: 1,
+            }
+        );
+        // The bf16 component install is preferred when present.
+        std::fs::create_dir_all(flux2.join("bf16").join("vae")).unwrap();
+        std::fs::write(flux2.join(FLUX2_VAE_MODEL.file), b"weights").unwrap();
+        let mut config = map_training_config(&plan.config);
+        apply_latent_perceptual(&settings, &plan, &mut config).unwrap();
+        assert_eq!(
+            canon(config.vae_anchor.model_dir.as_ref().unwrap()),
+            canon(&flux2.join("bf16").join("vae"))
+        );
     }
 
     /// sc-7817 follow-up: the candle backend OOMs on a dense backward over the big-DiT training
@@ -3352,6 +6945,33 @@ mod tests {
         ));
         let ltx = finalize_training_config(map_training_config(&ltx_plan.config), &ltx_plan);
         assert_eq!(ltx.train_dtype, "f32", "candle LTX training requires f32");
+        // sc-24160: Qwen Image 2.1 is a big dense MMDiT trained on its bf16 base — the same
+        // dense-backward OOM class, so both adapter kinds are forced on. Its bf16 compute dtype is
+        // left alone (unlike LTX's f32 normalization).
+        // sc-24162: the instruction-edit kernel is forced too.
+        for (kernel, network_type) in [
+            ("qwen_image_2_1_lora", "lora"),
+            ("qwen_image_2_1_lora", "lokr"),
+            ("qwen_image_2_1_edit_lora", "lora"),
+            ("qwen_image_2_1_edit_lora", "lokr"),
+        ] {
+            let mut value = plan_json(
+                dir.path(),
+                kernel,
+                "qwen_image_2_1",
+                network_type,
+                &[&image],
+            );
+            value["config"]["advanced"]["gradientCheckpointing"] = json!(false);
+            value["config"]["advanced"]["mixedPrecision"] = json!("bf16");
+            let plan = parse(value);
+            let config = finalize_training_config(map_training_config(&plan.config), &plan);
+            assert!(
+                config.gradient_checkpointing,
+                "{kernel} {network_type} forces gradient checkpointing on candle"
+            );
+            assert_eq!(config.train_dtype, "bf16", "{kernel}/{network_type}");
+        }
         // SDXL fits a dense backward, so its plan value (off) is honored — never forced on.
         assert!(
             !finalized_checkpointing("sdxl_lora", "sdxl"),
@@ -3690,6 +7310,34 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     #[test]
+    fn training_load_precision_keeps_qwen_image_2_1_at_bf16() {
+        // sc-24159: the 2.1 trainer refuses any LoadSpec precision but Bf16; f32 compute rides on
+        // train_dtype alone, so even an f32 (or free-text → f32) run loads at Bf16.
+        for dtype in ["f32", "F32", "bf16"] {
+            assert!(
+                matches!(
+                    training_load_precision("qwen_image_2_1", dtype),
+                    Precision::Bf16
+                ),
+                "{dtype}"
+            );
+        }
+        // Every other trainer keeps tracking train_dtype.
+        assert!(matches!(
+            training_load_precision("lens", "f32"),
+            Precision::Fp32
+        ));
+        assert!(matches!(
+            training_load_precision("lens", "bf16"),
+            Precision::Bf16
+        ));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
     fn engine_trainer_id_maps_native_families_and_rejects_the_rest() {
         let ltx_2_5_trainer = if cfg!(target_os = "macos") {
             "ltx_2_5"
@@ -3737,6 +7385,24 @@ mod tests {
             // the generation-only conditioning path (the Edit variants need reference tokens).
             ("mage_flow_lora", "mage_flow_edit_base", None),
             ("mage_flow_lora", "mage_flow_turbo", None),
+            // Qwen Image 2.1 (sc-24159): the trainer registers under the base generator id.
+            // The distinct 2512 `qwen_image` / Edit models never resolve to it.
+            (
+                "qwen_image_2_1_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_lora", "qwen_image", None),
+            ("qwen_image_2_1_lora", "qwen_image_edit", None),
+            // Qwen Image 2.1 instruction-edit (sc-24161): the SAME engine trainer in edit mode,
+            // base-gated the same way.
+            (
+                "qwen_image_2_1_edit_lora",
+                "qwen_image_2_1",
+                Some("qwen_image_2_1"),
+            ),
+            ("qwen_image_2_1_edit_lora", "qwen_image", None),
+            ("qwen_image_2_1_edit_lora", "qwen_image_edit", None),
             // Unknown SD3.5 base model variant (e.g. Turbo is NOT a training base).
             ("sd3_lora", "sd3_5_large_turbo", None),
             // Unknown A14B base model variant.
@@ -3818,6 +7484,276 @@ mod tests {
         }
     }
 
+    /// The pinned inference checkout's Qwen-Image 2.1 tiny snapshot (configs, tokenizer and
+    /// header-sized synthetic safetensors — no real weights). Located through `cargo metadata`
+    /// because a git dependency's source directory is not exposed at compile time; the fixture
+    /// lives in the same inference checkout as the pinned `sceneworks-gen-core` crate.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    fn pinned_qwen_image_2_1_tiny_snapshot() -> PathBuf {
+        // Filtered to this build's own target (exported by build.rs) so cargo needs only the
+        // packages this build already fetched (an unfiltered resolve would want the macOS-only
+        // graph's sources too).
+        const HOST: &str = env!("SW_HOST_TARGET");
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| env!("CARGO").to_owned());
+        let output = std::process::Command::new(cargo)
+            .args(["metadata", "--format-version", "1", "--offline", "--locked"])
+            .args(["--filter-platform", HOST])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo metadata runs");
+        assert!(
+            output.status.success(),
+            "cargo metadata failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let metadata: Value = serde_json::from_slice(&output.stdout).expect("metadata is JSON");
+        let gen_core_manifest = metadata["packages"]
+            .as_array()
+            .expect("metadata packages")
+            .iter()
+            .find(|package| {
+                package["name"] == "sceneworks-gen-core"
+                    && package["source"]
+                        .as_str()
+                        .is_some_and(|source| source.starts_with("git+"))
+            })
+            .and_then(|package| package["manifest_path"].as_str())
+            .expect("the pinned sceneworks-gen-core git package");
+        // <checkout>/crates/contracts/gen-core/Cargo.toml -> <checkout>
+        let checkout = Path::new(gen_core_manifest)
+            .ancestors()
+            .nth(4)
+            .expect("inference checkout root");
+        let snapshot = checkout
+            .join("crates/media/mlx-gen/mlx-gen-qwen-image-2-1/tests/fixtures/tiny-snapshot");
+        assert!(
+            snapshot.join("transformer").join("config.json").is_file(),
+            "pinned Qwen-Image 2.1 tiny snapshot missing at {}",
+            snapshot.display()
+        );
+        snapshot
+    }
+
+    /// sc-24163: SceneWorks' advanced map for `qwen_image_2_1_lora` — the target's own defaults and
+    /// every shipped preset, for each advertised network type — is accepted END TO END by the
+    /// pinned Candle 2.1 trainer: the plan goes through the real `map_training_config` +
+    /// `finalize_training_config` (via the shared dry/real preflight, which also runs the
+    /// registry-descriptor floors), and the resulting request then passes the engine trainer's
+    /// own `validate`, loaded through the engine registry from a weights-free tiny snapshot.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_builtin_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        std::fs::create_dir_all(&dataset_root).expect("dataset root");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_lora")
+            .expect("qwen_image_2_1_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 target ships presets");
+        let network_types: Vec<String> = target.limits["networkTypes"]
+            .as_array()
+            .expect("networkTypes")
+            .iter()
+            .map(|value| value.as_str().expect("network type").to_owned())
+            .collect();
+        assert_eq!(network_types, ["lora", "lokr"]);
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in &network_types {
+                let mut serialized = plan_json(
+                    dir.path(),
+                    &target.kernel,
+                    &target.base_model,
+                    network_type,
+                    &[&image],
+                );
+                serialized["target"]["targetId"] = json!(target.id);
+                serialized["target"]["family"] = json!(target.family);
+                let mut config = serde_json::to_value(config).expect("config serializes");
+                config["advanced"]["networkType"] = json!(network_type);
+                serialized["config"] = config;
+                let plan = parse(serialized);
+                let prepared =
+                    preflight_training_run(&settings, &plan, false).unwrap_or_else(|error| {
+                        panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                    });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * network_types.len());
+    }
+
+    /// sc-24161/sc-24162: the instruction-EDIT target's defaults and every shipped edit preset, for
+    /// each network type, with an EDIT-PAIR plan (ordered references + target + instruction), pass
+    /// the shared preflight AND the pinned Candle 2.1 trainer's own weights-free `validate` — the
+    /// references reach the engine in plan order, with the shipped preview cadence (sc-24163: the
+    /// engine renders edit previews conditioned on the first item's references). Its negative
+    /// twins: the same request with the references stripped is accepted by the engine as T2I and
+    /// refused by the SceneWorks kernel floor; with more references than the trainer's cap it is
+    /// refused naming the cap.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn qwen_image_2_1_edit_configs_pass_the_pinned_candle_trainer_validate() {
+        use sceneworks_core::training::{builtin_training_presets, builtin_training_targets};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let settings = test_settings(dir.path());
+        let dataset_root = dir.path().join("datasets").join("ds-1");
+        let refs_dir = dataset_root.join("images").join("refs");
+        std::fs::create_dir_all(&refs_dir).expect("refs dir");
+        let image = dataset_root.join("x.png");
+        std::fs::write(&image, b"png").expect("image");
+        let image = image.display().to_string();
+        let ref_names: Vec<String> = (1..=11).map(|index| format!("x_ref{index}.png")).collect();
+        for name in &ref_names {
+            std::fs::write(refs_dir.join(name), b"png").expect("reference");
+        }
+        let refs = |count: usize| -> Vec<String> {
+            ref_names[..count]
+                .iter()
+                .rev()
+                .map(|name| format!("images/refs/{name}"))
+                .collect()
+        };
+
+        let target = builtin_training_targets()
+            .targets
+            .into_iter()
+            .find(|target| target.id == "qwen_image_2_1_edit_lora")
+            .expect("qwen_image_2_1_edit_lora ships");
+        let mut configs = vec![("defaults".to_owned(), target.defaults.clone())];
+        configs.extend(
+            builtin_training_presets()
+                .presets
+                .into_iter()
+                .filter(|preset| preset.target_id == target.id)
+                .map(|preset| (preset.id, preset.config)),
+        );
+        assert!(configs.len() > 1, "the 2.1 edit target ships presets");
+
+        let mut spec = LoadSpec::new(WeightsSource::Dir(pinned_qwen_image_2_1_tiny_snapshot()));
+        spec.precision = training_load_precision("qwen_image_2_1", "bf16");
+        let trainer = crate::inference_runtime::load_trainer("qwen_image_2_1", &spec)
+            .expect("the pinned Candle 2.1 trainer loads weights-free from the tiny snapshot");
+        assert_eq!(trainer.descriptor().backend, "candle");
+        assert_eq!(trainer.descriptor().max_reference_images, 10);
+
+        let plan_for = |config: &sceneworks_core::training::TrainingConfig,
+                        network_type: &str,
+                        references: Vec<String>| {
+            let mut serialized = plan_json(
+                dir.path(),
+                &target.kernel,
+                &target.base_model,
+                network_type,
+                &[&image],
+            );
+            serialized["target"]["targetId"] = json!(target.id);
+            serialized["target"]["family"] = json!(target.family);
+            serialized["dataset"]["items"][0]["caption"] =
+                json!("put the hat from image 2 on image 1");
+            serialized["dataset"]["items"][0]["referenceImagePaths"] = json!(references);
+            let mut config = serde_json::to_value(config).expect("config serializes");
+            config["advanced"]["networkType"] = json!(network_type);
+            // The UI always submits a prompt pool (prefilled from the trigger phrase).
+            config["advanced"]["samplePrompts"] = json!(["make the hat red"]);
+            serialized["config"] = config;
+            parse(serialized)
+        };
+
+        let mut checked = 0;
+        for (label, config) in &configs {
+            for network_type in ["lora", "lokr"] {
+                let plan = plan_for(config, network_type, refs(3));
+                let prepared =
+                    preflight_training_run(&settings, &plan, false).unwrap_or_else(|error| {
+                        panic!("{label}/{network_type}: SceneWorks preflight refused: {error}")
+                    });
+                assert_eq!(prepared.engine_id, "qwen_image_2_1");
+                let item = &prepared.request.items[0];
+                assert_eq!(
+                    item.reference_image_paths
+                        .iter()
+                        .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+                        .collect::<Vec<_>>(),
+                    ["x_ref3.png", "x_ref2.png", "x_ref1.png"],
+                    "{label}/{network_type}: references reach the engine in plan order"
+                );
+                // Previews ON with the T2I cadence (sc-24163), reaching the engine request.
+                assert_eq!(
+                    (
+                        prepared.request.config.sample_every,
+                        prepared.request.config.sample_prompts.as_slice(),
+                    ),
+                    (500, ["make the hat red".to_owned()].as_slice()),
+                    "{label}/{network_type}: edit previews reach the engine"
+                );
+                trainer.validate(&prepared.request).unwrap_or_else(|error| {
+                    panic!("{label}/{network_type}: pinned Candle 2.1 trainer refused: {error}")
+                });
+
+                // Negative twins against the same pinned engine floor.
+                let mut stripped = prepared.request.clone();
+                stripped.items[0].reference_image_paths.clear();
+                assert!(
+                    gen_core::train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
+                    "a plain request is a T2I request to the engine — the KERNEL floor refuses it"
+                );
+                let mut over = prepared.request.clone();
+                over.items[0].reference_image_paths = (1..=11)
+                    .map(|index| refs_dir.join(format!("x_ref{index}.png")))
+                    .collect();
+                let error = trainer.validate(&over).unwrap_err().to_string();
+                assert!(
+                    error.contains("at most 10"),
+                    "{label}/{network_type}: {error}"
+                );
+                prepared.close().expect("preflight cleanup");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, configs.len() * 2);
+
+        // The kernel floor: the edit kernel refuses the reference-less plan the engine would accept.
+        let error = preflight_training_run(
+            &settings,
+            &plan_for(&target.defaults, "lora", Vec::new()),
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("qwen_image_2_1_edit_lora"), "{error}");
+    }
+
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     #[test]
     fn shared_dry_and_real_preflight_rejects_forged_new_candle_configs_before_load() {
@@ -3864,7 +7800,7 @@ mod tests {
         for (kernel, base, network, field, value) in cases {
             let mut serialized = plan_json(dir.path(), kernel, base, network, &[&image]);
             serialized["config"]["advanced"][field] = value;
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("dry and real execution share this rejection before load");
             assert!(
                 matches!(error, WorkerError::InvalidPayload(_)),
@@ -3879,7 +7815,7 @@ mod tests {
             "lora",
             &[&image],
         ));
-        assert!(preflight_training_run(&settings, &forged)
+        assert!(preflight_training_run(&settings, &forged, false)
             .expect_err("a forged kernel/base pairing must fail")
             .to_string()
             .contains("No native trainer"));
@@ -3891,10 +7827,12 @@ mod tests {
             "lokr",
             &[&image],
         ));
-        assert!(preflight_training_run(&settings, &unsupported_network)
-            .expect_err("Wan TI2V-5B does not advertise LoKr")
-            .to_string()
-            .contains("does not support networkType"));
+        assert!(
+            preflight_training_run(&settings, &unsupported_network, false)
+                .expect_err("Wan TI2V-5B does not advertise LoKr")
+                .to_string()
+                .contains("does not support networkType")
+        );
     }
 
     #[cfg(any(
@@ -3942,7 +7880,7 @@ mod tests {
             } else {
                 serialized["config"]["advanced"][field] = value;
             }
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("the shared dry/real recipe preflight must reject before load");
             assert!(
                 matches!(error, WorkerError::InvalidPayload(_)),
@@ -3953,7 +7891,7 @@ mod tests {
         // SD3 is the sole extension: logit-normal remains a valid, weights-free request.
         let mut sd3 = plan_json(dir.path(), "sd3_lora", "sd3_5_large", "lora", &[&image]);
         sd3["config"]["advanced"]["timestepType"] = json!("logit_normal");
-        assert!(preflight_training_run(&settings, &parse(sd3)).is_ok());
+        assert!(preflight_training_run(&settings, &parse(sd3), false).is_ok());
 
         for (kernel, base) in [
             ("anima_lora", "anima_base"),
@@ -3965,7 +7903,7 @@ mod tests {
         ] {
             let mut serialized = plan_json(dir.path(), kernel, base, "lora", &[&image]);
             serialized["dataset"]["items"][0]["controlImagePath"] = json!("control.png");
-            let error = preflight_training_run(&settings, &parse(serialized))
+            let error = preflight_training_run(&settings, &parse(serialized), false)
                 .expect_err("adapter item source/control images must fail before load");
             assert!(
                 error.to_string().contains("control/source"),
@@ -3985,7 +7923,7 @@ mod tests {
         mage_full["target"]["outputKind"] = json!("base_checkpoint");
         mage_full["config"]["rank"] = json!(0);
         mage_full["config"]["advanced"]["mixedPrecision"] = json!("f32");
-        let prepared = preflight_training_run(&settings, &parse(mage_full))
+        let prepared = preflight_training_run(&settings, &parse(mage_full), false)
             .expect("rank-zero Mage full request validates");
         assert_eq!(prepared.request.config.rank, 0);
     }
@@ -4372,6 +8310,21 @@ mod tests {
         assert_eq!(result["networkType"], json!("full"));
         assert_eq!(result["outputId"], json!("finetune_mage"));
         assert_eq!(result["backend"], json!("candle"));
+        // sc-2127: a single-resolution run records no bucket rows...
+        assert!(!result.contains_key("resolutionBuckets"));
+
+        // ...and a bucketed run records the rows it trained on next to `resolution`.
+        let mut bucketed = plan.clone();
+        bucketed.config.advanced.insert(
+            "resolutionBuckets".to_owned(),
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }]),
+        );
+        let result = training_result(&bucketed, &output, &[], &[], &[], 0, 0.0, "candle");
+        assert_eq!(
+            result["resolutionBuckets"],
+            json!([{ "resolution": 512, "repeats": 16 }, { "resolution": 1024, "repeats": 1 }])
+        );
+        assert_eq!(result["resolution"], json!(bucketed.config.resolution));
     }
 
     #[cfg(any(
@@ -4948,15 +8901,30 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            body_losses: Default::default(),
+            perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5077,15 +9045,30 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            body_losses: Default::default(),
+            perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5209,15 +9192,30 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            body_losses: Default::default(),
+            perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5379,15 +9377,30 @@ mod tests {
             resume: false,
             control_type: None,
             model_options: Default::default(),
+            weight_noise_sigma: 0.0,
+            gradient_noise_eta: 0.0,
+            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
+            resolution_buckets: Vec::new(),
+            depth_anchoring: Default::default(),
+            body_losses: Default::default(),
+            perceptual_decoder_dir: None,
+            identity_loss: Default::default(),
+            face_landmark_loss: Default::default(),
+            face_analysis_dir: None,
+            vae_anchor: Default::default(),
+            latent_lpips: Default::default(),
+            training_adapter: None,
+            subject_mask_loss: None,
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5569,11 +9582,12 @@ mod tests {
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir: output_dir.clone(),
@@ -5811,11 +9825,12 @@ mod tests {
         let request = TrainingRequest {
             items: vec![TrainingItem {
                 subject_mask_path: None,
+                reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
                 control_image_path: None,
+                subject_mask_path: None,
                 model_options: Default::default(),
-                reference_image_paths: Vec::new(),
             }],
             config,
             output_dir,

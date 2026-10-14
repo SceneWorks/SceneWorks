@@ -252,3 +252,18 @@ fn guard_rejects_candle_core_source_or_revision_skew() {
     );
     assert!(check_lock(&skew).unwrap_err().contains("skews"));
 }
+
+// Retain the epic's duplicate-resolution mutant coverage for both vendored patches.
+#[test]
+fn guard_rejects_duplicate_patched_resolutions() {
+    for crate_name in ["candle-kernels", "candle-core"] {
+        let lock = format!(
+            "{GOOD_LOCK}\n[[package]]\nname = \"{crate_name}\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/huggingface/candle?rev=1e6aa85e#1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d\"\n"
+        );
+        let error = check_lock(&lock).unwrap_err();
+        assert!(
+            error.contains(&format!("exactly one {crate_name}")),
+            "{error}"
+        );
+    }
+}
