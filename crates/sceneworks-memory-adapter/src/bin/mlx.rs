@@ -1564,6 +1564,8 @@ mod tests {
             "chroma1_flash",
             // sc-24112: Qwen-Image 2.1 on the turnkey still arm.
             "qwen_image_2_1",
+            // sc-25907: and its distilled Turbo sibling, its own registry id on the same arm.
+            "qwen_image_2_1_turbo",
         ] {
             let request = json!({ "planned": { "target": { "provider": provider } } });
             let error = run(&request)
@@ -1575,6 +1577,7 @@ mod tests {
         }
         assert_eq!(QWEN_PROVIDER, "qwen_image");
         assert_eq!(QWEN_IMAGE_2_1_PROVIDER, "qwen_image_2_1");
+        assert_eq!(QWEN_IMAGE_2_1_TURBO_PROVIDER, "qwen_image_2_1_turbo");
         assert_eq!(QWEN_EDIT_PROVIDER, "qwen_image_edit");
         assert_eq!(QWEN_EDIT_MODEL, "qwen_image_edit_2511");
         assert_eq!(QWEN_EDIT_LIGHTNING_MODEL, "qwen_image_edit_2511_lightning");
@@ -5150,6 +5153,9 @@ const LENS_TURBO_PROVIDER: &str = "lens_turbo";
 /// Qwen-Image 2.1 (sc-24112). The engine id equals the catalog model id
 /// (`crates/sceneworks-worker/src/engines.rs` MODEL_TABLE).
 const QWEN_IMAGE_2_1_PROVIDER: &str = "qwen_image_2_1";
+/// Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the distilled sibling's OWN engine id, registered by
+/// the same `mlx-gen-qwen-image-2-1` crate (`TURBO_MODEL_ID`) and equal to its catalog model id.
+const QWEN_IMAGE_2_1_TURBO_PROVIDER: &str = "qwen_image_2_1_turbo";
 /// The seed every turnkey capture renders at. The fixture binds member, tier and edge, so the seed
 /// does not also have to carry the route.
 const TURNKEY_SEED: u64 = 22732;
@@ -5215,6 +5221,27 @@ const QWEN_IMAGE_2_1_BF16_FAMILY: TurnkeyFamily = TurnkeyFamily {
     revision_env: "SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION",
     root_env: "SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT",
     expected_repository: protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY,
+    tiered: false,
+};
+
+/// The packed Qwen-Image 2.1 Turbo `q8/` / `q4/` re-host (sc-25907): its OWN repository and env
+/// family, split from base's the way Lens-Turbo is split from Lens, so a Turbo plan can never be
+/// satisfied by base weights.
+const QWEN_IMAGE_2_1_TURBO_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY",
+    revision_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION",
+    root_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT",
+    expected_repository: protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY,
+    tiered: true,
+};
+
+/// The Qwen-Image 2.1 Turbo bf16 tier: the upstream `Qwen/Qwen-Image-2.1-Turbo` snapshot at its
+/// ROOT, the directory the worker hands the engine for Turbo bf16 (base's untiered shape).
+const QWEN_IMAGE_2_1_TURBO_BF16_FAMILY: TurnkeyFamily = TurnkeyFamily {
+    repository_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY",
+    revision_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION",
+    root_env: "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT",
+    expected_repository: protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY,
     tiered: false,
 };
 
@@ -5287,6 +5314,19 @@ const QWEN_IMAGE_2_1_ARM: TurnkeyArm = TurnkeyArm {
     slug: "qwen-image-2-1",
 };
 
+/// Qwen-Image 2.1 Turbo (sc-25907): base's split-repo shape over the distilled checkpoint's OWN two
+/// repositories. Same reference-free text-to-image measurement as base; the engine refuses the
+/// other checkpoint's snapshot by name, and the families keep the env binding from ever offering it.
+const QWEN_IMAGE_2_1_TURBO_ARM: TurnkeyArm = TurnkeyArm {
+    provider: QWEN_IMAGE_2_1_TURBO_PROVIDER,
+    mode: "text_to_image",
+    execution_path: "the MLX Qwen-Image 2.1 Turbo base-only text-to-image path",
+    still_calibration: "MLX Qwen-Image 2.1 Turbo calibration",
+    family: QWEN_IMAGE_2_1_TURBO_FAMILY,
+    bf16_family: Some(QWEN_IMAGE_2_1_TURBO_BF16_FAMILY),
+    slug: "qwen-image-2-1-turbo",
+};
+
 impl TurnkeyArm {
     fn family_for(self, tier: &str) -> TurnkeyFamily {
         match (tier, self.bf16_family) {
@@ -5317,6 +5357,7 @@ fn turnkey_arm(request: &Value) -> Result<TurnkeyArm, String> {
         (LENS_PROVIDER, "text_to_image") => Ok(LENS_ARM),
         (LENS_TURBO_PROVIDER, "text_to_image") => Ok(LENS_TURBO_ARM),
         (QWEN_IMAGE_2_1_PROVIDER, "text_to_image") => Ok(QWEN_IMAGE_2_1_ARM),
+        (QWEN_IMAGE_2_1_TURBO_PROVIDER, "text_to_image") => Ok(QWEN_IMAGE_2_1_TURBO_ARM),
         (provider, mode) => Err(format!(
             "the MLX turnkey still arm does not implement provider {provider:?} in mode {mode:?}"
         )),
@@ -5511,6 +5552,12 @@ fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Option<String
         // load shape is its separate typed axis), read off the engine constant.
         (QWEN_IMAGE_2_1_PROVIDER, _) => {
             runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
+                .to_owned()
+        }
+        // sc-25907: the Turbo id publishes its OWN single identity (it prices a different
+        // checkpoint), so a base record can never satisfy a Turbo cell's handshake.
+        (QWEN_IMAGE_2_1_TURBO_PROVIDER, _) => {
+            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
                 .to_owned()
         }
         (KOLORS_PROVIDER, tier) => format!("kolors-{tier}-mlx-shared-ladder-v1"),
@@ -5841,7 +5888,10 @@ fn run_turnkey_still(request: &Value) -> Result<Value, String> {
         ));
     }
 
-    let lifecycle_blocker = if arm.provider == QWEN_IMAGE_2_1_PROVIDER {
+    let lifecycle_blocker = if matches!(
+        arm.provider,
+        QWEN_IMAGE_2_1_PROVIDER | QWEN_IMAGE_2_1_TURBO_PROVIDER
+    ) {
         concat!(
             "the pinned Qwen-Image 2.1 MLX crate opens a memory-strategy request scope ",
             "(registered_begin_request) but exposes no calibration fault-injection site, so the ",
@@ -22580,6 +22630,8 @@ fn run_with(
         // sc-24112: Qwen-Image 2.1 rides the same arm — a plain reference-free text-to-image load
         // off one tier root, with a split-repo bf16 leg the member carries like Ideogram's.
         QWEN_IMAGE_2_1_PROVIDER => run_turnkey_still(request),
+        // sc-25907: and the distilled Turbo id, its own member over its own two repositories.
+        QWEN_IMAGE_2_1_TURBO_PROVIDER => run_turnkey_still(request),
         // sc-18808: the first VIDEO arm. Every arm above it refuses `geometry.frames != 1`; this one
         // validates against LTX's own resolution/temporal envelope instead.
         LTX_PROVIDER => run_ltx(request),
@@ -32334,13 +32386,14 @@ mod sensenova_tests {
 mod turnkey_still_tests {
     use super::*;
 
-    const MEMBERS: [(&str, &str); 6] = [
+    const MEMBERS: [(&str, &str); 7] = [
         (KOLORS_PROVIDER, "kolors"),
         (IDEOGRAM_PROVIDER, "ideogram-4"),
         (IDEOGRAM_TURBO_PROVIDER, "ideogram-4-turbo"),
         (LENS_PROVIDER, "lens"),
         (LENS_TURBO_PROVIDER, "lens-turbo"),
         (QWEN_IMAGE_2_1_PROVIDER, "qwen-image-2-1"),
+        (QWEN_IMAGE_2_1_TURBO_PROVIDER, "qwen-image-2-1-turbo"),
     ];
 
     fn turnkey_planned(provider: &str, mode: &str, tier: &str) -> Value {
@@ -32475,6 +32528,34 @@ mod turnkey_still_tests {
             "QWEN_IMAGE_2_1_BF16",
         );
         assert!(!QWEN_IMAGE_2_1_ARM.family_for("bf16").tiered);
+        // sc-25907: Turbo has the same split over its OWN two repositories and env families.
+        for tier in ["q4", "q8"] {
+            expect(
+                QWEN_IMAGE_2_1_TURBO_ARM,
+                tier,
+                protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY,
+                "QWEN_IMAGE_2_1_TURBO",
+            );
+            assert!(QWEN_IMAGE_2_1_TURBO_ARM.family_for(tier).tiered);
+        }
+        expect(
+            QWEN_IMAGE_2_1_TURBO_ARM,
+            "bf16",
+            protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY,
+            "QWEN_IMAGE_2_1_TURBO_BF16",
+        );
+        assert!(!QWEN_IMAGE_2_1_TURBO_ARM.family_for("bf16").tiered);
+        // Base and Turbo must never share an artifact at any tier: a Turbo plan satisfied by base
+        // weights would re-label base's peaks as the distilled checkpoint's (E10).
+        for tier in ["q4", "q8", "bf16"] {
+            assert_ne!(
+                QWEN_IMAGE_2_1_ARM.family_for(tier).expected_repository,
+                QWEN_IMAGE_2_1_TURBO_ARM
+                    .family_for(tier)
+                    .expected_repository,
+                "{tier}"
+            );
+        }
         // Base Lens and Lens-Turbo must never share a family: a turbo plan satisfied by base
         // weights would re-label the base model's peaks as the distilled model's.
         assert_ne!(
@@ -32561,44 +32642,61 @@ mod turnkey_still_tests {
     /// Qwen-Image 2.1's bf16 leg is the upstream snapshot ROOT, so a `.../bf16` sub-directory — a
     /// path no production load opens — is refused, and neither repository satisfies the other's
     /// tiers (sc-24112).
+    ///
+    /// sc-25907: the same holds for the Turbo member over its own two repositories, and on top of
+    /// it neither checkpoint's repositories satisfy the OTHER checkpoint's plan at any tier.
     #[test]
     fn the_qwen_image_2_1_bf16_leg_binds_the_upstream_snapshot_root() {
         let revision = "c".repeat(40);
-        let tiered_bf16 =
-            turnkey_snapshot_root(protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY, &revision, "bf16");
-        let error = turnkey_load_spec_at(
-            &turnkey_planned(QWEN_IMAGE_2_1_PROVIDER, "text_to_image", "bf16"),
-            LoadShape::EagerMaterialization,
-            protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY.to_owned(),
-            revision.clone(),
-            tiered_bf16,
-        )
-        .expect_err("a bf16/ sub-directory is not the upstream snapshot root");
-        assert!(
-            error.contains(
-                protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY
-                    .replace('/', "--")
-                    .as_str()
-            ),
-            "{error}"
-        );
-        for (tier, foreign) in [
-            ("bf16", protocol::QWEN_IMAGE_2_1_REPOSITORY),
-            ("q8", protocol::QWEN_IMAGE_2_1_BF16_REPOSITORY),
+        for (arm, sibling) in [
+            (QWEN_IMAGE_2_1_ARM, QWEN_IMAGE_2_1_TURBO_ARM),
+            (QWEN_IMAGE_2_1_TURBO_ARM, QWEN_IMAGE_2_1_ARM),
         ] {
-            let root = turnkey_snapshot_root(foreign, &revision, tier);
+            let dense = arm.family_for("bf16").expected_repository;
+            let packed = arm.family_for("q8").expected_repository;
+            let tiered_bf16 = turnkey_snapshot_root(dense, &revision, "bf16");
             let error = turnkey_load_spec_at(
-                &turnkey_planned(QWEN_IMAGE_2_1_PROVIDER, "text_to_image", tier),
+                &turnkey_planned(arm.provider, "text_to_image", "bf16"),
                 LoadShape::EagerMaterialization,
-                foreign.to_owned(),
+                dense.to_owned(),
                 revision.clone(),
-                root,
+                tiered_bf16,
             )
-            .expect_err("the other Qwen-Image 2.1 repository must not satisfy this tier");
+            .expect_err("a bf16/ sub-directory is not the upstream snapshot root");
             assert!(
-                error.contains(QWEN_IMAGE_2_1_ARM.family_for(tier).expected_repository),
-                "{error}"
+                error.contains(dense.replace('/', "--").as_str()),
+                "{}: {error}",
+                arm.provider
             );
+            for (tier, foreign) in [
+                ("bf16", packed),
+                ("q8", dense),
+                ("bf16", sibling.family_for("bf16").expected_repository),
+                ("q8", sibling.family_for("q8").expected_repository),
+                ("q4", sibling.family_for("q4").expected_repository),
+            ] {
+                let root = if tier == "bf16" && foreign != packed {
+                    turnkey_snapshot_root(foreign, &revision, tier)
+                        .parent()
+                        .unwrap()
+                        .to_path_buf()
+                } else {
+                    turnkey_snapshot_root(foreign, &revision, tier)
+                };
+                let error = turnkey_load_spec_at(
+                    &turnkey_planned(arm.provider, "text_to_image", tier),
+                    LoadShape::EagerMaterialization,
+                    foreign.to_owned(),
+                    revision.clone(),
+                    root,
+                )
+                .expect_err("a foreign Qwen-Image 2.1 repository must not satisfy this tier");
+                assert!(
+                    error.contains(arm.family_for(tier).expected_repository),
+                    "{} {tier} vs {foreign}: {error}",
+                    arm.provider
+                );
+            }
         }
     }
 
@@ -32641,6 +32739,23 @@ mod turnkey_still_tests {
         request["planned"]["fixture"] = json!("lens-turbo-mlx-q4-1024-seed22732-step2");
         validate_turnkey_fixture(&request, arm, "q4")
             .expect_err("Lens-Turbo's fixture must not satisfy a base Lens plan");
+        // sc-25907: nor does either Qwen-Image 2.1 checkpoint's fixture satisfy the other's plan.
+        for (provider, foreign) in [
+            (
+                QWEN_IMAGE_2_1_PROVIDER,
+                "qwen-image-2-1-turbo-mlx-q4-1024-seed22732-step2",
+            ),
+            (
+                QWEN_IMAGE_2_1_TURBO_PROVIDER,
+                "qwen-image-2-1-mlx-q4-1024-seed22732-step2",
+            ),
+        ] {
+            let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
+            let mut request = turnkey_planned(provider, "text_to_image", "q4");
+            request["planned"]["fixture"] = json!(foreign);
+            validate_turnkey_fixture(&request, arm, "q4")
+                .expect_err("the sibling checkpoint's fixture must not satisfy this plan");
+        }
     }
 
     /// The committed plan's MLX turnkey cells, as an exact key set: five members x three tiers,
@@ -32698,6 +32813,7 @@ mod turnkey_still_tests {
             "lens",
             "lens_turbo",
             "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
         ]
         .iter()
         .flat_map(|model| {
@@ -32751,6 +32867,7 @@ mod turnkey_still_tests {
         .expect("the anchor plan parses");
         let mut identities = std::collections::BTreeMap::new();
         let mut qwen_image_2_1 = Vec::new();
+        let mut qwen_image_2_1_turbo = Vec::new();
         for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
             let provider = entry["provider"].as_str().unwrap();
             if !key.ends_with(":mlx") || !MEMBERS.iter().any(|(member, _)| *member == provider) {
@@ -32758,8 +32875,14 @@ mod turnkey_still_tests {
             }
             // sc-24112: `mlx-gen-qwen-image-2-1` publishes ONE identity for every tier, so its
             // three cells share it by construction and are held to the engine constant instead.
-            if provider == QWEN_IMAGE_2_1_PROVIDER {
-                qwen_image_2_1.push((
+            // sc-25907: the same per checkpoint — Turbo's three cells share Turbo's OWN constant.
+            if provider == QWEN_IMAGE_2_1_PROVIDER || provider == QWEN_IMAGE_2_1_TURBO_PROVIDER {
+                let bucket = if provider == QWEN_IMAGE_2_1_PROVIDER {
+                    &mut qwen_image_2_1
+                } else {
+                    &mut qwen_image_2_1_turbo
+                };
+                bucket.push((
                     key.clone(),
                     entry["calibrationFingerprint"].as_str().unwrap().to_owned(),
                 ));
@@ -32809,6 +32932,36 @@ mod turnkey_still_tests {
         assert_eq!(
             runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
             "qwen-image-2-1-mlx-derived-2026-09-22-v1"
+        );
+        // sc-25907: Turbo's cells name Turbo's OWN engine constant — never base's.
+        assert_eq!(
+            qwen_image_2_1_turbo.len(),
+            3,
+            "one Qwen-Image 2.1 Turbo MLX cell per tier"
+        );
+        for (key, planned) in &qwen_image_2_1_turbo {
+            assert_eq!(
+                planned,
+                runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+                "{key}: the plan row must name the loaded Turbo generator's production identity"
+            );
+            assert_eq!(
+                Some(planned.clone()),
+                turnkey_calibration_fingerprint(
+                    QWEN_IMAGE_2_1_TURBO_ARM,
+                    key.split(':').nth(1).unwrap()
+                ),
+                "{key}"
+            );
+            assert!(!identities.contains_key(planned.as_str()), "{key}");
+        }
+        assert_eq!(
+            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+            "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1"
+        );
+        assert_ne!(
+            runtime_macos::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT,
+            runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT
         );
         // The preserved measured keys, byte-for-byte, so the table cannot drift off the engine.
         assert_eq!(
@@ -32887,6 +33040,13 @@ mod turnkey_still_tests {
                 IDEOGRAM_PROVIDER,
                 "ideogram-4",
                 "ideogram4-mlx-registry-behavior-v1-ideogram-4-bf16-dense-resident",
+            ),
+            // sc-25907 (E10): a Turbo row naming BASE's identity is refused, so base's measured
+            // record can never be presented as Turbo's.
+            (
+                QWEN_IMAGE_2_1_TURBO_PROVIDER,
+                "qwen-image-2-1-turbo",
+                runtime_macos::providers::qwen_image_2_1::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT,
             ),
         ] {
             let mut request = turnkey_planned(provider, "text_to_image", "bf16");

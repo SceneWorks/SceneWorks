@@ -62,8 +62,9 @@ pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 // target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
 pub(crate) use routing::matrix::expected_backend_local_trainer_id;
 pub use routing::{
-    canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
-    video_mode_conditioning_requirements, video_ui_modes,
+    canonical_video_route_probe, is_qwen_image_2_1_model, qwen_image_2_1_reference_ids,
+    video_backend_mode_supported, video_mode_conditioning_requirements, video_ui_modes,
+    QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[

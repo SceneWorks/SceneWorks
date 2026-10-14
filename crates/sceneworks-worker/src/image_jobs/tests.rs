@@ -1253,6 +1253,7 @@ fn imported_krea_normal_driver_evaluates_every_shape_and_scopes_every_pass() {
                         context,
                         decode_quality_decisions: Vec::new(),
                         process_limit_bytes: None,
+                        prefix_kv_cache: None,
                     })
                 },
             )
@@ -1355,6 +1356,7 @@ fn dedicated_krea_edit_and_multiphase_helpers_open_the_exact_mlx_request_scope()
             context,
             decode_quality_decisions: vec![],
             process_limit_bytes: None,
+            prefix_kv_cache: None,
         }
     };
 
@@ -18616,7 +18618,9 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
     let final_selector = source
-        .split_once("let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(")
+        .split_once(
+            "let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(",
+        )
         .expect("final-pass selector")
         .1
         .split_once("let first_pass_shared_memory")
@@ -28042,9 +28046,14 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         !stream.contains("ladder_reserve_gb(budget"),
         "the ladder reserve must never be derived from the reclaimable-credited budget"
     );
+    // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
+    // the hires first pass is the plain selection.
     let shared_calls = stream
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
-        .count();
+        .count()
+        + stream
+            .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .count();
     assert_eq!(
         shared_calls, 2,
         "the final-pass and hires first-pass shared selections"

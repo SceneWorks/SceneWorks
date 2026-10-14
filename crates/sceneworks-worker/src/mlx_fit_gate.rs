@@ -1290,6 +1290,11 @@ pub(crate) struct MlxRequestInputs {
     /// Conservative count of CLIP windows for the actual positive/negative prompt pair.
     /// None means the caller has not supplied prompt demand; no single-window estimate is used.
     pub conditioning_windows: Option<u32>,
+    /// Whether the request evaluates a true-CFG NEGATIVE prompt branch
+    /// (`execution_planner::evaluates_negative_branch`). Read only by a provider that prices a
+    /// prefix KV cache, whose cache is held once per prompt branch (epic 25899); `false` on every
+    /// lane that never reaches one.
+    pub negative_branch: bool,
 }
 
 pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
@@ -1345,6 +1350,10 @@ pub(crate) struct MlxRequestEvaluation {
     /// Request-scoped soft MLX ceiling derived from an exact verified cell. Legacy cells keep the
     /// process-global #1947 fallback. Applying this never changes the wired limit.
     pub process_limit_bytes: Option<u64>,
+    /// What the admission decided about the provider's prefix KV cache (epic 25899): `None` for
+    /// every provider that prices none. A `Cached` plan is already written onto [`Self::memory`]
+    /// and counted in `context.predicted_peak_bytes`.
+    pub prefix_kv_cache: Option<crate::execution_planner::PrefixKvCachePlan>,
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -3587,6 +3596,15 @@ fn evaluate_request_with_budget_using_bundle(
             .capabilities
             .component_precision_floors,
         generator.memory_strategy_contract(),
+        crate::execution_planner::prefix_kv_cache_surcharge_bytes(
+            plan.engine_id,
+            &generator.descriptor().capabilities.execution,
+            plan.tier.quant,
+            inputs.width,
+            inputs.height,
+            inputs.reference_count,
+            inputs.negative_branch,
+        ),
         |base| generator.predicted_memory_peak_from_base(base),
         plan,
         inputs,
@@ -3629,6 +3647,12 @@ fn select_request_with_budget_using_bundle(
     phase: MlxAdmissionPhase,
     declared_floors: &'static [gen_core::ComponentPrecisionFloor],
     declared_contract: Option<&MemoryProviderContract>,
+    // The provider's prefix-KV-cache surcharge for this request
+    // (`execution_planner::prefix_kv_cache_surcharge_bytes`, priced against the LOADED generator's
+    // declaration), when this admission may select the cache. `None` for every provider without
+    // one — and on the pre-load tier probe: a tier fits when it fits with the cache shed (the cache
+    // is shed last, never a reason to drop a tier), so the probe grades exactly the shed demand.
+    prefix_kv_cache_surcharge: Option<u64>,
     predict_peak: impl FnOnce(u64) -> gen_core::MemoryPeakBreakdown,
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
@@ -4071,6 +4095,10 @@ fn select_request_with_budget_using_bundle(
     // `predicted_memory_peak_from_base`. Both now carry `None` and take the policy's documented
     // undeclared-floor arm instead of being charged a headroom they do not contain.
     let mut candidate_activation_bytes: Vec<Option<u64>> = Vec::new();
+    // Index-aligned with `evidence`: the Evidence path's per-candidate pre-check budget (GiB, at the
+    // candidate's CAPTURED foreign reserve), so a cache-surcharged pass re-runs the same pre-check
+    // at the surcharged peak. `None` where no pre-check applies (the Legacy path).
+    let mut candidate_precheck_available_gb: Vec<Option<f64>> = Vec::new();
     if admission.path == AdmissionPath::Evidence {
         // A covered cell is authorized only by its exact verified ladder. Letting the generic
         // resident estimate or caller-supplied evidence run first would turn Evidence telemetry
@@ -4103,6 +4131,7 @@ fn select_request_with_budget_using_bundle(
                 candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
                 // A measured envelope is one observed number; it does not decompose.
                 candidate_activation_bytes.push(None);
+                candidate_precheck_available_gb.push(candidate_budget.effective_gb());
             }
         }
         if evidence.is_empty() {
@@ -4146,6 +4175,7 @@ fn select_request_with_budget_using_bundle(
         evidence.reserve(capacity);
         candidate_bases.reserve(capacity);
         candidate_activation_bytes.reserve(capacity);
+        candidate_precheck_available_gb.resize(capacity, None);
         selections.push(resident_selection);
         evidence.push(&resident);
         // The resident baseline IS the rung-0 weights+headroom floor estimate (sc-18096): its
@@ -4230,81 +4260,133 @@ fn select_request_with_budget_using_bundle(
     } else {
         0
     };
-    let baseline = crate::memory_strategy::select_strategy_with_resident_credit(
-        request_scope,
-        contract,
-        selector_budget,
-        &candidates,
-        resident_allowance_credit,
-    );
-    // sc-18317: a GRANTED warm-policy switch takes effect HERE or nowhere.
-    //
-    // `select_strategy` picks the first fitting candidate in resident -> staged -> bounded-decode
-    // order, so a request whose weights fit resident never stages no matter what policy the caller
-    // asked for. Honoring a grant therefore means removing the looser candidates from the set: offer
-    // only those that engage `StagedResidency` and let the selector apply the SAME budget and margins
-    // it always does. A floored selection that comes back `Selected` has passed exactly the fit check
-    // the baseline would have had to pass, so it cannot exceed the admitted envelope — monotonicity is
-    // preserved by construction rather than asserted after the fact.
-    //
-    // The outcome (not the seam's proposal) is what gets reported: `rematerialized` is emitted only
-    // when the floor actually moved the selection.
-    let (selection, grant_outcome) = if warm_policy.requires_staged_residency() {
-        let staged = candidates
-            .iter()
-            .filter(|candidate| {
-                contract.engages_selection(&candidate.selection, MemoryStrategy::StagedResidency)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let baseline_stages = matches!(&baseline, Selection::Selected { selection, .. }
-            if contract.engages_selection(selection, MemoryStrategy::StagedResidency));
-        if baseline_stages {
-            (
-                baseline,
-                Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
-            )
-        } else if staged.is_empty() {
-            (
-                baseline,
-                Some(crate::execution_planner::GrantOutcome::NoStagedCandidate),
-            )
-        } else {
-            let floored = crate::memory_strategy::select_strategy(
+    // Epic 25899: the provider's prefix KV cache, priced per request and shed LAST. The whole
+    // ladder below — baseline and warm-policy floor alike — runs first with the cache surcharge
+    // on every candidate, and only if no candidate fits cached does it run again at the shed
+    // demand, which is exactly the pre-cache admission. A provider with no cache prices `None`
+    // and runs the ladder once, unchanged.
+    let run_ladder =
+        |extra_bytes: u64| -> (Selection, Option<crate::execution_planner::GrantOutcome>) {
+            let surcharged_evidence = (extra_bytes > 0).then(|| {
+                candidates
+                    .iter()
+                    .map(|candidate| {
+                        let mut evidence = candidate.evidence.clone();
+                        evidence.predicted_peak_bytes =
+                            evidence.predicted_peak_bytes.saturating_add(extra_bytes);
+                        evidence
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let surcharged_candidates = surcharged_evidence.as_ref().map(|surcharged| {
+                candidates
+                    .iter()
+                    .zip(surcharged)
+                    .zip(&candidate_precheck_available_gb)
+                    // The Evidence path's captured-reserve pre-check, re-run at the surcharged peak:
+                    // a measured cell that fitted shed but not cached is not a cached candidate.
+                    .filter(|((_, evidence), precheck)| {
+                        precheck.is_none_or(|available| {
+                            evidence.predicted_peak_bytes as f64 / BYTES_PER_GIB <= available
+                        })
+                    })
+                    .map(|((candidate, evidence), _)| Candidate {
+                        evidence,
+                        ..*candidate
+                    })
+                    .collect::<Vec<_>>()
+            });
+            let pass_candidates: &[Candidate<'_>] =
+                surcharged_candidates.as_deref().unwrap_or(&candidates);
+            let baseline = crate::memory_strategy::select_strategy_with_resident_credit(
                 request_scope,
                 contract,
                 selector_budget,
-                &staged,
+                pass_candidates,
+                resident_allowance_credit,
             );
-            match &floored {
-                // A fitting staged selection, and it necessarily differs from the baseline's: control
-                // only reaches here when the baseline does NOT engage staged residency, while every
-                // candidate offered to this call does. Asserted rather than re-tested, so the
-                // reasoning is checked in debug builds instead of hidden in an unreachable arm.
-                Selection::Selected {
-                    selection: chosen, ..
-                } => {
-                    debug_assert!(
-                        !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen),
-                        "a floored staged selection cannot equal a non-staging baseline"
-                    );
+            // sc-18317: a GRANTED warm-policy switch takes effect HERE or nowhere.
+            //
+            // `select_strategy` picks the first fitting candidate in resident -> staged -> bounded-decode
+            // order, so a request whose weights fit resident never stages no matter what policy the caller
+            // asked for. Honoring a grant therefore means removing the looser candidates from the set: offer
+            // only those that engage `StagedResidency` and let the selector apply the SAME budget and margins
+            // it always does. A floored selection that comes back `Selected` has passed exactly the fit check
+            // the baseline would have had to pass, so it cannot exceed the admitted envelope — monotonicity is
+            // preserved by construction rather than asserted after the fact.
+            //
+            // The outcome (not the seam's proposal) is what gets reported: `rematerialized` is emitted only
+            // when the floor actually moved the selection.
+            let outcome = if warm_policy.requires_staged_residency() {
+                let staged = pass_candidates
+                    .iter()
+                    .filter(|candidate| {
+                        contract.engages_selection(
+                            &candidate.selection,
+                            MemoryStrategy::StagedResidency,
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let baseline_stages = matches!(&baseline, Selection::Selected { selection, .. }
+                if contract.engages_selection(selection, MemoryStrategy::StagedResidency));
+                if baseline_stages {
                     (
-                        floored,
-                        Some(crate::execution_planner::GrantOutcome::SelectionMovedToStaged),
+                        baseline,
+                        Some(crate::execution_planner::GrantOutcome::AlreadyStaged),
                     )
+                } else if staged.is_empty() {
+                    (
+                        baseline,
+                        Some(crate::execution_planner::GrantOutcome::NoStagedCandidate),
+                    )
+                } else {
+                    let floored = crate::memory_strategy::select_strategy(
+                        request_scope,
+                        contract,
+                        selector_budget,
+                        &staged,
+                    );
+                    match &floored {
+                        // A fitting staged selection, and it necessarily differs from the baseline's: control
+                        // only reaches here when the baseline does NOT engage staged residency, while every
+                        // candidate offered to this call does. Asserted rather than re-tested, so the
+                        // reasoning is checked in debug builds instead of hidden in an unreachable arm.
+                        Selection::Selected {
+                            selection: chosen, ..
+                        } => {
+                            debug_assert!(
+                                !matches!(&baseline, Selection::Selected { selection: base, .. } if base == chosen),
+                                "a floored staged selection cannot equal a non-staging baseline"
+                            );
+                            (
+                                floored,
+                                Some(
+                                    crate::execution_planner::GrantOutcome::SelectionMovedToStaged,
+                                ),
+                            )
+                        }
+                        // The staged candidates did not fit this request's budget, or their evidence is
+                        // structurally unusable. The baseline stands; not a refusal, just the ordinary fit
+                        // check every selection passes.
+                        _ => (
+                            baseline,
+                            Some(crate::execution_planner::GrantOutcome::StagedCandidateDidNotFit),
+                        ),
+                    }
                 }
-                // The staged candidates did not fit this request's budget, or their evidence is
-                // structurally unusable. The baseline stands; not a refusal, just the ordinary fit
-                // check every selection passes.
-                _ => (
-                    baseline,
-                    Some(crate::execution_planner::GrantOutcome::StagedCandidateDidNotFit),
-                ),
-            }
-        }
-    } else {
-        (baseline, None)
-    };
+            } else {
+                (baseline, None)
+            };
+            outcome
+        };
+    let ((selection, grant_outcome), prefix_kv_cache) =
+        crate::execution_planner::plan_prefix_kv_cache(
+            prefix_kv_cache_surcharge,
+            run_ladder,
+            |(selection, _)| matches!(selection, Selection::Selected { .. }),
+        );
+    let prefix_kv_cache_extra = prefix_kv_cache.map_or(0, |plan| plan.admitted_surcharge_bytes());
     warm_policy.settle_with_selection(
         grant_outcome.unwrap_or(crate::execution_planner::GrantOutcome::AlreadyStaged),
     );
@@ -4417,7 +4499,11 @@ fn select_request_with_budget_using_bundle(
             total_gb: budget.total_bytes as f64 / BYTES_PER_GIB,
             reserved_headroom_gb: reserve as f64 / BYTES_PER_GIB,
         };
-        needed_gb = evidence.predicted_peak_bytes.saturating_add(reserve) as f64 / BYTES_PER_GIB;
+        needed_gb = evidence
+            .predicted_peak_bytes
+            .saturating_add(prefix_kv_cache_extra)
+            .saturating_add(reserve) as f64
+            / BYTES_PER_GIB;
         available_gb = selected_budget.effective_gb().unwrap_or(0.0);
         budget.reserved_headroom_bytes = reserve;
         process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
@@ -4433,6 +4519,8 @@ fn select_request_with_budget_using_bundle(
     } else {
         predicted_peak_bytes
     };
+    // The demand the admission approved: a cached selection was graded at shed + surcharge.
+    let predicted_peak_bytes = predicted_peak_bytes.saturating_add(prefix_kv_cache_extra);
     tracing::info!(
         event = if phase == MlxAdmissionPhase::TierProbe {
             "memory_strategy_tier_candidate_selected"
@@ -4461,10 +4549,17 @@ fn select_request_with_budget_using_bundle(
         needed_gb,
         available_gb,
         optimization_authority = ?optimization_authority,
+        prefix_kv_cache = prefix_kv_cache.map(|plan| plan.mode.label()),
+        prefix_kv_cache_priced_bytes = prefix_kv_cache.map(|plan| plan.priced_bytes),
         "selected request-scoped MLX memory strategy"
     );
+    let mut memory = memory_for_selection(contract, selection);
+    if let Some(plan) = prefix_kv_cache {
+        plan.write_onto(&mut memory);
+    }
     let evaluation = MlxRequestEvaluation {
-        memory: memory_for_selection(contract, selection),
+        memory,
+        prefix_kv_cache,
         process_limit_bytes,
         decode_quality_decisions: synthesized_ladder.decode_quality_decisions,
         context: MemoryRunContext {
@@ -4592,6 +4687,7 @@ pub(crate) fn preflight_request(
         MlxAdmissionPhase::TierProbe,
         declared_component_floors(plan.engine_id),
         contract.as_ref(),
+        None,
         |base| {
             contract.as_ref().map_or(
                 gen_core::MemoryPeakBreakdown::from_unattributed(base),
@@ -8214,6 +8310,7 @@ mod tests {
             use_pid: false,
             has_phases: false,
             conditioning_windows: None,
+            negative_branch: false,
         }
     }
 
@@ -8232,6 +8329,7 @@ mod tests {
             use_pid: false,
             has_phases: false,
             conditioning_windows: None,
+            negative_branch: false,
         };
         let (mode, mode_key) = request_mode(&plain.mode);
         assert_eq!(mode, MemoryMode::TextToImage);
@@ -8391,6 +8489,7 @@ mod tests {
             use_pid: false,
             has_phases: false,
             conditioning_windows: None,
+            negative_branch: false,
         };
         for provider in ["flux1_schnell", "flux1_dev"] {
             for mode in ["text_to_image", "style_variations"] {
@@ -8903,6 +9002,7 @@ mod tests {
             use_pid: false,
             has_phases: false,
             conditioning_windows: None,
+            negative_branch: false,
         }
     }
 
@@ -10042,6 +10142,7 @@ mod tests {
             use_pid: false,
             has_phases: false,
             conditioning_windows: None,
+            negative_branch: false,
         };
         assert_eq!(
             provider_request_mode("flux2_klein_9b", &public_base),
@@ -10138,6 +10239,7 @@ mod tests {
                     use_pid,
                     has_phases: false,
                     conditioning_windows: None,
+                    negative_branch: false,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -10187,6 +10289,7 @@ mod tests {
                 use_pid: true,
                 has_phases: false,
                 conditioning_windows: None,
+                negative_branch: false,
             };
             let mut refused = plan.clone();
             refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
@@ -10318,6 +10421,7 @@ mod tests {
                     use_pid: false,
                     has_phases: false,
                     conditioning_windows: None,
+                    negative_branch: false,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -17301,6 +17405,139 @@ mod tests {
         );
     }
 
+    /// Epic 25899 (E6), through the real MLX request planner: the prefix KV cache is priced per
+    /// request and shed LAST, and pricing it never turns an admissible request into a refusal.
+    ///
+    /// The same request is admitted twice at every budget on a scan from roomy to over-full — once
+    /// as a provider with no cache (`None`, today's admission) and once with a cache surcharge — so
+    /// each budget is graded against its own shed twin rather than a restated threshold:
+    ///
+    /// * fits cached → `Cached`, the selection is written onto the memory block the lane hands the
+    ///   provider, and the context's peak is the shed peak of the chosen rung PLUS the surcharge;
+    /// * fits only shed → `Prefill`, admitted (not refused), and byte-for-byte the no-cache
+    ///   admission: the same selection, memory block and context;
+    /// * fits neither → refused with the no-cache admission's own diagnostic.
+    ///
+    /// *Mutations that red this:* returning `Reject` when the cached pass fails (the prefill band
+    /// disappears); writing `Cached` without the surcharge in the context (the peak assertion);
+    /// dropping `write_onto` (the memory assertion); running the shed pass first (the roomy budgets
+    /// then admit `Prefill` and the three-band count reds).
+    #[test]
+    fn mlx_prefix_kv_cache_is_priced_shed_last_and_never_refuses_an_admissible_request() {
+        let generator = fixture_generator();
+        let plan = MlxRequestPlan {
+            calibration: MlxCalibrationConfig::Absent,
+            ..fixture_plan()
+        };
+        let inputs = fixture_inputs(1024, 1024);
+        let surcharge = gib_to_bytes(3.0);
+        let total_peak = plan.generic_total_peak_bytes(request_geometry(&inputs));
+        let run = |committed: u64, surcharge: Option<u64>| {
+            select_request_with_budget_using_bundle(
+                MlxAdmissionPhase::Generation,
+                generator.descriptor.capabilities.component_precision_floors,
+                generator.contract.as_ref(),
+                surcharge,
+                |base| {
+                    generator
+                        .contract
+                        .as_ref()
+                        .expect("fixture contract")
+                        .predicted_peak_from_base(base)
+                },
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                MemoryBudget {
+                    total_bytes: gib_to_bytes(32.0),
+                    committed_bytes: committed,
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gib_to_bytes(2.0),
+                },
+                total_peak,
+                0,
+                &[],
+                None,
+            )
+            .expect("the fixture request is structurally admissible")
+        };
+        let (mut cached, mut prefill, mut refused) = (0, 0, 0);
+        let mut seen_prefill = false;
+        for step in 0..=128u64 {
+            let committed = gib_to_bytes(0.25) * step;
+            match (run(committed, None), run(committed, Some(surcharge))) {
+                (MlxRequestAdmission::Rejected(shed), MlxRequestAdmission::Rejected(priced)) => {
+                    assert_eq!(
+                        priced.to_string(),
+                        shed.to_string(),
+                        "a request that fits neither is refused exactly as without the cache"
+                    );
+                    refused += 1;
+                }
+                (MlxRequestAdmission::Admitted(shed), MlxRequestAdmission::Admitted(priced)) => {
+                    assert_eq!(shed.prefix_kv_cache, None, "no surcharge, no plan");
+                    let decision = priced
+                        .prefix_kv_cache
+                        .expect("a priced request records its plan");
+                    assert_eq!(decision.priced_bytes, surcharge);
+                    match decision.mode {
+                        gen_core::PrefixKvCacheMode::Cached => {
+                            assert!(
+                                !seen_prefill,
+                                "the cache is shed last: no cached fit below a shed one"
+                            );
+                            assert_eq!(
+                                priced.memory.prefix_kv_cache,
+                                Some(gen_core::PrefixKvCacheMode::Cached),
+                                "the admitted selection rides the memory block to the provider"
+                            );
+                            // The cached rung's shed peak, from a roomy no-cache twin that selected it.
+                            if priced.context.selection == shed.context.selection {
+                                assert_eq!(
+                                    priced.context.predicted_peak_bytes,
+                                    shed.context.predicted_peak_bytes + surcharge,
+                                    "the context states the cached demand the admission approved"
+                                );
+                            }
+                            cached += 1;
+                        }
+                        gen_core::PrefixKvCacheMode::Prefill => {
+                            seen_prefill = true;
+                            assert_eq!(priced.memory, shed.memory, "prefill writes nothing");
+                            assert_eq!(
+                                priced.context, shed.context,
+                                "a shed admission is the no-cache admission, byte for byte"
+                            );
+                            prefill += 1;
+                        }
+                    }
+                }
+                (MlxRequestAdmission::Admitted(_), MlxRequestAdmission::Rejected(error)) => {
+                    panic!(
+                        "pricing the cache refused an admissible request at {committed}: {error}"
+                    )
+                }
+                (MlxRequestAdmission::Rejected(error), MlxRequestAdmission::Admitted(_)) => {
+                    panic!("pricing the cache admitted what the shed demand refuses at {committed}: {error}")
+                }
+            }
+        }
+        assert!(
+            cached > 0 && prefill > 0 && refused > 0,
+            "the scan must cross all three bands: cached={cached} prefill={prefill} refused={refused}"
+        );
+        // A provider that prices no cache is untouched at every budget (`None` above is that run).
+        match run(0, None) {
+            MlxRequestAdmission::Admitted(evaluation) => {
+                assert_eq!(evaluation.memory.prefix_kv_cache, None);
+                assert_eq!(evaluation.prefix_kv_cache, None);
+            }
+            MlxRequestAdmission::Rejected(error) => panic!("roomy budget refused: {error}"),
+        }
+    }
+
     #[test]
     fn resident_loaded_staged_ladder_credits_only_its_own_allocations_before_selection() {
         let mut generator = fixture_generator();
@@ -18792,6 +19029,7 @@ mod tests {
             "z_image_turbo_control",
             "qwen_image",
             "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -18943,6 +19181,7 @@ mod tests {
             "z_image_turbo_control",
             "qwen_image",
             "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
             "qwen_image_edit",
             "qwen_image_control",
             "lens",
@@ -21309,6 +21548,7 @@ mod declared_sequential_release_artifact_tests {
                     use_pid: false,
                     has_phases: false,
                     conditioning_windows: None,
+                    negative_branch: false,
                 };
                 preflight_request(candidate, &plan, &inputs, budget).unwrap()
             };

@@ -309,6 +309,7 @@ fn pulid_memory_inputs(width: u32, height: u32) -> crate::mlx_fit_gate::MlxReque
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
     }
 }
 

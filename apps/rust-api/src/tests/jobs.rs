@@ -16215,3 +16215,172 @@ async fn image_depth_route_queues_a_typed_job_and_publishes_a_depth_asset() {
         "{body}"
     );
 }
+
+/// The SHIPPED Qwen-Image 2.1 base and Turbo catalog entries (sc-25907), written as a fixture
+/// catalog so the API under test serves exactly the bytes the product ships.
+fn write_shipped_qwen_image_2_1_pair(config_dir: &std::path::Path) {
+    let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
+        sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .expect("builtin.models.jsonc embedded")
+            .1,
+    ))
+    .expect("builtin.models.jsonc parses");
+    let entries: Vec<Value> = shipped["models"]
+        .as_array()
+        .expect("models array")
+        .iter()
+        .filter(|model| model["id"] == "qwen_image_2_1" || model["id"] == "qwen_image_2_1_turbo")
+        .cloned()
+        .collect();
+    assert_eq!(entries.len(), 2, "both 2.1 entries ship");
+    std::fs::create_dir_all(config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        serde_json::to_string(&json!({ "schemaVersion": 1, "models": entries }))
+            .expect("fixture serializes"),
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+}
+
+/// sc-25907 AC: `GET /api/v1/models` lists `qwen_image_2_1_turbo` with its distilled defaults
+/// (8 steps, guidance 1.0), three tier rows and the licence-acknowledgment gate; a download without
+/// the accept is refused (and queues nothing), and one with it queues the upstream Turbo snapshot.
+///
+/// *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` from the Turbo entry (the
+/// bare download is then created), or copying base's 40-step default.
+#[tokio::test]
+async fn qwen_image_2_1_turbo_is_listed_with_its_defaults_tiers_and_licence_gate() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+
+    let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    let turbo = models
+        .as_array()
+        .expect("models array")
+        .iter()
+        .find(|model| model["id"] == "qwen_image_2_1_turbo")
+        .expect("Turbo is listed")
+        .clone();
+    assert_eq!(turbo["defaults"]["steps"], 8, "{turbo}");
+    assert_eq!(turbo["defaults"]["guidanceScale"], 1.0, "{turbo}");
+    assert_eq!(turbo["requiresLicenseAcknowledgment"], true, "{turbo}");
+    let tiers: Vec<&str> = turbo["variants"]
+        .as_array()
+        .expect("variants array")
+        .iter()
+        .filter_map(|variant| variant["variant"].as_str())
+        .collect();
+    for tier in ["bf16", "q8", "q4"] {
+        assert!(tiers.contains(&tier), "{tier} row listed: {tiers:?}");
+    }
+
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/qwen_image_2_1_turbo/download",
+        json!({ "requestedGpu": "auto" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    let (_, jobs) = request(app.clone(), "GET", "/api/v1/jobs", Value::Null).await;
+    assert!(
+        jobs.as_array().expect("jobs array").is_empty(),
+        "a refused download queues nothing: {jobs}"
+    );
+
+    let (status, job) = request(
+        app,
+        "POST",
+        "/api/v1/models/qwen_image_2_1_turbo/download",
+        json!({ "requestedGpu": "auto", "licenseAcknowledged": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["payload"]["repo"], "Qwen/Qwen-Image-2.1-Turbo");
+}
+
+/// sc-25907: `create_image_job` gates a Turbo request on Turbo's OWN declarations — the 1-step
+/// engine floor (where base refuses below 2), base's 10-reference cap and base's scheduler menu —
+/// so a request the engine would refuse is a 400 at enqueue, and one it serves is created.
+///
+/// *Mutation that reds this:* copying base's `hardMinSteps: 2` onto Turbo (the 1-step job is
+/// refused), or dropping Turbo's `maxReferenceAssets` (the 11-reference job is created).
+#[tokio::test]
+async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    write_shipped_qwen_image_2_1_pair(&temp_dir.path().join("config/manifests"));
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Qwen 2.1 Turbo Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let enqueue = |model: &'static str, extra: Value| {
+        let mut body = json!({
+            "projectId": project_id,
+            "model": model,
+            "prompt": "a lighthouse at dusk",
+            "width": 2048,
+            "height": 2048,
+        });
+        body.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().cloned().unwrap_or_default());
+        request(app.clone(), "POST", "/api/v1/image/jobs", body)
+    };
+
+    // No steps named: created, and the worker resolves the model's own default.
+    let (status, body) = enqueue("qwen_image_2_1_turbo", json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // One step: Turbo's engine floor admits it; base refuses it by its own floor.
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "steps": 1 } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "Turbo admits 1 step: {body}");
+    let (status, body) = enqueue("qwen_image_2_1", json!({ "advanced": { "steps": 1 } })).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "base refuses 1 step: {body}"
+    );
+
+    // An off-menu scheduler is refused by name, as on base.
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "scheduler": "no_such_scheduler" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    // Eleven ordered references exceed the 10 the engine composes.
+    let references: Vec<String> = (0..11).map(|index| format!("asset_{index}")).collect();
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "mode": "edit_image", "referenceAssetIds": references }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1_turbo") && detail.contains("10"),
+        "the refusal names the model and the cap: {detail}"
+    );
+}

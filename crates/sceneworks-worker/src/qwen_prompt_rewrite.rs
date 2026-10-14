@@ -67,9 +67,21 @@ use crate::{WorkerError, WorkerResult};
 /// The `task` discriminator that selects this path on a `prompt_refine` job.
 pub(crate) const REWRITE_TASK: &str = "qwen_image_rewrite";
 
-/// The image model this rewriter pair belongs to. A rewrite request naming any other target model
-/// is refused rather than served with the wrong template.
-pub(crate) const REWRITE_TARGET_MODEL: &str = "qwen_image_2_1";
+/// Whether the rewriters apply to `model`: the base 2.1 model and its distilled Turbo sibling
+/// (sc-25907) — one prompt format, one template — and nothing else. A rewrite request naming any
+/// other target model is refused rather than served with the wrong template.
+pub(crate) fn is_rewrite_target_model(model: &str) -> bool {
+    sceneworks_core::jobs_store::is_qwen_image_2_1_model(model)
+}
+
+/// The rewrite targets, spelled for a refusal message.
+pub(crate) fn rewrite_target_models_label() -> String {
+    sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
+        .iter()
+        .map(|id| format!("`{id}`"))
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
 
 /// Text-to-image rewriter repo + frozen revision.
 pub(crate) const PE_T2I_REPO: &str = "Qwen/Qwen-Image-2.1-PE-T2I";

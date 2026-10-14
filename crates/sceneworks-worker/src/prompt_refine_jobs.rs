@@ -1295,11 +1295,11 @@ pub(crate) async fn run_prompt_refine_job(
             // The rewriters are keyed to ONE image model. Serving a different target's request with
             // Qwen's template would hand the user a rewrite tuned for a model they are not running.
             if let Some(target) = target_model_id.as_deref() {
-                if target != crate::qwen_prompt_rewrite::REWRITE_TARGET_MODEL {
+                if !crate::qwen_prompt_rewrite::is_rewrite_target_model(target) {
                     return Err(WorkerError::InvalidPayload(format!(
-                        "The Qwen Image 2.1 prompt rewriters only apply to `{}`; this request \
+                        "The Qwen Image 2.1 prompt rewriters only apply to {}; this request \
                          targets `{target}`.",
-                        crate::qwen_prompt_rewrite::REWRITE_TARGET_MODEL
+                        crate::qwen_prompt_rewrite::rewrite_target_models_label()
                     )));
                 }
             }

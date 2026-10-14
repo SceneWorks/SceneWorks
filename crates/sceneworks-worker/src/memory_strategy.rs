@@ -225,6 +225,9 @@ fn run_with_scope<T>(
             cfgBatching = execution_domains
                 .cfg_batching
                 .map(gen_core::CfgBatching::label),
+            prefixKvCache = execution_domains
+                .prefix_kv_cache
+                .map(gen_core::PrefixKvCacheMode::label),
             "selected typed execution domains from the provider's declaration"
         );
     }
@@ -251,6 +254,11 @@ fn run_with_scope<T>(
             });
             return Err(error);
         }
+        // `configure_request` REPLACED `request.memory` (with `None` on a Resident selection), so
+        // every execution domain planned above is gone — the admitted prefix-KV-cache selection
+        // included, which would otherwise run prefill in silence. Restore them now, after the
+        // scope and before the provider reads the request (epic 25899).
+        execution_domains.reapply_after_request_scope(request);
     }
     let result = run(generator, request, on_progress);
     if let Some(scope) = scope.as_mut() {
@@ -2218,6 +2226,213 @@ mod tests {
         let record = generator.record.lock().unwrap();
         assert_eq!(record.configure_calls, 1);
         assert_eq!(record.finish_calls, vec![expected]);
+    }
+
+    /// A request scope that does what every shipped scope does (`candle-gen`/`mlx-gen`
+    /// `request_scope`): `configure_request` REPLACES the request's memory block with the admitted
+    /// selection's — `None` for a Resident one.
+    struct ReplacingScope;
+
+    impl MemoryRequestScope for ReplacingScope {
+        fn configure_request(
+            &mut self,
+            request: &mut gen_core::GenerationRequest,
+        ) -> gen_core::Result<()> {
+            request.memory = None;
+            Ok(())
+        }
+
+        fn enter_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn leave_phase(&mut self, _phase: MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn configure_decode(
+            &mut self,
+            _tile_edge: u32,
+            _overlap: u32,
+            _geometry: MemoryGeometry,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn configure_attention(&mut self, _chunk_size: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn materialize_transformer_window(
+            &mut self,
+            _first_block: u32,
+            _block_count: u32,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn finish(&mut self, _outcome: MemoryRunOutcome) -> gen_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A prefix-KV-cache provider that records what the ENGINE was handed and reports the path it
+    /// ran from exactly that (the providers' `prefix_kv_cache_for`: unset ⇒ prefill).
+    struct PrefixCacheRecordingGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        contract: MemoryProviderContract,
+        seen: Arc<Mutex<Option<Option<gen_core::PrefixKvCacheMode>>>>,
+    }
+
+    impl PrefixCacheRecordingGenerator {
+        fn new(domain: gen_core::PrefixKvCacheDomain) -> Self {
+            let mut capabilities = gen_core::Capabilities::default();
+            capabilities.execution.prefix_kv_cache = domain;
+            Self {
+                descriptor: gen_core::ModelDescriptor {
+                    id: "prefix_cache_mock",
+                    family: "test",
+                    backend: "mlx",
+                    modality: gen_core::Modality::Image,
+                    capabilities,
+                    encoder_contract: None,
+                    denoiser_output_latent_space: None,
+                    required_components: &[],
+                    control_kinds: None,
+                },
+                contract: contract(),
+                seen: Default::default(),
+            }
+        }
+    }
+
+    impl gen_core::Generator for PrefixCacheRecordingGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+
+        fn memory_strategy_contract(&self) -> Option<&MemoryProviderContract> {
+            Some(&self.contract)
+        }
+
+        fn begin_memory_strategy_request(
+            &self,
+            _context: &MemoryRunContext,
+        ) -> gen_core::Result<Option<Box<dyn MemoryRequestScope + '_>>> {
+            Ok(Some(Box::new(ReplacingScope)))
+        }
+
+        fn validate(&self, _request: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+
+        fn generate(
+            &self,
+            _request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            unreachable!("the lane calls generate_with_report")
+        }
+
+        fn generate_with_report(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _on_progress: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationReport> {
+            let selected = request.memory.and_then(|memory| memory.prefix_kv_cache);
+            *self.seen.lock().unwrap() = Some(selected);
+            let path = selected.unwrap_or(gen_core::PrefixKvCacheMode::Prefill);
+            Ok(gen_core::GenerationReport {
+                output: Some(gen_core::GenerationOutput::Images(vec![Default::default()])),
+                artifacts: None,
+                warnings: Vec::new(),
+                prefix_kv_cache: Some(gen_core::PrefixKvCacheReport {
+                    path,
+                    cache_bytes: if path.is_cached() { 4096 } else { 0 },
+                    overflow: None,
+                }),
+            })
+        }
+    }
+
+    /// Epic 25899 — the ordering trap, pinned through the one seam every image generation passes:
+    /// the request scope's `configure_request` replaces `request.memory` (with `None` here, as on a
+    /// Resident selection), so an admitted `Cached` selection survives only because
+    /// `run_with_scope` re-applies it AFTER the scope. Asserted on what the ENGINE was handed and
+    /// on what the job record then says ran, not on a helper.
+    ///
+    /// *Mutations that red this:* deleting the `reapply_after_request_scope` call in
+    /// `run_with_scope` (the engine sees `None` and the record says `prefill`); making
+    /// `plan_request_execution_domains` drop the admitted mode (same); forwarding a mode the
+    /// provider does not declare (the undeclared arm sees `Some`).
+    #[test]
+    fn an_admitted_prefix_kv_cache_selection_survives_the_request_scope_and_is_recorded() {
+        let cached_memory = Some(gen_core::GenerationMemory {
+            prefix_kv_cache: Some(gen_core::PrefixKvCacheMode::Cached),
+            ..Default::default()
+        });
+        let plan = crate::execution_planner::PrefixKvCachePlan {
+            mode: gen_core::PrefixKvCacheMode::Cached,
+            priced_bytes: 4096,
+        };
+
+        // A provider that declares the cache: the engine is handed `Cached` after the scope.
+        let generator =
+            PrefixCacheRecordingGenerator::new(gen_core::PrefixKvCacheDomain::Modes(vec![
+                gen_core::PrefixKvCacheMode::Cached,
+                gen_core::PrefixKvCacheMode::Prefill,
+            ]));
+        let mut request = gen_core::GenerationRequest {
+            memory: cached_memory,
+            ..Default::default()
+        };
+        let report =
+            generate_with_scope_report(&generator, &mut request, Some(&run_context()), &mut |_| {})
+                .expect("the render completes");
+        assert_eq!(
+            *generator.seen.lock().unwrap(),
+            Some(Some(gen_core::PrefixKvCacheMode::Cached)),
+            "the engine must be handed the admitted selection after configure_request"
+        );
+        let record = crate::execution_planner::prefix_kv_cache_record(
+            Some(plan),
+            report.prefix_kv_cache.as_ref(),
+        )
+        .expect("a priced render is recorded");
+        assert_eq!(record["selected"], "cached");
+        assert_eq!(record["path"], "cached");
+        assert_eq!(record["cacheBytes"], 4096);
+        assert_eq!(record["pricedBytes"], 4096);
+        assert!(record["overflow"].is_null());
+
+        // A shed (prefill) admission writes nothing, and the engine runs its unset default.
+        let mut request = gen_core::GenerationRequest::default();
+        let report =
+            generate_with_scope_report(&generator, &mut request, Some(&run_context()), &mut |_| {})
+                .expect("the render completes");
+        assert_eq!(*generator.seen.lock().unwrap(), Some(None));
+        let record = crate::execution_planner::prefix_kv_cache_record(
+            Some(crate::execution_planner::PrefixKvCachePlan {
+                mode: gen_core::PrefixKvCacheMode::Prefill,
+                ..plan
+            }),
+            report.prefix_kv_cache.as_ref(),
+        )
+        .expect("a priced render is recorded");
+        assert_eq!(record["selected"], "prefill");
+        assert_eq!(record["path"], "prefill");
+        assert_eq!(record["cacheBytes"], 0);
+
+        // A provider that does NOT declare the cache never receives a selection it would refuse.
+        let undeclared =
+            PrefixCacheRecordingGenerator::new(gen_core::PrefixKvCacheDomain::Unsupported);
+        let mut request = gen_core::GenerationRequest {
+            memory: cached_memory,
+            ..Default::default()
+        };
+        generate_with_scope_report(&undeclared, &mut request, Some(&run_context()), &mut |_| {})
+            .expect("the render completes");
+        assert_eq!(*undeclared.seen.lock().unwrap(), Some(None));
     }
 
     #[test]

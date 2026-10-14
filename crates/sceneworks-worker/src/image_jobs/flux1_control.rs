@@ -386,6 +386,7 @@ async fn generate_flux1_dev_control_stream(
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
     };
     let (spec, memory_plan) = release_declared_sequential_for_request(
         FLUX1_DEV_CONTROL_ENGINE_ID,

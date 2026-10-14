@@ -420,6 +420,11 @@ mod tests {
             capable.contains(&"qwen_image_2_1"),
             "the pinned 2.1 provider advertises alpha output: {capable:?}"
         );
+        // sc-25907: the Turbo id is the base descriptor under a second id, RGBA decode included.
+        assert!(
+            capable.contains(&"qwen_image_2_1_turbo"),
+            "the pinned 2.1 Turbo provider advertises alpha output: {capable:?}"
+        );
         assert!(!engine_advertises_alpha_output("no_such_model_xyz"));
 
         // The catalog's `supportsAlphaOutput` (what the web reads to offer the toggle) is a

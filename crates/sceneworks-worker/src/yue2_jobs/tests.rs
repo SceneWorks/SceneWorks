@@ -328,6 +328,7 @@ impl StubYue2 {
                 identity,
             }),
             warnings,
+            prefix_kv_cache: None,
         })
     }
 }
@@ -2351,6 +2352,7 @@ mod real_weights {
                 output: samples.map(audio),
                 artifacts: Some(record(&result, &dir)),
                 warnings,
+                prefix_kv_cache: None,
             })
         }
     }

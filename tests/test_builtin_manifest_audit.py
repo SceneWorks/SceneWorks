@@ -4509,3 +4509,246 @@ def _qwen_image_2_1_entry() -> dict:
         for model in _load_builtin_models_manifest()["models"]
         if model["id"] == "qwen_image_2_1"
     )
+
+
+# ── Qwen-Image 2.1 Turbo (sc-25907, epic 25899) ────────────────────────────────────────────────
+
+
+def _qwen_image_2_1_turbo_entry() -> dict:
+    return next(
+        model
+        for model in _load_builtin_models_manifest()["models"]
+        if model["id"] == "qwen_image_2_1_turbo"
+    )
+
+
+#: The Turbo snapshot the bf16 tier pins, and its EXACT byte total summed from the Hub API's
+#: resolved blob sizes at that revision (`/api/models/Qwen/Qwen-Image-2.1-Turbo/revision/<sha>
+#: ?blobs=true`, 32 files) — the same method that reproduces base's 33_134_949_212.
+_QWEN_IMAGE_2_1_TURBO_REVISION = "fc13ba1986fcb905854dc8de2f52eee395f49b5b"
+_QWEN_IMAGE_2_1_TURBO_BF16_BYTES = 32_493_327_348
+
+
+def test_qwen_image_2_1_turbo_is_its_own_id_on_the_base_family_and_lora_pool():
+    """E3/E9: a separate catalog id and recipe stamp, on base's family and LoRA family.
+
+    *Mutation that reds this:* re-using base's `adapter`, or giving Turbo its own LoRA family.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    base = _qwen_image_2_1_entry()
+    assert turbo["family"] == base["family"] == "qwen-image-2-1"
+    assert turbo["adapter"] == "qwen_image_2_1_turbo" != base["adapter"]
+    assert turbo["loraCompatibility"] == base["loraCompatibility"]
+    assert turbo["capabilities"] == base["capabilities"]
+    assert turbo["supportsAlphaOutput"] is True
+
+
+def test_qwen_image_2_1_turbo_defaults_are_the_distilled_operating_point():
+    """8 steps, guidance 1.0, one 2048-square image, the `default` solver (which keeps the saved
+    distilled sigmas) — and the engine's 1-step floor until the terminal step sweep raises it.
+
+    *Mutation that reds this:* copying base's 40-step default, or base's `hardMinSteps: 2`.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    assert turbo["defaults"] == {
+        "resolution": "2048x2048",
+        "steps": 8,
+        "guidanceScale": 1.0,
+        "count": 1,
+        "sampler": "default",
+        "scheduler": "default",
+    }
+    assert turbo["limits"]["hardMinSteps"] == 1
+
+
+def test_qwen_image_2_1_turbo_serves_base_request_envelope_verbatim():
+    """E3: Turbo serves everything base serves — the same presets, count, free-size envelope,
+    reference cap, solver menus and admission geometry (one descriptor under a second id).
+
+    *Mutation that reds this:* dropping a preset, the reference cap or a scheduler from Turbo.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    base = _qwen_image_2_1_entry()
+    for key in (
+        "resolutions",
+        "count",
+        "minDimension",
+        "maxDimension",
+        "requiresDimensionsMultipleOf",
+        "maxReferenceAssets",
+        "samplers",
+        "schedulers",
+    ):
+        assert turbo["limits"][key] == base["limits"][key], key
+    assert turbo["admissionGeometry"] == base["admissionGeometry"]
+    assert turbo["ui"]["multiReference"] is True
+
+
+def test_qwen_image_2_1_turbo_ships_three_tiers_bf16_upstream_and_the_pending_rehost():
+    """E7: bf16 is the upstream Turbo snapshot at its pinned revision with its exact Hub byte
+    total; q8/q4 are the SceneWorks re-host, PENDING (40-zero placeholder + flag) until the
+    terminal story publishes them; while pending, bf16 is the default (the base rule below).
+
+    *Mutation that reds this:* pointing bf16 at base's repo/revision, rounding its size, or
+    giving a pending row a real-looking revision.
+    """
+    downloads = _qwen_image_2_1_turbo_entry()["downloads"]
+    assert [d.get("variant") for d in downloads] == ["bf16", "q8", "q4"]
+    assert all(d.get("platforms") is None for d in downloads)
+    by_variant = {d["variant"]: d for d in downloads}
+    bf16 = by_variant["bf16"]
+    assert bf16["repo"] == "Qwen/Qwen-Image-2.1-Turbo"
+    assert bf16["revision"] == _QWEN_IMAGE_2_1_TURBO_REVISION
+    assert bf16["files"] == []
+    assert bf16["estimatedSizeBytes"] == _QWEN_IMAGE_2_1_TURBO_BF16_BYTES
+    assert bf16["footprint"]["diskSizeBytes"] == _QWEN_IMAGE_2_1_TURBO_BF16_BYTES
+    assert "pendingArtifact" not in bf16
+    for tier in ("q8", "q4"):
+        row = by_variant[tier]
+        assert row["repo"] == "SceneWorks/qwen-image-2-1-turbo-mlx", tier
+        assert row["files"] == [f"{tier}/*"], tier
+        assert row["pendingArtifact"] is True, tier
+        assert row["revision"] == _PENDING_ARTIFACT_REVISION, tier
+        assert row.get("default") is not True, tier
+    # Nothing has been measured for Turbo on any backend: no tier claims a memory footprint.
+    for row in downloads:
+        assert row["footprint"]["residentMemoryBytes"] is None
+        assert row["footprint"]["peakMemoryBytes"] is None
+    assert bf16.get("default") is True
+
+
+def test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier():
+    """Base's rule, applied to Turbo: the default is the lightest tier that can actually be
+    fetched. Today that is bf16 (q8/q4 pending); once they publish, this REQUIRES q4."""
+    downloads = _qwen_image_2_1_turbo_entry()["downloads"]
+    installable = [
+        d
+        for d in downloads
+        if d.get("pendingArtifact") is not True and d.get("variant") in _TIER_ORDER
+    ]
+    assert installable
+    lightest = min(installable, key=lambda d: _TIER_ORDER.index(d["variant"]))
+    chosen = next((d for d in installable if d.get("default") is True), None)
+    assert chosen is not None and chosen["variant"] == lightest["variant"]
+
+
+def test_qwen_image_2_1_turbo_pending_tier_sizes_are_derived_from_the_engine_tree():
+    """The pending q8/q4 sizes are DERIVED: `derived::tier_tree_bytes(Variant::Turbo, tier)`'s
+    weight files (the engine's packed-weight arithmetic over the Turbo release's file sizes) plus
+    the non-weight files base's PUBLISHED tiers carry above their own derived weights.
+
+    *Mutation that reds this:* copying base's published q8/q4 totals onto Turbo (E10).
+    """
+    group_size = 64
+    dit_linear = 7_115_112_448
+    lm_linear = 6_945_767_424
+
+    def packed(params: int, bits: int) -> int:
+        return params * bits // 8 + (params // group_size) * 4
+
+    def tree(text_encoder: int, vae: int, bits: int) -> int:
+        transformer = 9_968_332_504 + 4_261_951_904
+        return (
+            transformer
+            - dit_linear * 2
+            + packed(dit_linear, bits)
+            + text_encoder
+            - lm_linear * 2
+            + packed(lm_linear, bits)
+            + vae
+        )
+
+    base_text_encoder = 4_998_056_552 + 4_915_962_464 + 4_915_962_496 + 2_704_357_976
+    by_variant = {d["variant"]: d for d in _qwen_image_2_1_turbo_entry()["downloads"]}
+    for tier, bits in (("q8", 8), ("q4", 4)):
+        base_non_weight = _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier] - tree(
+            base_text_encoder, 1_350_989_512, bits
+        )
+        derived = tree(17_534_340_584, 675_508_656, bits) + base_non_weight
+        assert by_variant[tier]["estimatedSizeBytes"] == derived, tier
+        assert by_variant[tier]["footprint"]["diskSizeBytes"] == derived, tier
+        assert derived != _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier], tier
+
+
+def test_qwen_image_2_1_turbo_floors_are_turbos_own_derivation():
+    """E10: the MLX floors follow Turbo's derived default-path peak — base's less the halved bf16
+    VAE (0.63 GiB) — under the same ceil(GiB x 1.25) rule; the Candle floors are the same
+    arithmetic as base's because Candle holds both VAEs at its compute width. No measured key.
+    (The Rust test `qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source` pins
+    the MLX side to the linked accessor itself.)
+
+    *Mutation that reds this:* copying base's MLX floors (44/29/21) onto Turbo.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    base_peaks = {"bf16": 34.98, "q8": 22.71, "q4": 16.16}
+    vae_saving_gib = (1_350_961_616 - 675_480_808) / 2**30
+    for tier, base_peak in base_peaks.items():
+        derived = math.ceil((base_peak - vae_saving_gib) * 1.25)
+        assert turbo["mlx"]["minMemoryGbByTier"][tier] == derived, tier
+    assert (
+        turbo["mlx"]["minMemoryGbByTier"] != _qwen_image_2_1_entry()["mlx"]["minMemoryGbByTier"]
+    )
+    assert turbo["candle"]["minMemoryGbByTier"] == {"bf16": 45, "q8": 30, "q4": 21}
+    for backend in ("mlx", "candle"):
+        block = turbo[backend]
+        assert block["minMemoryGb"] == block["minMemoryGbByTier"]["bf16"]
+        for key in (
+            "vramGbByTier",
+            "sequentialPeakGb",
+            "measured",
+            "calibrations",
+            "stagedMinMemoryGbByTier",
+        ):
+            assert key not in block, f"{backend}.{key}"
+
+
+def test_qwen_image_2_1_turbo_contracts_carry_turbos_own_fingerprints():
+    """E10: each lane's request-owned contract names the Turbo provider id and Turbo's own
+    calibration fingerprint — a record built for base can never satisfy Turbo's handshake.
+
+    *Mutation that reds this:* leaving a base fingerprint on a Turbo contract row.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    expected = {
+        "mlx": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+        "candle": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+    }
+    base = _qwen_image_2_1_entry()
+    for backend, fingerprint in expected.items():
+        contract = turbo[backend]["memoryStrategyContract"]
+        assert contract["provider"] == "qwen_image_2_1_turbo"
+        rows = contract["implementations"]
+        assert rows and all(row["fingerprint"] == fingerprint for row in rows), backend
+        base_rows = base[backend]["memoryStrategyContract"]["implementations"]
+        assert [row["rung"] for row in rows] == [row["rung"] for row in base_rows], backend
+
+
+def test_qwen_image_2_1_turbo_carries_the_same_licence_gate_pinned_to_turbo():
+    """E8: the same credential-free acknowledgment gate as base, the non-commercial flag, a notice
+    that names Turbo (the LICENSE is byte-identical to base's), and a URL pinned to Turbo's
+    revision.
+
+    *Mutation that reds this:* dropping `requiresLicenseAcknowledgment`, or pointing the URL at
+    base's repo.
+    """
+    turbo = _qwen_image_2_1_turbo_entry()
+    assert turbo["gated"] is False
+    assert turbo["requiresLicenseAcknowledgment"] is True
+    assert turbo["nonCommercial"] is True
+    assert turbo["licenseUrl"] == (
+        "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/"
+        f"{_QWEN_IMAGE_2_1_TURBO_REVISION}/LICENSE"
+    )
+    notice = turbo["licenseNotice"]
+    assert "Qwen-Image 2.1 Turbo" in notice
+    assert "Qwen RESEARCH LICENSE AGREEMENT" in notice
+    assert "NOTICE" in notice and "SHA256SUMS" in notice and "CHANGES.md" in notice
+
+
+def test_qwen_image_2_1_turbo_ui_states_the_schedule_semantics():
+    """The UI-facing text says what an off-8 step count and a curated scheduler do to the
+    distilled schedule, because both are legal and neither is the distilled curve."""
+    description = _qwen_image_2_1_turbo_entry()["ui"]["description"]
+    assert "8 steps" in description
+    assert "resample" in description
+    assert "scheduler other than Default replaces it" in description

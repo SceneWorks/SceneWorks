@@ -1785,6 +1785,13 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
+    // sc-25907: a registry entry (a user target included) naming a base that is deliberately not
+    // trainable — the distilled Qwen-Image 2.1 Turbo — is refused by name, with what to do instead.
+    if let Some(reason) =
+        sceneworks_core::training::untrainable_base_model_reason(&target.base_model)
+    {
+        return Err(ApiError::bad_request(reason));
+    }
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
     // directly to clients, so every advertised numeric bound is a submit-time
@@ -3404,6 +3411,20 @@ pub(crate) fn raw_training_payload_license_error(payload: &JsonObject) -> Option
                 .unwrap_or_default();
             training_license_acknowledgment_error(target, &extra)
         })
+}
+
+/// The refusal for a hand-built `lora_train` / `control_training` plan on the raw
+/// `POST /api/v1/jobs` route whose target names a catalog model that is deliberately not a training
+/// base (`sceneworks_core::training::untrainable_base_model_reason` — Qwen-Image 2.1 Turbo, epic
+/// 25899). The typed route cannot name one (no registered target has it as a base); this closes
+/// the raw route with a 400 that says what to do instead, rather than a job the worker would fail.
+pub(crate) fn raw_training_payload_base_error(payload: &JsonObject) -> Option<ApiError> {
+    let base_model = payload
+        .get("plan")
+        .and_then(|plan| plan.get("target"))
+        .and_then(|target| target.get("baseModel"))
+        .and_then(Value::as_str)?;
+    sceneworks_core::training::untrainable_base_model_reason(base_model).map(ApiError::bad_request)
 }
 
 /// The refusal for a hand-built `lora_train` plan on the raw `POST /api/v1/jobs` route whose

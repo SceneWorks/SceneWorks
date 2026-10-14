@@ -104,6 +104,7 @@ fn krea_control_memory_inputs(
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
     }
 }
 

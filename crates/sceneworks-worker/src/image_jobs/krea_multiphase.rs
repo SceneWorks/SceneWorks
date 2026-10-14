@@ -676,6 +676,7 @@ async fn generate_krea_multiphase_stream(
         reference_count: 0,
         use_pid: false,
         has_phases: true,
+        negative_branch: false,
     };
 
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

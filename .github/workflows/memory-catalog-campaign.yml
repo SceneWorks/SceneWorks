@@ -140,9 +140,10 @@ on:
         default: false
       qwen_persistent_weights:
         description: >-
-          MLX qwen_image_2_1-only: reuse ~/sceneworks-rw-weights/hub, shared with the
+          MLX Qwen-Image 2.1-only: reuse ~/sceneworks-rw-weights/hub, shared with the
           terminal real-weight evidence job. Missing manifest-pinned files can be fetched there
-          with download_missing. Requires models=qwen_image_2_1 and empty hf_cache_roots.
+          with download_missing. Requires models drawn from qwen_image_2_1 / qwen_image_2_1_turbo
+          (space-separated) and empty hf_cache_roots.
           This catalog measures base anchors; overlay/training evidence belongs to real-weights.
         required: false
         type: boolean
