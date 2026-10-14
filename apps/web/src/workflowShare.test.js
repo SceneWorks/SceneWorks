@@ -450,6 +450,14 @@ function sampleValueFor(key) {
       return [{ steps: 4, guidance: 3.5, loras: [] }];
     case "structuredPrompt":
       return { intent: "a lighthouse" };
+    case "veda":
+      return {
+        enabled: true,
+        generated: "90%",
+        reference: "90%",
+        fullAttentionLayers: "0",
+        fullAttentionSteps: "0",
+      };
     case "enhancePrompt":
     case "usePid":
     case "faceRestore":
@@ -522,8 +530,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
     const here = report({
       styles: [{ field: "styleId", id: "ghibli", name: "Ghibli", state: "resolved", detail: "ok" }],
     });
-    const recipe = recipeFromWorkflowShare(share({ advanced: everyKey }), here);
-    const rows = workflowSettingRows(share({ advanced: everyKey }), here);
+    const testShare = share({ sceneworksWorkflow: "video", mode: "text_to_video", advanced: everyKey });
+    const recipe = recipeFromWorkflowShare(testShare, here);
+    const rows = workflowSettingRows(testShare, here);
 
     const carried = new Set(Object.keys(recipe.rawAdapterSettings));
     for (const row of rows) {
@@ -569,6 +578,37 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "videoRescaleScale",
       "videoStgGuidanceScale",
     ]);
+  });
+
+  it("routes a video share's complete authored Veda request to Video Studio only", () => {
+    const veda = {
+      enabled: true,
+      generated: "90.5%",
+      reference: "12",
+      fullAttentionLayers: Array.from({ length: 50 }, (_, index) => index).join(","),
+      fullAttentionSteps: Array.from({ length: 200 }, (_, index) => index).join(","),
+    };
+    const video = share({
+      sceneworksWorkflow: "video",
+      mode: "text_to_video",
+      advanced: { veda, vedaExecution: { effective: "dense", fallbackReason: "runtime fact" } },
+    });
+    const recipe = recipeFromWorkflowShare(video, report());
+    expect(recipe.mode).toBe("text_to_video");
+    expect(recipe.rawAdapterSettings.veda).toEqual(veda);
+    expect(recipe.rawAdapterSettings.vedaExecution).toBeUndefined();
+    expect(workflowSettingRows(video, report()).find((row) => row.key === "veda")).toMatchObject({
+      label: "Veda",
+      restored: true,
+      value: "Recorded",
+    });
+
+    const image = share({ advanced: { veda } });
+    expect(recipeFromWorkflowShare(image, report()).rawAdapterSettings.veda).toBeUndefined();
+    expect(workflowSettingRows(image, report()).find((row) => row.key === "veda")).toMatchObject({
+      restored: false,
+      detail: "Video Studio only.",
+    });
   });
 
   // `styleId` is the one CONDITIONAL entry: it is applied, but only when this install has the

@@ -105,7 +105,7 @@ const L_COUNT = "how many images the run asked for";
 const L_UPSCALE = "any upscale settings";
 const L_LORAS = "LoRA names, weights, Hugging Face repo ids and exact content hashes";
 const L_SETTINGS =
-  "the shared generation settings (sampler, scheduler, steps, guidance, strength and the other numeric knobs)";
+  "the shared settings (sampler, scheduler, steps, guidance, strength, other knobs, Veda percentages and attention lists)";
 const L_PASSES =
   "which optional passes ran — caption upsampling, the PiD or alternate decoder and PiD tier, face restoration — and the control type";
 const L_ANGLE = "the head angle or turnaround the run asked for";
@@ -205,6 +205,7 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.temporalUpsampleRounds", L_VIDEO_TIMING],
   ["advanced.textEncoderModel", L_TEXT_ENCODER],
   ["advanced.lightning", L_VIDEO_ENGINE],
+  ["advanced.veda", L_SETTINGS],
   ["advanced.videoCfgGuidanceScale", L_SETTINGS],
   ["advanced.videoStgGuidanceScale", L_SETTINGS],
   ["advanced.videoRescaleScale", L_SETTINGS],

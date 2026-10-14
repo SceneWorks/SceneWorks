@@ -28,6 +28,7 @@ vi.mock("../api.js", async (importOriginal) => {
 import { apiFetch } from "../api.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 import { AppContext } from "../context/AppContext.js";
+import { recipeFromWorkflowShare } from "../workflowShare.js";
 import { VideoStudio } from "./VideoStudio.jsx";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -458,8 +459,22 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     expect(setError).toHaveBeenLastCalledWith("");
   });
   it("Veda replay restores controls, excludes observed facts, and old recipes reset off", async () => {
-    const veda = { enabled: true, generated: "90.5%", reference: "12", fullAttentionLayers: "0–2", fullAttentionSteps: "0,3" };
-    const recipe = { model: MINIMAX.id, prompt: "a lighthouse", type: "text_to_video", settings: {}, loras: [], rawAdapterSettings: { veda, vedaExecution: { effective: "dense", fallbackReason: "test" } } };
+    const veda = {
+      enabled: true,
+      generated: "90.5%",
+      reference: "12",
+      fullAttentionLayers: Array.from({ length: 50 }, (_, index) => index).join(","),
+      fullAttentionSteps: Array.from({ length: 200 }, (_, index) => index).join(","),
+    };
+    const recipe = recipeFromWorkflowShare(
+      {
+        sceneworksWorkflow: "video",
+        mode: "text_to_video",
+        prompt: "a lighthouse",
+        advanced: { veda, vedaExecution: { effective: "dense", fallbackReason: "observed fact" } },
+      },
+      { model: { state: "resolved", catalogId: MINIMAX.id }, loras: [] },
+    );
     const context = baseContext({ studioLaunch: { view: "Video", id: "veda-replay", recipe } });
     await render(context); await openAdvanced(); await generate();
     expect(lastJob(context).advanced.veda).toEqual(veda);

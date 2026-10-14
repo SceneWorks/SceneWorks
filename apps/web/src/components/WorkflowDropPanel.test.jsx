@@ -100,8 +100,8 @@ describe("WorkflowDropPanel", () => {
     expect(text()).toContain("Krea 2 Turbo");
     expect(text()).toContain("Steps");
     expect(text()).toContain("Everything this recipe names is installed here.");
-    // No "model not prefilled" warning when the model resolved.
-    expect(text()).not.toContain("keeps the model it is already on");
+    // No warning when the model resolved.
+    expect(text()).not.toContain("current selection stays");
   });
 
   it("names a missing model instead of quietly running the studio's own", async () => {
@@ -123,7 +123,7 @@ describe("WorkflowDropPanel", () => {
     });
     expect(text()).toContain("No model matching `someones_private_model`");
     expect(text()).toContain("Missing");
-    expect(text()).toContain("keeps the model it is already on");
+    expect(text()).toContain("current selection stays");
     // "Use this workflow" is still offered — the prompt, seed and knobs are real and the
     // panel has said exactly what will not come with them.
     expect(buttonByLabel("Use this workflow")).toBeTruthy();
@@ -179,8 +179,7 @@ describe("WorkflowDropPanel", () => {
 
   it("reports the batch it came out of, and that replay makes one image", async () => {
     await render({ offer: { share: share({ count: 4 }), report: report(), error: "" } });
-    expect(text()).toContain("one of a batch of 4");
-    expect(text()).toContain("single image");
+    expect(text()).toContain("Only one of the 4 outputs is replayed.");
   });
 
   it("wires the three actions", async () => {
@@ -467,8 +466,8 @@ describe("WorkflowDropPanel — what it needs from the user", () => {
       },
     });
     expect(cta()?.disabled).toBe(false);
-    // The "keeps the model it is already on" warning is now false, and must not be shown.
-    expect(document.body.textContent).not.toContain("keeps the model it is already on");
+    // The model warning is now false, and must not be shown.
+    expect(document.body.textContent).not.toContain("current selection stays");
   });
 
   it("does not call poses restored when an unknown model has no pose-capable substitute", async () => {
@@ -596,7 +595,7 @@ describe("WorkflowDropPanel — what it needs from the user", () => {
     await render({
       offer: { assetId: "asset_1", file: null, share: share(), report: report(), error: "" },
     });
-    expect(document.body.textContent).toContain("The recipe in this image");
+    expect(document.body.textContent).toContain("Workflow recipe");
     expect(document.body.textContent).not.toContain("Workflow found");
     // "Import the image too" for an image that is already imported is a control describing a
     // state; the panel is not rendered with it at all rather than rendered with it disabled.
@@ -608,5 +607,19 @@ describe("WorkflowDropPanel — what it needs from the user", () => {
     await render({ offer: { assetId: null, share: share(), report: report(), error: "" } });
     expect(buttonByLabel("Import the image too")).toBeTruthy();
     expect(buttonByLabel("Use this workflow")).toBeTruthy();
+  });
+
+  it("identifies video workflows and the Video Studio destination", async () => {
+    await render({
+      offer: {
+        assetId: "video_asset",
+        share: share({ sceneworksWorkflow: "video", mode: "text_to_video" }),
+        report: report(),
+        error: "",
+      },
+    });
+    expect(document.body.textContent).toContain("Workflow recipe");
+    expect(document.body.textContent).toContain("This workflow carries a recipe");
+    expect(document.body.textContent).not.toContain("This image carries");
   });
 });
