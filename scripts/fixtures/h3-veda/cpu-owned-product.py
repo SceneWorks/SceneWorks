@@ -33,6 +33,9 @@ else:
         def do_GET(self):
             state=load()
             if self.path=='/api/v1/workers':self.send([{'id':os.environ['SCENEWORKS_WORKER_ID'],'status':'idle'}]);return
+            if self.path.endswith('/metrics'):
+                key=self.path.split('/')[-2]
+                if key in state['jobs']:self.send({'jobId':key,'postCount':state['postCount'],'cpuFixtureOnly':True});return
             if '?' in self.path:self.send(list(state['jobs'].values()));return
             key=self.path.split('/')[-1]
             if key in state['jobs']:self.send(state['jobs'][key]);return

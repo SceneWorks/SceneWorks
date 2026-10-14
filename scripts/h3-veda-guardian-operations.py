@@ -24,9 +24,16 @@ def rpc(control,method,arg=None):
         if not result['ok']:raise RuntimeError(result['error'])
         return result['value']
 class Physical:
-    def __init__(self,root):self.root=root;self.locks=g.Locks([root/'CPU-ONLY-NOT-GPU.lock']);self.locks.claim();self.sequence=[]
+    def __init__(self,root):self.root=root;self.locks=g.Locks([root/'CPU-ONLY-NOT-GPU.lock']);self.locks.claim();self.sequence=[];self.services=None
     def owned(self):return self.locks.owned()
     def probe(self,phase,owned,drained_api=None):
+        g.require(self.services is not None and not self.services.children and owned=={os.getpid()},'physical probe observed live owned API/worker')
+        for name in ['cpu-api.json','cpu-worker.json']:
+            file=self.root/name
+            if file.exists():
+                process=json.loads(file.read_text())
+                for pid in [process.get('pid'),process.get('descendant')]:
+                    if pid is not None:g.require(g.pid_birth(pid) is None,'physical probe observed live prior owned process')
         self.sequence.append(phase)
         return {'phase':phase,'admitted':True,'observedAt':int(time.time()*1000),'queueObservedAt':int(time.time()*1000),'drainedApi':drained_api,'cpuFixtureOnly':True,'GPU':False}
     def close(self):
@@ -38,7 +45,7 @@ class Physical:
 
 def daemon(root,controller_pid):
     os.environ.update(S9_CPU_PROOF_ROOT=str(root),SCENEWORKS_TOKEN='dummy-cpu-fixture-token')
-    m=json.loads((root/'input.json').read_text());physical=Physical(root);services=g.Services(m,'mlx',root,physical)
+    m=json.loads((root/'input.json').read_text());physical=Physical(root);services=g.Services(m,'mlx',root,physical);physical.services=services
     birth=g.pid_birth(controller_pid);owner=g.Guardian(m,'mlx',root,physical,services,g.Product(m['runners']['mlx']['apiUrl'],'dummy-cpu-fixture-token'),lambda:g.pid_birth(controller_pid)==birth)
     services.start('api');wait_for(lambda:owner.api('GET','/api/v1/workers'))
     class Handler(socketserver.StreamRequestHandler):
@@ -91,10 +98,14 @@ def controller(root):
     except Exception as e:duplicate=str(e)
     g.atomic(root/'duplicate.json',{'result':duplicate})
     if os.environ.get('S9_CPU_PROOF_VARIANT')=='paired_completed':
+        product=g.Product(m['runners']['mlx']['apiUrl'],'dummy-cpu-fixture-token')
         wait_for(lambda:(root/'cpu-worker.json').exists())
         first=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':intent['key'],'jobId':r['value']['id']}})
         one=first['drainedWorker'];api_one=first['drainedApi']
         g.require(api_one['reaped'] and api_one['descendantsDrained'] and g.pid_birth(api_one['pid']) is None,'dense owned API process/tree not actually drained')
+        dense_readback=product('GET','/api/v1/jobs/'+r['value']['id'])
+        dense_metrics=product('GET','/api/v1/jobs/'+r['value']['id']+'/metrics')
+        g.require(dense_readback['id']==dense_metrics['jobId']==r['value']['id'] and dense_metrics['cpuFixtureOnly'],'dense persisted readback/metrics lost on API restart')
         between=rpc(control,'phase',{'phase':'submit-or-reconcile'})
         g.require(between['drainedApi']['pid']!=api_one['pid'] and g.pid_birth(between['drainedApi']['pid']) is None,'between-arm owned API was retained')
         request['advanced']['s9Harness'].update(key='second-owned-intent',arm='sparse')
@@ -103,13 +114,16 @@ def controller(root):
         reply=rpc(control,'submit',second);wait_for(lambda:json.loads((root/'cpu-worker.json').read_text())['pid']!=one['pid'])
         last=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':second['key'],'jobId':reply['value']['id']}})
         two=last['drainedWorker'];api_two=last['drainedApi']
+        sparse_readback=product('GET','/api/v1/jobs/'+reply['value']['id'])
+        sparse_metrics=product('GET','/api/v1/jobs/'+reply['value']['id']+'/metrics')
+        g.require(sparse_readback['id']==sparse_metrics['jobId']==reply['value']['id'] and sparse_metrics['postCount']==2,'sparse persisted readback/metrics lost on API restart')
         g.require(api_two['pid'] not in [api_one['pid'],between['drainedApi']['pid']] and g.pid_birth(api_two['pid']) is None,'sparse owned API process/tree not actually drained')
         g.require(api_one['apiBinarySha256']==api_two['apiBinarySha256']==between['drainedApi']['apiBinarySha256'],'fresh API binary identity changed across arms')
         g.require(api_one['apiConfigSha256']==api_two['apiConfigSha256']==between['drainedApi']['apiConfigSha256'],'fresh API config identity changed across arms')
         g.require((one['pid'],one['birth'])!=(two['pid'],two['birth']),'paired arms reused process lifetime')
         for field in ['workerBinarySha256','workerConfigSha256','workerConfigBinding','backend','physicalGpuId','campaignId','sourceFingerprint','sourceFreezeSha256','workerId']:
             g.require(one[field]==two[field],'paired immutable identity differs: '+field)
-        g.atomic(root/'paired-lifetimes.json',{'dense':one,'sparse':two,'denseApi':api_one,'betweenArmApi':between['drainedApi'],'sparseApi':api_two,'actualCPUProcesses':True,'GPU':False,'nativeProduct':False})
+        g.atomic(root/'paired-lifetimes.json',{'dense':one,'sparse':two,'denseApi':api_one,'betweenArmApi':between['drainedApi'],'sparseApi':api_two,'persistedApiReadbacks':[dense_readback['id'],sparse_readback['id']],'persistedSyntheticMetrics':[dense_metrics,sparse_metrics],'actualCPUProcesses':True,'GPU':False,'nativeProduct':False})
     while True:time.sleep(.1)
 
 def contender(root):

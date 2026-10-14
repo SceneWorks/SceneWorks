@@ -11,9 +11,10 @@ from unittest.mock import patch
 spec=importlib.util.spec_from_file_location("guard",Path(__file__).with_name("h3-veda-guardian.py"));g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
 
 class Physical:
-    def __init__(self,events):self.events=events;self.held=True;self.reject=False
+    def __init__(self,events):self.events=events;self.held=True;self.reject=False;self.services=None
     def probe(self,phase,owned,drained_api=None):
         self.events.append("probe:"+phase)
+        if self.services is not None: g.require(not self.services.children,"probe observed live owned API/worker")
         if self.reject:raise RuntimeError("foreign queue or physical activity")
         return {"phase":phase,"admitted":True,"observedAt":int(time.time()*1000),"queueObservedAt":int(time.time()*1000),"drainedApi":drained_api}
     def owned(self):return self.held
@@ -75,6 +76,7 @@ class Fixture(unittest.TestCase):
         self.dir=tempfile.TemporaryDirectory();self.addCleanup(self.dir.cleanup);self.root=Path(self.dir.name)
         self.m={"campaignId":"cpu-campaign","sourceFreeze":{"CPU_ONLY":True},"projectId":"owned","runners":{"mlx":{"workerId":"worker","physicalGpuId":"CPU_ONLY_NOT_GPU","guardian":{"maxSeconds":10,"cleanupSeconds":1}}}}
         self.events=[];self.alive=True;self.now=0;self.physical=Physical(self.events);self.services=Services(self.events);self.jobs={};self.variant="ok"
+        self.physical.services=self.services
         self.owner=g.Guardian(self.m,"mlx",self.root,self.physical,self.services,self.api,lambda:self.alive,lambda:self.now)
     def intent(self,key="key",arm="dense"):
         req={"projectId":"owned","advanced":{"s9Harness":{"key":key,"fingerprint":g.digest(self.m),"arm":arm}}}
@@ -143,7 +145,7 @@ class Fixture(unittest.TestCase):
         self.assertLess(self.events.index("stop:worker"),self.events.index("probe:submit-or-reconcile"))
         post=self.events.index("POST:/api/v1/video/jobs");stop=self.events.index("stop:api",post);start=self.events.index("start:api",post)
         probes=[n for n,event in enumerate(self.events) if event=="probe:submit-or-reconcile"]
-        self.assertEqual(len(probes),2);self.assertLess(stop,start);self.assertLess(start,probes[1])
+        self.assertEqual(len(probes),2);self.assertLess(stop,probes[1]);self.assertLess(probes[1],start)
     def test_api_restart_failure_clears_prior_admission_without_unlocking(self):
         self.owner.before_phase("submit-or-reconcile")
         original=self.services.start
@@ -153,6 +155,16 @@ class Fixture(unittest.TestCase):
         self.services.start=refuse
         with self.assertRaisesRegex(RuntimeError,"owned API restart refused"):self.owner.before_phase("submit-or-reconcile")
         self.assertIsNone(self.owner.last_phase);self.assertTrue(self.physical.held)
+    def test_api_restart_cannot_refresh_stale_drained_probe(self):
+        original=self.physical.probe
+        def stale(phase,owned,drained_api=None):
+            proof=original(phase,owned,drained_api)
+            proof["queueObservedAt"]-=11000
+            return proof
+        self.physical.probe=stale
+        with self.assertRaisesRegex(RuntimeError,"not ready; no physical admission"):self.owner.before_phase("submit-or-reconcile")
+        self.assertIsNone(self.owner.last_phase);self.assertTrue(self.physical.held)
+        self.assertLess(self.events.index("probe:submit-or-reconcile"),self.events.index("start:api"))
     def test_physical_conflict_keeps_canonical_lock(self):
         self.physical.reject=True
         with self.assertRaises(RuntimeError):self.owner.before_phase("next")

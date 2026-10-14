@@ -378,15 +378,22 @@ class Guardian:
         api_process=self.services.api_receipt()
         api_closure=self.services.stop("api")
         require(api_closure and api_closure["pid"]==api_process["pid"] and api_closure["birth"]==api_process["birth"] and api_closure["reaped"] and api_closure["descendantsDrained"],"owned API lifetime not verifiably drained")
+        api_lifetime={"schemaVersion":1,**api_process,**api_closure,"sourceFingerprint":digest(self.m),"physicalGpuId":self.m["runners"][self.backend]["physicalGpuId"]}
+        proof=self.physical.probe(phase,self.services.owned_pids(),api_lifetime)
+        # Admit only the fully drained process tree. Restarting the authenticated
+        # normal API must fit within this same queue/driver receipt's freshness.
         self.services.start("api")
-        until=min(self.deadline,self.clock()+30)
-        while self.clock()<until:
+        until=min(self.deadline,self.clock()+10)
+        def fresh():
+            now=int(time.time()*1000)
+            return all(0<=now-proof[field]<=10000 for field in ["observedAt","queueObservedAt"])
+        while self.clock()<until and fresh():
             try:
                 self.services.owned_pids();self.api("GET","/api/v1/workers");break
             except Exception:time.sleep(.2)
         else:raise RuntimeError("restarted owned normal API not ready; no physical admission")
-        api_lifetime={"schemaVersion":1,**api_process,**api_closure,"sourceFingerprint":digest(self.m),"physicalGpuId":self.m["runners"][self.backend]["physicalGpuId"]}
-        self.last_phase={**self.physical.probe(phase,self.services.owned_pids(),api_lifetime),"ownerToken":self.token}
+        require(fresh() and self.clock()<self.deadline,"restarted owned API exceeded original physical/queue freshness; no admission")
+        self.last_phase={**proof,"ownerToken":self.token}
         if record is not None:self.last_phase["drainedWorker"]=record["drainedWorker"]
         return self.last_phase
     def acknowledge(self,intent):
