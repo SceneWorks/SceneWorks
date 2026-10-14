@@ -31,6 +31,42 @@ class Services:
     def close(self):self.events.append("drain-owned-descendants");self.children={}
     def owned_pids(self):return {111}
 
+class ActionsOwnership(unittest.TestCase):
+    def setUp(self):
+        self.uuid="BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF"
+        self.physical=g.Physical.__new__(g.Physical)
+        self.physical.backend="mlx"
+        self.physical.r={"physicalGpuId":self.uuid}
+        self.physical.contract={"hostRunnerNames":["nax-macos-2"]}
+        self.physical.m={"sourceFreeze":{"sceneworks":{"head":"a"*40}}}
+        self.runners={"id":2310,"name":"nax-macos","status":"online","busy":True},{"id":5281,"name":"nax-macos-2","status":"online","busy":True}
+        self.run={"id":123,"run_attempt":1,"event":"workflow_dispatch","head_sha":"a"*40,"status":"in_progress","conclusion":None,"name":"H3 Veda terminal owned campaign"}
+        self.job={"name":"mac2","runner_name":"nax-macos-2","run_id":123,"run_attempt":1,"head_sha":"a"*40,"status":"in_progress","conclusion":None,"runner_id":5281}
+        self.env={"GITHUB_ACTIONS":"true","GH_TOKEN":"CPU_FAKE","GITHUB_REPOSITORY":"SceneWorks/SceneWorks","GITHUB_EVENT_NAME":"workflow_dispatch","GITHUB_SHA":"a"*40,"GITHUB_WORKFLOW_REF":"SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@refs/heads/main","GITHUB_JOB":"mac2","RUNNER_NAME":"nax-macos-2","GITHUB_RUN_ID":"123","GITHUB_RUN_ATTEMPT":"1"}
+    def command(self,args,timeout=0):
+        route=args[-1]
+        if "orgs/SceneWorks/actions/runners" in route:return json.dumps([{"runners":self.runners}])
+        if "lensRunning" in route or "lensQueued" in route:raise AssertionError("unexpected alias")
+        if "michaeltrefry/LensWorks" in route:return json.dumps([{"workflow_runs":[]}])
+        if route.endswith("/runs/123"):return json.dumps(self.run)
+        if "/runs/123/jobs?" in route:return json.dumps([{"jobs":[self.job]}])
+        if args[:2]==["system_profiler","SPHardwareDataType"]:return json.dumps({"SPHardwareDataType":[{"platform_UUID":self.uuid}]})
+        raise AssertionError("unexpected command " + repr(args))
+    def test_exact_actions_owner_allows_only_its_own_busy_mac2_on_distinct_host(self):
+        with patch.dict(os.environ,self.env,clear=True),patch.object(g,"command",side_effect=self.command):
+            self.assertEqual(self.physical.actions_owner({"orgRunners":[{"runners":self.runners}]}),5281)
+            self.assertIsInstance(self.physical.queue()["observedAt"],int)
+            self.job["runner_id"]=2310
+            with self.assertRaisesRegex(RuntimeError,"identity ambiguous|runner not busy") : self.physical.queue()
+    def test_stale_or_unknown_mac_topology_refuses_even_with_live_own_job(self):
+        with patch.dict(os.environ,self.env,clear=True),patch.object(g,"command",side_effect=self.command):
+            self.physical.r["physicalGpuId"]="D299B954-4C63-5322-86A5-BD5667051634"
+            with self.assertRaisesRegex(RuntimeError,"topology unbound"):self.physical.queue()
+            self.physical.r["physicalGpuId"]=self.uuid;self.runners[0]["id"]=999
+            with self.assertRaisesRegex(RuntimeError,"topology changed"):self.physical.queue()
+            self.runners[0]["id"]=2310;self.run["status"]="completed"
+            with self.assertRaisesRegex(RuntimeError,"run identity"):self.physical.queue()
+
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.dir=tempfile.TemporaryDirectory();self.addCleanup(self.dir.cleanup);self.root=Path(self.dir.name)
@@ -225,5 +261,13 @@ class Fixture(unittest.TestCase):
         p.write_bytes(b"catalog-b");self.assertNotEqual(g.digest(one),g.digest(service.config_binding(env)))
         (config/"alias").symlink_to(p)
         with self.assertRaises(RuntimeError):service.config_binding(env)
+
+    def test_actions_runner_read_token_is_not_inherited_by_normal_product_children(self):
+        m={"runners":{"mlx":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18501},"apiUrl":"http://127.0.0.1:18501","workerId":"owned"}}}
+        service=g.Services(m,"mlx",self.root,self.physical)
+        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret","GH_TOKEN":"runner-read-secret","GITHUB_TOKEN":"default-secret"}):
+            env=service.env()
+        self.assertNotIn("GH_TOKEN",env);self.assertNotIn("GITHUB_TOKEN",env);self.assertNotIn("SCENEWORKS_TOKEN",env)
+        self.assertEqual(env["SCENEWORKS_ACCESS_TOKEN"],"product-secret")
 
 if __name__=="__main__":unittest.main()

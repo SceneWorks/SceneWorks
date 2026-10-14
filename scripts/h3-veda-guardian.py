@@ -139,16 +139,32 @@ class Physical:
         devices = json.loads(command(["system_profiler", "SPDisplaysDataType", "-json"]))["SPDisplaysDataType"]
         matches = [d for d in devices if d.get("sppci_model") == self.contract["metalDeviceName"] and d.get("spdisplays_mtlgpufamilysupport")]
         require(len(matches) == 1, "actual Metal driver/device not observed")
-        return {"observedAt": int(time.time()*1000), "admitted":True,"driverAvailable":True,"metalDevice":matches[0]["sppci_model"],"memoryFreePercent":int(free[1]),"actors":actors}
+        hardware=json.loads(command(["system_profiler","SPHardwareDataType","-json"]))["SPHardwareDataType"]
+        require(len(hardware)==1 and hardware[0].get("platform_UUID")==self.r["physicalGpuId"],"actual Mac physical platform UUID changed/unbound")
+        return {"observedAt": int(time.time()*1000), "admitted":True,"driverAvailable":True,"metalDevice":matches[0]["sppci_model"],"platformUuid":hardware[0]["platform_UUID"],"memoryFreePercent":int(free[1]),"actors":actors}
     def queue(self):
         # Same pre-existing Mac org/nax and Lens queue admission. CUDA host still requires runner/queue authority.
         queries = {"orgRunners":"orgs/SceneWorks/actions/runners?per_page=100", "lensRunning":"repos/michaeltrefry/LensWorks/actions/runs?status=in_progress&per_page=100", "lensQueued":"repos/michaeltrefry/LensWorks/actions/runs?status=queued&per_page=100"}
         with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
             fs = {k:pool.submit(command,["gh","api","--paginate","--slurp",q],15) for k,q in queries.items()}
             raw = {k:json.loads(f.result()) for k,f in fs.items()}
+        owned_runner = self.actions_owner(raw)
         if self.backend == "mlx":
             runners = [r for page in raw["orgRunners"] for r in page["runners"] if r["name"].startswith("nax")]
-            require(runners and all(r["status"] == "online" and not r["busy"] for r in runners), "nax busy/offline admission refused")
+            if owned_runner is not None and os.environ.get("RUNNER_NAME")=="nax-macos-2":
+                # This checkout is on Mac1: local .runner id 2310 / current
+                # SPHardwareDataType UUID D299... . Mac2 is admitted as a
+                # different physical lane only when the actual live platform
+                # UUID is bound and differs, and both org runner identities
+                # remain the observed pair. A changed topology refuses.
+                primary=[r for r in runners if r["name"]=="nax-macos"]
+                secondary=[r for r in runners if r["name"]=="nax-macos-2"]
+                require(len(runners)==2 and len(primary)==len(secondary)==1 and primary[0]["id"]==2310 and secondary[0]["id"]==5281 and secondary[0]["id"]==owned_runner,"Mac runner topology changed/unknown")
+                require(self.contract.get("hostRunnerNames")==["nax-macos-2"] and self.r["physicalGpuId"]!="D299B954-4C63-5322-86A5-BD5667051634","Mac2 physical lane topology unbound/same as primary")
+                observed=json.loads(command(["system_profiler","SPHardwareDataType","-json"],15))["SPHardwareDataType"]
+                require(len(observed)==1 and observed[0].get("platform_UUID")==self.r["physicalGpuId"],"Mac2 actual host UUID differs from frozen physical identity")
+                runners=secondary
+            require(runners and all(r["status"] == "online" and (not r["busy"] or r["id"] == owned_runner) for r in runners), "nax busy/offline admission refused")
             require(not any(p["workflow_runs"] for k in ["lensRunning","lensQueued"] for p in raw[k]), "Lens competing queue/run admission refused")
         else:
             # A standalone terminal guardian cannot assert CI-host ownership from a UUID lock alone.
@@ -157,10 +173,32 @@ class Physical:
             require(host_runners and set(host_runners).issubset(self.cuda.ALLOWED_RUNNERS) and runner in host_runners,"host listener inventory not frozen")
             for name in host_runners:
                 rows=[r for p in raw["orgRunners"] for r in p["runners"] if r["name"]==name]
-                require(len(rows)==1 and rows[0]["status"]=="online" and not rows[0]["busy"],"shared Windows host listener busy/offline")
+                require(len(rows)==1 and rows[0]["status"]=="online" and (not rows[0]["busy"] or rows[0]["id"]==owned_runner),"shared Windows host listener busy/offline")
             matches = [r for p in raw["orgRunners"] for r in p["runners"] if r["name"] == runner]
-            require(runner in self.cuda.ALLOWED_RUNNERS and len(matches) == 1 and matches[0]["status"] == "online" and not matches[0]["busy"], "Windows host runner busy/unowned; no scheduled CI process may host this standalone campaign")
+            require(runner in self.cuda.ALLOWED_RUNNERS and len(matches) == 1 and matches[0]["status"] == "online" and (not matches[0]["busy"] or matches[0]["id"]==owned_runner), "Windows host runner busy/unowned; no scheduled CI process may host this standalone campaign")
         return {"observedAt":int(time.time()*1000),"raw":raw}
+    def actions_owner(self, raw):
+        # A workflow-owned guardian necessarily sees its own listener as busy.
+        # Exempt only the one live runner ID proven by the current exact Actions
+        # run/job/source; every other listener and Lens queue retains the old rule.
+        if os.environ.get("GITHUB_ACTIONS") != "true": return None
+        env=os.environ
+        require(env.get("GH_TOKEN") and env.get("GITHUB_REPOSITORY")=="SceneWorks/SceneWorks" and env.get("GITHUB_EVENT_NAME")=="workflow_dispatch", "Actions owner authorization environment incomplete")
+        require(env.get("GITHUB_SHA")==self.m["sourceFreeze"]["sceneworks"]["head"] and env.get("GITHUB_WORKFLOW_REF","").startswith("SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@"),"Actions workflow/source identity differs")
+        expected_job="mac2" if self.backend=="mlx" else "windows_cuda"
+        expected_runner="nax-macos-2" if self.backend=="mlx" else self.contract.get("runnerName")
+        require(env.get("GITHUB_JOB")==expected_job and env.get("RUNNER_NAME")==expected_runner,"Actions job/physical runner identity differs")
+        run_id=env.get("GITHUB_RUN_ID","");attempt=env.get("GITHUB_RUN_ATTEMPT","")
+        require(run_id.isdecimal() and attempt.isdecimal(),"Actions run/attempt identity missing")
+        run=json.loads(command(["gh","api",f"repos/SceneWorks/SceneWorks/actions/runs/{run_id}"],15))
+        jobs=json.loads(command(["gh","api","--paginate","--slurp",f"repos/SceneWorks/SceneWorks/actions/runs/{run_id}/jobs?per_page=100"],15))
+        require(run.get("id")==int(run_id) and run.get("run_attempt")==int(attempt) and run.get("event")=="workflow_dispatch" and run.get("head_sha")==env["GITHUB_SHA"] and run.get("status")=="in_progress" and run.get("conclusion") is None and run.get("name")=="H3 Veda terminal owned campaign","live Actions run identity/terminal state differs")
+        matches=[j for page in jobs for j in page.get("jobs",[]) if j.get("name")==expected_job and j.get("runner_name")==expected_runner and j.get("run_id")==int(run_id) and j.get("run_attempt")==int(attempt) and j.get("head_sha")==env["GITHUB_SHA"] and j.get("status")=="in_progress" and j.get("conclusion") is None]
+        require(len(matches)==1 and isinstance(matches[0].get("runner_id"),int),"live Actions job/runner identity ambiguous")
+        runner_id=matches[0]["runner_id"]
+        inventory=[r for page in raw["orgRunners"] for r in page["runners"] if r.get("id")==runner_id and r.get("name")==expected_runner]
+        require(len(inventory)==1 and inventory[0]["status"]=="online" and inventory[0]["busy"] is True,"live Actions owner runner not busy/unique")
+        return runner_id
     def probe(self, phase, owned):
         require(re.fullmatch(r"[a-z][a-z0-9-]{0,63}",phase),"invalid phase identity")
         require(self.locks.owned(), "physical lock descriptor/path identity lost")
@@ -194,7 +232,7 @@ class Services:
             f=m["sourceFreeze"]; self.windows=source_module(f["inference"]["root"],"scripts/media_campaign_windows.py",f["inferenceFiles"].get("scripts/media_campaign_windows.py")).WindowsJob
     def env(self):
         g=self.r["guardian"]; token=os.environ.get("SCENEWORKS_TOKEN"); require(token,"SCENEWORKS_TOKEN required; never persist API secret")
-        env={k:v for k,v in os.environ.items() if not k.startswith("SCENEWORKS_") and k not in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES"]}
+        env={k:v for k,v in os.environ.items() if not k.startswith("SCENEWORKS_") and k not in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","GH_TOKEN","GITHUB_TOKEN"]}
         env.update(SCENEWORKS_DATA_DIR=g["dataDir"],SCENEWORKS_JOBS_DB_PATH=str(Path(g["dataDir"])/"cache/jobs.db"),SCENEWORKS_CONFIG_DIR=g["configDir"],SCENEWORKS_OWN_MANIFESTS="1",SCENEWORKS_API_HOST="127.0.0.1",SCENEWORKS_API_PORT=str(g["port"]),SCENEWORKS_API_URL=self.r["apiUrl"],SCENEWORKS_PARENT_PID=str(os.getpid()),SCENEWORKS_ACCESS_TOKEN=token,SCENEWORKS_GPU_ID="cpu",SCENEWORKS_RUST_WORKER_GPU_ID="cpu",SCENEWORKS_WORKER_ID=self.r["workerId"],HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1")
         if self.backend=="candle_cuda":
             index=str(self.physical.device["index"])
