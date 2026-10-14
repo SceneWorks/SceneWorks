@@ -61,6 +61,7 @@ export const SOURCE_EXTENSIONS = new Set([
   ".mjs",
   ".mts",
   ".orig",
+  ".patch",
   ".plist",
   ".ps1",
   ".py",

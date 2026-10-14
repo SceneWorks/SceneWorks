@@ -22,6 +22,7 @@ const REQUIRED_TEXT_EXTENSIONS = [
   ".cjs",
   ".mts",
   ".orig",
+  ".patch",
   ".stderr",
   ".ts",
   ".tsx",
@@ -154,6 +155,7 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
   writeFileSync(join(repo, "COPYRIGHT"), "Copyright notice.\n");
   writeFileSync(join(repo, "Cargo.toml.orig"), "[package]\nname = \"fixture\"\n");
   writeFileSync(join(repo, "fixture.stderr"), "error[E0001]: fixture\n");
+  writeFileSync(join(repo, "worker.patch"), "--- a/worker.rs\n+++ b/worker.rs\n");
   for (const extension of DECLARED_BINARY_EXTENSIONS) {
     writeFileSync(join(repo, `asset${extension}`), Buffer.from([0x00, 0x01, 0x02]));
   }
@@ -178,6 +180,11 @@ test("CLI ignores declared binary assets and rejects a tracked source NUL", (t) 
   });
   assert.equal(mutatedDiagnostic.status, 1);
   assert.match(mutatedDiagnostic.stderr, /fixture\.stderr: byte offset 5: 0x00/);
+
+  writeFileSync(join(repo, "worker.patch"), Buffer.from("--- a/worker\0.rs\n"));
+  const mutatedPatch = spawnSync(process.execPath, [CHECKER], { cwd: repo, encoding: "utf8" });
+  assert.equal(mutatedPatch.status, 1);
+  assert.match(mutatedPatch.stderr, /worker\.patch: byte offset 12: 0x00/);
 });
 
 test("explicit text attributes keep a NUL-bearing source diff textual", (t) => {
@@ -185,16 +192,16 @@ test("explicit text attributes keep a NUL-bearing source diff textual", (t) => {
   t.after(() => removeRepo(repo));
 
   writeFileSync(join(repo, ".gitattributes"), readFileSync(join(REPO_ROOT, ".gitattributes")));
-  writeFileSync(join(repo, "probe.mjs"), 'export const value = "clean";\n');
+  writeFileSync(join(repo, "probe.patch"), 'export const value = "clean";\n');
   initRepo(repo);
   git(repo, "config", "user.email", "codex@example.invalid");
   git(repo, "config", "user.name", "Codex");
   git(repo, "add", ".");
   git(repo, "commit", "--quiet", "-m", "baseline");
 
-  writeFileSync(join(repo, "probe.mjs"), Buffer.from('export const value = "dirty\0value";\n'));
-  const numstat = git(repo, "diff", "--numstat", "--", "probe.mjs");
-  const patch = git(repo, "diff", "--", "probe.mjs");
+  writeFileSync(join(repo, "probe.patch"), Buffer.from('export const value = "dirty\0value";\n'));
+  const numstat = git(repo, "diff", "--numstat", "--", "probe.patch");
+  const patch = git(repo, "diff", "--", "probe.patch");
 
   assert.doesNotMatch(numstat, /^-\t-\t/m);
   assert.doesNotMatch(patch, /Binary files/);

@@ -17,4 +17,30 @@ test('archive refuses path/link/metadata/hardlink/duplicate/checksum/truncation 
 test('bootstrap uses verified existing3.12 without download and seals reuse/mutation/context checks',async t=>{const root=fixture(t),p=path.join(root,'existing');writeFileSync(p,'interpreter');const options={discover:()=>[p],verify:probe,fetchArchive:()=>{throw Error('must not download');}};const r=await bootstrap(path.join(root,'owned'),options);assert.equal(r.provenance.kind,'existing_verified');assert.equal((await bootstrap(path.join(root,'owned'),options)).interpreter.sha256,r.interpreter.sha256);writeFileSync(p,'mutated');await assert.rejects(bootstrap(path.join(root,'owned'),options),/mutation/);await assert.rejects(bootstrap(path.join(root,'owned'),{...options,arch:'different'}),/context/);});
 test('bootstrap rejects unauthenticated download and foreign symlink marker',async t=>{const root=fixture(t),run=path.join(root,'owned');await assert.rejects(bootstrap(run,{platform:'darwin',arch:'arm64',discover:()=>[],fetchArchive:async()=>Buffer.from('corrupt')}),/SHA\/length/);const marker=path.join(run,'tools/.h3-owned-python.json');const bytes=readFileSync(marker);rmSync(marker);const external=path.join(root,'external');writeFileSync(external,bytes);symlinkSync(external,marker);await assert.rejects(bootstrap(run,{platform:'darwin',arch:'arm64'}),/marker symlink/);});
 test('fallback artifact contract pins immutable official release, exactminor and both physical platform families',()=>{assert.deepEqual(Object.keys(artifacts),['darwin-arm64','win32-x64']);for(const a of Object.values(artifacts)){assert.match(a.url,/^https:\/\/github.com\/astral-sh\/python-build-standalone\/releases\/download\/20261009\//);assert.match(a.sha256,/^[a-f0-9]{64}$/);assert.equal(a.version,'3.12.15');assert.ok(a.bytes<64*1024*1024);}});
-test('source-owned workflows call shared CPU bootstrap only for build/prepare/resume and preserve dispatch scope',()=>{const w=readFileSync(new URL('../.github/workflows/h3-veda-terminal.yml',import.meta.url),'utf8');assert.equal([...w.matchAll(/h3-veda-owned-python\.mjs bootstrap --run-dir/g)].length,2);assert.doesNotMatch(w,/actions\/setup-python@|RUNNER_TOOL_CACHE|sudo/);assert.match(w,/options: \[inventory, stage, build, prepare, resume, review\]/);});
+function assertTerminalBootstrapSurface(w) {
+ assert.doesNotMatch(w,/actions\/setup-python@|RUNNER_TOOL_CACHE|sudo/);
+ assert.match(w,/options: \[inventory, stage, build, prepare, resume, review\]/);
+ const calls=[...w.matchAll(/h3-veda-owned-python\.mjs bootstrap --run-dir/g)].length;
+ const body=w.split(/\njobs:\n/)[1];assert.ok(body,'terminal jobs body required');
+ if(/^  registration_only:/m.test(body)) {
+  assert.deepEqual([...body.matchAll(/^  ([\w-]+):/gm)].map(m=>m[1]),['registration_only']);
+  assert.match(body,/runs-on: ubuntu-latest/);assert.match(body,/timeout-minutes: 5/);
+  assert.doesNotMatch(body,/self-hosted|secrets\.|h3-veda-(?:actions|acceptance)\.mjs/);
+  assert.equal(calls,0,'registration stub must execute no Python bootstrap');
+ } else assert.equal(calls,2,'full feature workflow must bootstrap both physical hosts');
+}
+test('publication stub and CPU cache route preserve owned bootstrap and terminal six-mode scope',()=>{
+ const w=readFileSync(new URL('../.github/workflows/h3-veda-terminal.yml',import.meta.url),'utf8');assertTerminalBootstrapSurface(w);
+ const cache=readFileSync(new URL('../.github/workflows/h3-veda-cache-prepare.yml',import.meta.url),'utf8');
+ assert.doesNotMatch(cache,/actions\/setup-python@|RUNNER_TOOL_CACHE|sudo/);assert.match(cache,/options: \[build, prepare\]/);assert.match(cache,/h3-veda-cache-prepare\.mjs build/);assert.match(cache,/h3-veda-cache-prepare\.mjs prepare/);
+ const controller=readFileSync(new URL('h3-veda-cache-prepare.mjs',import.meta.url),'utf8');assert.match(controller,/import \{bootstrap,noSymlinkAncestors\} from '\.\/h3-veda-owned-python\.mjs'/);assert.match(controller,/await bootstrap\(runDir\)/);
+});
+test('full feature bootstrap checks remain enforced after integration and stub cannot hide host jobs',()=>{
+ const header=readFileSync(new URL('../.github/workflows/h3-veda-terminal.yml',import.meta.url),'utf8').split(/\njobs:\n/)[0];
+ const full=header+'\njobs:\n  mac2:\n    steps:\n      - run: node scripts/h3-veda-owned-python.mjs bootstrap --run-dir "$S9_RUN_DIR"\n  windows:\n    steps:\n      - run: node scripts/h3-veda-owned-python.mjs bootstrap --run-dir "$S9_RUN_DIR"\n';
+ assertTerminalBootstrapSurface(full);
+ assert.throws(()=>assertTerminalBootstrapSurface(full.replaceAll('h3-veda-owned-python.mjs bootstrap --run-dir','other-bootstrap')));
+ assert.throws(()=>assertTerminalBootstrapSurface(full.replace('[inventory, stage, build, prepare, resume, review]','[prepare]')));
+ assert.throws(()=>assertTerminalBootstrapSurface(full+'  registration_only:\n    runs-on: ubuntu-latest\n    timeout-minutes: 5\n'));
+ assert.throws(()=>assertTerminalBootstrapSurface(full+'# actions/setup-python@bad\n'));
+});
