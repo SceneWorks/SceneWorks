@@ -25,16 +25,27 @@ def clone_apfs(source,target):
     lib=ctypes.CDLL('/usr/lib/libSystem.B.dylib',use_errno=True);fn=lib.clonefile;fn.argtypes=[ctypes.c_char_p,ctypes.c_char_p,ctypes.c_int];fn.restype=ctypes.c_int
     if fn(os.fsencode(source),os.fsencode(target),0)!=0:raise OSError(ctypes.get_errno(),'APFS clonefile refused')
     require(source.stat().st_ino!=target.stat().st_ino,'clone unexpectedly hard-links shared inode')
-def prove_apfs(root):
+def apfs_volume_info(root,check=lambda:None):
     import plistlib
-    info=plistlib.loads(subprocess.check_output(['diskutil','info','-plist',str(root)],timeout=15));require('APFS' in str(info.get('FilesystemType','')).upper()+str(info.get('FilesystemName','')).upper(),'owned model volume is not observed APFS')
+    require(sys.platform=='darwin','APFS identity requires Darwin');no_links(root);before=root.stat();check()
+    rows=subprocess.check_output(['/bin/df','-P',str(root)],timeout=15).decode('utf-8').splitlines();check()
+    require(len(rows)==2,'filesystem lookup did not identify exactly one volume');fields=rows[1].split(maxsplit=5)
+    require(len(fields)==6 and re.fullmatch(r'/dev/disk\d+s\d+(?:s\d+)*',fields[0]) is not None,'filesystem lookup returned an unqualified device')
+    device=Path(fields[0]);no_links(device);device_stat=device.stat();require(stat.S_ISBLK(device_stat.st_mode) and device_stat.st_rdev==before.st_dev,'filesystem device differs from owned path')
+    info=plistlib.loads(subprocess.check_output(['/usr/sbin/diskutil','info','-plist',str(device)],timeout=15));check()
+    mount=Path(fields[5]);require(mount.is_absolute() and info.get('DeviceNode')==str(device) and info.get('DeviceIdentifier')==device.name and info.get('MountPoint')==str(mount),'disk information differs from filesystem lookup');no_links(mount)
+    after=root.stat();require((before.st_dev,before.st_ino)==(after.st_dev,after.st_ino) and mount.stat().st_dev==before.st_dev and device.stat()==device_stat,'owned filesystem identity changed during lookup')
+    require(info.get('FilesystemType','').lower()=='apfs' and re.fullmatch(r'[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}',str(info.get('VolumeUUID',''))) is not None,'owned model volume is not observed APFS')
+    return info,{'method':'df_device_authenticated_by_owned_path_st_dev_and_block_st_rdev','device':str(device),'mountPoint':str(mount),'pathDevice':before.st_dev,'volumeUuid':info['VolumeUUID']}
+def prove_apfs(root,check=lambda:None):
+    info,identity=apfs_volume_info(root,check)
     a=root/'.clone-probe-source';b=root/'.clone-probe-destination';require(not a.exists() and not b.exists(),'clone probe already exists')
     try:
-        a.write_bytes(b'owned APFS proof');clone_apfs(a,b);b.write_bytes(b'private mutation');require(a.read_bytes()==b'owned APFS proof','COW source changed')
+        check();a.write_bytes(b'owned APFS proof');clone_apfs(a,b);b.write_bytes(b'private mutation');require(a.read_bytes()==b'owned APFS proof','COW source changed');check()
     finally:
         if b.exists():b.unlink()
         if a.exists():a.unlink()
-    return {'method':'actual_same_volume_APFS_clonefile_and_private_mutation_probe','volume':info.get('VolumeUUID'),'physicalAdmission':False}
+    return {'method':'actual_same_volume_APFS_clonefile_and_private_mutation_probe','volume':info['VolumeUUID'],'filesystemIdentity':identity,'physicalAdmission':False}
 INTERNAL_HOME=Path('/Users/MTrefry')
 INTERNAL_BASE=INTERNAL_HOME/'.h3-veda-epic-25140'
 MAC2_UUID='734A72AE-13DA-52A8-B0CF-F97E1D646124'
@@ -271,7 +282,7 @@ def prepare_locked(p,controller_pid,root,cache,shared,cache_lock,phase_started=N
         return {'label':label,'observedAt':int(time.time()*1000),'evidence':outputs,'actualGpuContextVerified':False,'physicalAdmission':False}
     try:
         storage_mode=storage_policy(p)['mode'];check()
-        apfs=prove_apfs(root)
+        apfs=prove_apfs(root,check)
         if storage_mode=='owned_internal_cross_volume_copy':
             progress['storageIdentity']=identity or internal_storage_identity(p,root,shared);check();build_root=Path(p['binaryAttestation']['path']).parent;no_links(build_root);progress['existingBuildWorkspace']={'path':str(build_root),'allocatedBytes':workspace_allocated(build_root,check),'device':build_root.stat().st_dev,'alreadyOccupiedNotAdditionalReserve':True};workspace_base=workspace_allocated(root,check);quota_base[0]=workspace_base;progress['capacity']=capacity_receipt(root,capacity_required(p['entries'],cache,progress),workspace_base,check);atom(receipt_path,progress)
         else:require(root.stat().st_dev==shared.stat().st_dev,'shared/owned cache must be same APFS volume')

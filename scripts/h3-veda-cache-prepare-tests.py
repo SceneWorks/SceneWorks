@@ -6,6 +6,48 @@ spec=importlib.util.spec_from_file_location('cache',Path(__file__).with_name('h3
 class Tests(unittest.TestCase):
  def setUp(self):self.temp=tempfile.TemporaryDirectory();self.root=Path(self.temp.name).resolve();self.shared=self.root/'shared';self.cache=self.root/'owned';self.shared.mkdir();self.cache.mkdir();self.a={'repo':'author/model','revision':'a'*40,'file':'weight.safetensors','bytes':4,'sha256':__import__('hashlib').sha256(b'data').hexdigest(),'allowManagedFetch':True}
  def tearDown(self):self.temp.cleanup()
+ def volume_lookup_fixture(self,info_change=None,device_change=None,root_change=None,df_change=None,mount_device_change=False):
+  import plistlib
+  from types import SimpleNamespace
+  device=Path('/dev/disk99s3');original=Path.stat;root_stat=self.root.stat();device_stat=SimpleNamespace(st_mode=c.stat.S_IFBLK,st_rdev=root_stat.st_dev)
+  mount=self.root/'mount';mount.mkdir(exist_ok=True)
+  info={'FilesystemType':'apfs','DeviceNode':str(device),'DeviceIdentifier':device.name,'MountPoint':str(mount),'VolumeUUID':'70B5085E-DAA7-4E81-A01D-0194A14C3994'}
+  if info_change:info.update(info_change)
+  if device_change:device_stat=SimpleNamespace(**{**vars(device_stat),**device_change})
+  calls=[];root_reads=[0]
+  def execute(args,timeout):
+   self.assertEqual(timeout,15);calls.append(args)
+   if args==['/bin/df','-P',str(self.root)]:return df_change if df_change is not None else ('Filesystem 512-blocks Used Available Capacity Mounted on\n'+str(device)+' 100 10 90 10% '+str(mount)+'\n').encode()
+   self.assertEqual(args,['/usr/sbin/diskutil','info','-plist',str(device)]);return plistlib.dumps(info)
+  def actual_stat(path,*args,**kw):
+   if path==device:return device_stat
+   value=original(path,*args,**kw)
+   if path==mount and mount_device_change and kw.get('follow_symlinks',True):return SimpleNamespace(st_dev=value.st_dev+1)
+   if path==self.root and kw.get('follow_symlinks',True):
+    root_reads[0]+=1
+    if root_change and root_reads[0]>1:return SimpleNamespace(st_dev=value.st_dev,st_ino=value.st_ino+1)
+   return value
+  return execute,actual_stat,calls
+ def test_apfs_directory_lookup_uses_authenticated_device_not_arbitrary_directory(self):
+  execute,actual_stat,calls=self.volume_lookup_fixture()
+  with patch.object(c.sys,'platform','darwin'),patch.object(c.subprocess,'check_output',side_effect=execute),patch.object(Path,'stat',actual_stat):
+   info,r=c.apfs_volume_info(self.root);self.assertEqual(info['FilesystemType'],'apfs');self.assertEqual(r['pathDevice'],self.root.stat().st_dev);self.assertEqual(r['device'],'/dev/disk99s3');self.assertEqual(len(calls),2)
+ def test_apfs_lookup_refuses_foreign_malformed_or_changed_identity(self):
+  cases=[{'df_change':b'header\n/dev/not-a-disk 1 1 1 1% /\n'},{'df_change':b'header\n/dev/disk99s3 1 1 1 1% /\nextra\n'},{'device_change':{'st_rdev':-1}},{'device_change':{'st_mode':c.stat.S_IFREG}},{'info_change':{'DeviceNode':'/dev/disk98s3'}},{'info_change':{'DeviceIdentifier':'disk98s3'}},{'info_change':{'MountPoint':'/foreign'}},{'info_change':{'FilesystemType':'hfs'}},{'info_change':{'VolumeUUID':''}},{'root_change':True},{'mount_device_change':True}]
+  for case in cases:
+   with self.subTest(case=case):
+    execute,actual_stat,_=self.volume_lookup_fixture(**case)
+    with patch.object(c.sys,'platform','darwin'),patch.object(c.subprocess,'check_output',side_effect=execute),patch.object(Path,'stat',actual_stat):
+     with self.assertRaises(RuntimeError):c.apfs_volume_info(self.root)
+ def test_apfs_lookup_deadline_or_command_failure_cannot_reach_clone(self):
+  execute,actual_stat,_=self.volume_lookup_fixture();checks=[0]
+  def deadline():
+   checks[0]+=1
+   if checks[0]==2:raise TimeoutError('original deadline')
+  with patch.object(c.sys,'platform','darwin'),patch.object(c.subprocess,'check_output',side_effect=execute),patch.object(Path,'stat',actual_stat),patch.object(c,'clone_apfs',side_effect=AssertionError('clone after deadline')):
+   with self.assertRaises(TimeoutError):c.prove_apfs(self.root,deadline)
+  with patch.object(c.sys,'platform','darwin'),patch.object(c.subprocess,'check_output',side_effect=c.subprocess.CalledProcessError(1,['/bin/df'])),patch.object(c,'clone_apfs',side_effect=AssertionError('clone after failed lookup')):
+   with self.assertRaises(c.subprocess.CalledProcessError):c.prove_apfs(self.root)
  def test_private_clone_is_independent_and_corruption_refused(self):
   p=c.snapshot(self.shared,self.a);p.parent.mkdir(parents=True);p.write_bytes(b'data');q,origin=c.stage_file(self.shared,self.cache,self.a,lambda:None,clone=shutil.copyfile);r=c.verify_file(q,self.a,lambda:None);self.assertTrue(r['contentVerified']);q.resolve().chmod(0o600);q.write_bytes(b'evil');self.assertEqual(p.read_bytes(),b'data')
   with self.assertRaises(RuntimeError):c.verify_file(q,self.a,lambda:None)
