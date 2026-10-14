@@ -1,0 +1,1035 @@
+{
+  "schemaVersion": 1,
+  "scope": "named-required",
+  "status": "Source-bound synthetic conditioning plan; actualIDs unbound until normal owned imports/readbacks; no GPU/mediaquality acceptance",
+  "approvedPayloadSha256": "016e6c467244ed1cf6b51d19e360e5f391a71f9abca88a4688610740b3de37a9",
+  "catalogSha256": "07e3079ecd9af63221743fbc6ec7125ffd2ea7f50303f83cd257e49265ab4989",
+  "sourceAuthority": {
+    "sceneworksRef": "4f2885ca0cc89343d84f8d591dd90d22e294894c",
+    "inferenceRef": "90768c9c481543cd3f24ea24dd0a43ef22183fa1"
+  },
+  "canvases": [
+    "1536x672",
+    "672x1536",
+    "1344x768",
+    "768x1344",
+    "1024x768",
+    "768x1024",
+    "768x768",
+    "576x320",
+    "320x576"
+  ],
+  "namedFrames": [
+    124,
+    141,
+    243,
+    345
+  ],
+  "namedMatrixCells": 5400,
+  "optionalStressAdded": 0,
+  "provenance": "Locally generated CPU-only synthetic conditioning fixtures; no private-media scan, no upstream media reuse, no generated H3 output. These files exercise product carrier plumbing only and are not media-quality or model-acceptance evidence.",
+  "assets": {
+    "first_1536x672": {
+      "file": "images/first/01-1536x672.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 27704,
+      "sha256": "bd8e8a1e310eb6c7f1c7b548a9ca69c1b904852cf5ba83de571a3914a139349c",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1536,
+          "height": 672,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 100
+      },
+      "canvas": "1536x672"
+    },
+    "first_672x1536": {
+      "file": "images/first/02-672x1536.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 23890,
+      "sha256": "af2007cf20bfcb28c6fae8cd1583e852cc13e37e547d8f64f5cd023e077c5f84",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 672,
+          "height": 1536,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 101
+      },
+      "canvas": "672x1536"
+    },
+    "first_1344x768": {
+      "file": "images/first/03-1344x768.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 26290,
+      "sha256": "4b70dc5be41c161b7299d9ba4fd2ca714ba64c630cb738a3a771a159458e02ac",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1344,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 102
+      },
+      "canvas": "1344x768"
+    },
+    "first_768x1344": {
+      "file": "images/first/04-768x1344.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 26044,
+      "sha256": "9174863e403a017d0b12f70a0dbe517805c336136b52cb04290a54ca4ba37123",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1344,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 103
+      },
+      "canvas": "768x1344"
+    },
+    "first_1024x768": {
+      "file": "images/first/05-1024x768.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 20907,
+      "sha256": "0c70c279c6b15af3a74399b7cee52e2958acfe2101a13f9dbda3fcd9e84a59db",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1024,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 104
+      },
+      "canvas": "1024x768"
+    },
+    "first_768x1024": {
+      "file": "images/first/06-768x1024.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 19857,
+      "sha256": "e41b992ce3e8cd74174ff47bdc9395eb0cd420777ef9a8c57473b36d739229b4",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1024,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 105
+      },
+      "canvas": "768x1024"
+    },
+    "first_768x768": {
+      "file": "images/first/07-768x768.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 14936,
+      "sha256": "9b371f019f932c035dec84d82f75eaa65028461db617e213f35e9354fd3c4662",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 106
+      },
+      "canvas": "768x768"
+    },
+    "first_576x320": {
+      "file": "images/first/08-576x320.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 4461,
+      "sha256": "63195b0bfeb6c738623311036fb0da2d4d38db1b41158cd7869621411d4fe652",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 576,
+          "height": 320,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 107
+      },
+      "canvas": "576x320"
+    },
+    "first_320x576": {
+      "file": "images/first/09-320x576.png",
+      "type": "image",
+      "role": "first",
+      "bytes": 3232,
+      "sha256": "3de5d648235810495da2ffafd33bf0e77f80707086bdef342e54e20df409583c",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 320,
+          "height": 576,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 108
+      },
+      "canvas": "320x576"
+    },
+    "last_1536x672": {
+      "file": "images/last/01-1536x672.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 27703,
+      "sha256": "3fbaa3f484684b667da40df3bf814d3bba91ed648dffd4d279f4507962362fd5",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1536,
+          "height": 672,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 140
+      },
+      "canvas": "1536x672"
+    },
+    "last_672x1536": {
+      "file": "images/last/02-672x1536.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 23898,
+      "sha256": "754375cfe068cbec6bd936787fe2db869edef5fd25ea1eeaaa05c379c43b16f0",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 672,
+          "height": 1536,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 141
+      },
+      "canvas": "672x1536"
+    },
+    "last_1344x768": {
+      "file": "images/last/03-1344x768.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 26295,
+      "sha256": "3bfa1c7a4d390adcca0d21c446a814740b7ae691541c0e4e49ca41c2f08e6332",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1344,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 142
+      },
+      "canvas": "1344x768"
+    },
+    "last_768x1344": {
+      "file": "images/last/04-768x1344.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 26044,
+      "sha256": "9425dcd0920d76698e80767cc42cfefdbf127c63c087b38bedddd8df81d06c28",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1344,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 143
+      },
+      "canvas": "768x1344"
+    },
+    "last_1024x768": {
+      "file": "images/last/05-1024x768.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 20907,
+      "sha256": "0a77a212887968840473bcb361436224b4ee3429ad078681734b9e429e8af332",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1024,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 144
+      },
+      "canvas": "1024x768"
+    },
+    "last_768x1024": {
+      "file": "images/last/06-768x1024.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 19857,
+      "sha256": "98182200eacb5e3766bd1bd74df7179c7f79c2202ce05e40ea746bb7d69c507f",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1024,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 145
+      },
+      "canvas": "768x1024"
+    },
+    "last_768x768": {
+      "file": "images/last/07-768x768.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 14937,
+      "sha256": "1ec7f1adc658196e423febe17ee333bd9a327b1192076f0306a646f6dda52360",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 146
+      },
+      "canvas": "768x768"
+    },
+    "last_576x320": {
+      "file": "images/last/08-576x320.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 4462,
+      "sha256": "af6457d9e12e052c4e66f75d3843b22e7caa558439922fda55d788504794d672",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 576,
+          "height": 320,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 147
+      },
+      "canvas": "576x320"
+    },
+    "last_320x576": {
+      "file": "images/last/09-320x576.png",
+      "type": "image",
+      "role": "last",
+      "bytes": 3232,
+      "sha256": "28a9d5fbef2704c6596aaabc035351f712d2147156544369b01e177fa4a0c363",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 320,
+          "height": 576,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 148
+      },
+      "canvas": "320x576"
+    },
+    "reference_1536x672": {
+      "file": "images/reference/01-1536x672.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 27700,
+      "sha256": "d1a13104a8b3177a3418ca9c637c02a455b6db3977ecf77569d75cb2d1d86689",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1536,
+          "height": 672,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 180
+      },
+      "canvas": "1536x672"
+    },
+    "reference_672x1536": {
+      "file": "images/reference/02-672x1536.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 23890,
+      "sha256": "11a59b84a17e37333e869630d91b8b910481b4135ae6f1d3aa9e605f2dcfef6e",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 672,
+          "height": 1536,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 181
+      },
+      "canvas": "672x1536"
+    },
+    "reference_1344x768": {
+      "file": "images/reference/03-1344x768.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 26293,
+      "sha256": "1aa74d4185be33279769e2d0a630e2bef3301416261f752bf4560899126b7249",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1344,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 182
+      },
+      "canvas": "1344x768"
+    },
+    "reference_768x1344": {
+      "file": "images/reference/04-768x1344.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 26048,
+      "sha256": "9c63f24fba3d4b8af483e90853258e3311bc1e4e5f889b9ccde98d0c886dfdab",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1344,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 183
+      },
+      "canvas": "768x1344"
+    },
+    "reference_1024x768": {
+      "file": "images/reference/05-1024x768.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 20958,
+      "sha256": "5fad77148e088a1256d8a6b0f5af90dbf75b75bfa750ea17fd0a6e53364dfaa3",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 1024,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 184
+      },
+      "canvas": "1024x768"
+    },
+    "reference_768x1024": {
+      "file": "images/reference/06-768x1024.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 19860,
+      "sha256": "45931cc65632fd4176ad1ab3ee34268babc1e53a42dd5b4539e8e5ac5d5f7b7d",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 1024,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 185
+      },
+      "canvas": "768x1024"
+    },
+    "reference_768x768": {
+      "file": "images/reference/07-768x768.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 14964,
+      "sha256": "712b7c9cae6019b9ceb641e1d72f8f95379bf70c760b18b1cd8a9a8a99e9be3d",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 768,
+          "height": 768,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 186
+      },
+      "canvas": "768x768"
+    },
+    "reference_576x320": {
+      "file": "images/reference/08-576x320.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 4461,
+      "sha256": "945d4cc4f105dca97ab7685d9909f9d55ccfb467bb88c1a79b3ad38efcdd7d1e",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 576,
+          "height": 320,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 187
+      },
+      "canvas": "576x320"
+    },
+    "reference_320x576": {
+      "file": "images/reference/09-320x576.png",
+      "type": "image",
+      "role": "reference",
+      "bytes": 3230,
+      "sha256": "de40f6f7255d666bcba16ec5e0612b4248167bad58ebd04ee7695f55cf48ff01",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 320,
+          "height": 576,
+          "codec": "png",
+          "pixel_format": "rgb24"
+        },
+        "fixture_seed": 188
+      },
+      "canvas": "320x576"
+    },
+    "clip_silent": {
+      "file": "clips/silent-13f-24fps.mp4",
+      "type": "video",
+      "role": "silent",
+      "bytes": 2356,
+      "sha256": "c39699a1755d5db8a38095bf02e0372d5f6565d60f13d5e5d3246724e0df4682",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 640,
+          "height": 360,
+          "codec": "h264",
+          "pixel_format": "yuv420p",
+          "fps": "24/1",
+          "decoded_frames": 13
+        }
+      }
+    },
+    "clip_attached_soundtrack": {
+      "file": "clips/attached_soundtrack-13f-24fps.mp4",
+      "type": "video",
+      "role": "attached_soundtrack",
+      "bytes": 10104,
+      "sha256": "b7b334b106cb781300c41fc66ec8ed173df715ee3a4003a25b7ec59d045d74e7",
+      "hasAudio": true,
+      "mediaMetadata": {
+        "video": {
+          "width": 640,
+          "height": 360,
+          "codec": "h264",
+          "pixel_format": "yuv420p",
+          "fps": "24/1",
+          "decoded_frames": 13
+        },
+        "audio": {
+          "codec": "aac",
+          "channels": 2,
+          "sample_rate": 32000
+        }
+      }
+    },
+    "clip_silent_cap3": {
+      "file": "clips/silent_cap3-13f-24fps.mp4",
+      "type": "video",
+      "role": "silent_cap3",
+      "bytes": 2356,
+      "sha256": "78698141af72e7433492ae790b76d36f595a6eec6a3cdedd8279de1056ad3957",
+      "hasAudio": false,
+      "mediaMetadata": {
+        "video": {
+          "width": 640,
+          "height": 360,
+          "codec": "h264",
+          "pixel_format": "yuv420p",
+          "fps": "24/1",
+          "decoded_frames": 13
+        }
+      }
+    },
+    "audio_1": {
+      "file": "audio/reference-01-220hz-32k-stereo.wav",
+      "type": "audio",
+      "role": "standalone_audio",
+      "bytes": 128078,
+      "sha256": "f7998667f4d92de5005ad764d2de70eeffc9855b4386aadce5cf3d0a166f5d33",
+      "hasAudio": true,
+      "mediaMetadata": {
+        "audio": {
+          "codec": "pcm_s16le",
+          "channels": 2,
+          "sample_rate": 32000
+        }
+      }
+    },
+    "audio_2": {
+      "file": "audio/reference-02-440hz-32k-stereo.wav",
+      "type": "audio",
+      "role": "standalone_audio",
+      "bytes": 128078,
+      "sha256": "474d8aea24e5fe3c6330dc075e2a0e824b0cf502f166cc323af3611719272095",
+      "hasAudio": true,
+      "mediaMetadata": {
+        "audio": {
+          "codec": "pcm_s16le",
+          "channels": 2,
+          "sample_rate": 32000
+        }
+      }
+    },
+    "audio_3": {
+      "file": "audio/reference-03-660hz-32k-stereo.wav",
+      "type": "audio",
+      "role": "standalone_audio",
+      "bytes": 128078,
+      "sha256": "b28b251567ce5ad3c0432428ac437d56fe69e8b44f773470118200ae59560d91",
+      "hasAudio": true,
+      "mediaMetadata": {
+        "audio": {
+          "codec": "pcm_s16le",
+          "channels": 2,
+          "sample_rate": 32000
+        }
+      }
+    }
+  },
+  "bindings": {
+    "t2va": {
+      "seed": 2867295629,
+      "byCanvas": {
+        "1536x672": {},
+        "672x1536": {},
+        "1344x768": {},
+        "768x1344": {},
+        "1024x768": {},
+        "768x1024": {},
+        "768x768": {},
+        "576x320": {},
+        "320x576": {}
+      }
+    },
+    "fl2va_first": {
+      "seed": 2201526966,
+      "byCanvas": {
+        "1536x672": {
+          "first": "first_1536x672"
+        },
+        "672x1536": {
+          "first": "first_672x1536"
+        },
+        "1344x768": {
+          "first": "first_1344x768"
+        },
+        "768x1344": {
+          "first": "first_768x1344"
+        },
+        "1024x768": {
+          "first": "first_1024x768"
+        },
+        "768x1024": {
+          "first": "first_768x1024"
+        },
+        "768x768": {
+          "first": "first_768x768"
+        },
+        "576x320": {
+          "first": "first_576x320"
+        },
+        "320x576": {
+          "first": "first_320x576"
+        }
+      }
+    },
+    "fl2va_last": {
+      "seed": 507579340,
+      "byCanvas": {
+        "1536x672": {
+          "last": "last_1536x672"
+        },
+        "672x1536": {
+          "last": "last_672x1536"
+        },
+        "1344x768": {
+          "last": "last_1344x768"
+        },
+        "768x1344": {
+          "last": "last_768x1344"
+        },
+        "1024x768": {
+          "last": "last_1024x768"
+        },
+        "768x1024": {
+          "last": "last_768x1024"
+        },
+        "768x768": {
+          "last": "last_768x768"
+        },
+        "576x320": {
+          "last": "last_576x320"
+        },
+        "320x576": {
+          "last": "last_320x576"
+        }
+      }
+    },
+    "fl2va_both": {
+      "seed": 4041184709,
+      "byCanvas": {
+        "1536x672": {
+          "first": "first_1536x672",
+          "last": "last_1536x672"
+        },
+        "672x1536": {
+          "first": "first_672x1536",
+          "last": "last_672x1536"
+        },
+        "1344x768": {
+          "first": "first_1344x768",
+          "last": "last_1344x768"
+        },
+        "768x1344": {
+          "first": "first_768x1344",
+          "last": "last_768x1344"
+        },
+        "1024x768": {
+          "first": "first_1024x768",
+          "last": "last_1024x768"
+        },
+        "768x1024": {
+          "first": "first_768x1024",
+          "last": "last_768x1024"
+        },
+        "768x768": {
+          "first": "first_768x768",
+          "last": "last_768x768"
+        },
+        "576x320": {
+          "first": "first_576x320",
+          "last": "last_576x320"
+        },
+        "320x576": {
+          "first": "first_320x576",
+          "last": "last_320x576"
+        }
+      }
+    },
+    "r2va_mixed": {
+      "seed": 155630826,
+      "byCanvas": {
+        "1536x672": {
+          "images": [
+            "reference_1536x672"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "672x1536": {
+          "images": [
+            "reference_672x1536"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "1344x768": {
+          "images": [
+            "reference_1344x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x1344": {
+          "images": [
+            "reference_768x1344"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "1024x768": {
+          "images": [
+            "reference_1024x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x1024": {
+          "images": [
+            "reference_768x1024"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x768": {
+          "images": [
+            "reference_768x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "576x320": {
+          "images": [
+            "reference_576x320"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "320x576": {
+          "images": [
+            "reference_320x576"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        }
+      }
+    }
+  },
+  "boundaryBindings": {
+    "images_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [],
+      "audio": []
+    },
+    "clips_at_cap": {
+      "images": [],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": []
+    },
+    "audio_at_cap_with_visual": {
+      "images": [
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "combined_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "combined_images_clips_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": []
+    },
+    "combined_images_audio_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "soundtrack_slot_accounting": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024"
+      ],
+      "clips": [
+        "clip_attached_soundtrack",
+        "clip_attached_soundtrack",
+        "clip_attached_soundtrack"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "images_over": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576",
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": []
+    },
+    "clips_over": {
+      "images": [],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3",
+        "clip_silent"
+      ],
+      "audio": []
+    },
+    "audio_over": {
+      "images": [
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3",
+        "audio_1"
+      ]
+    },
+    "combined_over": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "audio_only": {
+      "images": [],
+      "clips": [],
+      "audio": [
+        "audio_1"
+      ]
+    },
+    "empty_refs": {
+      "images": [],
+      "clips": [],
+      "audio": []
+    }
+  },
+  "boundaryInterpretation": "102 normal product boundary identities,74 admitted proofs/28API refusals; no qualitymatrix extension. Soundtrack-slot accounting repeats same attachedclip3times intentionally: sourcecounts ordered referenceentries; no uniqueID restriction invented. Atcap9images/3clips/3audio use uniqueIDs; overcapcases reuse finite known files."
+}

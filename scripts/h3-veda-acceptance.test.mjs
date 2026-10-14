@@ -5,12 +5,21 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Readable } from "node:stream";
-import { catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, verifiedArmLifetime, pairedMemoryEnvelope, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
+import { artifactsForHost, catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, verifiedArmLifetime, pairedMemoryEnvelope, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
 import { mse, pairedStreams } from "./h3-veda-metrics.mjs";
+import { CAP_CASES, carrierBinding, publishedBoundaryRows, validateRefusal, bindCorpusPlan } from "./h3-veda-corpus.mjs";
 const catalog = await catalogs();
 const H = "a".repeat(40), D = "b".repeat(64);
 function manifest() {
   const m = { schemaVersion: 1, scope: "named-required", campaignId: "cpu-test", projectId: "owned-project", sourceFreeze: { stage: "permanent-inference-main-pin", inferencePin: H, sceneworks: { root: "/frozen/sw", head: H }, inference: { root: "/frozen/inference", head: H } }, styles: [{ id: "style", source: { repo: "author/style", revision: H, file: "style.safetensors" }, licenseEvidence: "declared model card license", compatibilityEvidence: { sha256: D }, weight: 1, trigger: "cartoon", models: ["minimax_h3", "minimax_h3_ref"], path: "/fixture/style" }], artifacts: [{}], assets: { first: { assetId: "first" }, last: { assetId: "last" }, image: { assetId: "image" }, clip: { assetId: "clip", hasAudio: true }, audio: { assetId: "audio" } }, prompts: Object.fromEntries(Object.keys(PROFILES).map((p) => [p, "A cyclist by the sea, surf and bell audible."])), bindings: { t2va: { seed: 1 }, fl2va_first: { seed: 2, first: "first" }, fl2va_last: { seed: 3, last: "last" }, fl2va_both: { seed: 4, first: "first", last: "last" }, r2va_mixed: { seed: 5, images: ["image"], clips: ["clip"], audio: ["audio"] } }, turboArtifacts: Object.fromEntries(catalog.loras.map((l) => [l.id, { ...l.source, modelIds: l.modelIds, path: `/fixture/${l.id}` }])), runners: { mlx: { requestedGpu: "local-mlx", workerId: "worker", reportedBackend: "mlx", kernel: "masked_sdpa", physicalGpuId: "gpu", workerBinary: { sha256: D } }, candle_cuda: { requestedGpu: "cuda-owned", workerId: "cuda-worker", reportedBackend: "cuda", kernel: "cuda_kernel", physicalGpuId: "cuda-uuid", workerBinary: { sha256: D } } }, proofRoutes: Object.fromEntries(PROOFS.map((id) => [id, { route: "product_job", requirement: "approved E1-E9" }])), limits: { maxJobs: 2, jobTimeoutMs: 10000, maxMediaBytes: 100000 } };
+  for (const key of ["first", "last", "image"]) m.assets[key].type = "image";
+  m.assets.clip.type = "video"; m.assets.audio.type = "audio";
+  const keys = { images: ["image"], clips: ["clip"], audio: ["audio"] };
+  for (const [field, count, type] of [["images",9,"image"],["clips",3,"video"],["audio",3,"audio"]]) for(let i=1;i<count;i++) {
+    const key = `${field}-${i}`; keys[field].push(key); m.assets[key] = { assetId:key,type,hasAudio:field!=="images" };
+  }
+  m.boundaryBindings = Object.fromEntries(Object.entries(CAP_CASES).map(([id,spec]) => [id,Object.fromEntries(["images","clips","audio"].map((field,i)=>[field,Array.from({length:spec.counts[i]},(_,n)=>keys[field][n%keys[field].length])]))]));
+  m.corpusPlan={sha256:D};m.corpusImportReceipt={sha256:D};
   return m;
 }
 const row = matrix(catalog)[0];
@@ -147,3 +156,45 @@ test("declared fallback proof requires the actual exact reason and dense executi
 test("phase resource guard failure stops submission even after source intake passes",async(t)=> {const x=await execute(t);const g=guard(x.m);g.beforePhase=async(phase)=>({phase,admitted:false});x.options.physical=async()=>g;await assert.rejects(x.run(),/stale\/unadmitted/);assert.equal(x.mocks.posts,0);});
 
 test("bounded timeout cancels only the persisted owned job and reads back before releasing",async(t)=> { const x=await execute(t,"timeout",m=>m.limits.jobTimeoutMs=1);x.options.sleep=async()=>new Promise(resolve=>setTimeout(resolve,2));await assert.rejects(x.run(),/owned job timeout/);const state=JSON.parse(await readFile(path.join(x.dir,"campaign.json")));assert.equal(state.cells[row.id].arms.dense.job.id,"job-1");assert.equal(state.cells[row.id].arms.dense.job.status,"canceled");assert.equal(state.cells[row.id].arms.dense.status,"timeout_cancelled_read_back");assert.equal(x.mocks.posts,1);assert.equal(x.mocks.releases,1); });
+
+
+test("complete corpus overrides retain every named bucket and all pair identities",()=>{
+  const m=manifest();for(const profile of Object.keys(PROFILES)) { const original=m.bindings[profile],{seed,...carriers}=original;m.bindings[profile]={seed,byCanvas:Object.fromEntries([...new Set(matrix(catalog).map(r=>r.canvas))].map(canvas=>[canvas,{...carriers}]))}; }
+  const rows=validateShape(m,catalog);assert.equal(rows.filter(r=>!r.style).length,5400);
+  for(const r of rows) { const d=requestFor(m,r,"dense"),s=requestFor(m,r,"sparse");delete s.advanced.veda;assert.deepEqual(d,s);assert.equal(d.seed,m.bindings[r.profile].seed); }
+  delete m.bindings.fl2va_first.byCanvas["768x768"];assert.throws(()=>validateShape(m,catalog),/canvas/);
+});
+test("published boundary corpus has exact14 duration rungs and9\/3\/3\/12 caps without stress",()=>{
+  const m=manifest(),rows=publishedBoundaryRows(catalog,m);assert.equal(rows.length,102);assert.equal(new Set(rows.map(r=>r.id)).size,102);assert.equal(rows.filter(r=>r.kind==="expected_refusal").length,28);
+  for(const backend of ["mlx","candle_cuda"]) for(const profile of ["t2va","r2va_mixed"]) assert.equal(rows.filter(r=>r.backend===backend&&r.profile===profile&&r.boundary.startsWith("published_duration_")).length,14);
+  for(const id of ["images_at_cap","clips_at_cap","audio_at_cap_with_visual","combined_at_cap","combined_over"]) {const r=rows.find(r=>r.boundary===id),q=requestFor(m,r,"sparse");assert.deepEqual([q.referenceAssetIds?.length??0,q.sourceClipAssetIds?.length??0,q.referenceAudioAssetIds?.length??0],CAP_CASES[id].counts);}
+  assert.equal(rows.find(r=>r.boundary==="in_window_duration_snap").frames,158);assert.equal(matrix(catalog).length,5400);
+});
+test("boundary/canvas drift, missing IDs and unrelated refusals fail closed",()=>{
+  for(const mutate of [m=>delete m.boundaryBindings.images_at_cap,m=>m.boundaryBindings.combined_over.audio.pop(),m=>m.assets.image.type="audio",m=>m.assets.clip.assetId="UNBOUND",m=>m.bindings.t2va.seed=-1]) {const m=manifest();mutate(m);assert.throws(()=>validateShape(m,catalog));}
+  const r=publishedBoundaryRows(catalog,manifest()).find(r=>r.boundary==="combined_over");validateRefusal(r,{status:400,value:{error:"minimax_h3_ref takes up to 12 reference files in total, but this request supplies 13"}});
+  for(const response of [{status:201,value:{status:"failed"}},{status:400,value:{error:"missing predictor"}},{status:422,value:{error:"catalog adapter not compatible"}}])assert.throws(()=>validateRefusal(r,response));
+  assert.equal(carrierBinding(manifest(),r).seed,5);
+});
+test("production H3 keyframe predicate compiles and passes CPU Rust tests without native builds",async(t)=>{
+  const dir=await temp(t),binary=path.join(dir,"h3-keyframes-cpu-tests"),source=path.join(path.dirname(new URL(import.meta.url).pathname),"../crates/sceneworks-core/src/h3_keyframes.rs");
+  execFileSync("rustc",["--edition=2021","--test",source,"-o",binary],{timeout:15000});const output=execFileSync(binary,[],{encoding:"utf8",timeout:5000});assert.match(output,/2 passed; 0 failed/);
+});
+
+test("portable33 corpus binds only complete exact owned imports and source byte readbacks",async()=>{
+  const plan=JSON.parse(await readFile(new URL('../config/terminal-evidence/epic-25140-corpus.plan.json',import.meta.url),'utf8')),m=manifest();
+  m.sourceFreeze.files={"config/manifests/builtin.models.jsonc":plan.catalogSha256};
+  const receipt={projectId:"actual-mock-owned-project",planSha256:D,assets:Object.fromEntries(Object.entries(plan.assets).map(([key,a])=>[key,{assetId:`mock-imported-${key}`,path:`/mock/${key}`,bytes:a.bytes,sha256:a.sha256,servedBytes:a.bytes,servedSha256:a.sha256,normalized:{path:`/mock/prepared-${key}`,bytes:1,sha256:D}}]))};
+  const bound=bindCorpusPlan(m,plan,receipt);assert.equal(Object.keys(bound.assets).length,33);assert.equal(Object.keys(bound.boundaryBindings).length,13);assert.equal(publishedBoundaryRows(catalog,bound).length,102);
+  const shape=validateShape(bound,catalog);assert.equal(shape.filter(r=>!r.style).length,5400);
+  for(const r of shape.filter(r=>r.profile==='fl2va_last'))assert.equal(requestFor(bound,r,'sparse').lastFrameAssetId,`mock-imported-last_${r.canvas}`);
+  for(const mutate of [x=>delete x.assets.audio_3,x=>x.assets.audio_3.assetId='UNBOUND',x=>x.assets.audio_3.servedSha256=D,x=>x.planSha256='c'.repeat(64),x=>delete x.assets.audio_3.normalized]){const copy=structuredClone(receipt);mutate(copy);assert.throws(()=>bindCorpusPlan(m,plan,copy));}
+  const twoStyles=[{models:['minimax_h3','minimax_h3_ref'],id:'rough'},{models:['minimax_h3','minimax_h3_ref'],id:'clay'}];assert.equal(matrix(catalog,twoStyles).length,11016);assert.equal(matrix(catalog,twoStyles).filter(r=>r.kind==='expected_refusal').length,1512);
+});
+
+
+test("selected host hashes its artifact projection while complete matrix declarations remain",async(t)=>{
+  const files=[{id:"mlx",coverage:[{backend:"mlx"}]},{id:"cuda",coverage:[{backend:"candle_cuda"}]},{id:"shared",coverage:[{backend:"mlx"},{backend:"candle_cuda"}]}];
+  assert.deepEqual(artifactsForHost(files,"mlx").map(x=>x.id),["mlx","shared"]);assert.deepEqual(artifactsForHost(files,"candle_cuda").map(x=>x.id),["cuda","shared"]);assert.equal(artifactsForHost(files).length,3);assert.throws(()=>artifactsForHost(files,"cpu"));assert.equal(files.length,3);
+  const x=await execute(t);let selection;const validate=x.options.validate;x.options.validate=async(m,options)=>{selection=options.backend;return validate(m,options);};await x.run();assert.equal(selection,"mlx");assert.equal(matrix(catalog).length,5400);assert.equal(new Set(matrix(catalog).map(r=>r.backend)).size,2);
+});

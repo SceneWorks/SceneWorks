@@ -19,7 +19,9 @@
       "config/manifests/builtin.loras.jsonc": "UNBOUND",
       "config/terminal-evidence/epic-25140-requirements.json": "UNBOUND",
       "scripts/h3-veda-acceptance.mjs": "UNBOUND",
-      "scripts/h3-veda-metrics.mjs": "UNBOUND"
+      "scripts/h3-veda-metrics.mjs": "UNBOUND",
+      "scripts/h3-veda-corpus.mjs": "UNBOUND",
+      "config/terminal-evidence/epic-25140-corpus.plan.json": "UNBOUND"
     },
     "artifactInventorySha256": "UNBOUND",
     "resourceContract": {
@@ -130,14 +132,38 @@
       ],
       "weight": 1,
       "trigger": "Rough 2D Cartoon Illustration"
+    },
+    {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "id": "claymation",
+      "source": {
+        "repo": "akhaliq/MiniMax-H3-Claymation-Style-LoRA",
+        "revision": "991e08146a349e00b1837e77f81f415586b19063",
+        "file": "checkpoints/full_claymation_h3_v1_claymation_h3_v1.safetensors"
+      },
+      "licenseEvidence": "UNBOUND original-author model card MiniMax H3 Community License receipt",
+      "compatibilityEvidence": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      },
+      "models": [
+        "minimax_h3",
+        "minimax_h3_ref"
+      ],
+      "weight": 1,
+      "trigger": "claymation"
     }
   ],
   "assets": {
-    "first": {
+    "first_1536x672": {
       "path": "/UNBOUND/absolute/file",
       "bytes": 0,
       "sha256": "UNBOUND",
       "assetId": "UNBOUND",
+      "type": "image",
       "hasAudio": false,
       "normalized": {
         "path": "/UNBOUND/absolute/file",
@@ -145,11 +171,12 @@
         "sha256": "UNBOUND"
       }
     },
-    "last": {
+    "first_672x1536": {
       "path": "/UNBOUND/absolute/file",
       "bytes": 0,
       "sha256": "UNBOUND",
       "assetId": "UNBOUND",
+      "type": "image",
       "hasAudio": false,
       "normalized": {
         "path": "/UNBOUND/absolute/file",
@@ -157,11 +184,12 @@
         "sha256": "UNBOUND"
       }
     },
-    "image": {
+    "first_1344x768": {
       "path": "/UNBOUND/absolute/file",
       "bytes": 0,
       "sha256": "UNBOUND",
       "assetId": "UNBOUND",
+      "type": "image",
       "hasAudio": false,
       "normalized": {
         "path": "/UNBOUND/absolute/file",
@@ -169,11 +197,337 @@
         "sha256": "UNBOUND"
       }
     },
-    "clip": {
+    "first_768x1344": {
       "path": "/UNBOUND/absolute/file",
       "bytes": 0,
       "sha256": "UNBOUND",
       "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "first_1024x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "first_768x1024": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "first_768x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "first_576x320": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "first_320x576": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_1536x672": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_672x1536": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_1344x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_768x1344": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_1024x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_768x1024": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_768x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_576x320": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "last_320x576": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_1536x672": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_672x1536": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_1344x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_768x1344": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_1024x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_768x1024": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_768x768": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_576x320": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "reference_320x576": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "image",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "clip_silent": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "video",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "clip_attached_soundtrack": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "video",
       "hasAudio": true,
       "normalized": {
         "path": "/UNBOUND/absolute/file",
@@ -181,11 +535,51 @@
         "sha256": "UNBOUND"
       }
     },
-    "audio": {
+    "clip_silent_cap3": {
       "path": "/UNBOUND/absolute/file",
       "bytes": 0,
       "sha256": "UNBOUND",
       "assetId": "UNBOUND",
+      "type": "video",
+      "hasAudio": false,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "audio_1": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "audio",
+      "hasAudio": true,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "audio_2": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "audio",
+      "hasAudio": true,
+      "normalized": {
+        "path": "/UNBOUND/absolute/file",
+        "bytes": 0,
+        "sha256": "UNBOUND"
+      }
+    },
+    "audio_3": {
+      "path": "/UNBOUND/absolute/file",
+      "bytes": 0,
+      "sha256": "UNBOUND",
+      "assetId": "UNBOUND",
+      "type": "audio",
       "hasAudio": true,
       "normalized": {
         "path": "/UNBOUND/absolute/file",
@@ -203,32 +597,227 @@
   },
   "bindings": {
     "t2va": {
-      "seed": 2867295629
+      "seed": 2867295629,
+      "byCanvas": {
+        "1536x672": {},
+        "672x1536": {},
+        "1344x768": {},
+        "768x1344": {},
+        "1024x768": {},
+        "768x1024": {},
+        "768x768": {},
+        "576x320": {},
+        "320x576": {}
+      }
     },
     "fl2va_first": {
       "seed": 2201526966,
-      "first": "first"
+      "byCanvas": {
+        "1536x672": {
+          "first": "first_1536x672"
+        },
+        "672x1536": {
+          "first": "first_672x1536"
+        },
+        "1344x768": {
+          "first": "first_1344x768"
+        },
+        "768x1344": {
+          "first": "first_768x1344"
+        },
+        "1024x768": {
+          "first": "first_1024x768"
+        },
+        "768x1024": {
+          "first": "first_768x1024"
+        },
+        "768x768": {
+          "first": "first_768x768"
+        },
+        "576x320": {
+          "first": "first_576x320"
+        },
+        "320x576": {
+          "first": "first_320x576"
+        }
+      }
     },
     "fl2va_last": {
       "seed": 507579340,
-      "last": "last"
+      "byCanvas": {
+        "1536x672": {
+          "last": "last_1536x672"
+        },
+        "672x1536": {
+          "last": "last_672x1536"
+        },
+        "1344x768": {
+          "last": "last_1344x768"
+        },
+        "768x1344": {
+          "last": "last_768x1344"
+        },
+        "1024x768": {
+          "last": "last_1024x768"
+        },
+        "768x1024": {
+          "last": "last_768x1024"
+        },
+        "768x768": {
+          "last": "last_768x768"
+        },
+        "576x320": {
+          "last": "last_576x320"
+        },
+        "320x576": {
+          "last": "last_320x576"
+        }
+      }
     },
     "fl2va_both": {
       "seed": 4041184709,
-      "first": "first",
-      "last": "last"
+      "byCanvas": {
+        "1536x672": {
+          "first": "first_1536x672",
+          "last": "last_1536x672"
+        },
+        "672x1536": {
+          "first": "first_672x1536",
+          "last": "last_672x1536"
+        },
+        "1344x768": {
+          "first": "first_1344x768",
+          "last": "last_1344x768"
+        },
+        "768x1344": {
+          "first": "first_768x1344",
+          "last": "last_768x1344"
+        },
+        "1024x768": {
+          "first": "first_1024x768",
+          "last": "last_1024x768"
+        },
+        "768x1024": {
+          "first": "first_768x1024",
+          "last": "last_768x1024"
+        },
+        "768x768": {
+          "first": "first_768x768",
+          "last": "last_768x768"
+        },
+        "576x320": {
+          "first": "first_576x320",
+          "last": "last_576x320"
+        },
+        "320x576": {
+          "first": "first_320x576",
+          "last": "last_320x576"
+        }
+      }
     },
     "r2va_mixed": {
       "seed": 155630826,
-      "images": [
-        "image"
-      ],
-      "clips": [
-        "clip"
-      ],
-      "audio": [
-        "audio"
-      ]
+      "byCanvas": {
+        "1536x672": {
+          "images": [
+            "reference_1536x672"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "672x1536": {
+          "images": [
+            "reference_672x1536"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "1344x768": {
+          "images": [
+            "reference_1344x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x1344": {
+          "images": [
+            "reference_768x1344"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "1024x768": {
+          "images": [
+            "reference_1024x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x1024": {
+          "images": [
+            "reference_768x1024"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "768x768": {
+          "images": [
+            "reference_768x768"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "576x320": {
+          "images": [
+            "reference_576x320"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        },
+        "320x576": {
+          "images": [
+            "reference_320x576"
+          ],
+          "clips": [
+            "clip_attached_soundtrack"
+          ],
+          "audio": [
+            "audio_1"
+          ]
+        }
+      }
     }
   },
   "runners": {
@@ -375,5 +964,201 @@
     "maxJobs": 2,
     "jobTimeoutMs": 1800000,
     "maxMediaBytes": 2147483648
+  },
+  "corpusPlan": {
+    "path": "/UNBOUND/frozen-sceneworks/config/terminal-evidence/epic-25140-corpus.plan.json",
+    "bytes": 0,
+    "sha256": "UNBOUND"
+  },
+  "corpusImportReceipt": {
+    "path": "/UNBOUND/absolute/file",
+    "bytes": 0,
+    "sha256": "UNBOUND"
+  },
+  "boundaryBindings": {
+    "images_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [],
+      "audio": []
+    },
+    "clips_at_cap": {
+      "images": [],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": []
+    },
+    "audio_at_cap_with_visual": {
+      "images": [
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "combined_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "combined_images_clips_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": []
+    },
+    "combined_images_audio_at_cap": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "soundtrack_slot_accounting": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024"
+      ],
+      "clips": [
+        "clip_attached_soundtrack",
+        "clip_attached_soundtrack",
+        "clip_attached_soundtrack"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "images_over": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768",
+        "reference_576x320",
+        "reference_320x576",
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": []
+    },
+    "clips_over": {
+      "images": [],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3",
+        "clip_silent"
+      ],
+      "audio": []
+    },
+    "audio_over": {
+      "images": [
+        "reference_1536x672"
+      ],
+      "clips": [],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3",
+        "audio_1"
+      ]
+    },
+    "combined_over": {
+      "images": [
+        "reference_1536x672",
+        "reference_672x1536",
+        "reference_1344x768",
+        "reference_768x1344",
+        "reference_1024x768",
+        "reference_768x1024",
+        "reference_768x768"
+      ],
+      "clips": [
+        "clip_silent",
+        "clip_attached_soundtrack",
+        "clip_silent_cap3"
+      ],
+      "audio": [
+        "audio_1",
+        "audio_2",
+        "audio_3"
+      ]
+    },
+    "audio_only": {
+      "images": [],
+      "clips": [],
+      "audio": [
+        "audio_1"
+      ]
+    },
+    "empty_refs": {
+      "images": [],
+      "clips": [],
+      "audio": []
+    }
   }
 }

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { collectComparison } from "./h3-veda-metrics.mjs";
+import { carrierBinding, validateCarrierBinding, validateCorpusBindings, publishedBoundaryRows, validateRefusal, bindCorpusPlan } from "./h3-veda-corpus.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const FRAMES = [124, 141, 243, 345];
@@ -77,13 +78,10 @@ export function validateShape(m, catalog) {
   assert(m.styles.every((s) => typeof s.trigger === "string" && !s.trigger.includes("UNBOUND")), "style trigger unbound");
   for (const profile of Object.keys(PROFILES)) {
     assert(m.prompts[profile]?.trim() && !m.prompts[profile].includes("UNBOUND"), `prompt unbound: ${profile}`);
-    const b = m.bindings[profile]; assert(b && Number.isSafeInteger(b.seed), `seed/binding missing: ${profile}`);
-    const first = !!b.first, last = !!b.last;
-    assert(first === ["fl2va_first", "fl2va_both"].includes(profile) && last === ["fl2va_last", "fl2va_both"].includes(profile), `keyframe shape mismatch: ${profile}`);
-    if (profile === "r2va_mixed") assert(b.images?.length && b.clips?.length && b.audio?.length && b.clips.some((id) => m.assets[id]?.hasAudio === true), "mixed R2VA image/clip soundtrack/standalone audio required");
-    else assert(!b.images?.length && !b.clips?.length && !b.audio?.length, `unexpected reference carriers: ${profile}`);
-    for (const id of [b.first, b.last, ...(b.images ?? []), ...(b.clips ?? []), ...(b.audio ?? [])].filter(Boolean)) assert(m.assets[id]?.assetId && m.assets[id].assetId !== "UNBOUND", `asset ID unbound: ${id}`);
+
   }
+  assert(HEX.test(m.corpusPlan?.sha256) && HEX.test(m.corpusImportReceipt?.sha256), "source corpus plan/import receipt missing");
+  validateCorpusBindings(m, CANVASES);
   const allowedIds = new Set(catalog.loras.map((l) => l.id));
   assert(m.turboArtifacts && Object.keys(m.turboArtifacts).length === allowedIds.size && Object.keys(m.turboArtifacts).every((id) => allowedIds.has(id)), "missing/unknown published Turbo artifact");
   assert(m.limits && Number.isSafeInteger(m.limits.jobTimeoutMs) && m.limits.jobTimeoutMs > 0 && Number.isSafeInteger(m.limits.maxJobs) && m.limits.maxJobs > 0 && Number.isSafeInteger(m.limits.maxMediaBytes) && m.limits.maxMediaBytes > 0, "bounded execution limits required");
@@ -102,22 +100,34 @@ export async function inspectSources(m) {
   const pins = [...cargo.matchAll(/git\s*=\s*"https:\/\/github.com\/SceneWorks\/inference"\s*,\s*rev\s*=\s*"([a-f0-9]{40})"/g)].map((x) => x[1]);
   assert(pins.length && pins.every((p) => p === f.inferencePin), "SceneWorks actual inference pins stale");
   for (const [file, expected] of Object.entries(f.files ?? {})) assert(HEX.test(expected) && await hashFile(path.join(f.sceneworks.root, file)) === expected, `source file fingerprint differs: ${file}`);
-  for (const file of ["config/manifests/builtin.models.jsonc", "config/manifests/builtin.loras.jsonc", "config/terminal-evidence/epic-25140-requirements.json", "scripts/h3-veda-acceptance.mjs", "scripts/h3-veda-metrics.mjs"]) assert(f.files?.[file], `required source fingerprint omitted: ${file}`);
+  for (const file of ["config/manifests/builtin.models.jsonc", "config/manifests/builtin.loras.jsonc", "config/terminal-evidence/epic-25140-requirements.json", "scripts/h3-veda-acceptance.mjs", "scripts/h3-veda-metrics.mjs", "scripts/h3-veda-corpus.mjs", "config/terminal-evidence/epic-25140-corpus.plan.json"]) assert(f.files?.[file], `required source fingerprint omitted: ${file}`);
 }
-export async function validateManifest(m, { catalog, sourceCheck = inspectSources } = {}) {
+export function artifactsForHost(artifacts, backend) {
+  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
+  return backend === undefined ? artifacts : artifacts.filter((a) => a.coverage?.some((c) => c.backend === backend));
+}
+export async function validateManifest(m, { catalog, sourceCheck = inspectSources, backend } = {}) {
+  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
   catalog ??= await catalogs(m.sourceFreeze?.sceneworks?.root);
-  const rows = validateShape(m, catalog);
+  const rows = [...validateShape(m, catalog), ...publishedBoundaryRows(catalog, m)];
   for (const p of m.productProofCases ?? []) {
     assert(PROOFS.includes(p.proof) && ["mlx", "candle_cuda"].includes(p.backend) && Object.keys(PROFILES).includes(p.profile), "unknown terminal product proof");
     const template = rows.find((r) => r.kind === "media" && !r.style && r.backend === p.backend && r.tier === p.tier && r.profile === p.profile && r.recipe === p.recipe && r.canvas === p.canvas && r.frames === p.frames);
     assert(template && ["sparse", "fallback_dense", "controlled_dense"].includes(p.expectation), "terminal product proof outside named configuration or expected outcome missing");
     assert(p.veda?.enabled === true && typeof p.veda.generated === "string" && typeof p.veda.reference === "string" && typeof p.veda.fullAttentionLayers === "string" && typeof p.veda.fullAttentionSteps === "string", "proof control binding incomplete");
     if (p.expectation === "fallback_dense") assert(p.fallbackReason?.trim() && p.setupReceipt?.sha256, "fallback cause/setup receipt unbound");
+    if (p.carriers) validateCarrierBinding(m, carrierBinding(m, { ...template, carriers: p.carriers }), p.profile, { mixed: p.profile === "r2va_mixed" && p.proof !== "published_input_boundaries" });
     rows.push({ ...template, ...p, kind: "product_proof", id: `proof/${p.proof}/${p.id}/${p.backend}` });
   }
   assert(new Set(rows.map((r) => r.id)).size === rows.length, "duplicate terminal case identity");
   await sourceCheck(m);
+  const localArtifacts = artifactsForHost(m.artifacts, backend);
   const snapshots = [];
+  const planBinding=await boundFile(m.corpusPlan), importBinding=await boundFile(m.corpusImportReceipt);
+  assert(planBinding.sha256===m.sourceFreeze.files["config/terminal-evidence/epic-25140-corpus.plan.json"],"corpus plan not frozen source");
+  const bound=bindCorpusPlan(m,JSON.parse(await readFile(planBinding.path,"utf8")),JSON.parse(await readFile(importBinding.path,"utf8")));
+  for(const key of ["projectId","assets","bindings","boundaryBindings"]) assert(digest(bound[key])===digest(m[key]),`owned imported corpus identity differs: ${key}`);
+  snapshots.push(planBinding,importBinding);
   for (const p of m.productProofCases ?? []) if (p.setupReceipt) {
     const binding = await boundFile(p.setupReceipt), setup = JSON.parse(await readFile(binding.path, "utf8"));
     assert(setup.fingerprint === digest(m.sourceFreeze) && setup.backend === p.backend && setup.proof === p.proof, "forced-condition setup provenance differs"); snapshots.push(binding);
@@ -125,7 +135,8 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   for (const a of m.artifacts) {
     assert(a.id && a.repo && HEAD.test(a.revision) && a.file && a.coverage?.length, "model artifact identity incomplete");
     // A frozen catalog inventory binds every expected file, not a self-selected happy-path subset.
-    snapshots.push(await boundFile(a));
+    assert(HEX.test(a.sha256) && Number.isSafeInteger(a.bytes) && a.bytes > 0 && typeof a.path === "string", "artifact descriptor unbound on either backend");
+    if (localArtifacts.includes(a)) snapshots.push(await boundFile(a));
   }
   assert(new Set(m.artifacts.map((a) => a.id)).size === m.artifacts.length, "duplicate model artifacts");
   assert(m.sourceFreeze.artifactInventorySha256 === m.artifactInventory.sha256, "complete artifact inventory absent from source freeze");
@@ -143,21 +154,24 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   }
   for (const s of m.styles) { snapshots.push(await boundFile(s)); snapshots.push(await boundFile(s.compatibilityEvidence)); }
   for (const a of Object.values(m.assets)) { snapshots.push(await boundFile(a)); snapshots.push(await boundFile(a.normalized)); }
-  for (const backend of ["mlx", "candle_cuda"]) {
-    const r = m.runners?.[backend]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[backend]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${backend}`); snapshots.push(await boundFile(r.physicalGuardAdapter)); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend === (backend === "mlx" ? "mlx" : "cuda") && r.kernel && r.physicalGpuId, `runner identity missing or wrong worker backend: ${backend}`);
+  for (const target of ["mlx", "candle_cuda"]) {
+    const r = m.runners?.[target]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[target]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${target}`); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend === (target === "mlx" ? "mlx" : "cuda") && r.kernel && r.physicalGpuId, `runner identity missing or wrong worker backend: ${target}`);
+    for (const file of [r.physicalGuardAdapter,r.apiBinary,r.workerBinary,r.attestation]) assert(typeof file?.path === "string" && HEX.test(file.sha256) && Number.isSafeInteger(file.bytes) && file.bytes > 0, `host descriptor missing: ${target}`);
+    if (backend !== undefined && target !== backend) continue;
+    snapshots.push(await boundFile(r.physicalGuardAdapter));
     snapshots.push(await boundFile(r.apiBinary)); snapshots.push(await boundFile(r.workerBinary));
     const attestation = JSON.parse(await readFile((await boundFile(r.attestation)).path, "utf8"));
-    assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${backend}`);
+    assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${target}`);
   }
-  return { rows, catalog, snapshots, fingerprint: digest(m) };
+  return { rows, catalog, snapshots, fingerprint: digest(m), hostValidation: { selectedBackend: backend ?? "all-local", actualFileVerificationBackends: backend ? [backend] : ["mlx", "candle_cuda"], otherBackendAcceptance: false } };
 }
 async function unchanged(snapshots) { for (const b of snapshots) { const s = await stat(b.path); assert(s.size === b.bytes && s.mtimeMs === b.mtimeMs && s.ino === b.ino, `artifact/carrier changed during campaign: ${b.path}`); } }
 export function requestFor(m, row, arm) {
-  const b = m.bindings[row.profile], [width, height] = row.canvas.split("x").map(Number);
+  const b = carrierBinding(m, row), [width, height] = row.canvas.split("x").map(Number);
   const recipe = m.turboArtifacts[row.recipe]; const style = m.styles.find((s) => s.id === row.style);
   const loras = [recipe && { id: row.recipe, family: "minimax-h3", modelIds: recipe.modelIds, path: recipe.path, weight: 1, file: recipe.file }, style && { id: style.id, family: "minimax-h3", path: style.path, weight: style.weight, file: style.source.file }].filter(Boolean);
   const id = (key) => m.assets[key].assetId;
-  const request = { projectId: m.projectId, model: row.model, mode: row.profile === "t2va" ? "text_to_video" : row.profile === "r2va_mixed" ? "reference_to_video" : row.profile === "fl2va_both" ? "first_last_frame" : "image_to_video", prompt: m.prompts[row.profile] + (style ? ` ${style.trigger}` : ""), seed: b.seed, duration: row.duration, fps: 24, width, height, requestedGpu: m.runners[row.backend].requestedGpu, loras, fitMode: "crop", advanced: { steps: row.sampling.steps, mlxQuantize: row.tier === "bf16" ? 0 : Number(row.tier.slice(1)), schedulerShift: row.sampling.schedulerShift } };
+  const request = { projectId: m.projectId, model: row.model, mode: row.profile === "t2va" ? "text_to_video" : row.profile === "r2va_mixed" ? "reference_to_video" : row.profile === "fl2va_both" ? "first_last_frame" : "image_to_video", prompt: m.prompts[row.profile] + (style ? ` ${style.trigger}` : ""), seed: b.seed, duration: row.duration, fps: 24, width, height, requestedGpu: m.runners[row.backend].requestedGpu, loras, fitMode: "crop", advanced: { steps: row.sampling.steps, mlxQuantize: row.tier === "bf16" ? 0 : Number(row.tier.slice(1)), schedulerShift: row.sampling.schedulerShift, audioSchedulerShift: row.sampling.audioSchedulerShift } };
   if (b.first) request.sourceAssetId = id(b.first); if (b.last) request.lastFrameAssetId = id(b.last);
   for (const [field, list] of [["referenceAssetIds", b.images], ["sourceClipAssetIds", b.clips], ["referenceAudioAssetIds", b.audio]]) if (list?.length) request[field] = list.map(id);
   if (arm === "sparse") request.advanced.veda = row.veda ?? { enabled: true, generated: "90%", reference: "90%", fullAttentionLayers: "", fullAttentionSteps: "" };
@@ -327,7 +341,7 @@ export async function claimLease(m, backend, runDir) {
 export async function runCampaign(m, { backend, runDir, validate = validateManifest, api = new ProductApi(m.runners?.[backend]?.apiUrl, process.env.SCENEWORKS_TOKEN), lease = claimLease, physical = acquirePhysicalGuard, sleep = delay, compare = collectComparison, sourceCheck = inspectSources } = {}) {
   assert(["mlx", "candle_cuda"].includes(backend) && path.isAbsolute(runDir), "explicit backend and external output directory required");
   assert(!runDir.startsWith(`${m.sourceFreeze.sceneworks.root}/`) && !runDir.startsWith(`${m.sourceFreeze.inference.root}/`), "receipts must stay outside frozen source repos");
-  const v = await validate(m); await mkdir(runDir, { recursive: true });
+  const v = await validate(m, { backend }); await mkdir(runDir, { recursive: true });
   const campaignFile = path.join(runDir, "campaign.json"); let state;
   try { state = JSON.parse(await readFile(campaignFile, "utf8")); assert(state.fingerprint === v.fingerprint, "resume input/source/artifact identity differs"); } catch (e) { if (e.code !== "ENOENT") throw e; state = { fingerprint: v.fingerprint, campaignId: m.campaignId, namedCells: 5400, optionalStressExecuted: 0, cells: {}, qualityAcceptance: "pending Michael", completedAcceptance: false }; }
   const guard = await physical(m, backend, runDir); let release;
@@ -345,7 +359,7 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       await sourceCheck(m); await unchanged(v.snapshots); await physicalPhase(guard, m, backend, "prepare-carriers");
       for (const asset of Object.values(m.assets)) {
         const r = await api.json(`/api/v1/projects/${encodeURIComponent(m.projectId)}/assets/${encodeURIComponent(asset.assetId)}`);
-        assert(r.status === 200 && r.value.id === asset.assetId, "product carrier asset missing/stale");
+        assert(r.status === 200 && r.value.id === asset.assetId && r.value.type === asset.type, "product carrier asset missing/stale/wrong type");
         await api.verifyCarrier(r.value, { ...asset, projectId: m.projectId }, m.limits.maxMediaBytes);
       }
       cell ??= { kind: row.kind, status: "planned", arms: {} }; state.cells[row.id] = cell;
@@ -367,7 +381,7 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
           attempt.status = "submitting"; await atomic(campaignFile, state); submitted++;
           let r; try { r = await guard.submit(attempt); } catch (error) { attempt.status = "ambiguous"; attempt.error = String(error); await atomic(campaignFile, state); throw error; }
           if (row.kind === "expected_refusal") {
-            const text = JSON.stringify(r.value); assert([400, 422].includes(r.status) && text.includes(row.recipe) && /declared.*not|not.*compatible/i.test(text), "expected modelIds refusal absent or unrelated error"); attempt.status = "expected_refusal"; attempt.response = r; cell.status = "expected_refusal_observed"; await atomic(campaignFile, state); continue;
+            validateRefusal(row, r); attempt.status = "expected_refusal"; attempt.response = r; cell.status = "expected_refusal_observed"; cell.refusalCategory = row.refusal?.category ?? "catalog_model_ids"; await atomic(campaignFile, state); continue;
           }
           assert(r.status === 201 && r.value.id, `product enqueue failed: HTTP ${r.status}`); job = r.value; attempt.jobId = job.id; attempt.status = "enqueued"; await atomic(campaignFile, state); await guard.attachJob(attempt);
         }
@@ -435,12 +449,21 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
 }
 export function summary(state) {
   const cells = Object.values(state.cells), count = (status) => cells.filter((c) => c.status === status).length;
-  return { namedCells: 5400, knownCells: cells.length, expectedRefusalsObserved: count("expected_refusal_observed"), mediaCollectedPendingMichael: count("media_collected_review_pending") + count("media_collected_evidence_incomplete"), instrumentationIncomplete: count("media_collected_evidence_incomplete"), productProofsObserved: count("product_proof_observed"), unresolved: count("unresolved"), qualityAcceptance: "pending Michael", completedAcceptance: false };
+  return { namedCells: 5400, knownCells: cells.length, expectedRefusalsObserved: cells.filter((c) => c.status === "expected_refusal_observed" && c.refusalCategory !== "input_boundary").length, inputBoundaryRefusalsObserved: cells.filter((c) => c.status === "expected_refusal_observed" && c.refusalCategory === "input_boundary").length, mediaCollectedPendingMichael: count("media_collected_review_pending") + count("media_collected_evidence_incomplete"), instrumentationIncomplete: count("media_collected_evidence_incomplete"), productProofsObserved: count("product_proof_observed"), unresolved: count("unresolved"), qualityAcceptance: "pending Michael", completedAcceptance: false };
 }
 async function main() {
   const [command, manifestPath, ...args] = process.argv.slice(2);
   const m = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (command === "validate") { const v = await validateManifest(m); console.log(JSON.stringify({ fingerprint: v.fingerprint, cells: v.rows.length, named: 5400, expectedRefusals: v.rows.filter((r) => r.kind === "expected_refusal").length, acceptance: false })); return; }
+  if(command==="bind-corpus") {
+    assert(args.length===3,"usage: bind-corpus MANIFEST PLAN IMPORT_RECEIPT OUTPUT");
+    const binding=async(file)=>({path:path.resolve(file),bytes:(await stat(file)).size,sha256:await hashFile(file)});
+    m.corpusPlan=await binding(args[0]);m.corpusImportReceipt=await binding(args[1]);
+    const result=bindCorpusPlan(m,JSON.parse(await readFile(args[0],"utf8")),JSON.parse(await readFile(args[1],"utf8")));
+    const output=path.resolve(args[2]);
+    for(const repo of [m.sourceFreeze.sceneworks.root,m.sourceFreeze.inference.root]) assert(output!==path.resolve(repo) && !output.startsWith(path.resolve(repo)+path.sep),"bound corpus output must stay outside frozen repos");
+    await atomic(output,result);console.log(JSON.stringify({assets:Object.keys(result.assets).length,boundaryBindings:Object.keys(result.boundaryBindings).length,status:"IDs bound from supplied actual import/readback receipt; runtime/source validation still required",acceptance:false}));return;
+  }
+  if (command === "validate") { assert(args.length <= 1, "usage: validate MANIFEST [BACKEND]"); const v = await validateManifest(m, { backend: args[0] }); console.log(JSON.stringify({ fingerprint: v.fingerprint, cells: v.rows.length, named: 5400, expectedRefusals: v.rows.filter((r) => r.kind === "expected_refusal" && !r.boundary).length, inputBoundaryRefusals: v.rows.filter((r) => r.kind === "expected_refusal" && r.boundary).length, hostValidation: v.hostValidation, acceptance: false })); return; }
   assert(command === "run" && args.length === 2, "usage: validate MANIFEST | run MANIFEST BACKEND EXTERNAL_RUN_DIR");
   console.log(JSON.stringify(summary(await runCampaign(m, { backend: args[0], runDir: path.resolve(args[1]) }))));
 }

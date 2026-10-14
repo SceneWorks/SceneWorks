@@ -5330,9 +5330,21 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
         validate_dimension(height, "height", MAX_VIDEO_DIMENSION)?;
     }
     match payload.mode.as_str() {
-        "image_to_video" if payload.source_asset_id.is_none() => Err(ApiError::bad_request(
-            "Image to Video requires a source image.",
-        )),
+        "image_to_video"
+            if payload.source_asset_id.is_none()
+                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
+                    &payload.model,
+                    &payload.mode,
+                    payload
+                        .last_frame_asset_id
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty()),
+                ) =>
+        {
+            Err(ApiError::bad_request(
+                "Image to Video requires a source image.",
+            ))
+        }
         "first_last_frame"
             if payload.source_asset_id.is_none() || payload.last_frame_asset_id.is_none() =>
         {
