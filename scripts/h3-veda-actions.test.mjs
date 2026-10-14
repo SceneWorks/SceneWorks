@@ -1,11 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia } from "./h3-veda-actions.mjs";
 import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -116,6 +116,53 @@ test("artifact transport is allowlisted summary and hashed closure, never raw me
   assert.doesNotMatch(text, /PRIVATE_TOKEN|PRIVATE_PROMPT|request/);
 });
 
+test("closed owned review exports exact decoded comparison and product clips with safe source-bound labels", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "s9-review-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const runDir = path.join(root, "run"), outputDir = path.join(root, "upload"), id = "mlx/q4/t2va/base_50/768x768/124/none";
+  const m0 = m(runDir); m0.campaignId = "epic-25140-s9"; m0.runners.mlx.leasePath = path.join(root, "lease"); m0.limits = { maxMediaBytes: 1000 };
+  const cell = { kind: "media", status: "media_collected_evidence_incomplete", arms: {}, comparison: {}, request: "PRIVATE_PROMPT", token: "PRIVATE_TOKEN" };
+  const bind = async (file, bytes) => { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, bytes); return { path: file, bytes: Buffer.byteLength(bytes), sha256: digest(bytes) }; };
+  for (const arm of ["dense", "sparse"]) { const key = digest(arm); cell.arms[arm] = { key, status: "collected", media: await bind(path.join(runDir, key, `${arm}.mp4`), `${arm}-actual-product`) }; }
+  const compare = path.join(runDir, digest(id));
+  cell.comparison.sideBySide = await bind(path.join(compare, "side-by-side.mp4"), "actual-decoded-comparison");
+  cell.comparison.denseAudio = await bind(path.join(compare, "dense.wav"), "actual-dense-audio");
+  cell.comparison.sparseAudio = await bind(path.join(compare, "sparse.wav"), "actual-sparse-audio");
+  const campaign = { campaignId: m0.campaignId, fingerprint: digest(m0), cells: { [id]: cell } };
+  await mkdir(path.join(runDir, "physical-guardian"));
+  await writeFile(path.join(runDir, "manifest.bound.json"), JSON.stringify(m0));
+  await writeFile(path.join(runDir, "campaign.json"), JSON.stringify(campaign));
+  const ownerToken = "a".repeat(48), deadPid = 999999999;
+  await writeFile(path.join(runDir, "physical-guardian/control.json"), JSON.stringify({ token: ownerToken, fingerprint: digest(m0), pid: deadPid }));
+  await writeFile(path.join(runDir, "physical-guardian/closed.json"), JSON.stringify({ closed: true, servicesDrained: true, physicalLockReleased: true, fingerprint: digest(m0), ownerTokenSha256: digest(ownerToken), pid: deadPid }));
+  const rows = [{ id, backend: "mlx", kind: "media", profile: "t2va", model: "minimax_h3", tier: "q4", recipe: "base_50", canvas: "768x768", frames: 124, duration: 5.1667 }];
+  const args = { runDir, backend: "mlx", caseIds: [id], sourceCheck: async () => {}, rows };
+  const result = await exportReviewMedia({ ...args, outputDir });
+  assert.equal(result.files.length, 5); assert.equal(result.selectedCases[0].recipe, "base_50");
+  assert.equal(result.completedAcceptance, false); assert.equal(result.qualityAcceptance, "pending Michael");
+  assert.equal(await readFile(path.join(outputDir, "case-01/side-by-side.mp4"), "utf8"), "actual-decoded-comparison");
+  assert.doesNotMatch(await readFile(path.join(outputDir, "review-media.json"), "utf8"), /PRIVATE_PROMPT|PRIVATE_TOKEN|request/);
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "duplicate"), caseIds: [id, id] }), /unique bounded review/);
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "unknown"), caseIds: ["foreign-case"] }), /outside declared owning-host/);
+  await writeFile(m0.runners.mlx.leasePath, "held");
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "leased") }), /lease still held/);
+  await rm(m0.runners.mlx.leasePath);
+  const closurePath = path.join(runDir, "physical-guardian/closed.json"), validClosure = await readFile(closurePath, "utf8");
+  await writeFile(closurePath, JSON.stringify({ ...JSON.parse(validClosure), ownerTokenSha256: "b".repeat(64) }));
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "wrong-owner") }), /control\/closure identity differs/);
+  await writeFile(closurePath, validClosure);
+  const active = structuredClone(campaign); active.cells[id].arms.dense.status = "ambiguous";
+  await writeFile(path.join(runDir, "campaign.json"), JSON.stringify(active));
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "ambiguous") }), /unresolved live or ambiguous/);
+  await writeFile(path.join(runDir, "campaign.json"), JSON.stringify(campaign));
+  await writeFile(cell.arms.dense.media.path, "tampered-product");
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "tampered") }), /file size\/type mismatch|file digest mismatch/);
+  await writeFile(cell.arms.dense.media.path, "dense-actual-product");
+  await symlink(path.join(root, "outside.mp4"), path.join(root, "link.mp4"));
+  cell.arms.dense.media.path = path.join(root, "link.mp4");
+  await writeFile(path.join(runDir, "campaign.json"), JSON.stringify(campaign));
+  await assert.rejects(exportReviewMedia({ ...args, outputDir: path.join(root, "escaped") }), /media binding incomplete/);
+});
+
 test("cross-host aggregate joins approved scope, exact row dispositions and distinct local imports without inventing acceptance", () => {
   const hex = "a".repeat(64), other = "b".repeat(64);
   const rows = ["mlx", "candle_cuda"].flatMap((backend) => [
@@ -173,6 +220,14 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
 test("workflow binds explicit runner, source, owned import and guardian, with no blanket artifact upload", async () => {
   const workflow = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8");
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
+  assert.match(workflow, /options: \[prepare, resume, review\]/);
+  assert.match(workflow, /review_case_ids:/);
+  assert.match(workflow, /h3-veda-actions\.mjs review/);
+  assert.match(workflow, /h3-veda-review-media-(?:mlx|cuda)-/);
+  for (const step of ["Generate masked job-owned private API token", "Build normal product API and worker from frozen source", "Build normal Candle/CUDA product API and worker from frozen source", "Prepare or verify owned private corpus", "Run bounded guardian-owned native campaign"]) {
+    const escaped = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(workflow, new RegExp(`- name: ${escaped}\\n\\s+if: inputs.mode != 'review'`), `review mode must skip ${step}`);
+  }
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /test "\$RUNNER_NAME" = 'nax-macos-2'/);
   assert.match(workflow, /S9_EXPECTED_RUNNER: \$\{\{ inputs.expected_runner \}\}/);

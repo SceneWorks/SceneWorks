@@ -4,7 +4,8 @@
 import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:net";
-import { readFile, writeFile, appendFile, mkdir, lstat, copyFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { readFile, writeFile, appendFile, mkdir, lstat, copyFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -329,6 +330,67 @@ export function aggregateHostReceipts(left, right) {
   };
 }
 
+const MAX_REVIEW_CASES = 4;
+const MAX_REVIEW_BYTES = 8 * 1024 ** 3;
+export async function exportReviewMedia({ runDir, outputDir, backend, caseIds, sourceCheck = inspectSources, rows: suppliedRows } = {}) {
+  check(absolute(runDir) && absolute(outputDir) && runDir !== outputDir && !inside(runDir, outputDir) && !inside(outputDir, runDir) && !inside(ROOT, outputDir) && ["mlx", "candle_cuda"].includes(backend), "review requires external owned run/output roots and physical backend");
+  check(Array.isArray(caseIds) && caseIds.length > 0 && caseIds.length <= MAX_REVIEW_CASES && caseIds.every((id) => typeof id === "string" && id.length > 0 && id.length <= 256) && new Set(caseIds).size === caseIds.length, "explicit unique bounded review case identities required");
+  const rootInfo = await lstat(runDir); check(rootInfo.isDirectory() && !rootInfo.isSymbolicLink(), "owned review run root unsafe");
+  await requirePreviousJobClosed(runDir);
+  const manifestPath = path.join(runDir, "manifest.bound.json"), campaignPath = path.join(runDir, "campaign.json"), controlPath = path.join(runDir, "physical-guardian/control.json"), closurePath = path.join(runDir, "physical-guardian/closed.json");
+  const m = await json(manifestPath), campaign = await json(campaignPath), control = await json(controlPath), closure = await json(closurePath);
+  await sourceCheck(m);
+  check(campaign.campaignId === m.campaignId && campaign.fingerprint === digest(m), "review campaign/manifest identity differs");
+  check(closure.closed === true && closure.servicesDrained === true && closure.physicalLockReleased === true && closure.fingerprint === digest(m), "review requires proven drained worker and released physical lock");
+  check(control.fingerprint === digest(m) && /^[a-f0-9]{48}$/.test(control.token ?? "") && sha(control.token) === closure.ownerTokenSha256 && Number.isSafeInteger(control.pid) && control.pid > 0 && control.pid === closure.pid, "review guardian control/closure identity differs");
+  let ownerAlive = true; try { process.kill(control.pid, 0); } catch (error) { check(error.code === "ESRCH", "review guardian process state unknown"); ownerAlive = false; }
+  check(!ownerAlive, "review guardian still alive");
+  check(Object.values(campaign.cells ?? {}).every((cell) => Object.values(cell.arms ?? {}).every((arm) => !["submitting", "ambiguous", "timeout_owned_job_active"].includes(arm.status) && (!arm.jobId || ["completed", "failed", "canceled", "interrupted"].includes(arm.job?.status)))), "review has unresolved live or ambiguous owned child");
+  check(absolute(m.runners?.[backend]?.leasePath), "review requires exact campaign lease identity");
+  const lease = await lstat(m.runners[backend].leasePath).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
+  check(!lease, "review campaign lease still held");
+  const rows = suppliedRows ?? declaredRows(m, await catalogs(m.sourceFreeze.sceneworks.root));
+  const allowed = new Map(rows.filter((row) => row.backend === backend && ["media", "product_proof"].includes(row.kind)).map((row) => [row.id, row]));
+  check(caseIds.every((id) => allowed.has(id)), "review selection outside declared owning-host output rows");
+  const realRoot = await realpath(runDir), sourceHash = await hashFile(campaignPath), manifestHash = await hashFile(manifestPath), controlHash = await hashFile(controlPath), closureHash = await hashFile(closurePath), files = [], selectedCases = [];
+  for (let index = 0; index < caseIds.length; index++) {
+    const id = caseIds[index], row = allowed.get(id), cell = campaign.cells?.[id];
+    check(cell?.kind === row.kind, `review case missing or wrong kind: ${id}`);
+    selectedCases.push({ id, kind: row.kind, profile: row.profile, model: row.model, backend, tier: row.tier, recipe: row.recipe, canvas: row.canvas, frames: row.frames, duration: row.duration, style: row.style ?? null, observedStatus: cell.status });
+    const entries = [];
+    const add = (role, binding, expectedPath) => { check(binding?.path === expectedPath && Number.isSafeInteger(binding.bytes) && binding.bytes > 0 && binding.bytes <= m.limits.maxMediaBytes && HEX.test(binding.sha256), `review media binding incomplete: ${id}/${role}`); entries.push({ id, index, role, binding }); };
+    for (const arm of row.kind === "media" ? ["dense", "sparse"] : ["sparse"]) {
+      const attempt = cell.arms?.[arm]; check(attempt?.status === "collected" && HEX.test(attempt.key), `review product output not collected: ${id}/${arm}`);
+      add(`${arm}-product`, attempt.media, path.join(runDir, attempt.key, `${arm}.mp4`));
+    }
+    if (row.kind === "media") {
+      const dir = path.join(runDir, digest(id));
+      add("side-by-side", cell.comparison?.sideBySide, path.join(dir, "side-by-side.mp4"));
+      add("dense-audio", cell.comparison?.denseAudio, path.join(dir, "dense.wav"));
+      add("sparse-audio", cell.comparison?.sparseAudio, path.join(dir, "sparse.wav"));
+    }
+    files.push(...entries);
+  }
+  check(files.length <= MAX_REVIEW_CASES * 5 && files.reduce((sum, file) => sum + file.binding.bytes, 0) <= MAX_REVIEW_BYTES, "selected review transport exceeds bounded file/byte budget");
+  await mkdir(path.dirname(outputDir), { recursive: true }); await mkdir(outputDir);
+  const exported = [];
+  for (const { id, index, role, binding } of files) {
+    const realSource = await realpath(binding.path);
+    check(inside(realRoot, realSource), "review source escapes owned run directory");
+    await boundFile(binding);
+    const extension = role.endsWith("audio") ? ".wav" : ".mp4";
+    const relative = `case-${String(index + 1).padStart(2, "0")}/${role}${extension}`;
+    const target = path.join(outputDir, relative);
+    await mkdir(path.dirname(target), { recursive: true }); await copyFile(binding.path, target, fsConstants.COPYFILE_EXCL);
+    check(await hashFile(target) === binding.sha256 && (await lstat(target)).size === binding.bytes, "staged review bytes differ from raw product output");
+    exported.push({ caseId: id, role, file: relative, bytes: binding.bytes, sha256: binding.sha256 });
+  }
+  check(await hashFile(campaignPath) === sourceHash && await hashFile(manifestPath) === manifestHash && await hashFile(controlPath) === controlHash && await hashFile(closurePath) === closureHash && !await lstat(m.runners[backend].leasePath).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "review campaign/guardian/lease changed during transport");
+  const review = { schemaVersion: 1, kind: "epic25140_selected_real_output_review", backend, campaignId: m.campaignId, manifestFingerprint: digest(m), manifestSha256: manifestHash, campaignSha256: sourceHash, guardianClosureSha256: closureHash, source: { sceneworksHead: m.sourceFreeze.sceneworks.head, inferencePin: m.sourceFreeze.inferencePin }, selectedCases, files: exported, selectedForReviewOnly: true, qualityAcceptance: "pending Michael", completedAcceptance: false, allRequiredRowsStillRequireNativeEvidence: true };
+  await writeFile(path.join(outputDir, "review-media.json"), JSON.stringify(review, null, 2) + "\n", { flag: "wx" });
+  return review;
+}
+
 export async function redactReceipt({ runDir, output, backend }) {
   const campaign = await json(path.join(runDir, "campaign.json")).catch(() => null);
   const closure = await json(path.join(runDir, "physical-guardian/closed.json")).catch(() => null);
@@ -379,6 +441,14 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       await mkdir(path.dirname(args[2]), { recursive: true });
       await writeFile(args[2], JSON.stringify(aggregate, null, 2) + "\n", { flag: "wx" });
       console.log(JSON.stringify({ output: args[2], expectedRows: aggregate.expectedRows, missing: aggregate.missing.length, unresolved: aggregate.unresolved.length, completedAcceptance: false }));
+    } else if (command === "review") {
+      check(args.length === 3 && ["mlx", "candle_cuda"].includes(args[2]), "review RUN_DIR OUTPUT_DIR BACKEND (S9_REVIEW_CASE_IDS JSON environment)");
+      check(absolute(process.env.RUNNER_TEMP) && inside(process.env.RUNNER_TEMP, args[1]), "review artifact must stay in owned Actions temporary directory");
+      const caseIds = JSON.parse(process.env.S9_REVIEW_CASE_IDS ?? "");
+      const m = await json(path.join(args[0], "manifest.bound.json"));
+      assertActionsIdentity({ backend: args[2], runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA, manifest: m, runDir: args[0], cacheRoot: process.env.S9_CACHE });
+      const review = await exportReviewMedia({ runDir: args[0], outputDir: args[1], backend: args[2], caseIds });
+      console.log(JSON.stringify({ campaignId: review.campaignId, backend: review.backend, selectedCases: review.selectedCases.length, files: review.files.length, completedAcceptance: false }));
     } else throw new Error("H3 S9 Actions: unknown command");
   })().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }
