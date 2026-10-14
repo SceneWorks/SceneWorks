@@ -8,7 +8,7 @@ import { readFile, writeFile, appendFile, mkdir, lstat, copyFile } from "node:fs
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
-import { boundFile, digest, hashFile, inspectSources, validateManifest } from "./h3-veda-acceptance.mjs";
+import { artifactsForHost, boundFile, catalogs, declaredRows, digest, hashFile, inspectSources, validateManifest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HEAD = /^[a-f0-9]{40}$/;
@@ -88,7 +88,7 @@ export async function preflight({ manifestPath, backend, runDir, cacheRoot, runn
     check(absolute(binding?.path) && HEX.test(binding.sha256) && await hashFile(binding.path) === binding.sha256, "normal product binary identity differs");
   }
   check(m.artifacts?.length > 0 && m.artifactInventory && Object.keys(m.turboArtifacts ?? {}).length > 0 && m.styles?.length > 0, "complete model/style closure missing");
-  for (const binding of [...m.artifacts, ...Object.values(m.turboArtifacts), ...m.styles]) {
+  for (const binding of [...artifactsForHost(m.artifacts, backend), ...Object.values(m.turboArtifacts), ...m.styles]) {
     check(inside(cacheRoot, binding.path), "model/style closure outside explicit offline cache");
     await boundFile(binding);
   }
@@ -254,12 +254,90 @@ export async function admitOwnedJob({ backend, runnerName, sceneWorksSha, runId 
   return { runId: Number(runId), attempt: Number(attempt), jobId: jobs[0].id, runnerName, source: sceneWorksSha, queueMinutes: (Date.parse(jobs[0].started_at) - Date.parse(run.created_at)) / 60000 };
 }
 
-export async function redactReceipt({ runDir, output }) {
+const withoutPath = (binding) => { const { path: _path, ...portable } = binding ?? {}; return portable; };
+export function approvedCampaignIdentity(m) {
+  const freeze = m.sourceFreeze;
+  check(HEAD.test(freeze?.sceneworks?.head) && freeze.inference?.head === freeze.inferencePin && HEAD.test(freeze.inferencePin), "approved source heads unavailable");
+  check(HEX.test(freeze.files?.["config/manifests/builtin.models.jsonc"]) && HEX.test(freeze.files?.["config/manifests/builtin.loras.jsonc"]) && HEX.test(freeze.files?.["config/terminal-evidence/epic-25140-corpus.plan.json"]), "approved source/catalog/corpus hashes unavailable");
+  return digest({
+    campaignId: m.campaignId, scope: m.scope,
+    source: { stage: freeze.stage, sceneworksHead: freeze.sceneworks.head, inferenceHead: freeze.inference.head, inferencePin: freeze.inferencePin, files: freeze.files, inferenceFiles: freeze.inferenceFiles, artifactInventorySha256: freeze.artifactInventorySha256 },
+    corpusPlanSha256: m.corpusPlan?.sha256, artifactInventory: withoutPath(m.artifactInventory),
+    artifacts: m.artifacts?.map(withoutPath), turboArtifacts: Object.fromEntries(Object.entries(m.turboArtifacts ?? {}).map(([id, a]) => [id, withoutPath(a)])),
+    styles: m.styles?.map((style) => ({ ...withoutPath(style), compatibilityEvidence: withoutPath(style.compatibilityEvidence) })),
+    prompts: m.prompts, bindings: m.bindings, boundaryBindings: m.boundaryBindings, proofRoutes: m.proofRoutes,
+    productProofCases: m.productProofCases?.map(({ setupReceipt: _hostReceipt, ...proof }) => proof),
+  });
+}
+
+export function buildHostEvidence(m, campaign, backend, rows, closure, { manifestSha256, campaignSha256 } = {}) {
+  check(["mlx", "candle_cuda"].includes(backend) && campaign?.campaignId === m.campaignId && campaign.fingerprint === digest(m), "host campaign/manifest identity differs");
+  check(HEX.test(manifestSha256) && HEX.test(campaignSha256), "host manifest/campaign file hashes required");
+  const expected = rows.filter((row) => row.backend === backend);
+  check(expected.length > 0 && new Set(rows.map((row) => row.id)).size === rows.length, "required row identities missing or duplicate");
+  const expectedIds = new Set(expected.map((row) => row.id));
+  check(Object.keys(campaign.cells ?? {}).every((id) => expectedIds.has(id)), "host campaign contains foreign or unknown row");
+  const runner = m.runners[backend];
+  check([runner.apiBinary?.sha256, runner.workerBinary?.sha256, runner.attestation?.sha256, runner.physicalGuardAdapter?.sha256].every((value) => HEX.test(value)), "host binary/attestation/guardian identity incomplete");
+  const cases = expected.map((row) => {
+    const cell = campaign.cells[row.id];
+    return { id: row.id, backend, kind: row.kind, style: row.style ?? null, status: cell?.status ?? "missing", evidenceSha256: cell ? digest(cell) : null };
+  });
+  return {
+    schemaVersion: 1, backend, campaignId: m.campaignId, approvedIdentitySha256: approvedCampaignIdentity(m),
+    source: { sceneworksHead: m.sourceFreeze.sceneworks.head, inferencePin: m.sourceFreeze.inferencePin, sourceFilesSha256: digest(m.sourceFreeze.files), catalogModelsSha256: m.sourceFreeze.files["config/manifests/builtin.models.jsonc"], catalogLorasSha256: m.sourceFreeze.files["config/manifests/builtin.loras.jsonc"], corpusPlanSha256: m.corpusPlan.sha256, artifactInventorySha256: m.sourceFreeze.artifactInventorySha256 },
+    local: { manifestFingerprint: digest(m), manifestSha256, campaignSha256, projectId: m.projectId, corpusImportReceiptSha256: m.corpusImportReceipt?.sha256, physicalGpuId: runner.physicalGpuId, workerId: runner.workerId, binarySha256: runner.workerBinary.sha256, apiBinarySha256: runner.apiBinary.sha256, attestationSha256: runner.attestation.sha256, physicalGuardSourceSha256: runner.physicalGuardAdapter.sha256 },
+    expectedAllRowsSha256: digest(rows.map((row) => ({ id: row.id, kind: row.kind, style: row.style ?? null }))),
+    expectedHostRowsSha256: digest(expected.map((row) => ({ id: row.id, kind: row.kind, style: row.style ?? null }))),
+    expectedAllRows: rows.length, expectedNamedRows: rows.filter((row) => !row.style && !row.boundary && row.kind !== "product_proof").length,
+    cases,
+    guardianClosed: closure?.closed === true && closure.servicesDrained === true && closure.physicalLockReleased === true && closure.fingerprint === digest(m),
+    qualityAcceptance: "pending Michael", completedAcceptance: false,
+  };
+}
+
+export function aggregateHostReceipts(left, right) {
+  const hosts = [left?.hostEvidence, right?.hostEvidence];
+  check(hosts.every((h) => h?.schemaVersion === 1) && new Set(hosts.map((h) => h.backend)).size === 2 && hosts.some((h) => h.backend === "mlx") && hosts.some((h) => h.backend === "candle_cuda"), "exact MLX and CUDA host receipts required");
+  const [first, second] = hosts;
+  check(first.campaignId === second.campaignId && first.approvedIdentitySha256 === second.approvedIdentitySha256 && HEX.test(first.approvedIdentitySha256) && digest(first.source) === digest(second.source), "approved campaign/recipe/source/catalog identities differ");
+  check(first.expectedAllRowsSha256 === second.expectedAllRowsSha256 && first.expectedAllRows === second.expectedAllRows && first.expectedNamedRows === second.expectedNamedRows && first.expectedNamedRows === 5400, "full named/style/boundary/proof row universe differs");
+  const cases = hosts.flatMap((h) => {
+    check(h.local && [h.local.manifestFingerprint, h.local.manifestSha256, h.local.campaignSha256, h.local.binarySha256, h.local.apiBinarySha256, h.local.attestationSha256, h.local.physicalGuardSourceSha256, h.local.corpusImportReceiptSha256].every((value) => HEX.test(value)), "host source/binary/corpus/campaign receipts incomplete");
+    check(h.local.physicalGpuId && h.local.workerId && h.cases?.length && h.cases.every((c) => c.backend === h.backend && c.id && c.kind && typeof c.status === "string" && (c.status === "missing" ? c.evidenceSha256 === null : HEX.test(c.evidenceSha256))), "host row disposition/physical identity incomplete");
+    check(HEX.test(h.expectedHostRowsSha256) && digest(h.cases.map((c) => ({ id: c.id, kind: c.kind, style: c.style }))) === h.expectedHostRowsSha256, "host row identity coverage missing/duplicate");
+    return h.cases;
+  });
+  check(cases.length === first.expectedAllRows && new Set(cases.map((c) => c.id)).size === cases.length, "full two-host row identity coverage missing/duplicate");
+  check(hosts.every((h) => h.cases.filter((c) => !c.style && !c.id.startsWith("boundary/") && !c.id.startsWith("proof/")).length === 2700), "each host must retain half of the 5400 named rows");
+  const missing = cases.filter((c) => c.status === "missing").map((c) => c.id);
+  const unresolved = cases.filter((c) => !["expected_refusal_observed", "product_proof_observed", "media_collected_review_pending"].includes(c.status)).map((c) => c.id);
+  return {
+    schemaVersion: 1, campaignId: first.campaignId, approvedIdentitySha256: first.approvedIdentitySha256,
+    hostManifestFingerprints: Object.fromEntries(hosts.map((h) => [h.backend, h.local.manifestFingerprint])),
+    hostBinarySha256: Object.fromEntries(hosts.map((h) => [h.backend, h.local.binarySha256])),
+    expectedRows: cases.length, observedDispositions: cases.length - missing.length, missing, unresolved,
+    bothGuardianClosuresVerified: hosts.every((h) => h.guardianClosed), qualityAcceptance: "pending Michael", completedAcceptance: false,
+    requiresRawLocalEvidenceReview: true,
+  };
+}
+
+export async function redactReceipt({ runDir, output, backend }) {
   const campaign = await json(path.join(runDir, "campaign.json")).catch(() => null);
   const closure = await json(path.join(runDir, "physical-guardian/closed.json")).catch(() => null);
   const summary = campaign && { campaignId: campaign.campaignId, fingerprint: campaign.fingerprint, namedCells: campaign.namedCells, cellStatusCounts: Object.values(campaign.cells ?? {}).reduce((a, c) => { a[c.status] = (a[c.status] ?? 0) + 1; return a; }, {}), qualityAcceptance: campaign.qualityAcceptance, completedAcceptance: campaign.completedAcceptance };
   const guardianClosure = closure && { closed: closure.closed, servicesDrained: closure.servicesDrained, physicalLockReleased: closure.physicalLockReleased, fingerprint: closure.fingerprint, ownerTokenSha256: closure.ownerTokenSha256, pid: closure.pid };
-  const receipt = { schemaVersion: 1, summary, guardianClosure, mediaUploaded: false, secretsUploaded: false, requiresRawLocalEvidenceReview: true };
+  let hostEvidence = null, hostEvidenceError = null;
+  if (campaign && backend) {
+    try {
+      const manifestPath = path.join(runDir, "manifest.bound.json"), m = await json(manifestPath);
+      await inspectSources(m);
+      for (const binding of [m.runners[backend].apiBinary, m.runners[backend].workerBinary, m.runners[backend].attestation, m.runners[backend].physicalGuardAdapter]) await boundFile(binding);
+      const catalog = await catalogs(m.sourceFreeze.sceneworks.root);
+      hostEvidence = buildHostEvidence(m, campaign, backend, declaredRows(m, catalog), closure, { manifestSha256: await hashFile(manifestPath), campaignSha256: await hashFile(path.join(runDir, "campaign.json")) });
+    } catch { hostEvidenceError = "host source, selected binary, or campaign receipt unavailable; inspect local raw evidence"; }
+  }
+  const receipt = { schemaVersion: 1, summary, guardianClosure, hostEvidence, hostEvidenceError, mediaUploaded: false, secretsUploaded: false, requiresRawLocalEvidenceReview: true };
   await mkdir(path.dirname(output), { recursive: true }); await writeFile(output, JSON.stringify(receipt, null, 2) + "\n");
   return receipt;
 }
@@ -287,7 +365,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "admit BACKEND");
       console.log(JSON.stringify(await admitOwnedJob({ backend: args[0], runnerName: process.env.RUNNER_NAME, sceneWorksSha: process.env.S9_SCENEWORKS_SHA })));
     } else if (command === "redact") {
-      check(args.length === 2, "redact RUN_DIR OUTPUT"); console.log(JSON.stringify(await redactReceipt({ runDir: args[0], output: args[1] })));
+      check(args.length === 3 && ["mlx", "candle_cuda"].includes(args[2]), "redact RUN_DIR OUTPUT BACKEND"); console.log(JSON.stringify(await redactReceipt({ runDir: args[0], output: args[1], backend: args[2] })));
+    } else if (command === "aggregate") {
+      check(args.length === 3, "aggregate MLX_RECEIPT CUDA_RECEIPT OUTPUT");
+      const aggregate = aggregateHostReceipts(await json(args[0]), await json(args[1]));
+      await mkdir(path.dirname(args[2]), { recursive: true });
+      await writeFile(args[2], JSON.stringify(aggregate, null, 2) + "\n", { flag: "wx" });
+      console.log(JSON.stringify({ output: args[2], expectedRows: aggregate.expectedRows, missing: aggregate.missing.length, unresolved: aggregate.unresolved.length, completedAcceptance: false }));
     } else throw new Error("H3 S9 Actions: unknown command");
   })().catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

@@ -106,9 +106,7 @@ export function artifactsForHost(artifacts, backend) {
   assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
   return backend === undefined ? artifacts : artifacts.filter((a) => a.coverage?.some((c) => c.backend === backend));
 }
-export async function validateManifest(m, { catalog, sourceCheck = inspectSources, backend } = {}) {
-  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
-  catalog ??= await catalogs(m.sourceFreeze?.sceneworks?.root);
+export function declaredRows(m, catalog) {
   const rows = [...validateShape(m, catalog), ...publishedBoundaryRows(catalog, m)];
   for (const p of m.productProofCases ?? []) {
     assert(PROOFS.includes(p.proof) && ["mlx", "candle_cuda"].includes(p.backend) && Object.keys(PROFILES).includes(p.profile), "unknown terminal product proof");
@@ -120,6 +118,12 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
     rows.push({ ...template, ...p, kind: "product_proof", id: `proof/${p.proof}/${p.id}/${p.backend}` });
   }
   assert(new Set(rows.map((r) => r.id)).size === rows.length, "duplicate terminal case identity");
+  return rows;
+}
+export async function validateManifest(m, { catalog, sourceCheck = inspectSources, backend } = {}) {
+  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
+  catalog ??= await catalogs(m.sourceFreeze?.sceneworks?.root);
+  const rows = declaredRows(m, catalog);
   await sourceCheck(m);
   const localArtifacts = artifactsForHost(m.artifacts, backend);
   const snapshots = [];
@@ -128,7 +132,7 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   const bound=bindCorpusPlan(m,JSON.parse(await readFile(planBinding.path,"utf8")),JSON.parse(await readFile(importBinding.path,"utf8")));
   for(const key of ["projectId","assets","bindings","boundaryBindings"]) assert(digest(bound[key])===digest(m[key]),`owned imported corpus identity differs: ${key}`);
   snapshots.push(planBinding,importBinding);
-  for (const p of m.productProofCases ?? []) if (p.setupReceipt) {
+  for (const p of m.productProofCases ?? []) if (p.setupReceipt && (backend === undefined || p.backend === backend)) {
     const binding = await boundFile(p.setupReceipt), setup = JSON.parse(await readFile(binding.path, "utf8"));
     assert(setup.fingerprint === digest(m.sourceFreeze) && setup.backend === p.backend && setup.proof === p.proof, "forced-condition setup provenance differs"); snapshots.push(binding);
   }

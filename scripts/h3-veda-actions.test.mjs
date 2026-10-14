@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts } from "./h3-veda-actions.mjs";
+import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const H = "a".repeat(40);
@@ -113,6 +114,58 @@ test("artifact transport is allowlisted summary and hashed closure, never raw me
   assert.equal(receipt.guardianClosure.physicalLockReleased, true);
   assert.equal(receipt.mediaUploaded, false);
   assert.doesNotMatch(text, /PRIVATE_TOKEN|PRIVATE_PROMPT|request/);
+});
+
+test("cross-host aggregate joins approved scope, exact row dispositions and distinct local imports without inventing acceptance", () => {
+  const hex = "a".repeat(64), other = "b".repeat(64);
+  const rows = ["mlx", "candle_cuda"].flatMap((backend) => [
+    ...Array.from({ length: 2700 }, (_, i) => ({ id: `${backend}/named/${i}`, backend, kind: "media", style: null })),
+    { id: `${backend}/style/one`, backend, kind: "media", style: "one" },
+    { id: `boundary/${backend}/cap`, backend, kind: "expected_refusal", boundary: "cap", style: null },
+    { id: `proof/route/one/${backend}`, backend, kind: "product_proof", style: null },
+  ]);
+  const manifest = (backend) => {
+    const x = m(`/owned/${backend}`, backend);
+    x.campaignId = "epic-25140-s9"; x.scope = "named-required"; x.projectId = `project_${backend}`;
+    x.sourceFreeze.files = { "config/manifests/builtin.models.jsonc": hex, "config/manifests/builtin.loras.jsonc": hex, "config/terminal-evidence/epic-25140-corpus.plan.json": hex };
+    x.sourceFreeze.artifactInventorySha256 = hex;
+    x.corpusPlan = { path: `/host/${backend}/plan`, sha256: hex };
+    x.corpusImportReceipt = { path: `/host/${backend}/import`, sha256: other };
+    x.artifactInventory = { path: `/host/${backend}/inventory`, sha256: hex, bytes: 1 };
+    x.artifacts = [{ id: "model", path: `/host/${backend}/weights`, sha256: hex, bytes: 1, coverage: [{ backend: "mlx" }, { backend: "candle_cuda" }] }];
+    x.turboArtifacts = { turbo: { path: `/host/${backend}/turbo`, sha256: hex, bytes: 1, modelIds: ["minimax_h3"] } };
+    x.styles = [{ id: "one", path: `/host/${backend}/style`, sha256: hex, bytes: 1, compatibilityEvidence: { path: `/host/${backend}/compat`, sha256: hex, bytes: 1 } }];
+    x.prompts = { t2va: "same prompt" }; x.bindings = { t2va: { seed: 7 } }; x.boundaryBindings = { cap: { images: ["one"] } }; x.proofRoutes = { route: { route: "product_job" } }; x.productProofCases = [];
+    Object.assign(x.runners[backend], { physicalGpuId: `physical-${backend}`, workerId: `worker-${backend}`, apiBinary: { sha256: backend === "mlx" ? hex : other }, workerBinary: { sha256: backend === "mlx" ? hex : other }, attestation: { sha256: hex }, physicalGuardAdapter: { sha256: hex } });
+    return x;
+  };
+  const receipt = (backend) => {
+    const x = manifest(backend), cells = Object.fromEntries(rows.filter((r) => r.backend === backend).map((r) => [r.id, { status: r.kind === "expected_refusal" ? "expected_refusal_observed" : r.kind === "product_proof" ? "product_proof_observed" : "media_collected_evidence_incomplete", privateRequest: "must never be uploaded" }]));
+    const state = { campaignId: x.campaignId, fingerprint: digest(x), cells };
+    return { hostEvidence: buildHostEvidence(x, state, backend, rows, { closed: true, servicesDrained: true, physicalLockReleased: true, fingerprint: digest(x) }, { manifestSha256: hex, campaignSha256: other }) };
+  };
+  const mlx = receipt("mlx"), cuda = receipt("candle_cuda");
+  assert.equal(mlx.hostEvidence.approvedIdentitySha256, cuda.hostEvidence.approvedIdentitySha256);
+  assert.notEqual(mlx.hostEvidence.local.manifestFingerprint, cuda.hostEvidence.local.manifestFingerprint);
+  assert.notEqual(mlx.hostEvidence.local.binarySha256, cuda.hostEvidence.local.binarySha256);
+  assert.doesNotMatch(JSON.stringify(mlx), /must never be uploaded/);
+  const joined = aggregateHostReceipts(mlx, cuda);
+  assert.equal(joined.expectedRows, rows.length);
+  assert.equal(joined.observedDispositions, rows.length);
+  assert.equal(joined.missing.length, 0);
+  assert.equal(joined.unresolved.length, 5402, "real media still lacks native proof and Michael review");
+  assert.equal(joined.completedAcceptance, false);
+  const changed = structuredClone(cuda); changed.hostEvidence.approvedIdentitySha256 = other;
+  assert.throws(() => aggregateHostReceipts(mlx, changed), /approved campaign\/recipe\/source\/catalog/);
+  const dropped = structuredClone(cuda); dropped.hostEvidence.cases.pop();
+  assert.throws(() => aggregateHostReceipts(mlx, dropped), /row identity coverage missing/);
+  const unresolved = structuredClone(cuda); unresolved.hostEvidence.cases[0].status = "missing"; unresolved.hostEvidence.cases[0].evidenceSha256 = null;
+  assert.equal(aggregateHostReceipts(mlx, unresolved).missing.length, 1);
+  const foreign = structuredClone(mlx); foreign.hostEvidence.cases[0].id = "candle_cuda/foreign";
+  assert.throws(() => aggregateHostReceipts(foreign, cuda), /row identity coverage missing\/duplicate/);
+  const sourceMismatch = structuredClone(cuda); sourceMismatch.hostEvidence.source.catalogModelsSha256 = other;
+  assert.throws(() => aggregateHostReceipts(mlx, sourceMismatch), /approved campaign\/recipe\/source\/catalog/);
+  assert.equal(approvedCampaignIdentity(manifest("mlx")), approvedCampaignIdentity(manifest("candle_cuda")));
 });
 
 test("workflow binds explicit runner, source, owned import and guardian, with no blanket artifact upload", async () => {

@@ -118,7 +118,7 @@ jobs:
           node scripts/h3-veda-acceptance.mjs run "$S9_RUN_DIR/manifest.bound.json" mlx "$S9_RUN_DIR"
       - name: Redact transport receipt without media or control token
         if: always()
-        run: node scripts/h3-veda-actions.mjs redact "$S9_RUN_DIR" "$RUNNER_TEMP/h3-veda-terminal/receipt.json"
+        run: node scripts/h3-veda-actions.mjs redact "$S9_RUN_DIR" "$RUNNER_TEMP/h3-veda-terminal/receipt.json" mlx
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -204,7 +204,7 @@ jobs:
           if errorlevel 1 exit /b 1
       - name: Redact transport receipt without media or control token
         if: always()
-        run: node scripts/h3-veda-actions.mjs redact "$env:S9_RUN_DIR" "$env:RUNNER_TEMP/h3-veda-terminal/receipt.json"
+        run: node scripts/h3-veda-actions.mjs redact "$env:S9_RUN_DIR" "$env:RUNNER_TEMP/h3-veda-terminal/receipt.json" candle_cuda
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
