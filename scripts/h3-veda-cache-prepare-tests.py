@@ -111,8 +111,19 @@ class Tests(unittest.TestCase):
    if path.name=='blobs':return SimpleNamespace(st_dev=info.st_dev+1,st_mode=info.st_mode,st_uid=info.st_uid)
    return info
   with patch.object(Path,'stat',foreign):
-   with self.assertRaisesRegex(RuntimeError,'volume alias'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+   with self.assertRaisesRegex(RuntimeError,'volume'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
   self.assertFalse(c.snapshot(self.cache,self.a).exists());self.assertEqual(list(self.cache.rglob('*.partial')),[])
+ def test_existing_snapshot_foreign_volume_cannot_be_reused_or_chmodded(self):
+  from types import SimpleNamespace
+  self.source_file();target,_=c.stage_file(self.shared,self.cache,self.a,lambda:None,clone=shutil.copyfile);r=c.verify_file(target,self.a,lambda:None);p={'files':{'author/model@'+'a'*40+'/weight.safetensors':r}};real_stat=Path.stat;before=c.signature(target);resolved=target.resolve()
+  def foreign(path,*a,**kw):
+   info=real_stat(path,*a,**kw)
+   if path in [target,resolved]:return SimpleNamespace(st_dev=info.st_dev+1,st_mode=info.st_mode,st_uid=info.st_uid,st_nlink=info.st_nlink,st_size=info.st_size)
+   return info
+  with patch.object(Path,'stat',foreign):
+   with self.assertRaisesRegex(RuntimeError,'foreign/shared inode'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+   self.assertEqual(c.capacity_required([self.a],self.cache,p),self.a['bytes']);self.assertFalse(c.complete_files(p,[self.a],self.cache))
+  self.assertEqual(c.signature(target),before)
  def test_atomic_publication_never_overwrites_even_collision(self):
   a=self.root/'source';b=self.root/'destination';a.write_bytes(b'data');b.write_bytes(b'alien')
   with self.assertRaises(OSError):c.publish_no_replace(a,b)

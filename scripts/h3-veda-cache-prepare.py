@@ -84,7 +84,7 @@ def capacity_required(entries,cache,progress):
     remaining=0
     for a in entries:
         key=a['repo']+'@'+a['revision']+'/'+a['file'];target=snapshot(cache,a);r=progress['files'].get(key)
-        verified=r and target.exists() and confined(cache,target.resolve()) and target.stat().st_nlink==1 and not target.stat().st_mode&0o222 and r.get('contentVerified') is True and r.get('bytes')==a['bytes'] and r.get('sha256')==a['sha256'] and r.get('stat')==signature(target)
+        verified=r and target.exists() and confined(cache,target.resolve()) and target.stat().st_nlink==1 and target.stat().st_dev==cache.stat().st_dev and not target.stat().st_mode&0o222 and r.get('contentVerified') is True and r.get('bytes')==a['bytes'] and r.get('sha256')==a['sha256'] and r.get('stat')==signature(target)
         if not verified:remaining+=a['bytes']  # No discount for unverified partials.
     return remaining
 
@@ -135,13 +135,18 @@ def stream_private_blob(source,blob,a,check,capacity_check=lambda remaining:None
     atom(journal,{'schemaVersion':1,'kind':'owned_cross_volume_copy_prefix','expected':expected,'sourcePath':str(source),'sourceStat':before,'committedBytes':offset,'prefixSha256':h.hexdigest(),'sealed':True,'privateBlob':str(blob),'privateStat':signature(blob),'destinationSha256':actual})
     return receipt
 
+def require_owned_device(cache,path):
+    ancestor=path
+    while not ancestor.exists():ancestor=ancestor.parent
+    require(ancestor.stat().st_dev==cache.stat().st_dev,'owned staging path aliases a foreign volume')
+
 def stage_file(shared,cache,a,check,clone=clone_apfs,storage_mode='same_volume_apfs_clone',capacity_check=lambda remaining:None):
-    source=snapshot(shared,a);target=snapshot(cache,a);no_links(target.parent);target.parent.mkdir(parents=True,exist_ok=True)
+    source=snapshot(shared,a);target=snapshot(cache,a);no_links(target.parent);require_owned_device(cache,target.parent);target.parent.mkdir(parents=True,exist_ok=True)
     if target.exists():
-        resolved=target.resolve(strict=True);require(confined(cache,resolved) and resolved.is_file() and resolved.stat().st_nlink==1,'owned cache points to foreign/shared inode');return target,None
-    blob=cache/'hub'/('models--'+a['repo'].replace('/','--'))/'blobs'/(a.get('gitBlob') or a['sha256']);no_links(blob.parent);blob.parent.mkdir(parents=True,exist_ok=True)
+        resolved=target.resolve(strict=True);require(confined(cache,resolved) and resolved.is_file() and resolved.stat().st_nlink==1 and resolved.stat().st_dev==cache.stat().st_dev,'owned cache points to foreign/shared inode');return target,None
+    blob=cache/'hub'/('models--'+a['repo'].replace('/','--'))/'blobs'/(a.get('gitBlob') or a['sha256']);no_links(blob.parent);require_owned_device(cache,blob.parent);blob.parent.mkdir(parents=True,exist_ok=True)
     if blob.exists() or blob.is_symlink():
-        require(not blob.is_symlink() and blob.stat().st_nlink==1 and blob.stat().st_size==a['bytes'] and sha(blob,check)==a['sha256'],'partial owned clone differs; retained without overwrite')
+        require(not blob.is_symlink() and blob.stat().st_nlink==1 and blob.stat().st_dev==cache.stat().st_dev and blob.stat().st_size==a['bytes'] and sha(blob,check)==a['sha256'],'partial owned clone differs; retained without overwrite')
         os.chmod(blob,0o444);target.symlink_to(os.path.relpath(blob,target.parent));return target,{'method':'recovered_complete_private_blob_after_SHA','sharedMutated':False}
     if not source.exists():require(a['allowManagedFetch'],'unexpected missing source file, not approved four-file download');return target,None
     resolved=source.resolve(strict=True);require(confined(shared,resolved) and resolved.is_file() and resolved.stat().st_size==a['bytes'],'shared source path/size differs')
@@ -197,7 +202,7 @@ def complete_files(progress,entries,cache):
     if set(progress['files'])!=set(expected):return False
     for key,a in expected.items():
         r=progress['files'][key];p=snapshot(cache,a)
-        if not p.exists() or not confined(cache,p.resolve()) or r.get('contentVerified') is not True or r.get('path')!=str(p) or r.get('bytes')!=a['bytes'] or r.get('sha256')!=a['sha256'] or r.get('stat')!=signature(p) or p.resolve().stat().st_mode&0o222:return False
+        if not p.exists() or p.stat().st_dev!=cache.stat().st_dev or not confined(cache,p.resolve()) or r.get('contentVerified') is not True or r.get('path')!=str(p) or r.get('bytes')!=a['bytes'] or r.get('sha256')!=a['sha256'] or r.get('stat')!=signature(p) or p.resolve().stat().st_mode&0o222:return False
     return True
 def complete_jobs(progress,entries):
     allowed={hashlib.sha256((a['repo']+'@'+a['revision']+'/'+a['file']).encode()).hexdigest():a for a in entries if a['allowManagedFetch']}
@@ -272,7 +277,7 @@ def prepare_locked(p,controller_pid,root,cache,shared,cache_lock,phase_started=N
         else:require(root.stat().st_dev==shared.stat().st_dev,'shared/owned cache must be same APFS volume')
         for a in p['entries']:
             check();key=a['repo']+'@'+a['revision']+'/'+a['file'];target=snapshot(cache,a);prior=progress['files'].get(key)
-            if prior and target.exists() and prior['stat']==signature(target) and target.resolve().stat().st_nlink==1 and target.resolve().stat().st_mode&0o222==0 and confined(cache,target.resolve()):continue
+            if prior and target.exists() and prior['stat']==signature(target) and target.resolve().stat().st_nlink==1 and target.stat().st_dev==cache.stat().st_dev and target.resolve().stat().st_mode&0o222==0 and confined(cache,target.resolve()):continue
             if storage_mode=='owned_internal_cross_volume_copy':progress['capacity']=capacity_receipt(root,capacity_required(p['entries'],cache,progress),workspace_base,check)
             remaining=capacity_required(p['entries'],cache,progress) if storage_mode=='owned_internal_cross_volume_copy' else 0
             def capacity_tick(file_remaining):
