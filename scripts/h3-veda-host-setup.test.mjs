@@ -12,10 +12,12 @@ const bundleFile = "config/terminal-evidence/epic-25140-carriers.json";
 const json = async (p) => JSON.parse(await readFile(p, "utf8"));
 async function temp(t) { const p = await realpath(await mkdtemp(path.join(os.tmpdir(), "s9-setup-"))); t.after(() => rm(p, { recursive: true, force: true })); return p; }
 const physical = { physicalGpuId: "A299B954-4C63-5322-86A5-BD5667051634", metalDeviceName: "Apple Test CPU Fixture", admission: false };
+const fullOwner = { runnerName: "nax-macos-2", readable: true, ownRunReadable: true, ownRunnerIdentityVerified: true, resourceQueueVerified: true, resourceScope: "cross_repository_runner_and_queue_read" };
+const cpuOwner = { runnerName: "nax-macos-2", ownRunReadable: true, ownRunnerIdentityVerified: true, resourceQueueVerified: false, resourceScope: "same_repository_actions_identity_only" };
 async function observation(t, root = ROOT) {
   const scratch = await temp(t), inferenceRoot = path.join(scratch, "inference");
   for (const [file, bytes] of [["scripts/release/veda_cuda_guard.py", "# CPU source fixture"], ["scripts/media_campaign_windows.py", "# CPU source fixture"], ["crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs", 'pub const KERNEL: &str = "fixture-mlx";'], ["crates/kernels/candle-quant-kernels/src/veda_int8.rs", 'name: "fixture-cuda",']]) { const p = path.join(inferenceRoot, file); await mkdir(path.dirname(p), { recursive: true }); await writeFile(p, bytes); }
-  return { schemaVersion: 1, kind: "epic25140_cpu_host_inventory", observedAt: Date.now(), backend: "mlx", runnerName: "nax-macos-2", source: { sceneworks: { root, head: H }, inference: { root: inferenceRoot, head: I } }, physical, cache: [], ownedStageRoot: path.join(scratch, "owned"), templateSha256: await hashFile(path.join(root, templateFile)), planSha256: await hashFile(path.join(root, planFile)), campaignReady: false, metadataOnly: true };
+  return { schemaVersion: 1, kind: "epic25140_cpu_host_inventory", observedAt: Date.now(), backend: "mlx", runnerName: "nax-macos-2", source: { sceneworks: { root, head: H }, inference: { root: inferenceRoot, head: I } }, owner: fullOwner, physical, cache: [], ownedStageRoot: path.join(scratch, "owned"), templateSha256: await hashFile(path.join(root, templateFile)), planSha256: await hashFile(path.join(root, planFile)), campaignReady: false, metadataOnly: true };
 }
 const sourceCheck = () => {};
 
@@ -45,9 +47,11 @@ test("cache inventory is finite metadata-only and rejects a snapshot symlink esc
 });
 test("inventory runs without a manifest, cache, corpus, binary or future permanent pin", async (t) => {
   const scratch = await temp(t);
-  const v = await inventory({ backend: "mlx", runnerName: "nax-macos-2", expectedRunner: "nax-macos-2", sceneWorksSha: H, inferenceSha: I, env: { HOME: scratch }, sourceCheck: () => ({ sceneworks: { root: ROOT, head: H }, inference: { root: path.join(scratch, "native"), head: I } }), authority: () => ({ readable: true, runnerName: "nax-macos-2" }), probe: () => physical });
+  const v = await inventory({ backend: "mlx", runnerName: "nax-macos-2", expectedRunner: "nax-macos-2", sceneWorksSha: H, inferenceSha: I, env: { HOME: scratch }, sourceCheck: () => ({ sceneworks: { root: ROOT, head: H }, inference: { root: path.join(scratch, "native"), head: I } }), authority: () => cpuOwner, probe: () => physical });
   assert.equal(v.metadataOnly, true); assert.equal(v.campaignReady, false); assert.equal(v.physicalAdmission, false); assert.equal(v.cache.some((c) => c.contentVerified), false);
+  assert.deepEqual(v.owner, cpuOwner);
   await assert.rejects(inventory({ backend: "mlx", runnerName: "nax-macos-2", env: { HOME: scratch }, sourceCheck: () => ({}), authority: () => ({ readable: false }), probe: () => physical }), /ownership/);
+  for (const owner of [{ ...cpuOwner, resourceQueueVerified: true }, { ...cpuOwner, readable: true }, { ...cpuOwner, resourceScope: "cross_repository_runner_and_queue_read" }, { ...cpuOwner, runnerName: "foreign" }]) await assert.rejects(inventory({ backend: "mlx", runnerName: "nax-macos-2", env: { HOME: scratch }, sourceCheck: () => ({}), authority: () => owner, probe: () => physical }), /ownership/);
 });
 test("source template retains all axes, both styles, all required artifact slots and explicit refusals", async () => {
   const t = await json(path.join(ROOT, templateFile)), c = await catalogs(ROOT), rows = matrix(c, t.styles);
@@ -62,6 +66,11 @@ test("stage copies every exact source byte and keeps missing counterpart evidenc
   assert.equal(m.runners.mlx.physicalGpuId, physical.physicalGpuId); assert.equal(m.runners.candle_cuda.physicalGpuId, null); assert.equal(m.runners.candle_cuda.workerBinary, null); assert.equal(m.sourceFreeze.stage, "preparation-unbound");
   assert.equal(m.preparation.missingBindings.productImports, true, "only actual owned API imports can clear this binding");
   assert.throws(() => validateShape(m, { models: [] }), /permanent inference/);
+});
+test("stage refuses metadata-only authority before creating an owned root", async (t) => {
+  const o = await observation(t); o.owner = cpuOwner;
+  await assert.rejects(stage({ observation: o, sourceCheck }), /full live Actions and resource-queue/);
+  await assert.rejects(stat(o.ownedStageRoot), /ENOENT/);
 });
 test("stage rejects stale inventory, changed source and overwrite before modifying the target", async (t) => {
   const o = await observation(t);

@@ -289,7 +289,28 @@ export function probeReadAuthority({ backend, runnerName, sceneWorksSha, runId =
   check(matchingJobs.length === 1 && Number.isSafeInteger(matchingJobs[0].runner_id), "live job/runner readback missing or ambiguous");
   check(runners.flatMap((page) => page.runners ?? []).filter((runner) => runner.id === matchingJobs[0].runner_id && runner.name === runnerName && runner.status === "online" && runner.busy === true).length === 1, "organization runner readback missing or ambiguous");
   check([lensRunning, lensQueued].every((pages) => Array.isArray(pages) && pages.every((page) => Array.isArray(page.workflow_runs))), "LensWorks queue readback malformed");
-  return { runId: Number(runId), jobId: matchingJobs[0].id, runnerId: matchingJobs[0].runner_id, runnerName, readable: true };
+  return { runId: Number(runId), jobId: matchingJobs[0].id, runnerId: matchingJobs[0].runner_id, runnerName, readable: true, ownRunReadable: true, ownRunnerIdentityVerified: true, resourceQueueVerified: true, resourceScope: "cross_repository_runner_and_queue_read" };
+}
+
+export function probeCpuInventoryAuthority({ backend, runnerName, sceneWorksSha, runId = process.env.GITHUB_RUN_ID, attempt = process.env.GITHUB_RUN_ATTEMPT, exec = execFileSync } = {}) {
+  const expectedJob = backend === "mlx" ? "mac2" : backend === "candle_cuda" ? "windows_cuda" : null;
+  const runnerIds = { "nax-macos-2": 5281, "cuda-windows": 2313, "cuda-windows-2": 2619 };
+  check(expectedJob && (backend === "mlx" ? runnerName === "nax-macos-2" : ["cuda-windows", "cuda-windows-2"].includes(runnerName)) && Number.isSafeInteger(runnerIds[runnerName]), "CPU inventory backend/runner is not the frozen physical listener");
+  check(process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN, "same-repository Actions read credential unavailable");
+  check(process.env.GITHUB_REPOSITORY === "SceneWorks/SceneWorks" && process.env.GITHUB_EVENT_NAME === "workflow_dispatch", "CPU inventory owner repository/event differs");
+  check(process.env.GITHUB_SHA === sceneWorksSha && process.env.GITHUB_WORKFLOW_REF?.startsWith("SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@") && process.env.GITHUB_JOB === expectedJob && process.env.RUNNER_NAME === runnerName, "CPU inventory workflow/source/job/runner differs");
+  check(/^\d+$/.test(runId ?? "") && /^\d+$/.test(attempt ?? ""), "CPU inventory run/attempt missing");
+  const read = (endpoint, paginated = false) => {
+    try { return JSON.parse(exec("gh", paginated ? ["api", "--paginate", "--slurp", endpoint] : ["api", endpoint], { encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"] })); }
+    catch { throw new Error(`H3 S9 Actions: same-repository credential cannot read ${endpoint.split("?")[0]}`); }
+  };
+  const run = read(`repos/SceneWorks/SceneWorks/actions/runs/${runId}`);
+  const pages = read(`repos/SceneWorks/SceneWorks/actions/runs/${runId}/jobs?per_page=100`, true);
+  check(run?.id === Number(runId) && run.run_attempt === Number(attempt) && run.head_sha === sceneWorksSha && run.status === "in_progress" && run.conclusion === null && run.event === "workflow_dispatch" && run.name === "H3 Veda terminal owned campaign" && run.path === ".github/workflows/h3-veda-terminal.yml", "CPU inventory exact live workflow readback differs");
+  check(Array.isArray(pages) && pages.length > 0 && pages.every((page) => Array.isArray(page.jobs)), "CPU inventory paginated job readback malformed");
+  const matches = pages.flatMap((page) => page.jobs).filter((job) => job.run_id === Number(runId) && job.run_attempt === Number(attempt) && job.head_sha === sceneWorksSha && job.name === expectedJob && job.runner_name === runnerName && job.runner_id === runnerIds[runnerName] && job.status === "in_progress" && job.conclusion === null && Number.isSafeInteger(job.id) && job.id > 0);
+  check(matches.length === 1, "CPU inventory live job/runner identity missing or ambiguous");
+  return { runId: Number(runId), jobId: matches[0].id, runnerId: runnerIds[runnerName], runnerName, ownRunReadable: true, ownRunnerIdentityVerified: true, resourceQueueVerified: false, resourceScope: "same_repository_actions_identity_only" };
 }
 
 export function assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest, runDir, cacheRoot }) {
@@ -688,7 +709,7 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     if (command === "inventory" || command === "stage") {
       check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "inventory|stage BACKEND");
       const setup = await import("./h3-veda-host-setup.mjs");
-      const observation = await setup.inventory({ backend: args[0], runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA, authority: probeReadAuthority });
+      const observation = await setup.inventory({ backend: args[0], runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA, authority: command === "inventory" ? probeCpuInventoryAuthority : probeReadAuthority });
       const receipt = command === "inventory" ? observation : await setup.stage({ observation, runDir: process.env.S9_RUN_DIR || undefined, corpusRoot: process.env.S9_CORPUS_ROOT || undefined, cacheRoot: process.env.S9_CACHE || undefined });
       check(absolute(process.env.RUNNER_TEMP), "owned Actions temporary directory unavailable");
       const output = path.join(process.env.RUNNER_TEMP, "h3-veda-terminal", "setup-receipt.json");
@@ -703,6 +724,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
       check(absolute(process.env.GITHUB_ENV) && Number.isSafeInteger(receipt.runnerId), "live Actions environment/runner readback unavailable");
       await appendFile(process.env.GITHUB_ENV, `S9_OBSERVED_RUNNER_ID=${receipt.runnerId}\n`, { encoding: "utf8" });
       console.log(JSON.stringify(receipt));
+    } else if (command === "probe-inventory-auth") {
+      check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "probe-inventory-auth BACKEND");
+      console.log(JSON.stringify(probeCpuInventoryAuthority({ backend: args[0], runnerName: process.env.RUNNER_NAME, sceneWorksSha: process.env.S9_SCENEWORKS_SHA })));
     } else if (command === "build") {
       const [manifestPath, backend, runDir] = args;
       check(args.length === 3, "build SOURCE_FROZEN_MANIFEST BACKEND RUN_DIR");

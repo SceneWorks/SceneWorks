@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, assertOwnedImportReadiness, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct, pinnedMlxSysPackageId, mlxMetallibBuildOutput, mlxBuildEnvironment } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, assertOwnedImportReadiness, emitOwnedApiToken, probeReadAuthority, probeCpuInventoryAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct, pinnedMlxSysPackageId, mlxMetallibBuildOutput, mlxBuildEnvironment } from "./h3-veda-actions.mjs";
 import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -123,13 +123,49 @@ test("existing credential probe requires exact live job, physical runner and cro
   };
   const seen = [], exec = (_bin, args) => { const endpoint = args.at(-1); seen.push(endpoint); return JSON.stringify(responses(endpoint)); };
   try {
-    assert.equal(probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec }).runnerId, 5281);
+    const full = probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec });
+    assert.equal(full.runnerId, 5281); assert.equal(full.resourceQueueVerified, true); assert.equal(full.resourceScope, "cross_repository_runner_and_queue_read");
     assert.equal(seen.length, 5);
     assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos", sceneWorksSha: H, runId: "123", attempt: "1", exec }), /workflow\/source\/job\/runner differs/);
     const failed = (_bin, args) => { if (args.at(-1).startsWith("orgs/")) throw Error("credential value must not surface"); return JSON.stringify(responses(args.at(-1))); };
     assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: failed }), (error) => error.message.includes("cannot read orgs/SceneWorks/actions/runners") && !error.message.includes("credential value"));
     const wrong = (_bin, args) => { const result = responses(args.at(-1)); if (args.at(-1).includes("/jobs")) result[0].jobs[0].runner_id = 999; return JSON.stringify(result); };
     assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: wrong }), /runner readback missing/);
+  } finally { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
+});
+
+test("CPU inventory authority binds only the exact same-repository run, job and physical listener", () => {
+  const names = ["GITHUB_ACTIONS", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_NAME", "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_NAME"];
+  const before = Object.fromEntries(names.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { GITHUB_ACTIONS: "true", GH_TOKEN: "not-logged-test-token", GITHUB_REPOSITORY: "SceneWorks/SceneWorks", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: H, GITHUB_WORKFLOW_REF: `SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@${H}`, GITHUB_JOB: "mac2", RUNNER_NAME: "nax-macos-2" });
+  const run = { id: 123, run_attempt: 1, head_sha: H, status: "in_progress", conclusion: null, event: "workflow_dispatch", name: "H3 Veda terminal owned campaign", path: ".github/workflows/h3-veda-terminal.yml" };
+  const job = { id: 456, run_id: 123, run_attempt: 1, head_sha: H, name: "mac2", runner_name: "nax-macos-2", runner_id: 5281, status: "in_progress", conclusion: null };
+  const probe = (alter = () => {}) => {
+    const [r, j] = [structuredClone(run), structuredClone(job)]; alter(r, j);
+    const seen = [], exec = (_bin, args) => { const endpoint = args.at(-1); seen.push(args); if (endpoint === "repos/SceneWorks/SceneWorks/actions/runs/123") return JSON.stringify(r); if (endpoint === "repos/SceneWorks/SceneWorks/actions/runs/123/jobs?per_page=100") return JSON.stringify([{ jobs: [j] }]); throw Error("cross-repository endpoint forbidden"); };
+    const result = probeCpuInventoryAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec });
+    return { result, seen };
+  };
+  try {
+    const { result, seen } = probe();
+    assert.deepEqual(seen.map((args) => args.at(-1)), ["repos/SceneWorks/SceneWorks/actions/runs/123", "repos/SceneWorks/SceneWorks/actions/runs/123/jobs?per_page=100"]);
+    assert.deepEqual(seen[1].slice(0, 3), ["api", "--paginate", "--slurp"]);
+    assert.equal(result.runnerId, 5281); assert.equal(result.ownRunReadable, true); assert.equal(result.ownRunnerIdentityVerified, true);
+    assert.equal(result.resourceQueueVerified, false); assert.equal(result.resourceScope, "same_repository_actions_identity_only"); assert.equal(Object.hasOwn(result, "readable"), false);
+    const badPages = (pages) => (_bin, args) => JSON.stringify(args.at(-1).includes("/jobs?") ? pages : run);
+    assert.throws(() => probeCpuInventoryAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: badPages({ jobs: [job] }) }), /paginated job readback malformed/);
+    assert.throws(() => probeCpuInventoryAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: badPages([{ jobs: [job] }, { jobs: [job] }]) }), /identity missing or ambiguous/);
+    for (const mutate of [
+      (r) => r.run_attempt = 2, (r) => r.head_sha = "b".repeat(40), (r) => r.path = ".github/workflows/other.yml", (r) => r.event = "push", (r) => r.status = "completed", (r) => r.name = "Other workflow",
+      (_r, j) => j.runner_id = 999, (_r, j) => j.runner_name = "foreign", (_r, j) => j.name = "windows_cuda", (_r, j) => j.run_attempt = 2, (_r, j) => j.head_sha = "b".repeat(40),
+    ]) assert.throws(() => probe(mutate), /readback differs|identity missing/);
+    assert.throws(() => probeCpuInventoryAuthority({ backend: "candle_cuda", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: () => "{}" }), /frozen physical listener/);
+    Object.assign(process.env, { GITHUB_JOB: "windows_cuda", RUNNER_NAME: "cuda-windows-2" });
+    const windowsExec = (_bin, args) => JSON.stringify(args.at(-1).includes("/jobs?") ? [{ jobs: [{ ...job, name: "windows_cuda", runner_name: "cuda-windows-2", runner_id: 2619 }] }] : run);
+    assert.equal(probeCpuInventoryAuthority({ backend: "candle_cuda", runnerName: "cuda-windows-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: windowsExec }).runnerId, 2619);
+    Object.assign(process.env, { GITHUB_JOB: "mac2", RUNNER_NAME: "nax-macos-2" });
+    process.env.GITHUB_EVENT_NAME = "push"; assert.throws(() => probe(), /repository\/event differs/); process.env.GITHUB_EVENT_NAME = "workflow_dispatch";
+    process.env.GH_TOKEN = ""; assert.throws(() => probe(), /credential unavailable/);
   } finally { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
 });
 
@@ -309,6 +345,13 @@ test("workflow binds explicit runner, source, owned import and guardian, with no
   assert.match(workflow, /h3-veda-acceptance\.mjs run/);
   assert.match(workflow, /h3-veda-actions\.mjs redact/);
   assert.equal((workflow.match(/h3-veda-actions\.mjs probe-auth/g) ?? []).length, 2);
+  assert.equal((workflow.match(/h3-veda-actions\.mjs probe-inventory-auth/g) ?? []).length, 2);
+  assert.match(workflow, /permissions:\n  contents: read\n  actions: read/);
+  assert.equal((workflow.match(/- name: Verify configured cross-repository read credential\n\s+if: inputs\.mode != 'inventory'/g) ?? []).length, 2);
+  assert.equal((workflow.match(/- name: Verify existing read credential against live run, runner, and LensWorks queue\n\s+if: inputs\.mode != 'inventory'/g) ?? []).length, 2);
+  assert.equal((workflow.match(/- name: Verify CPU inventory same-repository Actions identity\n\s+if: inputs\.mode == 'inventory'\n\s+env:\n\s+GH_TOKEN: \$\{\{ github\.token \}\}/g) ?? []).length, 2);
+  assert.equal((workflow.match(/token: \$\{\{ inputs\.mode == 'inventory' && github\.token \|\| secrets\.INFERENCE_READ_TOKEN \}\}/g) ?? []).length, 2);
+  assert.equal((workflow.match(/GH_TOKEN: \$\{\{ inputs\.mode == 'inventory' && github\.token \|\| secrets\.INFERENCE_READ_TOKEN \}\}/g) ?? []).length, 2);
   assert.equal((workflow.match(/h3-veda-actions\.mjs owned-token/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /SCENEWORKS_S9_TOKEN|S9_RUNNER_READ_TOKEN/);
   assert.doesNotMatch(workflow, /path:.*\*\*/);

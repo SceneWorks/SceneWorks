@@ -71,7 +71,10 @@ export async function inventory({ backend, runnerName, expectedRunner, sceneWork
   const source = sourceCheck({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, root });
   check(typeof authority === "function", "live Actions read-authority probe required");
   const owner = authority({ backend, runnerName, sceneWorksSha });
-  check(owner?.readable === true && owner.runnerName === runnerName, "live Actions ownership unavailable");
+  check(owner?.runnerName === runnerName && owner.ownRunReadable === true && owner.ownRunnerIdentityVerified === true && (
+    (owner.resourceScope === "same_repository_actions_identity_only" && owner.resourceQueueVerified === false && owner.readable !== true) ||
+    (owner.resourceScope === "cross_repository_runner_and_queue_read" && owner.resourceQueueVerified === true && owner.readable === true)
+  ), "live Actions ownership unavailable");
   const template = await json(path.join(root, TEMPLATE));
   const physical = probe(backend);
   const cache = await cacheMetadata(template, backend, declaredCacheRoots(template, backend, env));
@@ -84,6 +87,7 @@ const INFERENCE_FILES = ["scripts/release/veda_cuda_guard.py", "scripts/media_ca
 
 export async function stage({ observation, runDir, corpusRoot, cacheRoot, root = ROOT, sourceCheck = assertSetupSource }) {
   check(observation?.kind === "epic25140_cpu_host_inventory" && observation.metadataOnly === true && observation.campaignReady === false && Date.now() - observation.observedAt <= 60000 && observation.observedAt <= Date.now(), "fresh actual host inventory required");
+  check(observation.owner?.readable === true && observation.owner.ownRunReadable === true && observation.owner.ownRunnerIdentityVerified === true && observation.owner.resourceQueueVerified === true && observation.owner.resourceScope === "cross_repository_runner_and_queue_read" && observation.owner.runnerName === observation.runnerName, "stage requires full live Actions and resource-queue read authority");
   check(observation.source.sceneworks.root === root && SHA.test(observation.source.sceneworks.head), "inventory source differs");
   sourceCheck({ backend: observation.backend, runnerName: observation.runnerName, expectedRunner: observation.runnerName, sceneWorksSha: observation.source.sceneworks.head, inferenceSha: observation.source.inference.head, root, inferenceRoot: observation.source.inference.root });
   const template = await json(path.join(root, TEMPLATE)), plan = await json(path.join(root, PLAN));

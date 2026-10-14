@@ -48,6 +48,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: h3-veda-terminal-${{ inputs.run_dir }}
@@ -80,6 +81,7 @@ jobs:
           path: sceneworks
           fetch-depth: 1
       - name: Verify configured cross-repository read credential
+        if: inputs.mode != 'inventory'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: gh api repos/SceneWorks/inference --jq .full_name
@@ -89,7 +91,7 @@ jobs:
           ref: ${{ inputs.inference_main_sha }}
           path: inference
           fetch-depth: 0
-          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+          token: ${{ inputs.mode == 'inventory' && github.token || secrets.INFERENCE_READ_TOKEN }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -112,13 +114,19 @@ jobs:
             test "$(git -C ../inference rev-parse refs/remotes/origin/main)" = "$S9_INFERENCE_SHA"
           fi
       - name: Verify existing read credential against live run, runner, and LensWorks queue
+        if: inputs.mode != 'inventory'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth mlx
+      - name: Verify CPU inventory same-repository Actions identity
+        if: inputs.mode == 'inventory'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/h3-veda-actions.mjs probe-inventory-auth mlx
       - name: CPU-only host inventory or synthetic corpus staging
         if: inputs.mode == 'inventory' || inputs.mode == 'stage'
         env:
-          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+          GH_TOKEN: ${{ inputs.mode == 'inventory' && github.token || secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs ${{ inputs.mode }} mlx
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: inputs.mode == 'inventory' || inputs.mode == 'stage'
@@ -207,6 +215,7 @@ jobs:
           path: sceneworks
           fetch-depth: 1
       - name: Verify configured cross-repository read credential
+        if: inputs.mode != 'inventory'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: gh api repos/SceneWorks/inference --jq .full_name
@@ -216,7 +225,7 @@ jobs:
           ref: ${{ inputs.inference_main_sha }}
           path: inference
           fetch-depth: 0
-          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+          token: ${{ inputs.mode == 'inventory' && github.token || secrets.INFERENCE_READ_TOKEN }}
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -237,13 +246,19 @@ jobs:
           if ((git -C ../inference rev-parse HEAD) -ne $env:S9_INFERENCE_SHA) { throw 'inference checkout differs' }
           if ('${{ inputs.mode }}' -notin @('inventory','stage') -and (git -C ../inference rev-parse refs/remotes/origin/main) -ne $env:S9_INFERENCE_SHA) { throw 'inference permanent main differs' }
       - name: Verify existing read credential against live run, runner, and LensWorks queue
+        if: inputs.mode != 'inventory'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth candle_cuda
+      - name: Verify CPU inventory same-repository Actions identity
+        if: inputs.mode == 'inventory'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/h3-veda-actions.mjs probe-inventory-auth candle_cuda
       - name: CPU-only host inventory or synthetic corpus staging
         if: inputs.mode == 'inventory' || inputs.mode == 'stage'
         env:
-          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+          GH_TOKEN: ${{ inputs.mode == 'inventory' && github.token || secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs ${{ inputs.mode }} candle_cuda
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: inputs.mode == 'inventory' || inputs.mode == 'stage'
