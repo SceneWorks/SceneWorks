@@ -277,7 +277,7 @@ class FixturePolicyTests(unittest.TestCase):
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             parent_birth = f.g.pid_birth(os.getpid())
             self.assertIsNotNone(parent_birth)
-            with patch.object(f.g, "MAC_LOCKS", paths):
+            with patch.object(f.g, "canonical_mac_locks", return_value=paths):
                 watcher_pid = os.fork()
                 if watcher_pid == 0:
                     try:
@@ -316,7 +316,7 @@ class FixturePolicyTests(unittest.TestCase):
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             f.g.atomic(root / "running.json", {"active": {"pid": 98765, "birth": "owned-birth"}})
             calls = [None, "owned-birth", None]
-            with patch.object(f.g, "MAC_LOCKS", paths), patch.object(f.g, "pid_birth", side_effect=lambda _pid: calls.pop(0) if calls else None), patch.object(f.os, "getpgid", return_value=98765), patch.object(f.os, "killpg") as kill, patch.object(f, "group_alive", return_value=False):
+            with patch.object(f.g, "canonical_mac_locks", return_value=paths), patch.object(f.g, "pid_birth", side_effect=lambda _pid: calls.pop(0) if calls else None), patch.object(f.os, "getpgid", return_value=98765), patch.object(f.os, "killpg") as kill, patch.object(f, "group_alive", return_value=False):
                 try:
                     self.assertEqual(f.watchdog_locks(root, 123, "parent-birth", [h.fileno() for h in handles], .001), 0)
                     kill.assert_called_once_with(98765, f.signal.SIGTERM)
@@ -335,7 +335,7 @@ class FixturePolicyTests(unittest.TestCase):
             for handle in handles:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             f.g.atomic(root / "running.json", {"fixtures": [], "accepted": False})
-            with patch.object(f.g, "MAC_LOCKS", paths), patch.object(f.g, "pid_birth", return_value=None), patch.object(f.os, "killpg") as kill:
+            with patch.object(f.g, "canonical_mac_locks", return_value=paths), patch.object(f.g, "pid_birth", return_value=None), patch.object(f.os, "killpg") as kill:
                 try:
                     self.assertEqual(f.watchdog_locks(root, 123, "parent-birth", [h.fileno() for h in handles], .001), 0)
                     kill.assert_not_called()
@@ -354,7 +354,7 @@ class FixturePolicyTests(unittest.TestCase):
             for handle in handles:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             f.g.atomic(root / "running.json", {"launchIntent": {"fixture": f.FIXTURES[0], "state": "pre_spawning_device_child"}})
-            with patch.object(f.g, "MAC_LOCKS", paths), patch.object(f.g, "pid_birth", return_value=None), patch.object(f.os, "killpg") as kill, patch.object(f.time, "sleep", side_effect=StopAfterUnresolved):
+            with patch.object(f.g, "canonical_mac_locks", return_value=paths), patch.object(f.g, "pid_birth", return_value=None), patch.object(f.os, "killpg") as kill, patch.object(f.time, "sleep", side_effect=StopAfterUnresolved):
                 try:
                     with self.assertRaises(StopAfterUnresolved):
                         f.watchdog_locks(root, 123, "parent-birth", [h.fileno() for h in handles], .001)
@@ -374,7 +374,7 @@ class FixturePolicyTests(unittest.TestCase):
             for handle in handles:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             f.g.atomic(root / "running.json", {"active": {"pid": 98765, "birth": "original"}})
-            with patch.object(f.g, "MAC_LOCKS", paths), patch.object(f.g, "pid_birth", side_effect=lambda pid: None if pid == 123 else "replacement"), patch.object(f.os, "killpg") as kill, patch.object(f.time, "sleep", side_effect=StopAfterUnresolved):
+            with patch.object(f.g, "canonical_mac_locks", return_value=paths), patch.object(f.g, "pid_birth", side_effect=lambda pid: None if pid == 123 else "replacement"), patch.object(f.os, "killpg") as kill, patch.object(f.time, "sleep", side_effect=StopAfterUnresolved):
                 try:
                     with self.assertRaises(StopAfterUnresolved):
                         f.watchdog_locks(root, 123, "parent-birth", [h.fileno() for h in handles], .001)
@@ -400,42 +400,62 @@ class FixturePolicyTests(unittest.TestCase):
         self.assertIn(f.NATIVE_HEAD, workflow)
         self.assertNotIn("workflow_run:", workflow)
 
+    def staging_fixture(self, root, sha="a" * 40):
+        sw, inf = root / "sceneworks", root / "inference"
+        sw.mkdir(); inf.mkdir()
+        run = root / ".h3-veda-epic-25140" / sha / f.RUNNER
+        args = Namespace(sceneworks=str(sw), inference=str(inf), run_dir=str(run), sceneworks_sha=sha, inference_sha=f.NATIVE_HEAD, expected_runner=f.RUNNER, physical_gpu_id=f.PHYSICAL_GPU_ID, metal_device_name=f.METAL_DEVICE_NAME)
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "SceneWorks/SceneWorks", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKSPACE": str(root), "GITHUB_SHA": sha, "GITHUB_WORKFLOW_REF": f.WORKFLOW + "refs/heads/cpu-test", "GITHUB_JOB": "mac2", "RUNNER_NAME": f.RUNNER}
+        return args, env, sw, inf, run
+
+    def test_actual_failed_mac2_stage_path_is_source_bound_and_not_mac1_epic(self):
+        workspace = Path("/Users/MTrefry/actions-runner-nax/_work/SceneWorks/SceneWorks")
+        sha = "00d1626c1af72266432725d7bf6c0cf07b332e60"
+        run = workspace / ".h3-veda-epic-25140" / sha / f.RUNNER
+        args = Namespace(run_dir=str(run), sceneworks_sha=sha, expected_runner=f.RUNNER)
+        env = {"GITHUB_ACTIONS": "true", "GITHUB_REPOSITORY": "SceneWorks/SceneWorks", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKSPACE": str(workspace), "GITHUB_SHA": sha, "GITHUB_WORKFLOW_REF": f.WORKFLOW + "refs/heads/codex/s9-mac2-mlx-fixtures-00d1626c1", "GITHUB_JOB": "mac2", "RUNNER_NAME": f.RUNNER}
+        self.assertFalse(run.is_relative_to(f.g.EPIC))
+        with patch.dict(os.environ, env):
+            self.assertEqual(f.actions_stage_root(args, workspace / "sceneworks", workspace / "inference")["runDir"], str(run))
+
+    def test_actions_stage_rejects_arbitrary_stale_cross_runner_and_source_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); args, env, sw, inf, run = self.staging_fixture(root)
+            with patch.dict(os.environ, env):
+                self.assertEqual(f.actions_stage_root(args, sw, inf)["runDir"], str(run))
+                for key, value in [("GITHUB_ACTIONS", "false"), ("GITHUB_WORKSPACE", str(root / "foreign")), ("GITHUB_SHA", "b" * 40), ("GITHUB_JOB", "foreign"), ("RUNNER_NAME", "nax-macos"), ("GITHUB_WORKFLOW_REF", "foreign")]:
+                    with patch.dict(os.environ, {key: value}):
+                        with self.assertRaises(RuntimeError): f.actions_stage_root(args, sw, inf)
+                for bad in [f.g.EPIC / "arbitrary", root / "arbitrary", run / "child", run.parent / "nax-macos", run.parent.parent / ("b" * 40) / f.RUNNER]:
+                    args.run_dir = str(bad)
+                    with self.assertRaises(RuntimeError): f.actions_stage_root(args, sw, inf)
+                args.run_dir = str(run)
+                with self.assertRaisesRegex(RuntimeError, "checkout roots"): f.actions_stage_root(args, root / "foreign-source", inf)
+
     def test_unapproved_native_head_refuses_before_build_or_physical_claim(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            sw, inf, run_dir = root / "sceneworks", root / "inference", root / "evidence"
-            sw.mkdir(); inf.mkdir()
-            args = Namespace(sceneworks=str(sw), inference=str(inf), run_dir=str(run_dir), sceneworks_sha="a" * 40, inference_sha="b" * 40, expected_runner=f.RUNNER, physical_gpu_id="CPU_ONLY", metal_device_name="CPU_ONLY")
-            with patch.object(f.g, "EPIC", root), patch.object(f.subprocess, "Popen") as launch:
-                self.assertEqual(f.run(args), 1)
-                launch.assert_not_called()
+            root = Path(temporary).resolve(); args, env, sw, inf, run_dir = self.staging_fixture(root)
+            args.inference_sha = "b" * 40
+            with patch.dict(os.environ, env), patch.object(f.subprocess, "Popen") as launch:
+                self.assertEqual(f.run(args), 1); launch.assert_not_called()
             receipt = json.loads((run_dir / "mlx-five-fixtures" / "receipt.json").read_text())
-            self.assertFalse(receipt["accepted"])
-            self.assertIn("unapproved native source", receipt["error"])
-            self.assertEqual(receipt["fixtures"], [])
+            self.assertFalse(receipt["accepted"]); self.assertIn("unapproved native source", receipt["error"]); self.assertEqual(receipt["fixtures"], [])
 
     def test_wrong_mac2_uuid_or_metal_name_refuses_before_build_or_lock_claim(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            sw, inf = root / "sceneworks", root / "inference"
-            sw.mkdir(); inf.mkdir()
-            for index, (uuid, metal) in enumerate([(f.g.MAC_LOCKS[0].name, f.METAL_DEVICE_NAME), (f.PHYSICAL_GPU_ID, "foreign Metal")]):
-                run_dir = root / f"evidence-{index}"
-                args = Namespace(sceneworks=str(sw), inference=str(inf), run_dir=str(run_dir), sceneworks_sha="a" * 40, inference_sha=f.NATIVE_HEAD, expected_runner=f.RUNNER, physical_gpu_id=uuid, metal_device_name=metal)
-                with patch.object(f.g, "EPIC", root), patch.object(f.subprocess, "Popen") as launch, patch.object(f.FixturePhysical, "claim") as claim:
-                    self.assertEqual(f.run(args), 1)
-                    launch.assert_not_called(); claim.assert_not_called()
+        for uuid, metal in [("foreign UUID", f.METAL_DEVICE_NAME), (f.PHYSICAL_GPU_ID, "foreign Metal")]:
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary).resolve(); args, env, sw, inf, run_dir = self.staging_fixture(root)
+                args.physical_gpu_id, args.metal_device_name = uuid, metal
+                with patch.dict(os.environ, env), patch.object(f.subprocess, "Popen") as launch, patch.object(f.FixturePhysical, "claim") as claim:
+                    self.assertEqual(f.run(args), 1); launch.assert_not_called(); claim.assert_not_called()
                 self.assertIn("unapproved Mac2 physical identity", json.loads((run_dir / "mlx-five-fixtures/receipt.json").read_text())["error"])
 
     def test_symlinked_evidence_parent_refuses_before_any_output(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary).resolve()
-            sw, inf, actual, link = root / "sw", root / "inf", root / "actual", root / "link"
-            sw.mkdir(); inf.mkdir(); actual.mkdir(); link.symlink_to(actual, target_is_directory=True)
-            args = Namespace(sceneworks=str(sw), inference=str(inf), run_dir=str(link), sceneworks_sha="a" * 40, inference_sha=f.NATIVE_HEAD, expected_runner=f.RUNNER, physical_gpu_id="CPU_ONLY", metal_device_name="CPU_ONLY")
-            with patch.object(f.g, "EPIC", root):
-                with self.assertRaisesRegex(RuntimeError, "non-symlink"):
-                    f.run(args)
+            root = Path(temporary).resolve(); args, env, sw, inf, run = self.staging_fixture(root)
+            actual = root / "actual"; actual.mkdir(); (root / ".h3-veda-epic-25140").symlink_to(actual, target_is_directory=True)
+            with patch.dict(os.environ, env):
+                with self.assertRaisesRegex(RuntimeError, "non-symlink|symlink ancestor"): f.run(args)
             self.assertFalse((actual / "mlx-five-fixtures").exists())
 
 

@@ -25,6 +25,50 @@ from urllib.parse import quote
 TERMINAL = {"completed", "failed", "canceled", "interrupted", "refused", "not_submitted"}
 EPIC = Path("/Users/michael/Documents/Codex/2026-10-10/epic-25140")
 MAC_LOCKS = [EPIC / "s0-gpu-driver.lock", EPIC / "s2s4-aggregate-target.lock"]
+MAC2_UUID = "734A72AE-13DA-52A8-B0CF-F97E1D646124"
+MAC2_HOME = Path("/Users/MTrefry")
+MAC2_EPIC = MAC2_HOME / "Documents/Codex/2026-10-10/epic-25140"
+MAC2_LOCKS = [MAC2_EPIC / "s0-gpu-driver.lock", MAC2_EPIC / "s2s4-aggregate-target.lock"]
+
+
+def canonical_mac_locks(physical_uuid):
+    require(physical_uuid in {"D299B954-4C63-5322-86A5-BD5667051634", MAC2_UUID}, "Mac physical host has no source-owned global lock profile")
+    return list(MAC2_LOCKS if physical_uuid == MAC2_UUID else MAC_LOCKS)
+
+
+def qualify_mac2_global_locks(physical_uuid):
+    import pwd
+    import stat
+    require(physical_uuid == MAC2_UUID and sys.platform == "darwin", "Mac2 global profile requires exact admitted host family")
+    uid = os.getuid(); account = pwd.getpwuid(uid)
+    require(os.geteuid() == uid and account.pw_name == "MTrefry" and Path(account.pw_dir) == MAC2_HOME and os.environ.get("HOME") == str(MAC2_HOME), "Mac2 global profile account/HOME/UID differs")
+    require(os.environ.get("RUNNER_NAME") == "nax-macos-2", "Mac2 global profile runner differs")
+    paths = canonical_mac_locks(physical_uuid)
+    require(not any(p.exists() or p.is_symlink() for p in MAC_LOCKS), "Mac1 literal lock namespace unexpectedly exists on Mac2; reconcile before qualification")
+    rows, existing = [], []
+    for p in paths:
+        require(p.is_absolute() and p.resolve() == p and all(not a.is_symlink() for a in [p, *p.parents]), "Mac2 canonical global lock has an alternate/symlink root")
+        if p.exists():
+            info = p.stat()
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == uid and info.st_nlink == 1, "Mac2 canonical global lock owner/type/hardlink alias differs")
+            rows.append({"path": str(p), "existed": True, "device": info.st_dev, "inode": info.st_ino, "uid": info.st_uid, "links": info.st_nlink})
+            existing.append(str(p))
+        else:
+            rows.append({"path": str(p), "existed": False})
+    observation = subprocess.run(["/usr/sbin/lsof", "-n", "-P", "-F", "pn"], capture_output=True, text=True, timeout=15)
+    require(observation.returncode == 0 and observation.stderr == "" and 0 < len(observation.stdout.encode()) <= 8 * 1024 * 1024, "Mac2 global held-descriptor scan incomplete")
+    protected = set(map(str, [*paths, *MAC_LOCKS])); holders = []; pid = None; pids = set()
+    for line in observation.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdecimal():
+            pid = int(line[1:]); pids.add(pid)
+        elif line.startswith("n"):
+            name = line[1:].removesuffix(" (deleted)")
+            if name in protected: holders.append({"pid": pid, "path": name})
+    require(pids and not holders, "Mac2 canonical or legacy global lock has held descriptors; reconcile")
+    held = {"checkedPaths": sorted(protected), "holders": [], "observedPids": len(pids), "sampleBytes": len(observation.stdout.encode()), "sampleSha256": hashlib.sha256(observation.stdout.encode()).hexdigest(), "observedAt": int(time.time() * 1000)}
+    hardware = json.loads(command(["system_profiler", "SPHardwareDataType", "-json"], 15)).get("SPHardwareDataType", [])
+    require(len(hardware) == 1 and hardware[0].get("platform_UUID") == physical_uuid, "Mac2 actual UUID differs before global profile qualification")
+    return {"schemaVersion": 1, "kind": "initial_source_owned_host_global_lock_profile_qualification", "previouslyObservedProfile": False, "physicalGpuId": physical_uuid, "runnerName": "nax-macos-2", "expectedRunnerId": 5281, "account": {"name": account.pw_name, "home": account.pw_dir, "uid": uid, "effectiveUid": os.geteuid()}, "canonicalLocks": rows, "legacyMac1PathsAbsent": True, "heldDescriptors": held, "observedAt": int(time.time() * 1000)}
 
 def require(ok, why):
     if not ok:
@@ -116,7 +160,13 @@ class Physical:
         else:
             require(sys.platform == "darwin", "MLX guardian must run on the admitted Mac")
             require(self.contract.get("metalDeviceName"), "exact Metal device name required")
-            paths = MAC_LOCKS
+            paths = canonical_mac_locks(self.r["physicalGpuId"])
+            require([str(p) for p in paths] == self.contract["canonicalLocks"], "canonical global lock identity differs")
+            if self.r["physicalGpuId"] == MAC2_UUID:
+                qualification = qualify_mac2_global_locks(self.r["physicalGpuId"])
+                qualification["queue"] = self.queue()
+                qualification["actionsIdentity"] = self.actions_identity
+                atomic(self.out / "global-lock-profile-qualification.json", qualification)
         require([str(p) for p in paths] == self.contract["canonicalLocks"], "canonical global lock identity differs")
         require(self.contract["physicalGpuId"] == self.r["physicalGpuId"], "physical identity differs")
         self.locks = Locks(paths)

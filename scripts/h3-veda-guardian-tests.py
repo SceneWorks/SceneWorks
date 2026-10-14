@@ -2,6 +2,7 @@
 import importlib.util
 import json
 import os
+import subprocess
 from pathlib import Path
 import tempfile
 import time
@@ -9,6 +10,70 @@ import unittest
 from unittest.mock import patch
 
 spec=importlib.util.spec_from_file_location("guard",Path(__file__).with_name("h3-veda-guardian.py"));g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
+
+class GlobalMacProfileTests(unittest.TestCase):
+    def profile(self, root):
+        from types import SimpleNamespace
+        home = root / "home"; home.mkdir()
+        epic = home / "Documents/Codex/2026-10-10/epic-25140"; epic.mkdir(parents=True)
+        paths = [epic / "s0-gpu-driver.lock", epic / "s2s4-aggregate-target.lock"]
+        account = SimpleNamespace(pw_name="MTrefry", pw_dir=str(home))
+        return home, paths, account
+
+    def test_profiles_are_fixed_host_global_and_never_follow_generic_overrides(self):
+        mac1 = list(g.MAC_LOCKS); mac2 = list(g.MAC2_LOCKS)
+        with patch.dict(os.environ, {"EPIC": "/tmp/arbitrary", "HOME": "/tmp/arbitrary", "S9_RUN_DIR": "/tmp/arbitrary"}):
+            self.assertEqual(g.canonical_mac_locks("D299B954-4C63-5322-86A5-BD5667051634"), mac1)
+            self.assertEqual(g.canonical_mac_locks(g.MAC2_UUID), mac2)
+            with self.assertRaisesRegex(RuntimeError, "no source-owned"): g.canonical_mac_locks("unknown")
+        self.assertEqual(str(mac2[0]), "/Users/MTrefry/Documents/Codex/2026-10-10/epic-25140/s0-gpu-driver.lock")
+        self.assertNotIn(".h3-veda-epic", str(mac2[0]))
+
+    def test_initial_profile_binds_actual_uid_home_uuid_and_refuses_foreign_host(self):
+        import pwd
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); home, paths, account = self.profile(root)
+            with patch.object(g, "MAC2_HOME", home), patch.object(g, "MAC2_LOCKS", paths), patch.object(g, "MAC_LOCKS", [root / "absent-legacy"]), patch.object(g.sys, "platform", "darwin"), patch.object(pwd, "getpwuid", return_value=account), patch.dict(os.environ, {"HOME": str(home), "RUNNER_NAME": "nax-macos-2"}), patch.object(g, "command", return_value=json.dumps({"SPHardwareDataType": [{"platform_UUID": g.MAC2_UUID}]})), patch.object(g.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "p123\nn/ordinary\n", "")):
+                fact = g.qualify_mac2_global_locks(g.MAC2_UUID)
+                self.assertFalse(fact["previouslyObservedProfile"]); self.assertEqual(fact["account"]["uid"], os.getuid()); self.assertEqual([x["path"] for x in fact["canonicalLocks"]], list(map(str, paths)))
+                with patch.dict(os.environ, {"HOME": "/foreign"}):
+                    with self.assertRaisesRegex(RuntimeError, "account/HOME/UID"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                with patch.object(g, "command", return_value=json.dumps({"SPHardwareDataType": [{"platform_UUID": "foreign"}]})):
+                    with self.assertRaisesRegex(RuntimeError, "actual UUID"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                with self.assertRaisesRegex(RuntimeError, "exact admitted"): g.qualify_mac2_global_locks("foreign")
+
+    def test_initial_profile_refuses_legacy_namespace_symlink_hardlink_and_held_descriptors(self):
+        import pwd
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve(); home, paths, account = self.profile(root); legacy = root / "legacy"
+            with patch.object(g, "MAC2_HOME", home), patch.object(g, "MAC2_LOCKS", paths), patch.object(g, "MAC_LOCKS", [legacy]), patch.object(g.sys, "platform", "darwin"), patch.object(pwd, "getpwuid", return_value=account), patch.dict(os.environ, {"HOME": str(home), "RUNNER_NAME": "nax-macos-2"}), patch.object(g, "command", return_value=json.dumps({"SPHardwareDataType": [{"platform_UUID": g.MAC2_UUID}]})), patch.object(g.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "p123\nn/ordinary\n", "")):
+                legacy.write_text("legacy")
+                with self.assertRaisesRegex(RuntimeError, "Mac1 literal"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                legacy.unlink(); paths[0].symlink_to(root / "alternate")
+                with self.assertRaisesRegex(RuntimeError, "alternate/symlink"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                paths[0].unlink(); paths[0].write_text("lock"); os.link(paths[0], root / "alias")
+                with self.assertRaisesRegex(RuntimeError, "hardlink alias"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                (root / "alias").unlink()
+                with patch.object(g.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "p123\nn" + str(paths[0]) + "\n", "")):
+                    with self.assertRaisesRegex(RuntimeError, "held descriptors"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                with patch.object(g.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "p123\nn" + str(legacy) + " (deleted)\n", "")):
+                    with self.assertRaisesRegex(RuntimeError, "held descriptors"): g.qualify_mac2_global_locks(g.MAC2_UUID)
+                with patch.object(g.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "p123\nn/ordinary\n", "")):
+                    self.assertTrue(g.qualify_mac2_global_locks(g.MAC2_UUID)["canonicalLocks"][0]["existed"])
+
+    def test_actual_cpu_held_flock_blocks_global_claim_and_path_replacement_loses_identity(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as temporary:
+            paths = [Path(temporary) / "s0-global.lock", Path(temporary) / "aggregate-global.lock"]
+            held = paths[0].open("a+b"); fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                with self.assertRaises(BlockingIOError): g.Locks(paths).claim()
+            finally: held.close()
+            locks = g.Locks(paths); locks.claim()
+            try:
+                self.assertTrue(locks.owned()); paths[0].unlink(); paths[0].write_text("replacement"); self.assertFalse(locks.owned())
+            finally: locks.close()
+
 
 class Physical:
     def __init__(self,events):self.events=events;self.held=True;self.reject=False;self.services=None

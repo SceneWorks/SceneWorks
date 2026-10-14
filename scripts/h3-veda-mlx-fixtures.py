@@ -206,8 +206,8 @@ def watchdog_locks(output, parent_pid, parent_birth, lock_fds, interval=.25):
     never treats a cancellation, timeout, or missing process as lock release.
     """
     output = Path(output)
-    check(len(lock_fds) == len(g.MAC_LOCKS) == 2, "watchdog requires both canonical lock descriptors")
-    for fd, lock_path in zip(lock_fds, g.MAC_LOCKS):
+    check(len(lock_fds) == len(g.canonical_mac_locks(PHYSICAL_GPU_ID)) == 2, "watchdog requires both canonical lock descriptors")
+    for fd, lock_path in zip(lock_fds, g.canonical_mac_locks(PHYSICAL_GPU_ID)):
         check(not lock_path.is_symlink(), "watchdog canonical lock path changed")
         info, path = os.fstat(fd), lock_path.stat()
         check((info.st_dev, info.st_ino) == (path.st_dev, path.st_ino), "watchdog lock descriptor/path changed")
@@ -216,13 +216,13 @@ def watchdog_locks(output, parent_pid, parent_birth, lock_fds, interval=.25):
         if stop.exists():
             proof = json.loads(stop.read_text(encoding="utf-8"))
             check(proof.get("childTreeClosed") is True and proof.get("physicalLocksClosedByController") is True, "watchdog stop lacks complete closure")
-            g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_clean_closure", "parentPid": parent_pid, "parentBirth": parent_birth, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.MAC_LOCKS]})
+            g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_clean_closure", "parentPid": parent_pid, "parentBirth": parent_birth, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]})
             return 0
         if g.pid_birth(parent_pid) != parent_birth:
             active_file = output / "running.json"
             active = json.loads(active_file.read_text(encoding="utf-8")) if active_file.exists() else {}
             if active_file.exists() and "active" not in active and "launchIntent" not in active:
-                g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_lost_before_or_after_closed_device_child", "parentPid": parent_pid, "parentBirth": parent_birth, "childTreeClosed": True, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.MAC_LOCKS]})
+                g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_lost_before_or_after_closed_device_child", "parentPid": parent_pid, "parentBirth": parent_birth, "childTreeClosed": True, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]})
                 return 0
             child = active.get("active", {})
             pid, birth = child.get("pid"), child.get("birth")
@@ -238,11 +238,11 @@ def watchdog_locks(output, parent_pid, parent_birth, lock_fds, interval=.25):
                 while group_alive(pid) and time.monotonic() < deadline:
                     time.sleep(.1)
                 if not group_alive(pid):
-                    g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_lost_owned_child_drained", "parentPid": parent_pid, "parentBirth": parent_birth, "childPid": pid, "childBirth": birth, "childTreeClosed": True, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.MAC_LOCKS]})
+                    g.atomic(output / "watchdog-closure.json", {"schemaVersion": 1, "reason": "controller_lost_owned_child_drained", "parentPid": parent_pid, "parentBirth": parent_birth, "childPid": pid, "childBirth": birth, "childTreeClosed": True, "stoppedAt": int(time.time() * 1000), "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]})
                     return 0
             # A missing or changed PID is not proof that an arbitrary child
             # tree has ended. Retain the locks rather than signal a foreign PID.
-            g.atomic(output / "watchdog-unresolved.json", {"schemaVersion": 1, "parentPid": parent_pid, "parentBirth": parent_birth, "activePid": pid, "activeBirth": birth, "reason": "orphan_identity_or_closure_unproven", "lockPaths": [str(p) for p in g.MAC_LOCKS]})
+            g.atomic(output / "watchdog-unresolved.json", {"schemaVersion": 1, "parentPid": parent_pid, "parentBirth": parent_birth, "activePid": pid, "activeBirth": birth, "reason": "orphan_identity_or_closure_unproven", "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]})
             while True:
                 time.sleep(30)
         time.sleep(interval)
@@ -279,17 +279,34 @@ def rust_toolchain(native, output, env):
     return result
 
 
+def actions_stage_root(args, root, native):
+    env = os.environ
+    check(env.get("GITHUB_ACTIONS") == "true" and env.get("GITHUB_REPOSITORY") == "SceneWorks/SceneWorks" and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch", "Actions staging authorization context missing")
+    check(re.fullmatch(r"[a-f0-9]{40}", args.sceneworks_sha or "") and env.get("GITHUB_SHA") == args.sceneworks_sha and env.get("GITHUB_WORKFLOW_REF", "").startswith(WORKFLOW), "Actions staging source/workflow differs")
+    check(env.get("GITHUB_JOB") == "mac2" and env.get("RUNNER_NAME") == RUNNER and args.expected_runner == RUNNER, "Actions staging runner/job differs")
+    workspace_text = env.get("GITHUB_WORKSPACE", "")
+    workspace, run_dir = Path(workspace_text), Path(args.run_dir)
+    check(workspace.is_absolute() and str(workspace) == workspace_text and not any(ord(c) < 32 for c in workspace_text), "Actions workspace path not absolute/canonical")
+    check(run_dir.is_absolute() and str(run_dir) == args.run_dir and run_dir.resolve() == run_dir, "owned evidence directory must be an absolute non-symlink path")
+    for path in [workspace, run_dir]:
+        check(all(not ancestor.is_symlink() for ancestor in [path, *path.parents]), "owned staging/workspace has a symlink ancestor")
+    check(workspace.resolve() == workspace and root == workspace / "sceneworks" and native == workspace / "inference", "actual source checkout roots differ from Actions workspace")
+    expected = workspace / ".h3-veda-epic-25140" / args.sceneworks_sha / RUNNER
+    check(run_dir == expected, "owned evidence directory differs from exact Actions source-bound staging root")
+    return {"kind": "actions_source_bound_external_stage", "workspace": str(workspace), "runDir": str(expected), "sourceHead": args.sceneworks_sha, "runnerName": RUNNER, "jobName": "mac2", "workflowRef": env["GITHUB_WORKFLOW_REF"]}
+
+
 def run(args):
     root = Path(args.sceneworks).resolve(strict=True)
     native = Path(args.inference).resolve(strict=True)
     raw_run_dir = Path(args.run_dir)
-    check(raw_run_dir.is_absolute() and raw_run_dir.resolve() == raw_run_dir and raw_run_dir.is_relative_to(g.EPIC) and raw_run_dir != g.EPIC, "owned evidence directory must be an absolute non-symlink child of the epic")
+    stage = actions_stage_root(args, root, native)
     target = raw_run_dir / "cargo-target"
     output = raw_run_dir / "mlx-five-fixtures"
     check(output != root and not output.is_relative_to(root) and not output.is_relative_to(native), "output must be external to source")
     check(not output.exists(), "existing fixture output requires reconciliation; refusing overwrite")
     output.mkdir(parents=True)
-    receipt = {"schemaVersion": 1, "kind": "h3_veda_mlx_five_actual_device", "accepted": False, "fixtures": [], "startedAt": int(time.time() * 1000), "admissionLeaseSeconds": ADMISSION_SECONDS, "ownedChildMaxSeconds": CHILD_SECONDS, "physicalLocks": [str(p) for p in g.MAC_LOCKS], "runDir": str(raw_run_dir)}
+    receipt = {"schemaVersion": 1, "kind": "h3_veda_mlx_five_actual_device", "accepted": False, "fixtures": [], "startedAt": int(time.time() * 1000), "admissionLeaseSeconds": ADMISSION_SECONDS, "ownedChildMaxSeconds": CHILD_SECONDS, "physicalLocks": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)], "runDir": str(raw_run_dir), "stageRoot": stage}
     g.atomic(output / "running.json", receipt)
     physical = None
     watchdog = None
@@ -344,9 +361,11 @@ def run(args):
         receipt["sources"]["inference"] = exact_source(native, NATIVE_HEAD)
         receipt["sources"]["sceneworks"] = exact_source(root, args.sceneworks_sha)
         check(not stopping, "controller interrupted before admission")
-        manifest = {"runners": {"mlx": {"physicalGpuId": args.physical_gpu_id}}, "sourceFreeze": {"sceneworks": {"head": args.sceneworks_sha}, "resourceContract": {"mlx": {"physicalGpuId": args.physical_gpu_id, "metalDeviceName": args.metal_device_name, "canonicalLocks": [str(p) for p in g.MAC_LOCKS], "hostRunnerNames": [RUNNER]}}}}
+        manifest = {"runners": {"mlx": {"physicalGpuId": args.physical_gpu_id}}, "sourceFreeze": {"sceneworks": {"head": args.sceneworks_sha}, "resourceContract": {"mlx": {"physicalGpuId": args.physical_gpu_id, "metalDeviceName": args.metal_device_name, "canonicalLocks": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)], "hostRunnerNames": [RUNNER]}}}}
         physical = FixturePhysical(manifest, "mlx", output)
         physical.claim()
+        receipt["globalLockProfileQualification"] = file_binding(output / "global-lock-profile-qualification.json")
+        receipt["globalLockIdentities"] = [{"path": str(path), "device": identity[0], "inode": identity[1]} for path, identity in zip(physical.locks.paths, physical.locks.identities)]
         parent_birth = g.pid_birth(os.getpid())
         check(parent_birth is not None, "controller PID birth cannot be attested")
         lock_fds = tuple(handle.fileno() for handle in physical.locks.handles)
@@ -354,7 +373,7 @@ def run(args):
         with (output / "watchdog.stderr.log").open("wb") as watchdog_err:
             watchdog = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--watchdog", "--output", str(output), "--parent-pid", str(os.getpid()), "--parent-birth", parent_birth, "--lock-fds", ",".join(map(str, lock_fds))], env=watchdog_env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=watchdog_err, start_new_session=True, pass_fds=lock_fds)
         check(g.pid_birth(watchdog.pid) is not None and watchdog.poll() is None, "independent physical lock watchdog failed to start")
-        receipt["lockWatchdog"] = {"pid": watchdog.pid, "birth": g.pid_birth(watchdog.pid), "lockPaths": [str(p) for p in g.MAC_LOCKS]}
+        receipt["lockWatchdog"] = {"pid": watchdog.pid, "birth": g.pid_birth(watchdog.pid), "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]}
         lease_start = time.monotonic()
         owned_start = time.monotonic()
         for index, fixture in enumerate(FIXTURES, 1):
@@ -444,7 +463,7 @@ def main():
             result = watchdog_locks(args.output, args.parent_pid, args.parent_birth, [int(x) for x in args.lock_fds.split(",")])
         except BaseException as exc:
             # Exception paths must not release inherited physical locks.
-            g.atomic(Path(args.output) / "watchdog-unresolved.json", {"schemaVersion": 1, "reason": "watchdog_exception", "error": str(exc), "parentPid": args.parent_pid, "lockPaths": [str(p) for p in g.MAC_LOCKS]})
+            g.atomic(Path(args.output) / "watchdog-unresolved.json", {"schemaVersion": 1, "reason": "watchdog_exception", "error": str(exc), "parentPid": args.parent_pid, "lockPaths": [str(p) for p in g.canonical_mac_locks(PHYSICAL_GPU_ID)]})
             while True:
                 time.sleep(30)
         sys.exit(result)

@@ -111,6 +111,7 @@ jobs:
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stdout.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stderr.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/*-phase.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/global-lock-profile-qualification.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/actions-ancestor-proof.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/watchdog-closure.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/watchdog-unresolved.json
