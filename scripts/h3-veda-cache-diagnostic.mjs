@@ -1,6 +1,6 @@
 // Closed metadata/CPU compiler diagnostic for one failed preparation; never API/generation.
 import {execFileSync,spawnSync} from 'node:child_process';
-import {readFile,writeFile,mkdir,lstat} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,lstat,statfs} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -8,6 +8,7 @@ import {assertOwnedCpuRun,assertPrivateCpuRoot} from './h3-veda-cache-prepare.mj
 import {bootstrap,noSymlinkAncestors} from './h3-veda-owned-python.mjs';
 const ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 export const FAILED_DIAGNOSTIC_ROOT='/Volumes/Models/epic-25140-cache-diagnostic-69fae2f10';
+export const COMPLETED_DIAGNOSTIC={head:'698e4406c55084ec352a584974d00f48c3067bf5',runId:38541760784,jobId:115777981057,runDir:'/Volumes/Models/epic-25140-cache-diagnostic-698e4406c'};
 export const PRIOR={head:'299c99e8dbeb5ad37a9fa8ad3e7ba51e79f67328',runId:38534168074,jobId:115752914601,runDir:'/Volumes/Models/epic-25140-owned-cache-299c99e8d'};
 const require=(v,m)=>{if(!v)throw Error('H3 diagnostic refusal: '+m);};
 export function priorAuthority(run,job){
@@ -16,14 +17,25 @@ export function priorAuthority(run,job){
  return {run,job};
 }
 export function diagnosticRoots(runDir,internal){
- assertPrivateCpuRoot(runDir,['/Volumes/Models/huggingface',PRIOR.runDir,FAILED_DIAGNOSTIC_ROOT]);
+ assertPrivateCpuRoot(runDir,['/Volumes/Models/huggingface',PRIOR.runDir,FAILED_DIAGNOSTIC_ROOT,COMPLETED_DIAGNOSTIC.runDir]);
  require(path.isAbsolute(internal)&&!internal.startsWith('/Volumes/')&&internal!==ROOT&&!internal.startsWith(ROOT+path.sep),'actual internal RUNNER_TEMP root required');
  noSymlinkAncestors(internal);return {runDir,internal};
+}
+export function completedDiagnosticAuthority(run,job){
+ require(run.id===COMPLETED_DIAGNOSTIC.runId&&run.head_sha===COMPLETED_DIAGNOSTIC.head&&run.run_attempt===1&&run.event==='workflow_dispatch'&&run.path==='.github/workflows/h3-veda-cache-prepare.yml'&&run.status==='completed'&&run.conclusion==='success','exact completed698 diagnostic required');
+ require(job.id===COMPLETED_DIAGNOSTIC.jobId&&job.run_id===COMPLETED_DIAGNOSTIC.runId&&job.name==='mac2_cache'&&job.status==='completed'&&job.conclusion==='success'&&job.runner_id===5281&&job.runner_name==='nax-macos-2','exact completed698 Mac2 job required');return {run,job};
+}
+export function controlledRoot(runDir,runnerTemp,head,uid,stats,freeBytes){
+ require(path.isAbsolute(runnerTemp)&&!runnerTemp.startsWith('/Volumes/')&&runDir===path.join(runnerTemp,`h3-cache-controlled-${head.slice(0,9)}`),'exact source-prefixed actual internal RUNNER_TEMP directory required');
+ diagnosticRoots(runDir,runDir);require(stats.isDirectory()&&stats.uid===uid&&Number.isInteger(uid),'actual runner-temp UID/directory ownership differs');
+ require(Number.isSafeInteger(freeBytes)&&freeBytes>=1073741824,'fresh internal CPU experiment requires >=1GiB operational free space');
+ return {path:runnerTemp,uid,device:stats.dev,freeBytes,minimumFreeBytes:1073741824};
 }
 const hash=b=>createHash('sha256').update(b).digest('hex');
 async function bound(p){noSymlinkAncestors(p);const s=await lstat(p);require(s.isFile(),'regular file required');return {path:p,bytes:s.size,sha256:hash(await readFile(p))};}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
  (async()=>{
+ require(process.platform==='darwin'&&process.arch==='arm64','actual Apple-silicon Mac2 CPU host required');
  const runDir=process.argv[2],head=execFileSync('git',['-C',ROOT,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
  require(head===process.env.GITHUB_SHA&&execFileSync('git',['-C',ROOT,'status','--porcelain'],{encoding:'utf8'}).trim()==='','clean current exact source required');
  const api=p=>JSON.parse(execFileSync('gh',['api',`repos/SceneWorks/SceneWorks/${p}`],{encoding:'utf8',timeout:15000}));
@@ -31,10 +43,11 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
  const active=jobs.filter(j=>j.name==='mac2_cache'&&j.status==='in_progress');require(active.length===1,'unique current job required');
  const owner=assertOwnedCpuRun({run,job:active[0],head}),prior=priorAuthority(api(`actions/runs/${PRIOR.runId}`),api(`actions/jobs/${PRIOR.jobId}`));
  require(process.env.RUNNER_TEMP&&path.isAbsolute(process.env.RUNNER_TEMP),'actual runner temp missing');
- const internal=path.join(process.env.RUNNER_TEMP,`h3-cache-diagnostic-${owner.runId}-${owner.runAttempt}`);diagnosticRoots(runDir,internal);
+ const internal=runDir,uid=process.getuid();noSymlinkAncestors(process.env.RUNNER_TEMP);const disk=await statfs(process.env.RUNNER_TEMP);const runnerTemp=controlledRoot(runDir,process.env.RUNNER_TEMP,head,uid,await lstat(process.env.RUNNER_TEMP),disk.bavail*disk.bsize);
+ const completedDiagnostic=completedDiagnosticAuthority(api(`actions/runs/${COMPLETED_DIAGNOSTIC.runId}`),api(`actions/jobs/${COMPLETED_DIAGNOSTIC.jobId}`));
  require(!await lstat(runDir).catch(e=>e.code==='ENOENT'?null:Promise.reject(e)),'fresh diagnostic root required');
- await mkdir(runDir,{recursive:true});const py=await bootstrap(runDir),helper=await bound(path.join(ROOT,'scripts/h3-veda-cache-diagnostic.py'));
- const plan={schemaVersion:1,kind:'epic25140_cache_failure_299_diagnostic',head,owner,prior,runDir,internal,helper,python:await bound(py.interpreter.path),fixtureDirectory:path.join(ROOT,'scripts/fixtures/h3-cache-failure-299'),supervisor:await bound(path.join(ROOT,'scripts/h3-veda-cpu-build.py'))};
+ await mkdir(runDir);const py=await bootstrap(runDir),helper=await bound(path.join(ROOT,'scripts/h3-veda-cache-controlled.py'));
+ const plan={schemaVersion:1,kind:'epic25140_internal_matched_macro_control',head,owner,prior,completedDiagnostic,runnerTemp,runDir,internal,helper,python:await bound(py.interpreter.path),fixtureDirectory:path.join(ROOT,'scripts/fixtures/h3-cache-failure-299'),supervisor:await bound(path.join(ROOT,'scripts/h3-veda-cpu-build.py')),collector:await bound(path.join(ROOT,'scripts/h3-veda-cache-diagnostic.py'))};
  const bytes=Buffer.from(JSON.stringify(plan,null,2)+'\n'),planPath=path.join(runDir,'diagnostic-plan.json');await writeFile(planPath,bytes,{flag:'wx'});
  const child=spawnSync(plan.python.path,[helper.path,planPath,String(process.pid),hash(bytes)],{stdio:'inherit',timeout:1840000});require(child.status===0,'diagnostic refused/incomplete; inspect sealed receipt');
  })().catch(e=>{console.error(e.message);process.exitCode=1;});

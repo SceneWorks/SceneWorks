@@ -1,5 +1,11 @@
 # Exact failed Mac2 CPU compiler preparation diagnostic
 
+The complete diagnostic described below ran at immutable source698. The current
+`build` route is the bounded matched internal control described in
+[h3-cache-controlled-repro.md](h3-cache-controlled-repro.md). Its output grammar
+is `$RUNNER_TEMP/h3-cache-controlled-<source-SHA-first-9>`; original external
+299/69fa/698 evidence roots remain read-only.
+
 This source changes only `build` execution of the registered owned-cache workflow
 into a bounded diagnostic of run 38534168074, job 115752914601, source
 299c99e8dbeb5ad37a9fa8ad3e7ba51e79f67328. The five dispatch inputs remain literal
