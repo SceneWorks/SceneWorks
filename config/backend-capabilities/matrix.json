@@ -4,7 +4,7 @@
   "summary": {
     "modelCount": 137,
     "importedFamilyCount": 4,
-    "cellCount": 1066,
+    "cellCount": 1068,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -15,12 +15,12 @@
     "apiGeneration": "2b2784c851c5d43cfc59db8d43b008a0a3bb1176b9a66b34239c4a02ae9b364d",
     "apiValidation": "8a6540d2bb8adc0fd9d0af65223270e0adcf01e23f4e011795e124e3219ec224",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "a06cecd6ae656fc342a2e46ffd38679c668ba5f5d3e1ec3543b24f02ef1a783f",
-    "descriptorCandleFacts": "a9d3af4c1dd8a356a4d3a3812aed9c99ddf2fc5ea7f6d7055a17dbba9232c0e4",
-    "descriptorCandleRuntime": "7aa718098de439cfe44387c90ba861dc39749dd5babbaa7c69ae849aee8b7fe6",
-    "descriptorMlxFacts": "23e7e99b121f54765f33ec24c41e9baec188c956b10cc4d4eb66a59b9d0634b9",
-    "descriptorMlxRuntime": "60a7cc471cd9880636c005a71c6c69f4b09b173ff75e9ede1d14b4b893043b1c",
-    "descriptorPreviewFacts": "00ac6d888cd4db5fb270a18649e650cfbd2102597130e57d25384ef4533e1c88",
+    "descriptorAudioFacts": "55c8c8464cf1c47fcfbd81b04c4cf07527be91a8e402f568134f7c69af65616c",
+    "descriptorCandleFacts": "5ce1c5ff59a5ec9dffef2dcd254b7179726928229697eeb57da54f1aeceb2b43",
+    "descriptorCandleRuntime": "335f1648407945ea678b72d62a458670de504cd494fdb2325c53b3a1c84bdd8b",
+    "descriptorMlxFacts": "60d949ccb9ec521d28357c1d7bd5683cd72bf4848f50154c672a4f10842a4281",
+    "descriptorMlxRuntime": "73e36433e840c6947c10ae6724397021c722c7adbe3455a171f3985c44f1d882",
+    "descriptorPreviewFacts": "a9ea72b0ac0e3b0cb969f3d95513967b943c840bc775415f181db7f6cf2bb283",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
     "manifest": "7a24c4c1821f09e48d7ba2fb9f4e18a207e1f70f41680875c918e63b4322ddd7",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
@@ -4647,37 +4647,47 @@
       "operationAndMode": [
         {
           "capability": "edit_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "image_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "text_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "conditioningShape": [
         {
           "capability": "multiReference",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
         }
       ],
       "userAdapters": [
         {
           "capability": "lora",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         },
         {
           "capability": "lokr",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": true
         }
       ],
       "precisionTier": [
@@ -4700,8 +4710,8 @@
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
-        "candle": null
+        "mlx": false,
+        "candle": false
       }
     },
     {

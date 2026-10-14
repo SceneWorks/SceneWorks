@@ -169,6 +169,10 @@
       "candle": false,
       "mlx": false
     },
+    "qwen_image_2_1_turbo": {
+      "candle": false,
+      "mlx": false
+    },
     "qwen_image_edit": {
       "mlx": true
     },
