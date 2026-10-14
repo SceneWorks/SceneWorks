@@ -5,17 +5,23 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Readable } from "node:stream";
-import { catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, pairedMemoryEnvelope, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
+import { catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, verifiedArmLifetime, pairedMemoryEnvelope, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
 import { mse, pairedStreams } from "./h3-veda-metrics.mjs";
 const catalog = await catalogs();
 const H = "a".repeat(40), D = "b".repeat(64);
 function manifest() {
-  const m = { schemaVersion: 1, scope: "named-required", campaignId: "cpu-test", projectId: "owned-project", sourceFreeze: { stage: "permanent-inference-main-pin", inferencePin: H, sceneworks: { root: "/frozen/sw", head: H }, inference: { root: "/frozen/inference", head: H } }, styles: [{ id: "style", source: { repo: "author/style", revision: H, file: "style.safetensors" }, licenseEvidence: "declared model card license", compatibilityEvidence: { sha256: D }, weight: 1, trigger: "cartoon", models: ["minimax_h3", "minimax_h3_ref"], path: "/fixture/style" }], artifacts: [{}], assets: { first: { assetId: "first" }, last: { assetId: "last" }, image: { assetId: "image" }, clip: { assetId: "clip", hasAudio: true }, audio: { assetId: "audio" } }, prompts: Object.fromEntries(Object.keys(PROFILES).map((p) => [p, "A cyclist by the sea, surf and bell audible."])), bindings: { t2va: { seed: 1 }, fl2va_first: { seed: 2, first: "first" }, fl2va_last: { seed: 3, last: "last" }, fl2va_both: { seed: 4, first: "first", last: "last" }, r2va_mixed: { seed: 5, images: ["image"], clips: ["clip"], audio: ["audio"] } }, turboArtifacts: Object.fromEntries(catalog.loras.map((l) => [l.id, { ...l.source, modelIds: l.modelIds, path: `/fixture/${l.id}` }])), runners: { mlx: { requestedGpu: "local-mlx", workerId: "worker", reportedBackend: "mlx", kernel: "masked_sdpa" }, candle_cuda: { requestedGpu: "cuda-owned", workerId: "cuda-worker", reportedBackend: "cuda", kernel: "cuda_kernel" } }, proofRoutes: Object.fromEntries(PROOFS.map((id) => [id, { route: "product_job", requirement: "approved E1-E9" }])), limits: { maxJobs: 2, jobTimeoutMs: 10000, maxMediaBytes: 100000 } };
+  const m = { schemaVersion: 1, scope: "named-required", campaignId: "cpu-test", projectId: "owned-project", sourceFreeze: { stage: "permanent-inference-main-pin", inferencePin: H, sceneworks: { root: "/frozen/sw", head: H }, inference: { root: "/frozen/inference", head: H } }, styles: [{ id: "style", source: { repo: "author/style", revision: H, file: "style.safetensors" }, licenseEvidence: "declared model card license", compatibilityEvidence: { sha256: D }, weight: 1, trigger: "cartoon", models: ["minimax_h3", "minimax_h3_ref"], path: "/fixture/style" }], artifacts: [{}], assets: { first: { assetId: "first" }, last: { assetId: "last" }, image: { assetId: "image" }, clip: { assetId: "clip", hasAudio: true }, audio: { assetId: "audio" } }, prompts: Object.fromEntries(Object.keys(PROFILES).map((p) => [p, "A cyclist by the sea, surf and bell audible."])), bindings: { t2va: { seed: 1 }, fl2va_first: { seed: 2, first: "first" }, fl2va_last: { seed: 3, last: "last" }, fl2va_both: { seed: 4, first: "first", last: "last" }, r2va_mixed: { seed: 5, images: ["image"], clips: ["clip"], audio: ["audio"] } }, turboArtifacts: Object.fromEntries(catalog.loras.map((l) => [l.id, { ...l.source, modelIds: l.modelIds, path: `/fixture/${l.id}` }])), runners: { mlx: { requestedGpu: "local-mlx", workerId: "worker", reportedBackend: "mlx", kernel: "masked_sdpa", physicalGpuId: "gpu", workerBinary: { sha256: D } }, candle_cuda: { requestedGpu: "cuda-owned", workerId: "cuda-worker", reportedBackend: "cuda", kernel: "cuda_kernel", physicalGpuId: "cuda-uuid", workerBinary: { sha256: D } } }, proofRoutes: Object.fromEntries(PROOFS.map((id) => [id, { route: "product_job", requirement: "approved E1-E9" }])), limits: { maxJobs: 2, jobTimeoutMs: 10000, maxMediaBytes: 100000 } };
   return m;
 }
 const row = matrix(catalog)[0];
 function outcome(arm) { return { requested: arm === "sparse", effective: arm === "sparse" ? "sparse" : "dense", kernel: "masked_sdpa", predictor: "frozen", plan: "plan", planMatch: "exact", denseTokenPairs: 100, selectedTokenPairs: arm === "sparse" ? 90 : 100, totalAttentionFraction: arm === "sparse" ? .9 : 1, sparseCalls: arm === "sparse" ? 10 : 0, denseCalls: arm === "sparse" ? 0 : 10, predictorScoreCalls: arm === "sparse" ? 10 : 0, predictorLoadAttempts: arm === "sparse" ? 1 : 0, workspaceBytes: arm === "sparse" ? 100 : 0, fallbackReason: null, terminalEstimate: { schemaVersion: 1, method: "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace", interpretation: "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling", baseBytes: 100, headroomBytes: 10, sparseWorkspaceBoundBytes: arm === "sparse" ? 100 : 0, estimatedTotalBytes: arm === "sparse" ? 210 : 110, hostFullJobEstimateBytes: null }, terminalTelemetry: { schemaVersion: 1, backend: "mlx", hostMethod: "current_process_rss_independent_40ms_poll_plus_completed_step_sample", hostSampleIntervalMs: 40, hostSampleMaxBytes: 10, workspaceComparison: "unavailable: full denoise allocations are not attributable to Veda workspace", steps: Array.from({length: row.sampling.steps}, (_, i) => ({ index: i + 1, wallNs: 1, hostProcessRssSampleBytes: 10, hostWindowSampleMaxBytes: 10, hostWindowSampleCount: 1, device: { method: "mlx_process_allocator_cumulative_highwater_no_reset", allocatorActiveSampleBytes: 1, allocatorCacheSampleBytes: 0, allocatorPeakBytesCumulative: 1 } })) } }; }
 function evidence(request, id = "job") { const arm = request.advanced.s9Harness.arm, report = outcome(arm), [width, height] = row.canvas.split("x").map(Number); const asset = { id: `${id}-asset`, url: "/api/v1/projects/owned-project/files/out.mp4", lineage: { jobId: id }, file: { width, height, fps: 24, frameCount: row.frames, hasAudio: true }, recipe: { rawAdapterSettings: { vedaExecution: report } } }; return { asset, job: { id, projectId: request.projectId, payload: request, workerId: "worker", status: "completed", result: { assets: [asset] } }, metrics: { vedaExecution: report, model: row.model, quantLabel: row.tier, width, height, steps: row.sampling.steps, backend: "mlx", totalMs: 10, peakMemoryBytes: 20, terminalMemory: { schemaVersion: 1, scope: "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save", hostMethod: "current_process_rss_independent_40ms_poll_plus_end_sample", hostSampleIntervalMs: 40, hostSampleCount: 1, hostProcessRssAtStartBytes: 10, hostProcessRssSampleMaxBytes: 10, device: { method: "mlx_allocator_job_scoped_peak_no_step_resets", allocatorPeakBytes: 20 } } } }; }
+function armLifetime(m, backend, request, job, incarnation, admissionProof) {
+  const runner = m.runners[backend], marker = request.advanced.s9Harness;
+  const workerConfigBinding = { configFiles: [{ path: "manifests/builtin.models.jsonc", sha256: D }], environment: { SCENEWORKS_GPU_ID: runner.requestedGpu } };
+  return { key: marker.key, jobId: job.id, request, job, admissionProof,
+    workerClosure: { schemaVersion: 1, key: marker.key, jobId: job.id, pid: 1000 + incarnation, birth: `birth-${incarnation}`, workerId: runner.workerId, workerBinarySha256: runner.workerBinary.sha256, workerConfigBinding, workerConfigSha256: digest(workerConfigBinding), backend, physicalGpuId: runner.physicalGpuId, campaignId: marker.campaignId, sourceFingerprint: marker.fingerprint, guardianOwnerTokenSha256: D, sourceFreezeSha256: digest(m.sourceFreeze), lifecycle: "fresh_per_arm_process_drained_before_next_admission", reaped: true, descendantsDrained: true, exitCode: 0, admissionReceipt: structuredClone(admissionProof) } };
+}
 function pairedEvidence(backend = "mlx") {
   const m = manifest();
   const caseRow = { ...row, backend, id: row.id.replace(/^mlx\//, `${backend}/`) };
@@ -33,13 +39,31 @@ function pairedEvidence(backend = "mlx") {
       report.terminalEstimate.hostWorkspaceBoundBytes = arm === "sparse" ? 30 : null;
       e.metrics.terminalMemory.device = { method: "cuda_current_pool_job_scoped_highwater_reset_before_handler", sameCurrentPool: true, usedHighBytes: 20, reservedHighBytes: 20 };
     }
-    return { status: "collected", request, job: e.job, metrics: e.metrics };
+    const admissionProof = { phase: "submit-or-reconcile", admitted: true, physicalGpuId: m.runners[backend].physicalGpuId, driverSamples: Array.from({length:5},(_,i)=>({observedAt:i+1,admitted:true,driverAvailable:true})) };
+    return { status: "collected", metrics: e.metrics, ...armLifetime(m, backend, request, e.job, arm === "dense" ? 1 : 2, admissionProof) };
   };
   return { dense: make("dense"), sparse: make("sparse"), row: caseRow, runner: m.runners[backend] };
 }
 async function temp(t) { const dir = await mkdtemp(path.join(tmpdir(), "h3-s9-")); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
 async function receipt(file, data = "mock media; never real-weight acceptance") { await writeFile(file, data); return { path: file, bytes: Buffer.byteLength(data), sha256: await hashFile(file) }; }
-function guard(m) { m.sourceFreeze.resourceContract = { mlx: { physicalGpuId: "gpu", canonicalLocks: ["canonical-gpu-local", "canonical-nax-ci"] } }; m.runners.mlx.physicalGpuId = "gpu"; const g = { owned: true, ownerToken: "live-token", lockIdentities: m.sourceFreeze.resourceContract.mlx.canonicalLocks, isOwnerAlive: async () => true, ownsCanonicalLocks: async () => true, release: async () => {}, retainForOwnedJobs: async () => {}, beforePhase: async (phase) => ({ phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: Date.now(), queueObservedAt: Date.now(), conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: Date.now()-5000+i*1000, admitted: true, driverAvailable: true })) }) }; return g; }
+function guard(m) {
+  m.sourceFreeze.resourceContract = { mlx: { physicalGpuId: "gpu", canonicalLocks: ["canonical-gpu-local", "canonical-nax-ci"] } };
+  m.runners.mlx.physicalGpuId = "gpu";
+  let admissionProof, incarnation = 0;
+  const g = { owned: true, ownerToken: "live-token", lockIdentities: m.sourceFreeze.resourceContract.mlx.canonicalLocks,
+    isOwnerAlive: async () => true, ownsCanonicalLocks: async () => true, release: async () => {}, retainForOwnedJobs: async () => {},
+    beforePhase: async (phase, context = {}) => {
+      const now = Date.now();
+      const proof = { phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: now, queueObservedAt: now, conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: now - 5000 + i * 1000, admitted: true, driverAvailable: true })) };
+      if (phase === "submit-or-reconcile") { const { ownerToken, ...stored } = proof; admissionProof = stored; }
+      if (phase === "collect-completed-evidence") {
+        const request = { advanced: { s9Harness: { key: context.key, campaignId: m.campaignId, fingerprint: digest(m) } } };
+        proof.drainedWorker = armLifetime(m, "mlx", request, { id: context.jobId }, ++incarnation, admissionProof).workerClosure;
+      }
+      return proof;
+    } };
+  return g;
+}
 function mock(m, variant = "ok") { const jobs = new Map(), assets = new Map(); let posts = 0, releases = 0; return { get posts() { return posts; }, get releases() { return releases; }, lease: async () => async () => { releases++; }, api: { verifyCarrier: async () => {}, async json(route, options = {}) { if (route === "/api/v1/video/jobs") { posts++; if (variant === "ambiguous") throw new Error("lost transport"); const e = evidence(options.body, `job-${posts}`); if (variant === "timeout") e.job.status = "running"; if (variant === "unknown") e.job.status = "new_unknown_status"; if (variant === "missing") delete e.metrics.vedaExecution; if (variant === "fallback") { e.metrics.vedaExecution.fallbackReason = "missing predictor"; e.metrics.vedaExecution.effective = "dense"; } if (variant === "overbound" && options.body.advanced.s9Harness.arm === "sparse") { e.metrics.terminalMemory.device.allocatorPeakBytes = 121; e.metrics.peakMemoryBytes = 121; } jobs.set(e.job.id, e); assets.set(e.asset.id, e.asset); return { status: 201, value: e.job }; } if (route.endsWith("/cancel")) { jobs.get(route.split("/").at(-2)).job.status="canceled"; return {status:200,value:{}}; } if (route.endsWith("/metrics")) return { status: 200, value: jobs.get(route.split("/").at(-2)).metrics }; if (route.includes("/assets/")) return { status: 200, value: assets.get(route.split("/").at(-1)) }; if (route.includes("?")) return { status: 200, value: [...jobs.values()].map((e) => e.job) }; return { status: 200, value: jobs.get(route.split("/").at(-1))?.job }; }, download: async (_, target) => receipt(target) } }; }
 async function execute(t, variant = "ok", edit = () => {}) { const dir = await temp(t), m = manifest(); m.assets = {}; edit(m); const g = guard(m), mocks = mock(m, variant); g.submit = (intent) => mocks.api.json("/api/v1/video/jobs", { method: "POST", body: intent.request }); g.attachJob = async () => {}; const compare = async (dense, sparse) => ({ sideBySide: dense, denseAudio: dense, sparseAudio: sparse, video: { psnr: "Infinity" }, audio: { psnr: "Infinity" } }); const options = { backend: "mlx", runDir: dir, validate: async () => ({ rows: [row], snapshots: [], fingerprint: digest(m) }), sourceCheck: async () => {}, physical: async () => g, ...mocks, compare }; return { m, dir, mocks, options, run: () => runCampaign(m, options) }; }
 
@@ -51,18 +75,33 @@ test("exact source verifier rejects stale and dirty HEADs before any job", async
 test("reconciliation adopts exactly one marker and refuses absence, duplicate or full windows", async () => { const intent={key:"key",request:{projectId:"p",advanced:{s9Harness:{key:"key",fingerprint:"f"}}}}; const job={id:"j",payload:intent.request}; assert.equal((await reconcile({json:async()=>({status:200,value:[job]})},intent)).id,"j"); for (const list of [[],[job,job],Array(500).fill({})]) await assert.rejects(reconcile({json:async()=>({status:200,value:list})},intent)); });
 test("actual observations reject missing, forged, unknown, fallback and unmeasured outputs", () => { const m=manifest(), request=requestFor(m,row,"sparse"); request.advanced.s9Harness={arm:"sparse"}; for (const mutate of [(e)=>delete e.metrics.vedaExecution,(e)=>e.job.status="unknown",(e)=>e.metrics.vedaExecution.fallbackReason="failed self-test",(e)=>e.metrics.peakMemoryBytes=null,(e)=>delete e.metrics.terminalMemory,(e)=>e.metrics.terminalMemory.device.allocatorPeakBytes=null,(e)=>e.asset.file.hasAudio=false,(e)=>e.metrics.quantLabel="q8",(e)=>e.job.workerId="other",(e)=>delete e.metrics.vedaExecution.terminalEstimate,(e)=>e.metrics.vedaExecution.terminalEstimate.estimatedTotalBytes=1,(e)=>delete e.metrics.vedaExecution.terminalTelemetry,(e)=>e.metrics.vedaExecution.terminalTelemetry.steps.pop(),(e)=>e.metrics.vedaExecution.terminalTelemetry.steps[0].device.allocatorPeakBytesCumulative=null]) { const e=evidence(request); mutate(e); assert.throws(()=>observed(e.job,e.metrics,row,"sparse",m.runners.mlx)); } });
 test("admission floor plus workspace is retained as a comparison, not a peak ceiling", () => { const m=manifest(), request=requestFor(m,row,"sparse"); request.advanced.s9Harness={arm:"sparse"}; const e=evidence(request), estimate=e.metrics.vedaExecution.terminalEstimate; Object.assign(estimate,{baseBytes:5,headroomBytes:5,sparseWorkspaceBoundBytes:100,estimatedTotalBytes:110}); e.metrics.terminalMemory.device.allocatorPeakBytes=111; e.metrics.peakMemoryBytes=111; assert.equal(observed(e.job,e.metrics,row,"sparse",m.runners.mlx).id,e.asset.id); });
-test("paired measured whole-job peaks use the same-worker dense baseline and problem bound", () => {
+test("paired measured whole-job peaks use matched fresh owned worker incarnations and problem bound", () => {
   const { dense, sparse } = pairedEvidence();
-  const proof = pairedMemoryEnvelope(dense, sparse, "mlx");
+  const proof = pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze));
+  assert.notDeepEqual(proof.workerIncarnations[0], proof.workerIncarnations[1]);
   assert.equal(proof.device.nativeSparseWorkspaceBoundBytes, 100);
   assert.equal(proof.device.denseObservedPlusBoundBytes, 120);
   assert.equal(proof.device.withinEmpiricalEnvelope, true);
   assert.equal(proof.host.withinEmpiricalEnvelope, true);
   sparse.metrics.terminalMemory.device.allocatorPeakBytes = 121;
-  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx").device.withinEmpiricalEnvelope, false);
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze)).device.withinEmpiricalEnvelope, false);
   sparse.metrics.terminalMemory.device.allocatorPeakBytes = 20;
   sparse.metrics.terminalMemory.hostProcessRssSampleMaxBytes = 111;
-  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx").host.withinEmpiricalEnvelope, false);
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze)).host.withinEmpiricalEnvelope, false);
+});
+test("paired memory refuses missing, reused, or unbound worker process lifetimes", () => {
+  for (const [caseIndex, mutate] of [
+    (p) => { delete p.sparse.workerClosure; },
+    (p) => { p.sparse.workerClosure.pid = p.dense.workerClosure.pid; p.sparse.workerClosure.birth = p.dense.workerClosure.birth; },
+    (p) => { p.sparse.workerClosure.jobId = "foreign-job"; },
+    (p) => { p.sparse.workerClosure.reaped = false; },
+    (p) => { p.sparse.workerClosure.workerBinarySha256 = "f".repeat(64); },
+    (p) => { p.sparse.workerClosure.workerConfigBinding.environment.SCENEWORKS_GPU_ID = "foreign"; },
+    (p) => { p.sparse.workerClosure.sourceFreezeSha256 = "f".repeat(64); },
+    (p) => { p.sparse.workerClosure.admissionReceipt.observedAt = 999; },
+  ].entries()) { const p = pairedEvidence(); mutate(p); assert.throws(() => pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze)), undefined, `worker lifetime mutation ${caseIndex}`); }
+  const p = pairedEvidence(); p.sparse.workerClosure.guardianOwnerTokenSha256 = "f".repeat(64);
+  assert.equal(pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze)).device.withinEmpiricalEnvelope, true);
 });
 test("paired memory refuses identity, method, and runtime workspace mismatches", () => {
   for (const mutate of [
@@ -72,20 +111,20 @@ test("paired memory refuses identity, method, and runtime workspace mismatches",
     (p) => { p.sparse.metrics.terminalMemory.device.method = "driver_global_sample"; },
     (p) => { p.sparse.metrics.vedaExecution.workspaceBytes = 101; },
     (p) => { p.sparse.metrics.vedaExecution.terminalEstimate.baseBytes = 101; },
-  ]) { const p = pairedEvidence(); mutate(p); assert.throws(() => pairedMemoryEnvelope(p.dense, p.sparse, "mlx")); }
+  ]) { const p = pairedEvidence(); mutate(p); assert.throws(() => pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze))); }
 });
 test("CUDA worker backend and native backend retain distinct identities and host bound", () => {
   const { dense, sparse, row: cudaRow, runner } = pairedEvidence("candle_cuda");
   assert.equal(observed(dense.job, dense.metrics, cudaRow, "dense", runner).id, dense.job.result.assets[0].id);
   assert.equal(observed(sparse.job, sparse.metrics, cudaRow, "sparse", runner).id, sparse.job.result.assets[0].id);
-  const proof = pairedMemoryEnvelope(dense, sparse, "candle_cuda");
+  const proof = pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze));
   assert.equal(proof.backend, "candle_cuda");
   assert.equal(proof.host.nativeSparseHostWorkspaceBoundBytes, 30);
   assert.equal(proof.host.denseObservedPlusBoundBytes, 40);
   sparse.metrics.terminalMemory.hostProcessRssSampleMaxBytes = 41;
-  assert.equal(pairedMemoryEnvelope(dense, sparse, "candle_cuda").host.withinEmpiricalEnvelope, false);
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze)).host.withinEmpiricalEnvelope, false);
   sparse.metrics.vedaExecution.terminalEstimate.hostWorkspaceBoundBytes = null;
-  assert.throws(() => pairedMemoryEnvelope(dense, sparse, "candle_cuda"));
+  assert.throws(() => pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze)));
 });
 test("mock product pair collects only pending evidence; resume never rerenders", async (t) => { const x=await execute(t); const state=await x.run(); assert.equal(x.mocks.posts,2); assert.equal(x.mocks.releases,1); assert.equal(state.cells[row.id].status,"media_collected_evidence_incomplete"); assert.equal(summary(state).completedAcceptance,false); await x.run(); assert.equal(x.mocks.posts,2); assert.equal(summary(state).instrumentationIncomplete,1); });
 test("whole-job empirical bound excess remains unresolved", async (t) => { const x=await execute(t,"overbound"); const state=await x.run(); const cell=state.cells[row.id]; assert.equal(cell.status,"unresolved"); assert.equal(cell.memoryEnvelope.device.withinEmpiricalEnvelope,false); assert.match(cell.memoryEnvelopeError,/exceeds/); assert.equal(summary(state).completedAcceptance,false); });

@@ -226,14 +226,35 @@ export function observed(job, metrics, row, arm, runner) {
   return asset;
 }
 
+// A logical worker ID is stable across guardian-controlled process restarts.
+// Each arm must instead carry its own reaped process-birth receipt, bound to
+// the exact admitted request and frozen binary/config/device/campaign.
+export function verifiedArmLifetime(attempt, runner, backend, sourceFreezeSha256) {
+  const closure = attempt?.workerClosure, admission = attempt?.admissionProof;
+  const marker = attempt?.request?.advanced?.s9Harness;
+  assert(admission?.phase === "submit-or-reconcile" && admission.admitted === true && admission.physicalGpuId === runner.physicalGpuId && Array.isArray(admission.driverSamples) && admission.driverSamples.length === 5, "arm admission proof missing or wrong device");
+  assert(closure?.schemaVersion === 1 && closure.lifecycle === "fresh_per_arm_process_drained_before_next_admission" && closure.reaped === true && closure.descendantsDrained === true && Number.isInteger(closure.exitCode), "owned worker process drain proof missing");
+  assert(closure.key === attempt.key && closure.jobId === attempt.jobId && closure.jobId === attempt.job?.id && marker?.key === closure.key && marker?.campaignId === closure.campaignId && marker?.fingerprint === closure.sourceFingerprint, "worker process is not bound to this admitted product job");
+  assert(Number.isSafeInteger(closure.pid) && closure.pid > 0 && (typeof closure.birth === "string" ? closure.birth.length > 0 : Number.isSafeInteger(closure.birth) && closure.birth > 0), "owned worker PID/birth identity missing");
+  assert(closure.workerId === runner.workerId && attempt.job.workerId === runner.workerId && closure.backend === backend && closure.physicalGpuId === runner.physicalGpuId && closure.workerBinarySha256 === runner.workerBinary?.sha256, "worker incarnation differs from frozen binary/backend/device");
+  assert([closure.workerBinarySha256, closure.workerConfigSha256, closure.sourceFreezeSha256, closure.guardianOwnerTokenSha256, closure.sourceFingerprint].every((value) => typeof value === "string" && HEX.test(value)), "worker incarnation fingerprint missing");
+  assert(closure.sourceFreezeSha256 === sourceFreezeSha256 && closure.workerConfigBinding && Array.isArray(closure.workerConfigBinding.configFiles) && closure.workerConfigBinding.configFiles.length > 0 && closure.workerConfigBinding.environment && digest(closure.workerConfigBinding) === closure.workerConfigSha256, "worker source/config launch attestation differs");
+  assert(!Object.hasOwn(closure.workerConfigBinding.environment, "SCENEWORKS_ACCESS_TOKEN") && !Object.hasOwn(closure.workerConfigBinding.environment, "SCENEWORKS_PARENT_PID"), "private worker launch fields persisted");
+  assert(digest(closure.admissionReceipt) === digest(admission), "worker incarnation admission differs from the pre-submit five-sample proof");
+  return closure;
+}
+
 // The dense arm is an observed baseline for this exact pair, never an ex-ante
 // native peak prediction. Compare like-scoped whole-job counters; the native
 // problem bound is the only additive term. A passing comparison is empirical
 // evidence, not Veda-only allocation attribution or a continuously measured RSS peak.
-export function pairedMemoryEnvelope(dense, sparse, backend) {
+export function pairedMemoryEnvelope(dense, sparse, backend, runner, sourceFreezeSha256) {
   assert(dense?.status === "collected" && sparse?.status === "collected", "paired memory needs both completed arms");
   const d = dense.metrics, s = sparse.metrics, dj = dense.job, sj = sparse.job;
-  assert(dj?.id && sj?.id && dj.id !== sj.id && dj.workerId && dj.workerId === sj.workerId, "paired memory worker/job identity differs");
+  assert(dj?.id && sj?.id && dj.id !== sj.id && dj.workerId && dj.workerId === sj.workerId, "paired logical worker/job identity differs");
+  const dp = verifiedArmLifetime(dense, runner, backend, sourceFreezeSha256), sp = verifiedArmLifetime(sparse, runner, backend, sourceFreezeSha256);
+  assert(dp.pid !== sp.pid || dp.birth !== sp.birth, "paired arms reused one process incarnation");
+  assert(dp.workerBinarySha256 === sp.workerBinarySha256 && dp.workerConfigSha256 === sp.workerConfigSha256 && dp.sourceFreezeSha256 === sp.sourceFreezeSha256 && dp.sourceFingerprint === sp.sourceFingerprint && dp.physicalGpuId === sp.physicalGpuId, "paired owned worker binary/config/source/device identity differs");
   assert(["mlx", "candle_cuda"].includes(backend) && d?.backend === (backend === "mlx" ? "mlx" : "cuda") && s?.backend === d.backend, "paired memory backend differs");
   const dh = dense.request?.advanced?.s9Harness, sh = sparse.request?.advanced?.s9Harness;
   assert(dh?.arm === "dense" && sh?.arm === "sparse" && dh.campaignId && dh.campaignId === sh.campaignId && dh.caseId && dh.caseId === sh.caseId && dh.fingerprint && dh.fingerprint === sh.fingerprint, "paired memory campaign identity differs");
@@ -254,20 +275,21 @@ export function pairedMemoryEnvelope(dense, sparse, backend) {
   const hostCeiling = denseHost + hostBound;
   assert([denseHost, sparseHost, hostBound, hostCeiling].every(Number.isSafeInteger) && denseHost > 0 && sparseHost > 0 && hostBound > 0, "paired host RSS or workspace bound is not an exact byte count");
   return {
-    schemaVersion: 1, method: "same_worker_dense_observed_whole_job_peak_plus_native_problem_workspace_bound",
+    schemaVersion: 1, method: "same_frozen_binary_config_device_distinct_worker_process_dense_observed_peak_plus_problem_workspace_bound",
     campaignId: dh.campaignId, caseId: dh.caseId, sourceFingerprint: dh.fingerprint,
-    denseJobId: dj.id, sparseJobId: sj.id, workerId: dj.workerId, backend,
+    denseJobId: dj.id, sparseJobId: sj.id, logicalWorkerId: dj.workerId, backend,
+    workerIncarnations: [{pid: dp.pid, birth: dp.birth, jobId: dp.jobId}, {pid: sp.pid, birth: sp.birth, jobId: sp.jobId}],
     device: { method: deviceMethod, denseObservedPeakBytes: densePeak, sparseObservedPeakBytes: sparsePeak, nativeSparseWorkspaceBoundBytes: se.sparseWorkspaceBoundBytes, denseObservedPlusBoundBytes: deviceCeiling, withinEmpiricalEnvelope: sparsePeak <= deviceCeiling },
     host: { method: d.terminalMemory.hostMethod, scope: "sampled process RSS whole-job maxima; Apple unified RSS overlaps MLX allocation", denseObservedSampleMaxBytes: denseHost, sparseObservedSampleMaxBytes: sparseHost, nativeSparseHostWorkspaceBoundBytes: hostBound, denseObservedPlusBoundBytes: hostCeiling, withinEmpiricalEnvelope: sparseHost <= hostCeiling },
-    limit: "paired observed dense baseline, not ex-ante admission ceiling; sampled host RSS can miss transients; allocator/current-pool peaks cannot isolate Veda allocations",
+    limit: "paired observed dense baseline, not ex-ante admission ceiling; sampled host RSS can miss transients; whole-job allocator/current-pool peaks cannot isolate Veda allocations; MLX native cumulative steps share the existing worker job-start peak reset window",
   };
 }
 // This adapter must hold the established physical OS lock; campaign.json/marker is not that lock.
-export async function physicalPhase(guard, m, backend, phase, { now } = {}) {
+export async function physicalPhase(guard, m, backend, phase, { now, context = {} } = {}) {
   const r = m.runners[backend], expected = m.sourceFreeze.resourceContract?.[backend];
   assert(expected?.canonicalLocks?.length && expected.physicalGpuId === r.physicalGpuId && digest(guard.lockIdentities) === digest(expected.canonicalLocks), "wrong canonical physical resource lock");
   assert(guard.owned === true && guard.ownerToken && await guard.isOwnerAlive() === true && await guard.ownsCanonicalLocks() === true, "unowned/dead physical guard owner");
-  const proof = await guard.beforePhase(phase); now ??= Date.now();
+  const proof = await guard.beforePhase(phase, context); now ??= Date.now();
   assert(proof.phase === phase && proof.ownerToken === guard.ownerToken && proof.admitted === true && proof.physicalGpuId === r.physicalGpuId && proof.observedAt <= now && now - proof.observedAt <= 10000 && proof.conflictingJobs === 0 && proof.queueObservedAt <= now && now - proof.queueObservedAt <= 10000, "stale/unadmitted current phase or conflicting queue");
   assert(Array.isArray(proof.driverSamples) && proof.driverSamples.length === 5 && proof.driverSamples.every((x, i, a) => x.admitted === true && x.driverAvailable === true && Number.isFinite(x.observedAt) && x.observedAt <= now && now - x.observedAt <= 15000 && (!i || x.observedAt > a[i - 1].observedAt)), "five timed driver admission samples missing/stale");
   return proof;
@@ -329,13 +351,13 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       cell ??= { kind: row.kind, status: "planned", arms: {} }; state.cells[row.id] = cell;
       for (const arm of row.kind === "expected_refusal" ? ["refusal"] : row.kind === "product_proof" ? ["sparse"] : ["dense", "sparse"]) {
         if (submitted >= m.limits.maxJobs) break;
-        await sourceCheck(m); await unchanged(v.snapshots); if (release.check) await release.check(); await physicalPhase(guard, m, backend, "submit-or-reconcile");
+        await sourceCheck(m); await unchanged(v.snapshots); if (release.check) await release.check(); const submitProof = await physicalPhase(guard, m, backend, "submit-or-reconcile");
         let attempt = cell.arms[arm];
         if (attempt?.status === "collected") { await boundFile(attempt.media); continue; }
         if (attempt?.status === "expected_refusal") continue;
         const request = requestFor(m, row, arm); const key = digest({ fingerprint: v.fingerprint, row: row.id, arm, request });
         request.advanced.s9Harness = { campaignId: m.campaignId, caseId: row.id, arm, key, fingerprint: v.fingerprint };
-        if (!attempt) { attempt = { key, request, requestSha256: digest(request), status: "intent", deadline: Date.now() + m.limits.jobTimeoutMs }; cell.arms[arm] = attempt; await atomic(campaignFile, state); }
+        if (!attempt) { const admissionProof = { ...submitProof }; delete admissionProof.ownerToken; attempt = { key, request, requestSha256: digest(request), admissionProof, status: "intent", deadline: Date.now() + m.limits.jobTimeoutMs }; cell.arms[arm] = attempt; await atomic(campaignFile, state); }
         assert(attempt.key === key && attempt.requestSha256 === digest(request), "persisted arm request identity differs");
         let job;
         if (attempt.jobId) { const r = await api.json(`/api/v1/jobs/${encodeURIComponent(attempt.jobId)}`); assert(r.status === 200, "recorded job not readable; do not resubmit"); job = r.value; }
@@ -362,10 +384,12 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         }
         assert(TERMINAL.has(job.status), "unknown product job status"); attempt.job = job;
         if (job.status !== "completed") { attempt.status = job.status; cell.status = job.status; await atomic(campaignFile, state); continue; }
-        await physicalPhase(guard, m, backend, "collect-completed-evidence");
+        const collectProof = await physicalPhase(guard, m, backend, "collect-completed-evidence", { context: { key, jobId: job.id } });
+        attempt.workerClosure = collectProof.drainedWorker; await atomic(campaignFile, state);
         const metricsResult = await api.json(`/api/v1/jobs/${encodeURIComponent(job.id)}/metrics`); assert(metricsResult.status === 200, "metrics readback failed"); attempt.metrics = metricsResult.value;
         try {
           const asset = observed(job, attempt.metrics, row, arm, m.runners[backend]);
+          verifiedArmLifetime(attempt, m.runners[backend], backend, digest(m.sourceFreeze));
           const admission = attempt.metrics.vedaExecution.terminalEstimate;
           const whole = attempt.metrics.terminalMemory;
           const measuredDevicePeak = backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
@@ -388,15 +412,15 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         cell.comparison = await compare(cell.arms.dense.media, cell.arms.sparse.media, row, path.join(runDir, digest(row.id)), m.limits.jobTimeoutMs);
         cell.review = { reviewer: "Michael", disposition: "pending" }; cell.status = "media_collected_evidence_incomplete";
         try {
-          cell.memoryEnvelope = pairedMemoryEnvelope(cell.arms.dense, cell.arms.sparse, backend);
+          cell.memoryEnvelope = pairedMemoryEnvelope(cell.arms.dense, cell.arms.sparse, backend, m.runners[backend], digest(m.sourceFreeze));
           if (!cell.memoryEnvelope.device.withinEmpiricalEnvelope || !cell.memoryEnvelope.host.withinEmpiricalEnvelope) {
             cell.status = "unresolved";
-            cell.memoryEnvelopeError = "observed sparse full-job peak exceeds the same-worker dense observed peak plus native problem workspace bound";
+            cell.memoryEnvelopeError = "observed sparse full-job peak exceeds the matched owned dense observed peak plus native problem workspace bound";
           }
         } catch (error) {
           cell.status = "unresolved"; cell.memoryEnvelopeError = String(error);
         }
-        cell.nativeMeasurementGaps = ["the paired dense observed peak is an empirical baseline, not an ex-ante device admission ceiling", "sampled host RSS may miss short transients and overlaps unified MLX allocation", "global allocator/current-pool highwaters cannot attribute bytes to Veda alone"];
+        cell.nativeMeasurementGaps = ["the paired dense observed peak is an empirical baseline, not an ex-ante device admission ceiling", "sampled host RSS may miss short transients and overlaps unified MLX allocation", "whole-job allocator/current-pool highwaters cannot attribute bytes to Veda alone; native MLX cumulative steps share the existing worker job-start reset window"];
       }
       await atomic(campaignFile, state);
     }
