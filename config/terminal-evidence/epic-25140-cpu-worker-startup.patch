@@ -1,0 +1,44 @@
+diff --git a/crates/sceneworks-worker/src/lib.rs b/crates/sceneworks-worker/src/lib.rs
+index f2e68e4b5..9f76a2101 100644
+--- a/crates/sceneworks-worker/src/lib.rs
++++ b/crates/sceneworks-worker/src/lib.rs
+@@ -1568,6 +1568,26 @@ fn reclaim_import_staging(
+     sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
+ }
+ 
++fn apply_worker_memory_limit(gpu_id: &str, bytes: u64, apply: impl FnOnce(u64)) {
++    // CPU utility workers must not initialize the MLX device/allocator at startup.
++    // Every non-CPU worker retains the existing setter and exact configured value.
++    if gpu_id != "cpu" {
++        apply(bytes);
++    }
++}
++
++#[cfg(test)]
++mod cache_cpu_startup_tests {
++    #[test]
++    fn cpu_never_calls_mlx_setter_and_non_cpu_keeps_exact_bytes() {
++        for selector in ["cpu", "mlx", "auto", "0", "GPU-test"] {
++            let mut calls = Vec::new();
++            super::apply_worker_memory_limit(selector, 123, |bytes| calls.push(bytes));
++            assert_eq!(calls, if selector == "cpu" { vec![] } else { vec![123] });
++        }
++    }
++}
++
+ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
+     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
+@@ -1583,7 +1603,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
+     // upscales, AND LoRA training. When the user configured no ceiling (0) a default derived from
+     // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
+     // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
+-    generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
++    apply_worker_memory_limit(
++        &settings.gpu_id,
++        settings.gpu_memory_limit_bytes,
++        generator_cache::apply_gpu_memory_limit,
++    );
+     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
+     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
+     // do no MLX work) don't clobber the file with zeros.

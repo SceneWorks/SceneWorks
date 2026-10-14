@@ -1,0 +1,87 @@
+name: H3 owned CPU cache preparation
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Build ordinary managed downloader or prepare its private cache. No generation.
+        type: choice
+        options: [build, prepare]
+        required: true
+      sceneworks_sha:
+        description: Exact workflow/helper source commit.
+        type: string
+        required: true
+      run_dir:
+        description: External task-owned same-APFS-volume directory; never the shared HF cache.
+        type: string
+        required: true
+      shared_cache_root:
+        description: Narrow source-declared existing cache root, read-only.
+        type: string
+        required: false
+        default: /Volumes/Models/huggingface
+      binary_attestation_path:
+        description: Existing host-local cpu-download-build.json produced by build mode.
+        type: string
+        required: false
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: h3-owned-cpu-cache-mac2
+  cancel-in-progress: false
+jobs:
+  mac2_cache:
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    timeout-minutes: ${{ inputs.mode == 'build' && 75 || 10 }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      S9_EXPECTED_SOURCE: ${{ inputs.sceneworks_sha }}
+      CARGO_BUILD_JOBS: 2
+      RUSTUP_HOME: ${{ inputs.run_dir }}/tools/rustup
+      CARGO_HOME: ${{ inputs.run_dir }}/tools/cargo
+      SCENEWORKS_GPU_CHECK: "0"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Verify exact source and unique Mac2 runner
+        run: |
+          test "$RUNNER_NAME" = nax-macos-2
+          test "$GITHUB_SHA" = "$S9_EXPECTED_SOURCE"
+          test "$(git rev-parse HEAD)" = "$S9_EXPECTED_SOURCE"
+          test -z "$(git status --porcelain)"
+      - name: Install exact owned CPU Rust toolchain for source build
+        if: inputs.mode == 'build'
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal
+          echo "$RUSTUP_HOME/toolchains/1.97.1-aarch64-apple-darwin/bin" >> "$GITHUB_PATH"
+      - name: Build byte-attested ordinary managed downloader with CPU-only worker startup guard
+        if: inputs.mode == 'build'
+        env:
+          S9_RUN_DIR: ${{ inputs.run_dir }}
+        run: node scripts/h3-veda-cache-prepare.mjs build "$S9_RUN_DIR"
+      - name: Clone and SHA-verify full frozen closure; fetch only missing exact files through normal jobs
+        if: inputs.mode == 'prepare'
+        env:
+          S9_RUN_DIR: ${{ inputs.run_dir }}
+          S9_SHARED_CACHE: ${{ inputs.shared_cache_root }}
+          S9_CPU_BUILD_ATTESTATION: ${{ inputs.binary_attestation_path }}
+        run: node scripts/h3-veda-cache-prepare.mjs prepare "$S9_RUN_DIR" "$S9_SHARED_CACHE" "$S9_CPU_BUILD_ATTESTATION"
+      - name: Upload bounded metadata only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: h3-owned-cpu-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ inputs.run_dir }}/cpu-download-build.json
+            ${{ inputs.run_dir }}/cache-progress.json
+            ${{ inputs.run_dir }}/before-startup-*.txt
+            ${{ inputs.run_dir }}/after-startup-*.txt
+            ${{ inputs.run_dir }}/after-drain-*.txt
+          if-no-files-found: error
+          retention-days: 14
