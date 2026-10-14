@@ -7583,13 +7583,13 @@ fn co_requisite_cache_health(
 ) -> Option<HuggingFaceCacheHealth> {
     match sceneworks_core::managed_file::ManagedFileIdentity::from_download(download) {
         Ok(Some(identity)) => {
-            let valid = huggingface_repo_cache_path(data_dir, &identity.repo)
-                .map(|root| {
-                    root.join("snapshots")
-                        .join(&identity.revision)
-                        .join(&identity.file)
-                })
-                .is_some_and(|path| identity.verify(&path).is_ok());
+            let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+                sceneworks_core::hf_home::model_source_library(data_dir),
+            );
+            let valid = resolver
+                .discover_source_snapshot(&identity.repo, Some(&identity.revision))
+                .map(|(_, snapshot)| snapshot.join(&identity.file))
+                .is_ok_and(|path| identity.verify(&path).is_ok());
             return Some(if valid {
                 HuggingFaceCacheHealth::installed()
             } else {
