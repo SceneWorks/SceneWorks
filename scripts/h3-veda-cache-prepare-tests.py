@@ -68,4 +68,118 @@ class Tests(unittest.TestCase):
    s.close()
    if prior is None:os.environ.pop('SCENEWORKS_TOKEN',None)
    else:os.environ['SCENEWORKS_TOKEN']=prior
+ def source_file(self,data=b'data'):
+  self.a.update(bytes=len(data),sha256=c.hashlib.sha256(data).hexdigest());p=c.snapshot(self.shared,self.a);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(data);return p
+ def test_internal_stream_uses_full_destination_SHA_and_independent_private_inode(self):
+  source=self.source_file();before=c.signature(source);target,origin=c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+  self.assertEqual(c.signature(source),before);self.assertNotEqual(source.stat().st_ino,target.stat().st_ino);self.assertEqual(target.read_bytes(),b'data');self.assertEqual(target.stat().st_nlink,1);self.assertFalse(target.stat().st_mode&0o222)
+  self.assertTrue(c.verify_file(target,self.a,lambda:None,origin['destinationVerification'])['contentVerified']);journal=Path(origin['privateBlob']+'.partial.json');self.assertTrue(json.loads(journal.read_text())['sealed'])
+ def test_partial_timeout_seals_prefix_and_resumes_without_publication(self):
+  data=b'A'*(2*1024*1024)+b'Z';self.source_file(data);calls=[0]
+  def deadline():
+   calls[0]+=1
+   if calls[0]==2:raise TimeoutError('original phase')
+  with self.assertRaises(TimeoutError):c.stage_file(self.shared,self.cache,self.a,deadline,storage_mode='owned_internal_cross_volume_copy')
+  target=c.snapshot(self.cache,self.a);self.assertFalse(target.exists());partial=next(self.cache.rglob('*.partial'));saved=json.loads(Path(str(partial)+'.json').read_text());self.assertEqual(saved['committedBytes'],1024*1024);self.assertEqual(saved['prefixSha256'],c.sha(partial));self.assertEqual(saved['partialStat'],c.signature(partial))
+  target,origin=c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy');self.assertEqual(target.read_bytes(),data);self.assertTrue(c.verify_file(target,self.a,lambda:None,origin['destinationVerification'])['contentVerified'])
+ def partial_fixture(self):
+  self.source_file(b'A'*(2*1024*1024));calls=[0]
+  def deadline():
+   calls[0]+=1
+   if calls[0]==2:raise TimeoutError('phase')
+  with self.assertRaises(TimeoutError):c.stage_file(self.shared,self.cache,self.a,deadline,storage_mode='owned_internal_cross_volume_copy')
+  return next(self.cache.rglob('*.partial'))
+ def test_partial_tamper_even_rewritten_stat_cannot_pass_prefix_SHA(self):
+  partial=self.partial_fixture();partial.write_bytes(b'B'*partial.stat().st_size);journal=Path(str(partial)+'.json');v=json.loads(journal.read_text());v['partialStat']=c.signature(partial);journal.write_text(json.dumps(v))
+  with self.assertRaisesRegex(RuntimeError,'prefix tampered'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+  self.assertFalse(c.snapshot(self.cache,self.a).exists());self.assertTrue(partial.exists())
+ def test_partial_wrong_source_or_length_is_retained_and_refused(self):
+  partial=self.partial_fixture();source=c.snapshot(self.shared,self.a);source.write_bytes(b'Z'*source.stat().st_size)
+  with self.assertRaisesRegex(RuntimeError,'source/identity changed'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+  self.assertTrue(partial.exists())
+ def test_source_mutation_during_stream_refuses_publication(self):
+  source=self.source_file();seen=[False]
+  def changed(_):
+   if not seen[0]:seen[0]=True;source.write_bytes(b'evil')
+  with self.assertRaisesRegex(RuntimeError,'source changed'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy',capacity_check=changed)
+  self.assertFalse(c.snapshot(self.cache,self.a).exists())
+ def test_private_staging_mount_alias_is_refused_before_data_write(self):
+  from types import SimpleNamespace
+  self.source_file();real_stat=Path.stat
+  def foreign(path,*a,**kw):
+   info=real_stat(path,*a,**kw)
+   if path.name=='blobs':return SimpleNamespace(st_dev=info.st_dev+1,st_mode=info.st_mode,st_uid=info.st_uid)
+   return info
+  with patch.object(Path,'stat',foreign):
+   with self.assertRaisesRegex(RuntimeError,'volume alias'):c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy')
+  self.assertFalse(c.snapshot(self.cache,self.a).exists());self.assertEqual(list(self.cache.rglob('*.partial')),[])
+ def test_atomic_publication_never_overwrites_even_collision(self):
+  a=self.root/'source';b=self.root/'destination';a.write_bytes(b'data');b.write_bytes(b'alien')
+  with self.assertRaises(OSError):c.publish_no_replace(a,b)
+  self.assertEqual(a.read_bytes(),b'data');self.assertEqual(b.read_bytes(),b'alien')
+ def test_partial_and_state_symlinks_cannot_write_foreign_paths(self):
+  source=self.source_file();blob=self.cache/'hub/models--author--model/blobs'/self.a['sha256'];blob.parent.mkdir(parents=True);outside=self.root/'outside';outside.write_bytes(b'foreign');Path(str(blob)+'.partial').symlink_to(outside)
+  with self.assertRaisesRegex(RuntimeError,'symlink'):c.stream_private_blob(source,blob,self.a,lambda:None)
+  self.assertEqual(outside.read_bytes(),b'foreign')
+ def test_capacity_covers_full_remaining_payload_scratch_and_no_partial_discount(self):
+  from types import SimpleNamespace
+  self.assertEqual(c.capacity_required([self.a],self.cache,{'files':{}}),4)
+  required=4+c.FETCH_SCRATCH_BYTES+c.WORKSPACE_GROWTH_BYTES
+  with patch.object(c.os,'statvfs',return_value=SimpleNamespace(f_bavail=required-1,f_frsize=1)):
+   with self.assertRaisesRegex(RuntimeError,'capacity insufficient'):c.capacity_receipt(self.root,4,c.workspace_allocated(self.root,lambda:None),lambda:None)
+  with patch.object(c.os,'statvfs',return_value=SimpleNamespace(f_bavail=required,f_frsize=1)):
+   r=c.capacity_receipt(self.root,4,c.workspace_allocated(self.root,lambda:None),lambda:None);self.assertEqual(r['requiredFreeBytes'],required);self.assertEqual(r['unverifiedPartialDiscountBytes'],0)
+  with patch.object(c,'workspace_allocated',return_value=c.WORKSPACE_GROWTH_BYTES+1):
+   with self.assertRaisesRegex(RuntimeError,'workspace growth'):c.capacity_receipt(self.root,4,0,lambda:None)
+ def test_verified_file_reduces_capacity_only_while_full_stat_and_readonly_match(self):
+  self.source_file();target,_=c.stage_file(self.shared,self.cache,self.a,lambda:None,clone=shutil.copyfile);r=c.verify_file(target,self.a,lambda:None);p={'files':{'author/model@'+'a'*40+'/weight.safetensors':r}}
+  self.assertEqual(c.capacity_required([self.a],self.cache,p),0);target.resolve().chmod(0o600);self.assertEqual(c.capacity_required([self.a],self.cache,p),4)
+ def test_closed_internal_storage_policy_refuses_budget_source_root_and_runner_mutations(self):
+  head='a'*40;root=str(c.INTERNAL_BASE/('private-cache-'+head[:9]));p={'runDir':root,'sourceHead':head,'storage':{'schemaVersion':1,'mode':'owned_internal_cross_volume_copy','boundRoot':root,'sourceHead':head,'expectedHome':str(c.INTERNAL_HOME),'expectedRunner':'nax-macos-2','expectedRunnerId':5281,'expectedHostUuid':c.MAC2_UUID,'workspaceGrowthBytes':c.WORKSPACE_GROWTH_BYTES,'managedDownloadScratchBytes':c.FETCH_SCRATCH_BYTES}}
+  c.storage_policy(p)
+  for field,value in [('boundRoot','/foreign'),('sourceHead','b'*40),('expectedRunnerId',999),('workspaceGrowthBytes',0),('managedDownloadScratchBytes',0)]:
+   changed=json.loads(json.dumps(p));changed['storage'][field]=value
+   with self.assertRaises(RuntimeError):c.storage_policy(changed)
+ def test_low_space_internal_phase_is_durable_without_product_children(self):
+  from types import SimpleNamespace
+  p={'runDir':str(self.root),'sourceHead':'a'*40,'owner':{},'sourceModules':{'guardian':{'path':str(Path(__file__).with_name('h3-veda-guardian.py'))}},'maxSeconds':30,'entries':[self.a],'template':{'sha256':'b'*64},'catalog':{'sha256':'c'*64},'storage':{'schemaVersion':1,'mode':'owned_internal_cross_volume_copy','boundRoot':str(self.root),'sourceHead':'a'*40,'expectedHome':str(c.INTERNAL_HOME),'expectedRunner':'nax-macos-2','expectedRunnerId':5281,'expectedHostUuid':c.MAC2_UUID,'workspaceGrowthBytes':c.WORKSPACE_GROWTH_BYTES,'managedDownloadScratchBytes':c.FETCH_SCRATCH_BYTES}}
+  with patch.object(c.os,'statvfs',return_value=SimpleNamespace(f_bavail=1,f_frsize=1)):
+   with self.assertRaisesRegex(RuntimeError,'scratch capacity'):c.prepare_locked(p,os.getpid(),self.root,self.cache,self.shared,None)
+  r=json.loads((self.root/'cache-progress.json').read_text());self.assertFalse(r['contentVerified']);self.assertEqual(r['files'],{});self.assertTrue(r['servicesDrained']);self.assertFalse(r['physicalAdmission'])
+ def test_partial_does_not_discount_full_required_capacity(self):
+  self.partial_fixture();self.assertEqual(c.capacity_required([self.a],self.cache,{'files':{}}),self.a['bytes'])
+ def test_verified_destination_receipt_cannot_hide_post_copy_mutation(self):
+  self.source_file();target,origin=c.stage_file(self.shared,self.cache,self.a,lambda:None,storage_mode='owned_internal_cross_volume_copy');target.resolve().chmod(0o600);target.write_bytes(b'evil')
+  with self.assertRaisesRegex(RuntimeError,'SHA/size mismatch'):c.verify_file(target,self.a,lambda:None,origin['destinationVerification'])
+ def test_state_hardlink_alias_is_refused_without_foreign_mutation(self):
+  root=self.root/'prepare';root.mkdir();outside=self.root/'foreign-state';outside.write_bytes(b'foreign');os.link(outside,root/'cache-prepare.lock');before=c.signature(outside)
+  p={'runDir':str(root),'cacheRoot':str(root/'huggingface'),'sharedCache':str(self.shared),'maxSeconds':30,'sourceModules':{'guardian':{'path':str(Path(__file__).with_name('h3-veda-guardian.py'))}}}
+  with self.assertRaisesRegex(RuntimeError,'hardlink alias'):c.prepare(p,os.getpid())
+  self.assertEqual(c.signature(outside),before);self.assertEqual(outside.read_bytes(),b'foreign')
+ def test_original_controller_birth_mismatch_before_state_creation_refuses(self):
+  from types import SimpleNamespace
+  root=self.root/'never-created';p={'runDir':str(root),'cacheRoot':str(root/'huggingface'),'sharedCache':str(self.shared),'maxSeconds':30,'sourceModules':{'guardian':{'path':'CPU fake guard'}}}
+  births=iter(['original','foreign']);guard=SimpleNamespace(pid_birth=lambda _:next(births));spec=SimpleNamespace(loader=SimpleNamespace(exec_module=lambda _:None))
+  with patch.object(c.importlib.util,'spec_from_file_location',return_value=spec),patch.object(c.importlib.util,'module_from_spec',return_value=guard):
+   with self.assertRaisesRegex(RuntimeError,'controller/deadline changed'):c.prepare(p,os.getpid())
+  self.assertFalse(root.exists())
+ def test_internal_host_account_device_uuid_qualification_is_source_only(self):
+  from types import SimpleNamespace
+  home=self.root/'home';home.mkdir();base=home/'.h3-veda-epic-25140';base.mkdir();head='a'*40;root=base/('private-cache-'+head[:9]);shared=self.shared;p={'runDir':str(root),'sourceHead':head,'owner':{'runnerId':5281,'runnerName':'nax-macos-2'}};real_stat=Path.stat
+  def separate(path,*a,**kw):
+   info=real_stat(path,*a,**kw)
+   return SimpleNamespace(st_dev=info.st_dev+1,st_mode=info.st_mode,st_uid=info.st_uid) if path==shared else info
+  with patch.object(c,'INTERNAL_HOME',home),patch.object(c,'INTERNAL_BASE',base),patch.object(c.sys,'platform','darwin'),patch.object(c.pwd,'getpwuid',return_value=SimpleNamespace(pw_name='MTrefry',pw_dir=str(home))),patch.dict(os.environ,{'HOME':str(home)}),patch.object(Path,'stat',separate),patch.object(c.subprocess,'check_output',return_value=json.dumps({'SPHardwareDataType':[{'platform_UUID':c.MAC2_UUID}]}).encode()):
+   # Production shared path is fixed; use its constant only through this CPU seam.
+   with patch.object(c,'Path',side_effect=lambda value:shared if value=='/Volumes/Models/huggingface' else Path(value)):
+    r=c.internal_storage_identity(p,root,shared);self.assertFalse(r['physicalAdmission']);self.assertNotEqual(r['rootDevice'],r['sharedDevice'])
+    with self.assertRaisesRegex(RuntimeError,'source-owned'):c.internal_storage_identity({**p,'sourceHead':'b'*40},root,shared)
+    bad={**p,'owner':{'runnerId':999,'runnerName':'nax-macos-2'}}
+    with self.assertRaisesRegex(RuntimeError,'runner'):c.internal_storage_identity(bad,root,shared)
+    with patch.object(c.subprocess,'check_output',return_value=b'{"SPHardwareDataType":[{"platform_UUID":"foreign"}]}'):
+     with self.assertRaisesRegex(RuntimeError,'UUID'):c.internal_storage_identity(p,root,shared)
+    with patch.object(c.pwd,'getpwuid',return_value=SimpleNamespace(pw_name='foreign',pw_dir=str(home))):
+     with self.assertRaisesRegex(RuntimeError,'UID'):c.internal_storage_identity(p,root,shared)
+    with patch.object(Path,'stat',real_stat):
+     with self.assertRaisesRegex(RuntimeError,'volume'):c.internal_storage_identity(p,root,shared)
 if __name__=='__main__':unittest.main()
