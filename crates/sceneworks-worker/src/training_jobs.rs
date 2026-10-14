@@ -2380,23 +2380,6 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         })
         .unwrap_or_default();
     TrainingConfig {
-        // Preserve the legacy training path when consuming the newer paired contract.
-        // Its additive techniques are opt-in; no noise, auxiliary model, mask, bucket or adapter
-        // is initialized by this compatibility bridge.
-        weight_noise_sigma: 0.0,
-        gradient_noise_eta: 0.0,
-        gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-        resolution_buckets: Vec::new(),
-        depth_anchoring: Default::default(),
-        perceptual_decoder_dir: None,
-        subject_mask_loss: None,
-        body_losses: Default::default(),
-        identity_loss: Default::default(),
-        face_landmark_loss: Default::default(),
-        face_analysis_dir: None,
-        vae_anchor: Default::default(),
-        latent_lpips: Default::default(),
-        training_adapter: None,
         rank: config.rank,
         alpha: config.alpha as f32,
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-4) as f32,
