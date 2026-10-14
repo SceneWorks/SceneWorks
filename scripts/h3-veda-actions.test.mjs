@@ -140,7 +140,7 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
     return x;
   };
   const receipt = (backend) => {
-    const x = manifest(backend), cells = Object.fromEntries(rows.filter((r) => r.backend === backend).map((r) => [r.id, { status: r.kind === "expected_refusal" ? "expected_refusal_observed" : r.kind === "product_proof" ? "product_proof_observed" : "media_collected_evidence_incomplete", privateRequest: "must never be uploaded" }]));
+    const x = manifest(backend), cells = Object.fromEntries(rows.filter((r) => r.backend === backend).map((r) => [r.id, { kind: r.kind, status: r.kind === "expected_refusal" ? "expected_refusal_observed" : r.kind === "product_proof" ? "product_proof_observed" : "media_collected_evidence_incomplete", privateRequest: "must never be uploaded" }]));
     const state = { campaignId: x.campaignId, fingerprint: digest(x), cells };
     return { hostEvidence: buildHostEvidence(x, state, backend, rows, { closed: true, servicesDrained: true, physicalLockReleased: true, fingerprint: digest(x) }, { manifestSha256: hex, campaignSha256: other }) };
   };
@@ -161,6 +161,8 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
   assert.throws(() => aggregateHostReceipts(mlx, dropped), /row identity coverage missing/);
   const unresolved = structuredClone(cuda); unresolved.hostEvidence.cases[0].status = "missing"; unresolved.hostEvidence.cases[0].evidenceSha256 = null;
   assert.equal(aggregateHostReceipts(mlx, unresolved).missing.length, 1);
+  const wrongDisposition = structuredClone(cuda); wrongDisposition.hostEvidence.cases[0].status = "expected_refusal_observed";
+  assert.throws(() => aggregateHostReceipts(mlx, wrongDisposition), /disposition differs/);
   const foreign = structuredClone(mlx); foreign.hostEvidence.cases[0].id = "candle_cuda/foreign";
   assert.throws(() => aggregateHostReceipts(foreign, cuda), /row identity coverage missing\/duplicate/);
   const sourceMismatch = structuredClone(cuda); sourceMismatch.hostEvidence.source.catalogModelsSha256 = other;

@@ -281,6 +281,12 @@ export function buildHostEvidence(m, campaign, backend, rows, closure, { manifes
   check([runner.apiBinary?.sha256, runner.workerBinary?.sha256, runner.attestation?.sha256, runner.physicalGuardAdapter?.sha256].every((value) => HEX.test(value)), "host binary/attestation/guardian identity incomplete");
   const cases = expected.map((row) => {
     const cell = campaign.cells[row.id];
+    if (cell) {
+      check(cell.kind === row.kind, `host row kind differs: ${row.id}`);
+      check(cell.status !== "expected_refusal_observed" || row.kind === "expected_refusal", `non-refusal row claims refusal: ${row.id}`);
+      check(!["media_collected_review_pending", "media_collected_evidence_incomplete"].includes(cell.status) || row.kind === "media", `non-media row claims media: ${row.id}`);
+      check(cell.status !== "product_proof_observed" || row.kind === "product_proof", `non-proof row claims product proof: ${row.id}`);
+    }
     return { id: row.id, backend, kind: row.kind, style: row.style ?? null, status: cell?.status ?? "missing", evidenceSha256: cell ? digest(cell) : null };
   });
   return {
@@ -306,6 +312,7 @@ export function aggregateHostReceipts(left, right) {
     check(h.local && [h.local.manifestFingerprint, h.local.manifestSha256, h.local.campaignSha256, h.local.binarySha256, h.local.apiBinarySha256, h.local.attestationSha256, h.local.physicalGuardSourceSha256, h.local.corpusImportReceiptSha256].every((value) => HEX.test(value)), "host source/binary/corpus/campaign receipts incomplete");
     check(h.local.physicalGpuId && h.local.workerId && h.cases?.length && h.cases.every((c) => c.backend === h.backend && c.id && c.kind && typeof c.status === "string" && (c.status === "missing" ? c.evidenceSha256 === null : HEX.test(c.evidenceSha256))), "host row disposition/physical identity incomplete");
     check(HEX.test(h.expectedHostRowsSha256) && digest(h.cases.map((c) => ({ id: c.id, kind: c.kind, style: c.style }))) === h.expectedHostRowsSha256, "host row identity coverage missing/duplicate");
+    check(h.cases.every((c) => (c.status !== "expected_refusal_observed" || c.kind === "expected_refusal") && (!["media_collected_review_pending", "media_collected_evidence_incomplete"].includes(c.status) || c.kind === "media") && (c.status !== "product_proof_observed" || c.kind === "product_proof")), "host row disposition differs from required kind");
     return h.cases;
   });
   check(cases.length === first.expectedAllRows && new Set(cases.map((c) => c.id)).size === cases.length, "full two-host row identity coverage missing/duplicate");
