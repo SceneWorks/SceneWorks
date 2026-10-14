@@ -17654,10 +17654,17 @@ mod tests {
                 .accepts(gen_core::PrefixKvCacheMode::Cached),
             "the linked Turbo provider declares the cache"
         );
-        let generator = RequestGenerator {
+        let mut generator = RequestGenerator {
             descriptor,
             ..fixture_generator()
         };
+        // The fixture ladder, conformed to the provider it now stands in for.
+        generator
+            .contract
+            .as_mut()
+            .expect("fixture contract")
+            .provider_id = "qwen_image_2_1_turbo".to_owned();
+        let generator = generator;
         let plan = MlxRequestPlan {
             engine_id: "qwen_image_2_1_turbo",
             calibration: MlxCalibrationConfig::Absent,
