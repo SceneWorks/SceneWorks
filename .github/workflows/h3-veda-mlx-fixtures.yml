@@ -77,7 +77,6 @@ jobs:
           test "$(git -C ../inference rev-parse HEAD)" = "$S9_INFERENCE_SHA"
           test "$(git -C ../inference status --porcelain=v1 --untracked-files=all)" = ''
           test "$(git status --porcelain=v1 --untracked-files=all)" = ''
-          test "$(rustup run 1.96.0 rustc --version)" = 'rustc 1.96.0 (ac68faa20 2026-05-25)'
           test "$S9_PHYSICAL_GPU_ID" = '734A72AE-13DA-52A8-B0CF-F97E1D646124'
           test "$S9_METAL_DEVICE_NAME" = 'Apple M5 Max'
           "$S9_GUARD_PYTHON" -I -S -c 'import sys; assert sys.version_info[:2] == (3, 12)'
@@ -106,6 +105,8 @@ jobs:
             ${{ inputs.run_dir }}/mlx-five-fixtures/running.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/build.jsonl
             ${{ inputs.run_dir }}/mlx-five-fixtures/build.stderr.log
+            ${{ inputs.run_dir }}/mlx-five-fixtures/toolchain-*.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/toolchain-install.*.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*-receipt.json
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stdout.log
             ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stderr.log

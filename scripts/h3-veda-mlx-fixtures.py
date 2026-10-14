@@ -57,10 +57,10 @@ def shell(argv, cwd=None, timeout=30):
     return subprocess.check_output(argv, cwd=cwd, text=True, stderr=subprocess.STDOUT, timeout=timeout).strip()
 
 
-def file_binding(path):
+def file_binding(path, allow_empty=False):
     raw = Path(path)
     info = raw.lstat()
-    check(stat.S_ISREG(info.st_mode) and info.st_size > 0, "bound file missing/unsafe")
+    check(stat.S_ISREG(info.st_mode) and (info.st_size > 0 or allow_empty), "bound file missing/unsafe")
     path = raw.resolve(strict=True)
     return {"path": str(path), "bytes": info.st_size, "sha256": g.file_sha(path)}
 
@@ -248,6 +248,37 @@ def watchdog_locks(output, parent_pid, parent_birth, lock_fds, interval=.25):
         time.sleep(interval)
 
 
+def rust_toolchain(native, output, env):
+    listing = subprocess.run(["rustup", "toolchain", "list"], cwd=native, env=env, capture_output=True, text=True, timeout=20, check=True)
+    installed = any(line.split()[0] == "1.96.0" or line.split()[0].startswith("1.96.0-") for line in listing.stdout.splitlines() if line.strip())
+    provision = {"required": not installed, "installedListBefore": listing.stdout}
+    if not installed:
+        command = ["rustup", "toolchain", "install", "1.96.0", "--profile", "minimal"]
+        stdout, stderr = output / "toolchain-install.stdout.log", output / "toolchain-install.stderr.log"
+        with stdout.open("wb") as out, stderr.open("wb") as err:
+            child = subprocess.Popen(command, cwd=native, env=env, stdout=out, stderr=err, start_new_session=True)
+            birth = g.pid_birth(child.pid)
+            try:
+                check(birth is not None, "cannot prove owned Rust provision PID birth")
+                rc = child.wait(timeout=600)
+            finally:
+                if birth is not None:
+                    closure = child_closure(child, birth, time.monotonic() + 10)
+                else:
+                    check(child.poll() is not None, "unidentified Rust provision still running")
+        provision.update(argv=command, pid=child.pid, birth=birth, rc=rc, closure=closure, stdout=file_binding(stdout, allow_empty=True), stderr=file_binding(stderr, allow_empty=True))
+        g.atomic(output / "toolchain-install-receipt.json", provision)
+        check(rc == 0, "pinned Rust toolchain provision failed")
+    result = {"provision": provision, "tools": {}}
+    for tool, expected in [("rustc", "rustc 1.96.0 (ac68faa20 2026-05-25)"), ("cargo", "cargo 1.96.0")]:
+        version = subprocess.run(["rustup", "run", "1.96.0", tool, "--version"], cwd=native, env=env, capture_output=True, text=True, timeout=20, check=True).stdout.strip()
+        check(version == expected if tool == "rustc" else version.startswith(expected + " ("), "pinned Rust tool version differs")
+        actual = subprocess.run(["rustup", "which", "--toolchain", "1.96.0", tool], cwd=native, env=env, capture_output=True, text=True, timeout=20, check=True).stdout.strip()
+        result["tools"][tool] = {"version": version, **file_binding(Path(actual).resolve(strict=True))}
+    g.atomic(output / "toolchain-receipt.json", result)
+    return result
+
+
 def run(args):
     root = Path(args.sceneworks).resolve(strict=True)
     native = Path(args.inference).resolve(strict=True)
@@ -289,6 +320,7 @@ def run(args):
         for key in ("PMETAL_METALLIB_PATH", "PMETAL_MLX_PREBUILT_DIR", "GH_TOKEN", "GITHUB_TOKEN", "INFERENCE_READ_TOKEN"):
             env.pop(key, None)
         env.update(CARGO_TARGET_DIR=str(target), CARGO_BUILD_JOBS="2", RUSTUP_TOOLCHAIN="1.96.0")
+        receipt["rustToolchain"] = rust_toolchain(native, output, env)
         command = ["rustup", "run", "1.96.0", "cargo", "test", "--locked", "-p", "mlx-gen-minimax-h3", "--lib", "--no-run", "--message-format=json"]
         with build_out.open("wb") as out, build_err.open("wb") as err:
             build = subprocess.Popen(command, cwd=native, env=env, stdout=out, stderr=err, start_new_session=True)
@@ -331,6 +363,8 @@ def run(args):
             check(exact_source(native, NATIVE_HEAD) == receipt["sources"]["inference"] and exact_source(root, args.sceneworks_sha) == receipt["sources"]["sceneworks"], "source identity changed")
             check(python_binding(root, raw_run_dir) == receipt["python"], "Python binding changed during fixture lifetime")
             check(file_binding(binary["path"]) == binary and file_binding(shader["path"]) == shader, "binary/metallib bytes changed")
+            for tool in receipt["rustToolchain"]["tools"].values():
+                check(file_binding(tool["path"]) == {key: tool[key] for key in ("path", "bytes", "sha256")}, "Rust toolchain bytes changed")
             phase = physical.probe(f"mlx-fixture-{index}", {os.getpid()})
             validate_phase(phase, args.physical_gpu_id, args.metal_device_name, physical.actions_identity)
             receipt["actionsIdentity"] = physical.actions_identity

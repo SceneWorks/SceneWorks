@@ -56,6 +56,40 @@ class FixturePolicyTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "authority differs"):
                     f.python_binding(root, run)
 
+    def test_rust_toolchain_installs_only_missing_exact_version_and_records_actual_tools(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); output = root / "output"; output.mkdir()
+            tools = {name: root / name for name in ("rustc", "cargo")}
+            for path in tools.values(): path.write_bytes(b"actual tool bytes")
+            calls = []
+            missing = False
+            def command(argv, **kwargs):
+                calls.append(argv)
+                if argv == ["rustup", "toolchain", "list"]:
+                    value = "stable-aarch64-apple-darwin (default)\n" if missing else "1.96.0-aarch64-apple-darwin\n"
+                elif argv[1] == "which": value = str(tools[argv[-1]])
+                else: value = "rustc 1.96.0 (ac68faa20 2026-05-25)" if argv[3] == "rustc" else "cargo 1.96.0 (fixture 2026-05-25)"
+                return subprocess.CompletedProcess(argv, 0, value, "")
+            with patch.object(f.subprocess, "run", side_effect=command), patch.object(f.subprocess, "Popen") as launch:
+                facts = f.rust_toolchain(root, output, {})
+                launch.assert_not_called(); self.assertFalse(facts["provision"]["required"])
+                self.assertEqual(facts["tools"]["rustc"]["sha256"], f.g.file_sha(tools["rustc"]))
+                missing = True; child = launch.return_value; child.pid = 123; child.wait.return_value = 0
+                with patch.object(f.g, "pid_birth", return_value="owned-birth"), patch.object(f, "child_closure", return_value={"closed": True}):
+                    facts = f.rust_toolchain(root, output, {})
+                self.assertTrue(facts["provision"]["required"])
+                self.assertEqual(launch.call_args.args[0], ["rustup", "toolchain", "install", "1.96.0", "--profile", "minimal"])
+                self.assertEqual(child.wait.call_args.kwargs["timeout"], 600)
+                self.assertEqual(facts["provision"]["birth"], "owned-birth")
+                self.assertTrue(all("default" not in c and "override" not in c for c in calls))
+                child.wait.return_value = 1
+                with patch.object(f.g, "pid_birth", return_value="owned-birth"), patch.object(f, "child_closure", return_value={"closed": True}):
+                    with self.assertRaisesRegex(RuntimeError, "provision failed"): f.rust_toolchain(root, output, {})
+            with patch.object(f.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, "1.97.1-aarch64-apple-darwin\n", "")), patch.object(f.subprocess, "Popen") as launch:
+                child = launch.return_value; child.pid = 123; child.wait.return_value = 0
+                with patch.object(f.g, "pid_birth", return_value="owned-birth"), patch.object(f, "child_closure", return_value={"closed": True}):
+                    with self.assertRaisesRegex(RuntimeError, "version differs"): f.rust_toolchain(root, output, {})
+
     def test_fixed_actual_mac2_and_shared_bootstrap_workflow_preserve_registered_header(self):
         workflow = (source.parent.parent / ".github/workflows/h3-veda-mlx-fixtures.yml").read_bytes()
         self.assertEqual(len(workflow.split(b"permissions:", 1)[0]), 936)
