@@ -138,7 +138,9 @@ def run(output):
         root=output/variant;root.mkdir();port_socket=socket.socket();port_socket.bind(('127.0.0.1',0));port=port_socket.getsockname()[1];port_socket.close()
         fixture=ROOT/'fixtures/h3-veda/cpu-owned-product.py';binding={'path':str(fixture),'sha256':g.file_sha(fixture)}
         (root/'config').mkdir();g.atomic(root/'config/CPU_ONLY.json',{'mockProduct':True,'GPU':False})
-        m={'campaignId':'cpu-only-operational-proof','sourceFreeze':{'CPU_ONLY':True},'projectId':'owned-cpu-proof','runners':{'mlx':{'physicalGpuId':'CPU_ONLY_NOT_GPU','apiUrl':f'http://127.0.0.1:{port}','workerId':'owned-cpu-worker','requestedGpu':'mlx','guardian':{'dataDir':str(root/'data'),'configDir':str(root/'config'),'port':port,'maxSeconds':20,'cleanupSeconds':5},'apiBinary':binding,'workerBinary':binding}}}
+        shader=root/'product-resources'/'mlx'/'mlx.metallib';shader.parent.mkdir(parents=True);shader.write_bytes(b'CPU-only fake shader resource')
+        native={'schemaVersion':1,'mode':'locked_cargo_source_build','sourceOutput':{},'mlxMetallib':{'path':str(shader),'bytes':shader.stat().st_size,'sha256':g.file_sha(shader)}}
+        m={'campaignId':'cpu-only-operational-proof','sourceFreeze':{'CPU_ONLY':True},'projectId':'owned-cpu-proof','runners':{'mlx':{'physicalGpuId':'CPU_ONLY_NOT_GPU','apiUrl':f'http://127.0.0.1:{port}','workerId':'owned-cpu-worker','requestedGpu':'mlx','nativeResources':native,'guardian':{'dataDir':str(root/'data'),'configDir':str(root/'config'),'port':port,'maxSeconds':20,'cleanupSeconds':5},'apiBinary':binding,'workerBinary':binding}}}
         g.atomic(root/'input.json',m);env=dict(os.environ,S9_CPU_PROOF_VARIANT=variant,S9_CPU_PROOF_ROOT=str(root))
         ctrl=subprocess.Popen([sys.executable,__file__,'controller',str(root)],env=env,start_new_session=True,stdout=subprocess.DEVNULL,stderr=(root/'controller.stderr').open('w'))
         if variant=='absent':

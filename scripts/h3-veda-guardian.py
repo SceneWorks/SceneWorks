@@ -233,8 +233,12 @@ class Services:
             f=m["sourceFreeze"]; self.windows=source_module(f["inference"]["root"],"scripts/media_campaign_windows.py",f["inferenceFiles"].get("scripts/media_campaign_windows.py")).WindowsJob
     def env(self,kind="api"):
         g=self.r["guardian"]; token=os.environ.get("SCENEWORKS_TOKEN"); require(token,"SCENEWORKS_TOKEN required; never persist API secret")
-        env={k:v for k,v in os.environ.items() if not k.startswith("SCENEWORKS_") and k not in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","GH_TOKEN","GITHUB_TOKEN"]}
+        env={k:v for k,v in os.environ.items() if not k.startswith("SCENEWORKS_") and k not in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","GH_TOKEN","GITHUB_TOKEN","PMETAL_METALLIB_PATH","PMETAL_MLX_PREBUILT_DIR"]}
         env.update(SCENEWORKS_DATA_DIR=g["dataDir"],SCENEWORKS_JOBS_DB_PATH=str(Path(g["dataDir"])/"cache/jobs.db"),SCENEWORKS_CONFIG_DIR=g["configDir"],SCENEWORKS_OWN_MANIFESTS="1",SCENEWORKS_API_HOST="127.0.0.1",SCENEWORKS_API_PORT=str(g["port"]),SCENEWORKS_API_URL=self.r["apiUrl"],SCENEWORKS_PARENT_PID=str(os.getpid()),SCENEWORKS_ACCESS_TOKEN=token,SCENEWORKS_GPU_ID="cpu",SCENEWORKS_RUST_WORKER_GPU_ID="cpu",SCENEWORKS_WORKER_ID=self.r["workerId"],SCENEWORKS_GPU_CHECK="0",SCENEWORKS_WORKER_ONLY="0",SCENEWORKS_RUN_UTILITY_INPROCESS="0",HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1")
+        if self.backend=="mlx":
+            resource=self.r.get("nativeResources",{}).get("mlxMetallib")
+            require(resource and Path(resource["path"]).is_absolute() and file_sha(resource["path"])==resource["sha256"] and Path(resource["path"]).stat().st_size==resource["bytes"],"owned MLX metallib descriptor missing or changed")
+            env["PMETAL_METALLIB_PATH"]=resource["path"]
         if kind=="worker":env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
         if self.backend=="candle_cuda" and kind=="worker":
             index=str(self.physical.device["index"])
@@ -278,8 +282,8 @@ class Services:
         for p in sorted(root.rglob("*")):
             require(not p.is_symlink(),"worker config symlink refused")
             if p.is_file():files.append({"path":p.relative_to(root).as_posix(),"sha256":file_sha(p)})
-        public={k:v for k,v in env.items() if (k.startswith("SCENEWORKS_") and k not in ["SCENEWORKS_ACCESS_TOKEN","SCENEWORKS_PARENT_PID"]) or k in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","HF_HUB_OFFLINE","TRANSFORMERS_OFFLINE"]}
-        return {"configFiles":files,"environment":public}
+        public={k:v for k,v in env.items() if (k.startswith("SCENEWORKS_") and k not in ["SCENEWORKS_ACCESS_TOKEN","SCENEWORKS_PARENT_PID"]) or k in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","HF_HUB_OFFLINE","TRANSFORMERS_OFFLINE","PMETAL_METALLIB_PATH"]}
+        return {"configFiles":files,"environment":public,"nativeResources":self.r.get("nativeResources")}
     def worker_receipt(self):
         item=self.children.get("worker");require(item is not None,"owned worker descriptor missing")
         self.owned_pids()
@@ -496,6 +500,25 @@ class Product:
                 return json.load(response)
         except urllib.error.HTTPError as error:raise ProductError(error.code,json.load(error)) from error
 
+def validate_native_resources(r,backend,run_dir,source_root):
+    native=r.get("nativeResources",{});root=Path(run_dir).resolve()
+    if backend=="mlx":
+        source=native.get("sourceOutput",{});resource=native.get("mlxMetallib",{})
+        cargo_lock=Path(source_root)/"Cargo.lock";blocks=re.split(r"(?=^\[\[package\]\]$)",cargo_lock.read_text(encoding="utf-8"),flags=re.M);pins=[b for b in blocks if re.search(r'^name = "pmetal-mlx-sys"$',b,flags=re.M)];pin=re.search(r'^source = "git\+https://github.com/michaeltrefry/mlx-rs\?rev=([a-f0-9]{40})#\1"$',pins[0],flags=re.M) if len(pins)==1 else None;version=re.search(r'^version = "([^\"]+)"$',pins[0],flags=re.M) if len(pins)==1 else None
+        target=root/"cargo-target";out=Path(source.get("outDir",""));source_path=Path(source.get("path",""));resource_path=Path(resource.get("path",""));safe_out=False
+        try:
+            current=target
+            for part in out.relative_to(target).parts:
+                current=current/part
+                require(current.is_dir() and not current.is_symlink(),"MLX Cargo output path contains a symlink or missing directory")
+            safe_out=True
+        except (ValueError,OSError):pass
+        require(native.get("schemaVersion")==1 and native.get("mode")=="locked_cargo_source_build" and pin and source.get("revision")==pin.group(1) and version and source.get("packageId")==f"git+https://github.com/michaeltrefry/mlx-rs?rev={pin.group(1)}#pmetal-mlx-sys@{version.group(1)}" and out.is_absolute() and target.resolve() in out.resolve().parents and safe_out and source_path==out/"build"/"lib"/"mlx.metallib" and resource_path==root/"product-resources"/"mlx"/"mlx.metallib","source-bound MLX metallib descriptor differs")
+        for binding in [source,resource]:
+            path=Path(binding["path"]);require(path.is_file() and not path.is_symlink() and path.resolve()==path and path.stat().st_size==binding["bytes"] and file_sha(path)==binding["sha256"],"source-bound MLX metallib missing or changed")
+        require(source["bytes"]==resource["bytes"] and source["sha256"]==resource["sha256"],"durable MLX metallib differs from exact Cargo output")
+    else:require(native=={"schemaVersion":1,"mode":"not_applicable","sourceOutput":None,"mlxMetallib":None},"Candle host must declare MLX metallib not applicable")
+
 def validate_config(m,backend,run_dir):
     r=m["runners"][backend];g=r.get("guardian",{});root=Path(run_dir).resolve()
     for name in ["sceneworks","inference"]:
@@ -512,6 +535,7 @@ def validate_config(m,backend,run_dir):
     require(owner=={"campaignId":m["campaignId"],"sourceFreezeSha256":digest(m["sourceFreeze"]),"projectId":m["projectId"]},"isolated workspace ownership unbound")
     for name in ["builtin.models.jsonc","builtin.loras.jsonc"]:
         require(file_sha(Path(g["configDir"])/"manifests"/name)==m["sourceFreeze"]["files"]["config/manifests/"+name],"isolated normal product catalog differs")
+    validate_native_resources(r,backend,root,m["sourceFreeze"]["sceneworks"]["root"])
     for binding in [r["apiBinary"],r["workerBinary"]]:
         require(Path(binding["path"]).is_absolute() and file_sha(binding["path"])==binding["sha256"],"source-attested normal binary differs")
     return g
@@ -588,6 +612,7 @@ def serve_cpu_import_api(manifest_file,backend,run_dir):
     from types import SimpleNamespace
     token=cpu_import_supervisor_token(os.environ);os.environ["SCENEWORKS_TOKEN"]=token
     m=json.loads(Path(manifest_file).read_text(encoding="utf-8"));root=Path(run_dir).resolve();r=m["runners"][backend];g=r["guardian"]
+    validate_native_resources(r,backend,root,m["sourceFreeze"]["sceneworks"]["root"])
     require(backend in ["mlx","candle_cuda"] and Path(manifest_file).is_absolute() and root.is_absolute(),"absolute selected import inputs required")
     require(m["sourceFreeze"]["stage"]=="permanent-inference-main-pin" and m["sourceFreeze"]["inference"]["head"]==m["sourceFreeze"]["inferencePin"],"permanent source/pin freeze required")
     for name in ["sceneworks","inference"]:
@@ -602,7 +627,7 @@ def serve_cpu_import_api(manifest_file,backend,run_dir):
     binary=r["apiBinary"];worker=r["workerBinary"];require(binary["path"]==worker["path"] and binary["sha256"]==worker["sha256"] and binary["bytes"]==worker["bytes"] and Path(binary["path"]).is_absolute() and file_sha(binary["path"])==binary["sha256"],"durable source-bound API/worker binary differs")
     att_binding=r["attestation"];att_path=Path(att_binding["path"]);require(att_path.is_absolute() and file_sha(att_path)==att_binding["sha256"],"durable normal API build attestation bytes differ")
     att=json.loads(att_path.read_text(encoding="utf-8"));freeze_sha=digest(m["sourceFreeze"])
-    require(att.get("schemaVersion")==2 and att.get("method")=="actions_source_build_durable_same_binary_api_and_worker" and att.get("backend")==backend and att.get("sceneworksHead")==m["sourceFreeze"]["sceneworks"]["head"] and att.get("inferencePin")==m["sourceFreeze"]["inferencePin"] and att.get("sourceFreezeSha256")==freeze_sha and att.get("apiBinarySha256")==binary["sha256"] and att.get("workerBinarySha256")==r["workerBinary"]["sha256"] and att.get("workerId")==r["workerId"] and att.get("buildIdentitySha256")==digest(att.get("buildIdentity")),"normal API build attestation source/pin/binary differs")
+    require(att.get("schemaVersion")==3 and att.get("method")=="actions_source_build_durable_same_binary_api_worker_and_native_resources" and att.get("backend")==backend and att.get("sceneworksHead")==m["sourceFreeze"]["sceneworks"]["head"] and att.get("inferencePin")==m["sourceFreeze"]["inferencePin"] and att.get("sourceFreezeSha256")==freeze_sha and att.get("apiBinarySha256")==binary["sha256"] and att.get("workerBinarySha256")==r["workerBinary"]["sha256"] and att.get("workerId")==r["workerId"] and att.get("buildIdentitySha256")==digest(att.get("buildIdentity")) and att.get("nativeResources")==r.get("nativeResources") and att.get("buildIdentity",{}).get("nativeResources")==r.get("nativeResources") and att.get("buildIdentity",{}).get("environment",{}).get("PMETAL_METALLIB_PATH") is None and att.get("buildIdentity",{}).get("environment",{}).get("PMETAL_MLX_PREBUILT_DIR") is None,"normal API build attestation source/pin/binary differs")
     control=root/"cpu-import-api";control.mkdir(parents=True,exist_ok=False)
     class NoPhysicalLock:
         handles=[]

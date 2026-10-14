@@ -23,13 +23,15 @@ const inside = (root, p) => { const r = path.relative(root, p); return r && r !=
 const productName = () => process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api";
 const productPath = (runDir, backend) => path.join(runDir, "product-binaries", backend, productName());
 const productAttestationPath = (runDir, backend) => path.join(runDir, `${backend}-product-binary-attestation.json`);
+const mlxMetallibPath = (runDir) => path.join(runDir, "product-resources", "mlx", "mlx.metallib");
+const MLX_SYS_SOURCE = "https://github.com/michaeltrefry/mlx-rs";
 
 function targetCargoDir(runDir, cargoTargetDir = process.env.CARGO_TARGET_DIR) {
   check(absolute(cargoTargetDir) && path.resolve(cargoTargetDir) === path.join(path.resolve(runDir), "cargo-target") && !inside(ROOT, cargoTargetDir), "durable Cargo target must be the external owned run directory cargo-target");
   return cargoTargetDir;
 }
 
-export function cpuImportApiEnvironment(base, { dataDir, configDir, jobsDbPath, cacheRoot, apiUrl, token } = {}) {
+export function cpuImportApiEnvironment(base, { dataDir, configDir, jobsDbPath, cacheRoot, apiUrl, token, backend, nativeResources } = {}) {
   const env = {
     ...base,
     SCENEWORKS_DATA_DIR: dataDir,
@@ -55,6 +57,39 @@ export function cpuImportApiEnvironment(base, { dataDir, configDir, jobsDbPath, 
   delete env.GH_TOKEN;
   delete env.GITHUB_TOKEN;
   delete env.SCENEWORKS_TOKEN;
+  delete env.PMETAL_METALLIB_PATH;
+  delete env.PMETAL_MLX_PREBUILT_DIR;
+  if (backend === "mlx") { check(absolute(nativeResources?.mlxMetallib?.path) && HEX.test(nativeResources.mlxMetallib.sha256), "MLX runtime metallib descriptor missing"); env.PMETAL_METALLIB_PATH = nativeResources.mlxMetallib.path; }
+  return env;
+}
+
+export function pinnedMlxSysPackageId(cargoLock) {
+  const blocks = cargoLock.split(/(?=^\[\[package\]\]$)/m).filter((block) => /^name = "pmetal-mlx-sys"$/m.test(block));
+  check(blocks.length === 1, "Cargo.lock must contain exactly one pmetal-mlx-sys package");
+  const version = blocks[0].match(/^version = "([^"]+)"$/m)?.[1];
+  const source = blocks[0].match(/^source = "git\+https:\/\/github\.com\/michaeltrefry\/mlx-rs\?rev=([a-f0-9]{40})#\1"$/m)?.[1];
+  check(version && source, "Cargo.lock MLX sys source/version is not exact and pinned");
+  return { revision: source, packageId: `git+${MLX_SYS_SOURCE}?rev=${source}#pmetal-mlx-sys@${version}` };
+}
+
+export function mlxMetallibBuildOutput(stdout, expectedPackageId, targetDir) {
+  const messages = [];
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line) continue;
+    let message;
+    try { message = JSON.parse(line); } catch { continue; }
+    if (message.reason === "build-script-executed" && message.package_id === expectedPackageId) messages.push(message);
+  }
+  check(messages.length === 1, `expected one exact pinned pmetal-mlx-sys build-script output, found ${messages.length}`);
+  const outDir = messages[0].out_dir;
+  check(absolute(outDir) && inside(path.resolve(targetDir), path.resolve(outDir)), "pinned MLX build-script OUT_DIR must be inside the durable Cargo target");
+  return { packageId: expectedPackageId, outDir: path.resolve(outDir), path: path.join(path.resolve(outDir), "build", "lib", "mlx.metallib") };
+}
+
+export function mlxBuildEnvironment(base) {
+  const env = { ...base };
+  delete env.PMETAL_METALLIB_PATH;
+  delete env.PMETAL_MLX_PREBUILT_DIR;
   return env;
 }
 
@@ -64,7 +99,7 @@ function safeRunRoot(runDir) {
 
 export function buildArguments(backend) {
   check(["mlx", "candle_cuda"].includes(backend), "explicit backend required");
-  return ["build", "--release", "--locked", "-p", "sceneworks-rust-api", ...(backend === "candle_cuda" ? ["--features", "backend-candle"] : [])];
+  return ["build", "--release", "--locked", "--message-format=json-render-diagnostics", "-p", "sceneworks-rust-api", ...(backend === "candle_cuda" ? ["--features", "backend-candle"] : [])];
 }
 
 function cargoFact(args) {
@@ -79,16 +114,51 @@ function selectedPython() {
   return { path: python, version };
 }
 
-function buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes, binarySha256, cargoLockSha256 }) {
-  const envKeys = ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "NVCC_CCBIN", "VCToolsInstallDir"];
-  const environment = Object.fromEntries(envKeys.map((key) => [key, process.env[key] ?? null]));
+function buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes, binarySha256, cargoLockSha256, nativeResources }) {
+  const envKeys = ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "NVCC_CCBIN", "VCToolsInstallDir", "PMETAL_METALLIB_PATH", "PMETAL_MLX_PREBUILT_DIR"];
+  const environment = Object.fromEntries(envKeys.map((key) => [key, key.startsWith("PMETAL_") ? null : process.env[key] ?? null]));
   const rustc = cargoFact(["rustc", "-Vv"]), rustcHost = rustc.match(/^host: (.+)$/m)?.[1];
   return {
     schemaVersion: 1, backend, sourceFreezeSha256, runDir, targetDir,
     host: { platform: process.platform, arch: process.arch, targetTriple: process.env.CARGO_BUILD_TARGET ?? rustcHost, runnerName: process.env.RUNNER_NAME ?? null, runnerId: process.env.S9_OBSERVED_RUNNER_ID },
     cargo: { rustc, cargo: cargoFact(["cargo", "-V"]), python: selectedPython(), args, profile: "release", cargoLockSha256 },
-    environment, binary: { bytes: binaryBytes, sha256: binarySha256 },
+    environment, binary: { bytes: binaryBytes, sha256: binarySha256 }, nativeResources,
   };
+}
+
+async function noSymlinkPath(root, target) {
+  if (!inside(root, target)) return false;
+  let current = root;
+  const rootInfo = await lstat(current).catch(() => null);
+  if (!rootInfo?.isDirectory() || rootInfo.isSymbolicLink()) return false;
+  for (const component of path.relative(root, target).split(path.sep)) {
+    current = path.join(current, component);
+    const info = await lstat(current).catch(() => null);
+    if (!info?.isDirectory() || info.isSymbolicLink()) return false;
+  }
+  return true;
+}
+
+export async function verifyNativeResources(nativeResources, backend, runDir) {
+  check(nativeResources?.schemaVersion === 1, `native resource inventory missing: ${backend}`);
+  if (backend === "candle_cuda") {
+    check(nativeResources.mode === "not_applicable" && nativeResources.mlxMetallib === null && nativeResources.sourceOutput === null, "Candle host must explicitly declare no MLX metallib resource");
+    return [];
+  }
+  check(nativeResources.mode === "locked_cargo_source_build" && nativeResources.mlxMetallib && nativeResources.sourceOutput, "MLX host must bind its locked Cargo-built metallib");
+  const { revision, packageId } = pinnedMlxSysPackageId(await readFile(path.join(ROOT, "Cargo.lock"), "utf8"));
+  const targetDir = path.join(runDir, "cargo-target");
+  const resource = nativeResources.mlxMetallib, source = nativeResources.sourceOutput;
+  check(resource.path === mlxMetallibPath(runDir) && source.packageId === packageId && source.revision === revision, "MLX resource identity differs from exact locked pmetal-mlx-sys package");
+  check(path.resolve(source.outDir) === source.outDir && await noSymlinkPath(targetDir, source.outDir) && source.path === path.join(source.outDir, "build", "lib", "mlx.metallib") && (await lstat(path.dirname(resource.path))).isDirectory() && !(await lstat(path.dirname(resource.path))).isSymbolicLink(), "MLX resource source path differs from exact build-script output");
+  const checked = [];
+  for (const binding of [source, resource]) {
+    const info = await lstat(binding.path).catch((error) => { if (error.code === "ENOENT") return null; throw error; });
+    check(info?.isFile() && !info.isSymbolicLink() && Number.isSafeInteger(binding.bytes) && binding.bytes > 0 && info.size === binding.bytes && HEX.test(binding.sha256) && await hashFile(binding.path) === binding.sha256, `MLX metallib missing or changed: ${binding.path}`);
+    checked.push({ path: binding.path, bytes: info.size, sha256: binding.sha256 });
+  }
+  check(source.bytes === resource.bytes && source.sha256 === resource.sha256, "durable MLX metallib copy differs from exact Cargo output");
+  return checked;
 }
 
 export async function buildDurableProduct({ manifestPath, backend, runDir, runnerName, expectedRunner, sceneWorksSha, inferenceSha, build = execFileSync }) {
@@ -108,28 +178,52 @@ export async function buildDurableProduct({ manifestPath, backend, runDir, runne
   const runInfo = await lstat(runDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
   check(!runInfo || (runInfo.isDirectory() && !runInfo.isSymbolicLink()), "durable run directory unsafe");
   await mkdir(runDir, { recursive: true });
-  const receiptPath = path.join(runDir, `${backend}-product-build-receipt.json`), attestationPath = productAttestationPath(runDir, backend), destination = productPath(runDir, backend);
-  const existing = await Promise.all([receiptPath, attestationPath, destination].map((file) => lstat(file).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e))));
+  const receiptPath = path.join(runDir, `${backend}-product-build-receipt.json`), attestationPath = productAttestationPath(runDir, backend), destination = productPath(runDir, backend), resourceDestination = mlxMetallibPath(runDir);
+  const productFiles = backend === "mlx" ? [receiptPath, attestationPath, destination, resourceDestination] : [receiptPath, attestationPath, destination];
+  const existing = await Promise.all(productFiles.map((file) => lstat(file).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e))));
   if (existing.some(Boolean)) {
     check(existing.every((item) => item?.isFile() && !item.isSymbolicLink()), "partial or unsafe durable product build exists; preserve it for reconciliation");
     const receipt = await json(receiptPath), attestation = await json(attestationPath), binarySha256 = await hashFile(destination), binaryBytes = existing[2].size;
     check(receipt.schemaVersion === 1 && receipt.backend === backend && receipt.runnerName === runnerName && receipt.runnerId === process.env.S9_OBSERVED_RUNNER_ID && receipt.source?.sceneworksHead === sceneWorksSha && receipt.source?.inferencePin === inferenceSha && receipt.source?.sourceFreezeSha256 === digest(m.sourceFreeze), "existing durable build receipt source/runner differs");
     check(receipt.inputManifestSha256 === await hashFile(manifestPath) && receipt.apiBinary?.path === destination && receipt.workerBinary?.path === destination && receipt.apiBinary.sha256 === binarySha256 && receipt.workerBinary.sha256 === binarySha256 && receipt.apiBinary.bytes === binaryBytes && receipt.workerBinary.bytes === binaryBytes, "existing durable build receipt binary/input differs");
     check(receipt.attestation?.path === attestationPath && receipt.attestation.bytes === existing[1].size && receipt.attestation.sha256 === await hashFile(attestationPath), "existing durable build receipt attestation differs");
-    check(attestation.schemaVersion === 2 && attestation.backend === backend && attestation.sceneworksHead === sceneWorksSha && attestation.inferencePin === inferenceSha && attestation.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.inputManifestSha256 === receipt.inputManifestSha256 && attestation.apiBinarySha256 === binarySha256 && attestation.workerBinarySha256 === binarySha256 && attestation.binaryBytes === binaryBytes && attestation.workerId === m.runners[backend].workerId && attestation.buildIdentitySha256 === digest(attestation.buildIdentity) && receipt.buildIdentitySha256 === attestation.buildIdentitySha256, "existing durable build attestation differs");
+    check(attestation.schemaVersion === 3 && attestation.backend === backend && attestation.sceneworksHead === sceneWorksSha && attestation.inferencePin === inferenceSha && attestation.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.inputManifestSha256 === receipt.inputManifestSha256 && attestation.apiBinarySha256 === binarySha256 && attestation.workerBinarySha256 === binarySha256 && attestation.binaryBytes === binaryBytes && attestation.workerId === m.runners[backend].workerId && attestation.buildIdentitySha256 === digest(attestation.buildIdentity) && receipt.buildIdentitySha256 === attestation.buildIdentitySha256 && digest(attestation.nativeResources) === digest(receipt.nativeResources), "existing durable build attestation differs");
+    await verifyNativeResources(receipt.nativeResources, backend, runDir);
     return receipt;
   }
   await mkdir(targetDir, { recursive: true });
   const targetInfo = await lstat(targetDir);
-  check(targetInfo.isDirectory() && !targetInfo.isSymbolicLink(), "durable Cargo target directory unsafe");
-  build("cargo", args, { cwd: ROOT, env: { ...process.env, CARGO_TARGET_DIR: targetDir }, stdio: "inherit", timeout: 60 * 60_000 });
+  check(targetInfo.isDirectory() && !targetInfo.isSymbolicLink() && await noSymlinkPath(runDir, targetDir), "durable Cargo target directory unsafe");
+  const cargoEnv = mlxBuildEnvironment({ ...process.env, CARGO_TARGET_DIR: targetDir });
+  let cargoOutput;
+  try { cargoOutput = build("cargo", args, { cwd: ROOT, env: cargoEnv, encoding: "utf8", maxBuffer: 128 * 1024 * 1024, stdio: ["ignore", "pipe", "inherit"], timeout: 60 * 60_000 }); }
+  catch (error) { if (error.stdout) process.stdout.write(error.stdout); throw error; }
+  if (cargoOutput) process.stdout.write(cargoOutput);
+  let nativeResources = { schemaVersion: 1, mode: "not_applicable", sourceOutput: null, mlxMetallib: null };
+  if (backend === "mlx") {
+    const { revision, packageId } = pinnedMlxSysPackageId(await readFile(path.join(ROOT, "Cargo.lock"), "utf8"));
+    const sourceOutput = mlxMetallibBuildOutput(cargoOutput ?? "", packageId, targetDir);
+    sourceOutput.revision = revision;
+    const sourceInfo = await lstat(sourceOutput.path);
+    check(sourceInfo.isFile() && !sourceInfo.isSymbolicLink() && sourceInfo.size > 0, "exact locked MLX build output metallib missing or unsafe");
+    sourceOutput.bytes = sourceInfo.size; sourceOutput.sha256 = await hashFile(sourceOutput.path);
+    await mkdir(path.dirname(resourceDestination), { recursive: true });
+    check(await noSymlinkPath(runDir, path.dirname(resourceDestination)), "durable MLX resource parent is unsafe");
+    check(!await lstat(resourceDestination).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "durable MLX metallib already exists; refusing replacement");
+    const tempResource = `${resourceDestination}.pending-${process.pid}-${randomBytes(5).toString("hex")}`;
+    await copyFile(sourceOutput.path, tempResource, fsConstants.COPYFILE_EXCL);
+    try { await rename(tempResource, resourceDestination); } catch (error) { await unlink(tempResource).catch(() => {}); throw error; }
+    const resourceInfo = await lstat(resourceDestination);
+    nativeResources = { schemaVersion: 1, mode: "locked_cargo_source_build", sourceOutput, mlxMetallib: { path: resourceDestination, bytes: resourceInfo.size, sha256: await hashFile(resourceDestination) } };
+    await verifyNativeResources(nativeResources, backend, runDir);
+  }
   const built = path.join(targetDir, "release", productName());
   const builtInfo = await lstat(built);
   check(builtInfo.isFile() && !builtInfo.isSymbolicLink() && builtInfo.size > 0, "release product API binary missing after build");
   const destinationRoot = path.dirname(destination);
   await mkdir(destinationRoot, { recursive: true });
   const destinationRootInfo = await lstat(destinationRoot);
-  check(destinationRootInfo.isDirectory() && !destinationRootInfo.isSymbolicLink(), "durable product directory unsafe");
+  check(destinationRootInfo.isDirectory() && !destinationRootInfo.isSymbolicLink() && await noSymlinkPath(runDir, destinationRoot), "durable product directory unsafe");
   check(!await lstat(destination).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "durable product binary already exists; refusing replacement");
   const tempBinary = `${destination}.pending-${process.pid}-${randomBytes(5).toString("hex")}`;
   await copyFile(built, tempBinary, fsConstants.COPYFILE_EXCL);
@@ -138,17 +232,17 @@ export async function buildDurableProduct({ manifestPath, backend, runDir, runne
   check(productInfo.isFile() && !productInfo.isSymbolicLink() && productInfo.size === builtInfo.size, "durable product copy differs from build output");
   const binarySha256 = await hashFile(destination);
   const sourceFreezeSha256 = digest(m.sourceFreeze);
-  const identity = buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes: productInfo.size, binarySha256, cargoLockSha256: sha(await readFile(path.join(ROOT, "Cargo.lock"))) });
+  const identity = buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes: productInfo.size, binarySha256, cargoLockSha256: sha(await readFile(path.join(ROOT, "Cargo.lock"))), nativeResources });
   const attestation = {
-    schemaVersion: 2, method: "actions_source_build_durable_same_binary_api_and_worker", backend,
+    schemaVersion: 3, method: "actions_source_build_durable_same_binary_api_worker_and_native_resources", backend,
     inferencePin: inferenceSha, sceneworksHead: sceneWorksSha, sourceFreezeSha256,
     inputManifestSha256: await hashFile(manifestPath), apiBinarySha256: binarySha256,
     workerBinarySha256: binarySha256, binaryBytes: productInfo.size,
-    workerId: m.runners[backend].workerId, buildIdentity: identity, buildIdentitySha256: digest(identity),
+    workerId: m.runners[backend].workerId, nativeResources, buildIdentity: identity, buildIdentitySha256: digest(identity),
   };
   await writeFile(attestationPath, JSON.stringify(attestation, null, 2) + "\n", { flag: "wx" });
   const receipt = {
-    schemaVersion: 1, backend, runnerName, runnerId: process.env.S9_OBSERVED_RUNNER_ID,
+    schemaVersion: 1, backend, runnerName, runnerId: process.env.S9_OBSERVED_RUNNER_ID, nativeResources,
     source: { sceneworksHead: sceneWorksSha, inferencePin: inferenceSha, sourceFreezeSha256 },
     inputManifestSha256: attestation.inputManifestSha256,
     apiBinary: { path: destination, bytes: productInfo.size, sha256: binarySha256 },
@@ -221,11 +315,13 @@ export async function verifyDurableProduct(m, backend, runDir, { sceneWorksSha, 
   check(attestationBinding?.path === productAttestationPath(runDir, backend), "product attestation must use the exact durable run-owned path");
   const attestationFile = await boundFile(attestationBinding);
   const attestation = JSON.parse(await readFile(attestationFile.path, "utf8"));
-  check(attestation.schemaVersion === 2 && attestation.method === "actions_source_build_durable_same_binary_api_and_worker" && attestation.backend === backend, "durable product attestation schema/backend differs");
+  check(attestation.schemaVersion === 3 && attestation.method === "actions_source_build_durable_same_binary_api_worker_and_native_resources" && attestation.backend === backend, "durable product attestation schema/backend differs");
   check(attestation.sceneworksHead === sceneWorksSha && attestation.inferencePin === inferenceSha && attestation.sourceFreezeSha256 === digest(m.sourceFreeze), "durable product source freeze differs");
   check(attestation.apiBinarySha256 === binary.sha256 && attestation.workerBinarySha256 === binary.sha256 && attestation.binaryBytes === binary.bytes && attestation.workerId === runner.workerId, "durable product binary/worker identity differs");
-  check(attestation.buildIdentity?.backend === backend && attestation.buildIdentity.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.buildIdentity.binary?.sha256 === binary.sha256 && attestation.buildIdentity.binary?.bytes === binary.bytes && attestation.buildIdentitySha256 === digest(attestation.buildIdentity), "durable product build identity differs");
-  return { binary, attestation: attestationBinding, buildIdentitySha256: attestation.buildIdentitySha256 };
+  check(attestation.nativeResources && digest(attestation.nativeResources) === digest(runner.nativeResources), "durable native resource descriptors differ from bound host manifest");
+  const nativeResources = await verifyNativeResources(runner.nativeResources, backend, runDir);
+  check(attestation.buildIdentity?.backend === backend && attestation.buildIdentity.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.buildIdentity.binary?.sha256 === binary.sha256 && attestation.buildIdentity.binary?.bytes === binary.bytes && digest(attestation.buildIdentity.nativeResources) === digest(attestation.nativeResources) && attestation.buildIdentity.environment?.PMETAL_METALLIB_PATH === null && attestation.buildIdentity.environment?.PMETAL_MLX_PREBUILT_DIR === null && attestation.buildIdentitySha256 === digest(attestation.buildIdentity), "durable product build identity differs");
+  return { binary, attestation: attestationBinding, buildIdentitySha256: attestation.buildIdentitySha256, nativeResources };
 }
 
 // A source-frozen preparation manifest may leave only the product import IDs
@@ -244,6 +340,11 @@ export function assertOwnedImportReadiness(m) {
       const file = runner[name];
       check(typeof file?.path === "string" && file.path.length > 0 && Number.isSafeInteger(file.bytes) && file.bytes > 0 && HEX.test(file.sha256 ?? ""), `source-built binary descriptor unbound: ${backend}/${name}`);
     }
+    const native = runner.nativeResources;
+    if (backend === "mlx") {
+      const source = native?.sourceOutput, resource = native?.mlxMetallib;
+      check(native.schemaVersion === 1 && native.mode === "locked_cargo_source_build" && source && resource && absolute(source.outDir) && absolute(source.path) && absolute(resource.path) && source.path === path.join(source.outDir, "build", "lib", "mlx.metallib") && Number.isSafeInteger(source.bytes) && source.bytes > 0 && source.bytes === resource.bytes && HEX.test(source.sha256 ?? "") && source.sha256 === resource.sha256 && source.packageId === `git+${MLX_SYS_SOURCE}?rev=${source.revision}#pmetal-mlx-sys@${source.packageId.split("@").at(-1)}` && HEAD.test(source.revision ?? ""), `native resource provenance unbound: ${backend}`);
+    } else check(native?.schemaVersion === 1 && native.mode === "not_applicable" && native.mlxMetallib === null && native.sourceOutput === null, `native resource provenance unbound: ${backend}`);
     check(runner.apiBinary.sha256 === runner.workerBinary.sha256 && runner.apiBinary.bytes === runner.workerBinary.bytes && runner.apiBinary.path === runner.workerBinary.path, `API/worker binary identity differs: ${backend}`);
   }
 }
@@ -316,7 +417,7 @@ export async function importOwnedCorpus({ manifest, manifestPath, plan, planPath
   await requireFreeLoopbackPort(g.port);
   await mkdir(g.dataDir, { recursive: true }); await mkdir(path.join(g.configDir, "manifests"), { recursive: true });
   for (const name of ["builtin.models.jsonc", "builtin.loras.jsonc"]) await copyFile(path.join(ROOT, "config/manifests", name), path.join(g.configDir, "manifests", name));
-  const env = cpuImportApiEnvironment(process.env, { dataDir: g.dataDir, configDir: g.configDir, jobsDbPath: path.join(g.dataDir, "cache/jobs.db"), cacheRoot, apiUrl: manifest.runners[backend].apiUrl, token });
+  const env = cpuImportApiEnvironment(process.env, { dataDir: g.dataDir, configDir: g.configDir, jobsDbPath: path.join(g.dataDir, "cache/jobs.db"), cacheRoot, apiUrl: manifest.runners[backend].apiUrl, token, backend, nativeResources: manifest.runners[backend].nativeResources });
   const python = selectedPython().path;
   const child = spawnApi(python, [path.join(ROOT, "scripts/h3-veda-guardian.py"), "--cpu-import-api", manifestPath, backend, runDir], { cwd: ROOT, env, stdio: "ignore" });
   let supervisorStopped = false, apiProcessClosure;

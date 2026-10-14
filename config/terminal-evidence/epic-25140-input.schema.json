@@ -282,9 +282,124 @@
           "apiBinary",
           "workerBinary",
           "attestation",
+          "nativeResources",
           "physicalGuardAdapter"
         ],
         "properties": {
+          "nativeResources": {
+            "type": "object",
+            "required": [
+              "schemaVersion",
+              "mode",
+              "sourceOutput",
+              "mlxMetallib"
+            ],
+            "properties": {
+              "schemaVersion": {
+                "const": 1
+              },
+              "mode": {
+                "enum": [
+                  "locked_cargo_source_build",
+                  "not_applicable"
+                ]
+              },
+              "sourceOutput": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "packageId",
+                      "revision",
+                      "outDir",
+                      "path",
+                      "bytes",
+                      "sha256"
+                    ],
+                    "properties": {
+                      "packageId": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "revision": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{40}$"
+                      },
+                      "outDir": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "path": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "bytes": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    }
+                  }
+                ]
+              },
+              "mlxMetallib": {
+                "anyOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/$defs/file"
+                  }
+                ]
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "locked_cargo_source_build"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "sourceOutput": {
+                      "type": "object"
+                    },
+                    "mlxMetallib": {
+                      "$ref": "#/$defs/file"
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "mode": {
+                      "const": "not_applicable"
+                    }
+                  }
+                },
+                "then": {
+                  "properties": {
+                    "sourceOutput": {
+                      "type": "null"
+                    },
+                    "mlxMetallib": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            ]
+          },
           "physicalGuardAdapter": {
             "$ref": "#/$defs/file"
           }

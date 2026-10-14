@@ -284,21 +284,50 @@ class Fixture(unittest.TestCase):
 
     def test_actual_config_binding_hashes_bytes_refuses_symlinks_and_omits_secrets(self):
         config=self.root/"config";config.mkdir();p=config/"builtin.models.jsonc";p.write_bytes(b"catalog-a")
-        m={"runners":{"mlx":{"guardian":{"configDir":str(config)}}}}
+        resource={"schemaVersion":1,"mode":"locked_cargo_source_build","sourceOutput":{"sha256":"a"*64},"mlxMetallib":{"sha256":"b"*64}}
+        m={"runners":{"mlx":{"guardian":{"configDir":str(config)},"nativeResources":resource}}}
         service=g.Services(m,"mlx",self.root,self.physical)
         env={"SCENEWORKS_DATA_DIR":"owned","SCENEWORKS_ACCESS_TOKEN":"never-persist","SCENEWORKS_PARENT_PID":"123","HF_HUB_OFFLINE":"1"}
-        one=service.config_binding(env);self.assertNotIn("never-persist",json.dumps(one));self.assertNotIn("SCENEWORKS_PARENT_PID",one["environment"])
+        one=service.config_binding(env);self.assertEqual(one["nativeResources"],resource);self.assertNotIn("never-persist",json.dumps(one));self.assertNotIn("SCENEWORKS_PARENT_PID",one["environment"])
         p.write_bytes(b"catalog-b");self.assertNotEqual(g.digest(one),g.digest(service.config_binding(env)))
         (config/"alias").symlink_to(p)
         with self.assertRaises(RuntimeError):service.config_binding(env)
 
     def test_actions_runner_read_token_is_not_inherited_by_normal_product_children(self):
-        m={"runners":{"mlx":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18501},"apiUrl":"http://127.0.0.1:18501","workerId":"owned"}}}
+        shader=self.root/"mlx.metallib";shader.write_bytes(b"test-shader")
+        m={"runners":{"mlx":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18501},"apiUrl":"http://127.0.0.1:18501","workerId":"owned","nativeResources":{"mlxMetallib":{"path":str(shader),"bytes":shader.stat().st_size,"sha256":g.file_sha(shader)}}}}}
         service=g.Services(m,"mlx",self.root,self.physical)
-        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret","GH_TOKEN":"runner-read-secret","GITHUB_TOKEN":"default-secret"}):
+        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret","GH_TOKEN":"runner-read-secret","GITHUB_TOKEN":"default-secret","PMETAL_METALLIB_PATH":"/ambient/wrong.metallib","PMETAL_MLX_PREBUILT_DIR":"/ambient/prebuilt"}):
             env=service.env()
         self.assertNotIn("GH_TOKEN",env);self.assertNotIn("GITHUB_TOKEN",env);self.assertNotIn("SCENEWORKS_TOKEN",env)
         self.assertEqual(env["SCENEWORKS_ACCESS_TOKEN"],"product-secret")
+        self.assertEqual(env["PMETAL_METALLIB_PATH"],str(shader))
+        self.assertNotIn("PMETAL_MLX_PREBUILT_DIR",env)
+        shader.write_bytes(b"changed")
+        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret"}):
+            with self.assertRaisesRegex(RuntimeError,"metallib descriptor missing or changed"):service.env()
+
+    def test_native_resource_closure_requires_exact_locked_output_and_owned_copy(self):
+        import re
+        source_root=Path(__file__).resolve().parent.parent
+        blocks=re.split(r"(?=^\[\[package\]\]$)",(source_root/"Cargo.lock").read_text(),flags=re.M)
+        packages=[b for b in blocks if re.search(r'^name = "pmetal-mlx-sys"$',b,flags=re.M)]
+        revision=re.search(r'^source = "git\+https://github.com/michaeltrefry/mlx-rs\?rev=([a-f0-9]{40})#\1"$',packages[0],flags=re.M).group(1)
+        version=re.search(r'^version = "([^\"]+)"$',packages[0],flags=re.M).group(1)
+        run=self.root.resolve();out=run/"cargo-target"/"release"/"build"/"pmetal-mlx-sys-fixture"/"out"
+        source=out/"build"/"lib"/"mlx.metallib";copy=run/"product-resources"/"mlx"/"mlx.metallib"
+        source.parent.mkdir(parents=True);copy.parent.mkdir(parents=True);source.write_bytes(b"exact locked shader");copy.write_bytes(b"exact locked shader")
+        item={"path":str(source),"bytes":source.stat().st_size,"sha256":g.file_sha(source)}
+        native={"schemaVersion":1,"mode":"locked_cargo_source_build","sourceOutput":{"packageId":f"git+https://github.com/michaeltrefry/mlx-rs?rev={revision}#pmetal-mlx-sys@{version}","revision":revision,"outDir":str(out),**item},"mlxMetallib":{"path":str(copy),"bytes":copy.stat().st_size,"sha256":g.file_sha(copy)}}
+        g.validate_native_resources({"nativeResources":native},"mlx",run,source_root)
+        copy.write_bytes(b"same-size or changed wrong shader")
+        with self.assertRaisesRegex(RuntimeError,"missing or changed"):g.validate_native_resources({"nativeResources":native},"mlx",run,source_root)
+        with self.assertRaisesRegex(RuntimeError,"descriptor differs"):
+            bad={"nativeResources":{**native,"sourceOutput":{**native["sourceOutput"],"revision":"0"*40}}}
+            g.validate_native_resources(bad,"mlx",run,source_root)
+        g.validate_native_resources({"nativeResources":{"schemaVersion":1,"mode":"not_applicable","sourceOutput":None,"mlxMetallib":None}},"candle_cuda",run,source_root)
+        with self.assertRaisesRegex(RuntimeError,"not applicable"):
+            g.validate_native_resources({"nativeResources":{"schemaVersion":1,"mode":"locked_cargo_source_build","sourceOutput":{},"mlxMetallib":{}}},"candle_cuda",run,source_root)
 
     def test_cpu_import_api_explicitly_disables_engine_and_inprocess_worker_for_both_hosts(self):
         m={"runners":{"candle_cuda":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18502},"apiUrl":"http://127.0.0.1:18502","workerId":"owned","requestedGpu":"0"}}}

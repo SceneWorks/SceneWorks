@@ -849,6 +849,23 @@
         "path": "/UNBOUND/frozen-sceneworks/scripts/physical-guard-adapter.mjs",
         "bytes": 0,
         "sha256": "UNBOUND"
+      },
+      "nativeResources": {
+        "schemaVersion": 1,
+        "mode": "locked_cargo_source_build",
+        "sourceOutput": {
+          "packageId": "UNBOUND exact locked pmetal-mlx-sys Cargo package ID",
+          "revision": "UNBOUND",
+          "outDir": "/UNBOUND/external-run/cargo-target/release/build/pmetal-mlx-sys/out",
+          "path": "/UNBOUND/external-run/cargo-target/release/build/pmetal-mlx-sys/out/build/lib/mlx.metallib",
+          "bytes": 0,
+          "sha256": "UNBOUND"
+        },
+        "mlxMetallib": {
+          "path": "/UNBOUND/external-run/product-resources/mlx/mlx.metallib",
+          "bytes": 0,
+          "sha256": "UNBOUND"
+        }
       }
     },
     "candle_cuda": {
@@ -879,6 +896,12 @@
         "path": "/UNBOUND/frozen-sceneworks/scripts/physical-guard-adapter.mjs",
         "bytes": 0,
         "sha256": "UNBOUND"
+      },
+      "nativeResources": {
+        "schemaVersion": 1,
+        "mode": "not_applicable",
+        "sourceOutput": null,
+        "mlxMetallib": null
       }
     }
   },

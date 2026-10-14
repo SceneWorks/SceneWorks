@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, assertOwnedImportReadiness, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, assertOwnedImportReadiness, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct, pinnedMlxSysPackageId, mlxMetallibBuildOutput, mlxBuildEnvironment } from "./h3-veda-actions.mjs";
 import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -17,9 +17,9 @@ const options = (root, backend = "mlx") => ({ backend, runnerName: backend === "
 
 test("owned import begins only from source-frozen readiness with product IDs as the sole gap", () => {
   const descriptor = { path: "/host-owned/product", bytes: 12, sha256: "b".repeat(64) };
-  const runner = (physicalGpuId) => ({ physicalGpuId, apiBinary: descriptor, workerBinary: { ...descriptor }, attestation: { path: "/host-owned/attestation.json", bytes: 42, sha256: "c".repeat(64) } });
+  const runner = (physicalGpuId, mode) => ({ physicalGpuId, nativeResources: mode === "mlx" ? {schemaVersion:1,mode:"locked_cargo_source_build",sourceOutput:{packageId:`git+https://github.com/michaeltrefry/mlx-rs?rev=${H}#pmetal-mlx-sys@0.2.4`,revision:H,outDir:"/host-owned/cargo-target/release/build/pmetal-mlx-sys/out",path:"/host-owned/cargo-target/release/build/pmetal-mlx-sys/out/build/lib/mlx.metallib",bytes:12,sha256:"d".repeat(64)},mlxMetallib:{path:"/host-owned/product-resources/mlx/mlx.metallib",bytes:12,sha256:"d".repeat(64)}} : {schemaVersion:1,mode:"not_applicable",sourceOutput:null,mlxMetallib:null}, apiBinary: descriptor, workerBinary: { ...descriptor }, attestation: { path: "/host-owned/attestation.json", bytes: 42, sha256: "c".repeat(64) } });
   const ready = { sourceFreeze: { stage: "permanent-inference-main-pin", resourceContract: { mlx: { physicalGpuId: "Mac-physical" }, candle_cuda: { physicalGpuId: "GPU-physical" } } },
-    runners: { mlx: runner("Mac-physical"), candle_cuda: runner("GPU-physical") },
+    runners: { mlx: runner("Mac-physical","mlx"), candle_cuda: runner("GPU-physical","candle_cuda") },
     preparation: { campaignReady: false, unresolved: ["normal owned corpus imports/readbacks required"], missingBindings: { permanentSourceFreeze: false, binaries: [], counterpartInventory: null, modelPayloadVerification: false, cacheSelection: false, activeDeviceSelection: false, productImports: true, productProofSetup: [], unknownArtifactHashes: [] } } };
   assertOwnedImportReadiness(ready);
   for (const change of [
@@ -56,8 +56,9 @@ test("owned import refuses missing private token before creating data or startin
 });
 
 test("CPU-only import API environment overrides inherited engine startup switches and credentials", () => {
-  const env = cpuImportApiEnvironment({ CUDA_VISIBLE_DEVICES: "0", NVIDIA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_CHECK: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_TOKEN: "ambient", GH_TOKEN: "ambient" }, { dataDir: "/run/data", configDir: "/run/config", jobsDbPath: "/run/data/jobs.db", cacheRoot: "/cache", apiUrl: "http://127.0.0.1:12345", token: "owned" });
+  const env = cpuImportApiEnvironment({ CUDA_VISIBLE_DEVICES: "0", NVIDIA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_CHECK: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_TOKEN: "ambient", GH_TOKEN: "ambient" }, { dataDir: "/run/data", configDir: "/run/config", jobsDbPath: "/run/data/jobs.db", cacheRoot: "/cache", apiUrl: "http://127.0.0.1:12345", token: "owned", backend: "mlx", nativeResources: { mlxMetallib: { path: "/run/product-resources/mlx/mlx.metallib", sha256: "f".repeat(64) } } });
   assert.deepEqual([env.SCENEWORKS_GPU_CHECK, env.SCENEWORKS_WORKER_ONLY, env.SCENEWORKS_RUN_UTILITY_INPROCESS, env.SCENEWORKS_GPU_ID, env.SCENEWORKS_RUST_WORKER_GPU_ID], ["0", "0", "0", "cpu", "cpu"]);
+  assert.equal(env.PMETAL_METALLIB_PATH, "/run/product-resources/mlx/mlx.metallib"); assert.equal(Object.hasOwn(env, "PMETAL_MLX_PREBUILT_DIR"), false);
   for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) assert.equal(Object.hasOwn(env, key), false, `${key} must not reach the import API`);
   assert.equal(env.SCENEWORKS_ACCESS_TOKEN, "owned");
 });
@@ -67,18 +68,36 @@ test("durable host binary verification binds both API and worker to one source-f
   const backend = "mlx", freeze = { inferencePin: H, sceneworks: { head: H } }, binaryPath = path.join(runDir, "product-binaries", backend, process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
   await mkdir(path.dirname(binaryPath), { recursive: true }); await writeFile(binaryPath, "source-built product fixture");
   const binary = await readFile(binaryPath), binarySha256 = await (await import("./h3-veda-acceptance.mjs")).hashFile(binaryPath);
-  const identity = { backend, sourceFreezeSha256: digest(freeze), binary: { sha256: binarySha256, bytes: binary.length } };
-  const attestation = { schemaVersion: 2, method: "actions_source_build_durable_same_binary_api_and_worker", backend, inferencePin: H, sceneworksHead: H, sourceFreezeSha256: digest(freeze), apiBinarySha256: binarySha256, workerBinarySha256: binarySha256, binaryBytes: binary.length, workerId: "mlx-worker", buildIdentity: identity, buildIdentitySha256: digest(identity) };
+  const targetDir=path.join(runDir,"cargo-target"), {packageId,revision}=pinnedMlxSysPackageId(await readFile(path.join(ROOT,"Cargo.lock"),"utf8"));
+  const sourcePath=path.join(targetDir,"release","build","pmetal-mlx-sys-deadbeef","out","build","lib","mlx.metallib"), resourcePath=path.join(runDir,"product-resources","mlx","mlx.metallib");
+  await mkdir(path.dirname(sourcePath),{recursive:true}); await mkdir(path.dirname(resourcePath),{recursive:true}); await writeFile(sourcePath,"verified fixture metallib"); await writeFile(resourcePath,"verified fixture metallib");
+  const resourceBytes=await readFile(sourcePath), resourceSha=await (await import("./h3-veda-acceptance.mjs")).hashFile(sourcePath);
+  const nativeResources={schemaVersion:1,mode:"locked_cargo_source_build",sourceOutput:{packageId,revision,outDir:path.dirname(path.dirname(path.dirname(sourcePath))),path:sourcePath,bytes:resourceBytes.length,sha256:resourceSha},mlxMetallib:{path:resourcePath,bytes:resourceBytes.length,sha256:resourceSha}};
+  const identity = { backend, sourceFreezeSha256: digest(freeze), binary: { sha256: binarySha256, bytes: binary.length }, nativeResources, environment:{PMETAL_METALLIB_PATH:null,PMETAL_MLX_PREBUILT_DIR:null} };
+  const attestation = { schemaVersion: 3, method: "actions_source_build_durable_same_binary_api_worker_and_native_resources", backend, inferencePin: H, sceneworksHead: H, sourceFreezeSha256: digest(freeze), apiBinarySha256: binarySha256, workerBinarySha256: binarySha256, binaryBytes: binary.length, workerId: "mlx-worker", nativeResources, buildIdentity: identity, buildIdentitySha256: digest(identity) };
   const attestationPath = path.join(runDir, `${backend}-product-binary-attestation.json`); await writeFile(attestationPath, JSON.stringify(attestation));
-  const descriptor = { path: binaryPath, bytes: binary.length, sha256: binarySha256 }, m = { sourceFreeze: freeze, runners: { [backend]: { apiBinary: descriptor, workerBinary: { ...descriptor }, workerId: "mlx-worker", attestation: { path: attestationPath, bytes: (await readFile(attestationPath)).length, sha256: await (await import("./h3-veda-acceptance.mjs")).hashFile(attestationPath) } } } };
+  const descriptor = { path: binaryPath, bytes: binary.length, sha256: binarySha256 }, m = { sourceFreeze: freeze, runners: { [backend]: { apiBinary: descriptor, workerBinary: { ...descriptor }, workerId: "mlx-worker", nativeResources, attestation: { path: attestationPath, bytes: (await readFile(attestationPath)).length, sha256: await (await import("./h3-veda-acceptance.mjs")).hashFile(attestationPath) } } } };
   assert.equal((await verifyDurableProduct(m, backend, runDir, { sceneWorksSha: H, inferenceSha: H })).binary.sha256, binarySha256);
+  await writeFile(resourcePath,"altered shader"); await assert.rejects(verifyDurableProduct(m, backend, runDir, {sceneWorksSha:H,inferenceSha:H}),/MLX metallib missing or changed/); await writeFile(resourcePath,"verified fixture metallib");
+  await rm(resourcePath); await assert.rejects(verifyDurableProduct(m, backend, runDir, {sceneWorksSha:H,inferenceSha:H}),/MLX metallib missing or changed/); await writeFile(resourcePath,"verified fixture metallib");
+  m.runners[backend].nativeResources.mlxMetallib.sha256="0".repeat(64); await assert.rejects(verifyDurableProduct(m, backend, runDir, {sceneWorksSha:H,inferenceSha:H}),/durable native resource descriptors differ/); m.runners[backend].nativeResources.mlxMetallib.sha256=resourceSha;
   m.runners[backend].workerBinary = { ...descriptor, path: path.join(ROOT, "target", "release", "sceneworks-rust-api") };
   await assert.rejects(verifyDurableProduct(m, backend, runDir, { sceneWorksSha: H, inferenceSha: H }), /same durable run-owned binary/);
-  assert.deepEqual(buildArguments("mlx"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api"]);
-  assert.deepEqual(buildArguments("candle_cuda"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
+  assert.deepEqual(buildArguments("mlx"), ["build", "--release", "--locked", "--message-format=json-render-diagnostics", "-p", "sceneworks-rust-api"]);
+  assert.deepEqual(buildArguments("candle_cuda"), ["build", "--release", "--locked", "--message-format=json-render-diagnostics", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
   assert.throws(() => buildArguments("unknown"), /explicit backend/);
 });
 
+
+test("MLX resource discovery binds one exact locked Cargo build-script output and clears inherited overrides", async()=>{
+  const lock=await readFile(path.join(ROOT,"Cargo.lock"),"utf8"), pin=pinnedMlxSysPackageId(lock), target="/owned/run/cargo-target", out=`${target}/release/build/pmetal-mlx-sys-deadbeef/out`;
+  const line=JSON.stringify({reason:"build-script-executed",package_id:pin.packageId,out_dir:out});
+  assert.equal(mlxMetallibBuildOutput(`${line}\n`,pin.packageId,target).path,`${out}/build/lib/mlx.metallib`);
+  assert.throws(()=>mlxMetallibBuildOutput("",pin.packageId,target),/found 0/);
+  assert.throws(()=>mlxMetallibBuildOutput(`${line}\n${line}\n`,pin.packageId,target),/found 2/);
+  assert.throws(()=>mlxMetallibBuildOutput(JSON.stringify({reason:"build-script-executed",package_id:pin.packageId,out_dir:"/other/out"}),pin.packageId,target),/inside the durable Cargo target/);
+  const env=mlxBuildEnvironment({PMETAL_METALLIB_PATH:"/wrong",PMETAL_MLX_PREBUILT_DIR:"/wrong/prebuilt",PATH:"/bin"}); assert.equal(Object.hasOwn(env,"PMETAL_METALLIB_PATH"),false);assert.equal(Object.hasOwn(env,"PMETAL_MLX_PREBUILT_DIR"),false);assert.equal(env.PATH,"/bin");
+});
 test("job-owned API token is random-length hex, masked before job env write, and never returned", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "s9-token-")); t.after(() => rm(root, { recursive: true, force: true }));
   const prior = process.env.GITHUB_ACTIONS; process.env.GITHUB_ACTIONS = "true";
