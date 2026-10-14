@@ -56,18 +56,41 @@ class Tests(unittest.TestCase):
    p=source/name;p.parent.mkdir(parents=True,exist_ok=True)
    if not p.exists():p.write_bytes(b'owned CPU source fixture')
    bindings.append(b.binding(p))
-  return {'schemaVersion':1,'kind':'epic25140_closed_CPU_build_plan','mode':mode,'runDir':str(self.root),'sourceRoot':str(self.root/'download-source'),'helper':b.binding(Path(b.__file__).resolve()),'python':b.binding(Path(sys.executable).resolve()),'sourceBindings':bindings}
+  config=source/'.cargo/config.toml';config.parent.mkdir(exist_ok=True);config.write_bytes(b'CPU configuration fixture')
+  return {'sourceConfiguration':b.binding(config),'buildAuthority':{},'schemaVersion':1,'kind':'epic25140_closed_CPU_build_plan','mode':mode,'runDir':str(self.root),'sourceRoot':str(self.root/'download-source'),'helper':b.binding(Path(b.__file__).resolve()),'python':b.binding(Path(sys.executable).resolve()),'sourceBindings':bindings}
  def test_closed_toolchain_argv_owned_homes_and_caps_without_installing(self):
-  argv,cwd,env,seconds,tools=b.closed_command(self.plan());self.assertEqual(argv[1:],['toolchain','install','1.97.1','--profile','minimal','--no-self-update']);self.assertEqual(seconds,600);self.assertEqual(env['RUSTUP_HOME'],str(self.root/'tools/rustup'));self.assertEqual(env['CARGO_HOME'],str(self.root/'tools/cargo'));self.assertNotIn('GH_TOKEN',env);self.assertTrue(tools['rustup']['sha256'])
+  p=self.plan()
+  with patch.object(b,'validate_build_authority'),patch.object(b,'CONFIG_SHA',p['sourceConfiguration']['sha256']):argv,cwd,env,seconds,tools=b.closed_command(p)
+  self.assertEqual(argv[1:],['toolchain','install','1.97.1','--profile','minimal','--no-self-update']);self.assertEqual(seconds,600);self.assertEqual(env['RUSTUP_HOME'],str(self.root/'tools/rustup'));self.assertEqual(env['CARGO_HOME'],str(self.root/'tools/cargo'));self.assertNotIn('GH_TOKEN',env);self.assertTrue(tools['rustup']['sha256'])
   for change in [lambda p:p.update(mode='arbitrary'),lambda p:p.update(argv=['rm']),lambda p:p.update(sourceRoot='/foreign')]:
    p=self.plan();change(p)
-   with self.assertRaises(RuntimeError):b.closed_command(p)
+   with patch.object(b,'validate_build_authority'),patch.object(b,'CONFIG_SHA',p['sourceConfiguration']['sha256']):
+    with self.assertRaises(RuntimeError):b.closed_command(p)
  def test_closed_cargo_argv_uses_actual_owned_tool_bytes_and_original_source(self):
   source=self.root/'download-source';source.mkdir(exist_ok=True);bins=self.root/'tools/rustup/toolchains/1.97.1-aarch64-apple-darwin/bin';bins.mkdir(parents=True)
   for name in ['rustc','cargo']:(bins/name).write_bytes(b'CPU fake tool fixture')
+  driver=bins.parent/'lib/librustc_driver-e03ed1db822dfa4c.dylib';driver.parent.mkdir();driver.write_bytes(b'CPU fake runtime fixture');expected={name:b.sha(bins/name) for name in ['rustc','cargo']};expected['rustcDriver']=b.sha(driver)
   def output(argv,**kw):return b.SOURCE+'\n' if argv[0]=='git' else Path(argv[0]).name+' 1.97.1 (CPU fixture)\n'
-  with patch.object(b.subprocess,'check_output',side_effect=output):argv,cwd,env,seconds,tools=b.closed_command(self.plan('cargo'))
-  self.assertEqual(seconds,3600);self.assertEqual(argv,[str(bins/'cargo'),'build','--release','--locked','--message-format=json-render-diagnostics','-p','sceneworks-rust-api']);self.assertEqual(env['RUSTC'],str(bins/'rustc'));self.assertEqual(tools['cargo']['sha256'],b.sha(bins/'cargo'))
-  with patch.object(b.subprocess,'check_output',return_value='wrong-head'):
+  p=self.plan('cargo')
+  with patch.object(b,'validate_build_authority'),patch.object(b,'CONFIG_SHA',p['sourceConfiguration']['sha256']),patch.object(b,'EXPECTED_TOOLS',expected),patch.object(b.subprocess,'check_output',side_effect=output):argv,cwd,env,seconds,tools=b.closed_command(p)
+  self.assertEqual(seconds,3600);self.assertEqual(argv,[str(bins/'cargo'),'build','--release','--locked','-vv','--message-format=json-render-diagnostics','-p','sceneworks-rust-api','--config','profile.release.build-override.strip="none"']);self.assertEqual(env['RUSTC'],str(bins/'rustc'));self.assertEqual(tools['cargo']['sha256'],b.sha(bins/'cargo'))
+  with patch.object(b,'validate_build_authority'),patch.object(b,'CONFIG_SHA',p['sourceConfiguration']['sha256']),patch.object(b.subprocess,'check_output',return_value='wrong-head'):
    with self.assertRaisesRegex(RuntimeError,'source head'):b.closed_command(self.plan('cargo'))
+ def test_runtime_byte_tamper_refuses_without_launching_cargo(self):
+  p=self.plan('cargo');bins=self.root/'tools/rustup/toolchains/1.97.1-aarch64-apple-darwin/bin';bins.mkdir(parents=True)
+  for name in ['rustc','cargo']:(bins/name).write_bytes(b'CPU fake tool fixture')
+  driver=bins.parent/'lib/librustc_driver-e03ed1db822dfa4c.dylib';driver.parent.mkdir();driver.write_bytes(b'CPU changed runtime')
+  expected={name:b.sha(bins/name) for name in ['rustc','cargo']};expected['rustcDriver']='a'*64
+  def output(argv,**kw):return b.SOURCE+'\n' if argv[0]=='git' else Path(argv[0]).name+' 1.97.1 (CPU fixture)\n'
+  with patch.object(b,'validate_build_authority'),patch.object(b,'CONFIG_SHA',p['sourceConfiguration']['sha256']),patch.object(b,'EXPECTED_TOOLS',expected),patch.object(b.subprocess,'check_output',side_effect=output):
+   with self.assertRaisesRegex(RuntimeError,'runtime bytes differ'):b.closed_command(p)
+ def test_disk_reserve_refusal_drains_only_owned_fake_child(self):
+  with patch.object(b.shutil,'disk_usage',return_value=type('Disk',(),{'free':7})()):
+   with self.assertRaises(RuntimeError):b.supervise(self.command('import time;time.sleep(60)'),self.root,os.environ.copy(),self.root/'child',3,os.getpid(),{'diskAdmission':{'path':str(self.root),'reserveFreeBytes':8}})
+  r=self.receipt();self.assertIn('disk reserve exhausted',r['error']);self.assertTrue(r['closure']['descendantsDrained']);self.assertFalse(r['prepared'])
+ def test_durable_owner_marker_uid_device_and_source_guard(self):
+  cpu_home=self.root/'home';cpu_home.mkdir();head='a'*40;root=cpu_home/'.h3-veda-epic-25140'/('cpu-build-'+head[:9]);root.mkdir(parents=True);uid=os.getuid();a={'control':{'sourceHead':'351e828ea7f1d43f433d3267a25869d9a2e0024d','runId':38545586867,'jobId':115790708657,'verificationSha256':'39fb5d4b2e615daec201a932449078697d35ed091ffe8d48de0b980e04857f4f'},'sourceHead':head,'owner':{'runnerId':5281,'sourceHead':head},'home':{'path':str(cpu_home),'uid':uid,'device':cpu_home.stat().st_dev}};marker=root/'.h3-cpu-build-owner.json';marker.write_text(json.dumps(a));a['marker']=b.binding(marker);p={'runDir':str(root),'buildAuthority':a}
+  with patch.object(b.sys,'platform','darwin'),patch.object(b.os,'uname',return_value=type('Host',(),{'machine':'arm64'})()),patch.object(b.pwd,'getpwuid',return_value=type('Account',(),{'pw_dir':str(cpu_home)})()),patch.object(b.shutil,'disk_usage',return_value=type('Disk',(),{'free':b.BUILD_MIN_FREE})()):
+   b.validate_build_authority(p);marker.write_text('{}')
+   with self.assertRaisesRegex(RuntimeError,'marker changed'):b.validate_build_authority(p)
 if __name__=='__main__':unittest.main()

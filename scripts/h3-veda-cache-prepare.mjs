@@ -1,7 +1,8 @@
 // Owned CPU preparation through normal SceneWorks managed download jobs. Never generation.
 import {execFileSync,spawnSync} from 'node:child_process';
-import {readFile,writeFile,mkdir,lstat} from 'node:fs/promises';
+import {readFile,writeFile,mkdir,lstat,statfs} from 'node:fs/promises';
 import path from 'node:path';
+import {homedir} from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {createReadStream} from 'node:fs';
@@ -16,7 +17,7 @@ import {bootstrap,noSymlinkAncestors} from './h3-veda-owned-python.mjs';
 const absolute=p=>typeof p==='string'&&path.isAbsolute(p),inside=(r,p)=>{const x=path.relative(r,p);return x&&!x.startsWith('..')&&!path.isAbsolute(x);},MLX_SYS_SOURCE='https://github.com/michaeltrefry/mlx-rs';
 export function buildArguments(backend) {
   check(["mlx", "candle_cuda"].includes(backend), "explicit backend required");
-  return ["build", "--release", "--locked", "--message-format=json-render-diagnostics", "-p", "sceneworks-rust-api", ...(backend === "candle_cuda" ? ["--features", "backend-candle"] : [])];
+  return ["build", "--release", "--locked", "-vv", "--message-format=json-render-diagnostics", "-p", "sceneworks-rust-api", ...(backend === "candle_cuda" ? ["--features", "backend-candle"] : ["--config", 'profile.release.build-override.strip="none"'])];
 }
 export function mlxBuildEnvironment(base) {
   const env = { ...base };
@@ -77,13 +78,29 @@ export function assertPrivateCpuRoot(runDir,cacheRoots){
  noSymlinkAncestors(runDir);check(path.isAbsolute(runDir)&&runDir!==ROOT&&!runDir.startsWith(ROOT+path.sep),'owned external CPU root required');
  for(const cache of cacheRoots)check(runDir!==cache&&!runDir.startsWith(cache+path.sep)&&!cache.startsWith(runDir+path.sep),'owned CPU tools/build root overlaps declared shared cache');
 }
+export const BUILD_CONTROL={sourceHead:'351e828ea7f1d43f433d3267a25869d9a2e0024d',runId:38545586867,jobId:115790708657,verificationSha256:'39fb5d4b2e615daec201a932449078697d35ed091ffe8d48de0b980e04857f4f'};
+export const BUILD_MIN_FREE_BYTES=32*1024*1024*1024;
+export function assertBuildControl(run,job){
+ check(run.id===BUILD_CONTROL.runId&&run.head_sha===BUILD_CONTROL.sourceHead&&run.run_attempt===1&&run.status==='completed'&&run.conclusion==='success'&&run.event==='workflow_dispatch'&&run.path==='.github/workflows/h3-veda-cache-prepare.yml','exact completed matched control required');
+ check(job.id===BUILD_CONTROL.jobId&&job.run_id===BUILD_CONTROL.runId&&job.status==='completed'&&job.conclusion==='success'&&job.runner_id===5281&&job.name==='mac2_cache','exact completed Mac2 matched-control job required');return {...BUILD_CONTROL,run,job};
+}
+export function assertDurableCpuBuildRoot(runDir,cpuHome,head,uid,homeStat,freeBytes){
+ check(/^[a-f0-9]{40}$/.test(head)&&path.isAbsolute(cpuHome)&&!cpuHome.startsWith('/Volumes/')&&runDir===path.join(cpuHome,'.h3-veda-epic-25140',`cpu-build-${head.slice(0,9)}`),'exact durable internal home/source-prefixed build root required');
+ assertPrivateCpuRoot(runDir,['/Volumes/Models/huggingface','/Volumes/Models/epic-25140-owned-cache-299c99e8d','/Volumes/Models/epic-25140-cache-diagnostic-69fae2f10','/Volumes/Models/epic-25140-cache-diagnostic-698e4406c']);
+ noSymlinkAncestors(cpuHome);check(homeStat.isDirectory()&&homeStat.uid===uid&&Number.isInteger(uid),'actual home UID ownership differs');check(Number.isSafeInteger(freeBytes)&&freeBytes>=BUILD_MIN_FREE_BYTES,'fresh internal CPU API build requires >=32GiB operational free space');return {path:cpuHome,uid,device:homeStat.dev,freeBytes,minimumFreeBytes:BUILD_MIN_FREE_BYTES};
+}
+async function createDurableCpuBuildRoot(runDir,owner,control){
+ check(process.platform==='darwin'&&process.arch==='arm64','actual Apple-silicon CPU build host required');const cpuHome=homedir(),uid=process.getuid(),disk=await statfs(cpuHome),home=assertDurableCpuBuildRoot(runDir,cpuHome,owner.sourceHead,uid,await lstat(cpuHome),disk.bavail*disk.bsize);
+ check(!await lstat(runDir).catch(e=>e.code==='ENOENT'?null:Promise.reject(e)),'durable build root already exists; prior evidence must remain untouched');const parent=path.dirname(runDir);if(!await lstat(parent).catch(e=>e.code==='ENOENT'?null:Promise.reject(e)))await mkdir(parent);noSymlinkAncestors(parent);const ps=await lstat(parent);check(ps.isDirectory()&&ps.uid===uid&&ps.dev===home.device,'durable task parent has foreign UID/device');await mkdir(runDir);const rs=await lstat(runDir);check(rs.uid===uid&&rs.dev===home.device,'actual durable root UID/internal device differs');
+ const value={schemaVersion:1,sourceHead:owner.sourceHead,owner,home,control};const marker=path.join(runDir,'.h3-cpu-build-owner.json');await writeFile(marker,JSON.stringify(value,null,2)+'\n',{flag:'wx'});return {...value,marker:await bound(marker)};
+}
 async function privateCpuRoot(runDir){const t=await json(path.join(ROOT,'config/terminal-evidence/epic-25140-host-template.json'));assertPrivateCpuRoot(runDir,declaredCacheRoots(t,'mlx'));}
-export async function supervisedCpuBuild(mode,runDir,checkout,py){
+export async function supervisedCpuBuild(mode,runDir,checkout,py,buildAuthority){
  check(['toolchain','cargo'].includes(mode),'closed CPU preparation mode required');
  const helper=await bound(path.join(ROOT,'scripts/h3-veda-cpu-build.py')),python=await bound(py.interpreter.path);
  check(python.sha256===py.interpreter.sha256,'selected Python byte authority changed');
  const sourceBindings=await Promise.all(['Cargo.toml','Cargo.lock','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml','crates/sceneworks-worker/src/lib.rs'].map(f=>bound(path.join(checkout,f))));
- const plan={schemaVersion:1,kind:'epic25140_closed_CPU_build_plan',mode,runDir,sourceRoot:checkout,helper,python,sourceBindings};
+ const sourceConfiguration=await bound(path.join(checkout,'.cargo/config.toml'));const plan={schemaVersion:1,kind:'epic25140_closed_CPU_build_plan',mode,runDir,sourceRoot:checkout,helper,python,sourceBindings,sourceConfiguration,buildAuthority};
  const planPath=path.join(runDir,`cpu-build-${mode}-plan.json`);await writeFile(planPath,JSON.stringify(plan,null,2)+'\n',{flag:'wx'});
  const child=spawnSync(python.path,[helper.path,planPath,String(process.pid),await hashFile(planPath)],{stdio:'inherit',timeout:mode==='cargo'?3640000:640000});
  check(child.status===0,'owned CPU preparation refused; inspect durable closure receipt');
@@ -92,8 +109,8 @@ export async function supervisedCpuBuild(mode,runDir,checkout,py){
  for(const b of [receipt.stdout,receipt.stderr,...Object.values(receipt.tools)])check((await bound(b.path)).sha256===b.sha256,'actual CPU log/tool bytes changed');
  return {...receipt,receipt:await bound(receiptPath)};
 }
-export async function buildCacheProduct(runDir,{run=execFileSync,python}={}){
- await privateCpuRoot(runDir);await mkdir(runDir,{recursive:true});
+export async function buildCacheProduct(runDir,{run=execFileSync,python,buildAuthority}={}){
+ await privateCpuRoot(runDir);check(buildAuthority?.owner?.sourceHead===git(ROOT,'rev-parse','HEAD')&&await hashFile(buildAuthority.marker.path)===buildAuthority.marker.sha256,'actual durable build ownership/source marker required');
  const checkout=path.join(runDir,'download-source');check(!await lstat(checkout).catch(e=>e.code==='ENOENT'?null:Promise.reject(e)),'source build exists; reuse only its completed attestation');
  await mkdir(checkout);const call=(...a)=>run('git',['-C',checkout,...a],{encoding:'utf8',timeout:120000});call('init');call('-c','credential.helper=','-c','credential.helper=!gh auth git-credential','fetch','--depth=1','https://github.com/SceneWorks/SceneWorks.git',DOWNLOAD_SOURCE);call('checkout','--detach',DOWNLOAD_SOURCE);
  check(await hashFile(path.join(checkout,'crates/sceneworks-worker/src/lib.rs'))==='e2cd68fce583d5e39e2051ea2cf6cc33919dd4b538726849d38c20ada459f353','ordinary source worker bytes differ before CPU-only overlay');
@@ -101,11 +118,11 @@ export async function buildCacheProduct(runDir,{run=execFileSync,python}={}){
  check(git(checkout,'diff','--name-only')==='crates/sceneworks-worker/src/lib.rs','CPU-only setter overlay changed unrelated source');
  const old=JSON.parse(stripJsoncComments(await readFile(path.join(checkout,'config/manifests/builtin.models.jsonc'),'utf8'))),now=JSON.parse(stripJsoncComments(await readFile(path.join(ROOT,'config/terminal-evidence/epic-25140-cache-catalog.json'),'utf8')));check(await hashFile(path.join(checkout,'config/manifests/builtin.models.jsonc'))===ORDINARY_CATALOG_SHA,'ordinary source catalog bytes changed');sameH3Catalog(old,now);
  const pins=[...['Cargo.toml','crates/sceneworks-worker/Cargo.toml','crates/sceneworks-memory-adapter/Cargo.toml'].flatMap(f=>[...git(checkout,'show','HEAD:'+f).matchAll(/git\s*=\s*"https:\/\/github.com\/SceneWorks\/inference"\s*,\s*rev\s*=\s*"([a-f0-9]{40})"/g)].map(m=>m[1]))];check(pins.length>0&&pins.every(p=>p===DOWNLOAD_PIN),'all ordinary source direct native pins must equal original75');const pin=DOWNLOAD_PIN;const lockPins=[...(await readFile(path.join(checkout,'Cargo.lock'),'utf8')).matchAll(/source = "git\+https:\/\/github.com\/SceneWorks\/inference\?rev=([a-f0-9]{40})#([a-f0-9]{40})"/g)];check(lockPins.length>0&&lockPins.every(m=>m[1]===pin&&m[2]===pin),'ordinary Cargo.lock native source authority differs');
- const py=python??await bootstrap(runDir),toolchainPreparation=await supervisedCpuBuild('toolchain',runDir,checkout,py),cargoPreparation=await supervisedCpuBuild('cargo',runDir,checkout,py);
+ const py=python??await bootstrap(runDir),toolchainPreparation=await supervisedCpuBuild('toolchain',runDir,checkout,py,buildAuthority),cargoPreparation=await supervisedCpuBuild('cargo',runDir,checkout,py,buildAuthority);
  const target=path.join(runDir,'download-cargo-target'),args=buildArguments('mlx');check(cargoPreparation.stdout.bytes<=64*1024*1024,'CPU build log exceeds bounded parser');const output=await readFile(cargoPreparation.stdout.path,'utf8');
  check(git(checkout,'status','--porcelain','--untracked-files=all')==='M crates/sceneworks-worker/src/lib.rs','ordinary CPU source changed during preparation');for(const b of cargoPreparation.sourceBindings)check(await hashFile(b.path)===b.sha256,'actual CPU build source bytes changed');
  const binary=await bound(path.join(target,'release/sceneworks-rust-api')),sys=pinnedMlxSysPackageId(await readFile(path.join(checkout,'Cargo.lock'),'utf8')),resource=mlxMetallibBuildOutput(output,sys.packageId,target),metallib=await bound(resource.path);
- const value={schemaVersion:1,kind:'epic25140_cpu_download_source_build',sourceHead:DOWNLOAD_SOURCE,inferencePin:pin,overlay:await bound(patch),bootstrapCatalog:await bound(path.join(ROOT,'config/terminal-evidence/epic-25140-cache-catalog.json')),ordinaryLoras:await bound(path.join(checkout,'config/manifests/builtin.loras.jsonc')),ordinaryCatalog:await bound(path.join(checkout,'config/manifests/builtin.models.jsonc')),sourceWorker:await bound(path.join(checkout,'crates/sceneworks-worker/src/lib.rs')),cargoLock:await bound(path.join(checkout,'Cargo.lock')),binary,metallib,buildArgs:args,cpuPreparation:{toolchain:toolchainPreparation,cargo:cargoPreparation},rustc:cargoPreparation.tools.rustc,cargo:cargoPreparation.tools.cargo,runnerName:process.env.RUNNER_NAME,sourceRoot:checkout,cpuSourcePathVerified:true,actualStartupGpuContextVerified:false,actualManagedDownload:false,physicalAdmission:false,campaignReady:false};
+ const value={schemaVersion:1,kind:'epic25140_cpu_download_source_build',sourceHead:DOWNLOAD_SOURCE,inferencePin:pin,overlay:await bound(patch),bootstrapCatalog:await bound(path.join(ROOT,'config/terminal-evidence/epic-25140-cache-catalog.json')),ordinaryLoras:await bound(path.join(checkout,'config/manifests/builtin.loras.jsonc')),ordinaryCatalog:await bound(path.join(checkout,'config/manifests/builtin.models.jsonc')),sourceWorker:await bound(path.join(checkout,'crates/sceneworks-worker/src/lib.rs')),cargoLock:await bound(path.join(checkout,'Cargo.lock')),binary,metallib,buildArgs:args,buildAuthority,sourceConfiguration:await bound(path.join(checkout,'.cargo/config.toml')),cpuPreparation:{toolchain:toolchainPreparation,cargo:cargoPreparation},rustc:cargoPreparation.tools.rustc,cargo:cargoPreparation.tools.cargo,runnerName:process.env.RUNNER_NAME,sourceRoot:checkout,cpuSourcePathVerified:true,actualStartupGpuContextVerified:false,actualManagedDownload:false,physicalAdmission:false,campaignReady:false};
  const outputPath=path.join(runDir,'cpu-download-build.json');await writeFile(outputPath,JSON.stringify(value,null,2)+'\n',{flag:'wx'});return value;
 }
 export async function planCache({runDir,sharedCache,attestationPath,owner,maxSeconds=480}){
@@ -121,5 +138,5 @@ export async function planCache({runDir,sharedCache,attestationPath,owner,maxSec
  await mkdir(runDir,{recursive:true});const target=path.join(runDir,`cache-plan-${owner.runId}-${owner.runAttempt}.json`);await writeFile(target,JSON.stringify(p,null,2)+'\n',{flag:'wx'});return target;
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- (async()=>{const [mode,runDir,sharedCache,attestationPath]=process.argv.slice(2);check(['build','prepare'].includes(mode),'build RUN_DIR | prepare RUN_DIR SHARED_CACHE ATTESTATION');const head=git(ROOT,'rev-parse','HEAD');check(head===process.env.GITHUB_SHA,'workflow exact checkout required');const api=r=>JSON.parse(execFileSync('gh',['api',`repos/SceneWorks/SceneWorks/${r}`],{encoding:'utf8',timeout:15000}));const run=api(`actions/runs/${process.env.GITHUB_RUN_ID}`),jobs=api(`actions/runs/${run.id}/jobs?per_page=100`),job=jobs.jobs?.filter(j=>j.name==='mac2_cache'&&j.status==='in_progress');check(job?.length===1,'owned live cache job absent/ambiguous');const owner=assertOwnedCpuRun({run,job:job[0],head});await privateCpuRoot(runDir);const py=await bootstrap(runDir);if(mode==='build'){console.log(JSON.stringify(await buildCacheProduct(runDir,{python:py})));return;}const plan=await planCache({runDir,sharedCache,attestationPath,owner});const child=spawnSync(py.interpreter.path,[path.join(ROOT,'scripts/h3-veda-cache-prepare.py'),plan,String(process.pid),await hashFile(plan)],{stdio:'inherit',env:{...process.env,S9_CACHE_PYTHON_SHA256:py.interpreter.sha256},timeout:550000});check(child.status===0,'CPU cache controller refused/incomplete closure');})().catch(e=>{console.error(e.message);process.exitCode=1;});
+ (async()=>{const [mode,runDir,sharedCache,attestationPath]=process.argv.slice(2);check(['build','prepare'].includes(mode),'build RUN_DIR | prepare RUN_DIR SHARED_CACHE ATTESTATION');const head=git(ROOT,'rev-parse','HEAD');check(head===process.env.GITHUB_SHA&&git(ROOT,'status','--porcelain')==='','workflow exact clean checkout required');const api=r=>JSON.parse(execFileSync('gh',['api',`repos/SceneWorks/SceneWorks/${r}`],{encoding:'utf8',timeout:15000}));const run=api(`actions/runs/${process.env.GITHUB_RUN_ID}`),jobs=api(`actions/runs/${run.id}/jobs?per_page=100`),job=jobs.jobs?.filter(j=>j.name==='mac2_cache'&&j.status==='in_progress');check(job?.length===1,'owned live cache job absent/ambiguous');const owner=assertOwnedCpuRun({run,job:job[0],head});if(mode==='build'){const control=assertBuildControl(api(`actions/runs/${BUILD_CONTROL.runId}`),api(`actions/jobs/${BUILD_CONTROL.jobId}`)),buildAuthority=await createDurableCpuBuildRoot(runDir,owner,control),py=await bootstrap(runDir);console.log(JSON.stringify(await buildCacheProduct(runDir,{python:py,buildAuthority})));return;}await privateCpuRoot(runDir);const py=await bootstrap(runDir);const plan=await planCache({runDir,sharedCache,attestationPath,owner});const child=spawnSync(py.interpreter.path,[path.join(ROOT,'scripts/h3-veda-cache-prepare.py'),plan,String(process.pid),await hashFile(plan)],{stdio:'inherit',env:{...process.env,S9_CACHE_PYTHON_SHA256:py.interpreter.sha256},timeout:550000});check(child.status===0,'CPU cache controller refused/incomplete closure');})().catch(e=>{console.error(e.message);process.exitCode=1;});
 }

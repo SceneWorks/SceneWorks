@@ -1,5 +1,10 @@
 # Matched internal CPU macro control
 
+The matched control ran at immutable source351. The current registered `build`
+body has returned to the normal API producer described in
+[h3-cache-api-build-recovery.md](h3-cache-api-build-recovery.md). The controlled
+helper and its immutable evidence remain available; no control root is reused.
+
 The registered cache workflow retains its exact five dispatch inputs. On this
 source, `mode=build` invokes the closed internal CPU macro experiment. Supply
 `run_dir` exactly as `$RUNNER_TEMP/h3-cache-controlled-<first9-of-sceneworks_sha>`.

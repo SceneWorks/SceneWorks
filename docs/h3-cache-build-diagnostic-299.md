@@ -1,9 +1,8 @@
 # Exact failed Mac2 CPU compiler preparation diagnostic
 
-The complete diagnostic described below ran at immutable source698. The current
-`build` route is the bounded matched internal control described in
-[h3-cache-controlled-repro.md](h3-cache-controlled-repro.md). Its output grammar
-is `$RUNNER_TEMP/h3-cache-controlled-<source-SHA-first-9>`; original external
+The complete diagnostic described below ran at immutable source698. The matched control ran at source351 as described in
+[h3-cache-controlled-repro.md](h3-cache-controlled-repro.md). The current normal
+API recovery build is described in [h3-cache-api-build-recovery.md](h3-cache-api-build-recovery.md); original external
 299/69fa/698 evidence roots remain read-only.
 
 This source changes only `build` execution of the registered owned-cache workflow
