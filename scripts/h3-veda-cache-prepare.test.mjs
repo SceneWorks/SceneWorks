@@ -11,10 +11,8 @@ test('CPU Rustup/Cargo lifecycle supervisor closes owned children and enforces o
 
 test('CPU build/tool roots reject shared-cache equality, ancestors, descendants and source checkout',()=>{const shared='/Volumes/Models/huggingface';assertPrivateCpuRoot('/Volumes/Models/epic-25140-owned-cache',[shared]);for(const root of [shared,shared+'/child','/Volumes/Models',path.resolve(import.meta.dirname,'..')])assert.throws(()=>assertPrivateCpuRoot(root,[shared]));});
 
-<<<<<<< HEAD
 test('recovery root is durable internal/source-bound with actual UID and capacity',()=>{const h='a'.repeat(40),home='/Users/MTrefry',root=home+'/.h3-veda-epic-25140/cpu-build-'+h.slice(0,9),s={uid:501,dev:3,isDirectory:()=>true};assert.equal(assertDurableCpuBuildRoot(root,home,h,501,s,BUILD_MIN_FREE_BYTES).device,3);for(const value of [root+'/child','/Volumes/Models/new','/Users/MTrefry/actions-runner-nax/_work/_temp/build'])assert.throws(()=>assertDurableCpuBuildRoot(value,home,h,501,s,BUILD_MIN_FREE_BYTES));assert.throws(()=>assertDurableCpuBuildRoot(root,home,h,502,s,BUILD_MIN_FREE_BYTES));assert.throws(()=>assertDurableCpuBuildRoot(root,home,h,501,s,BUILD_MIN_FREE_BYTES-1));});
 test('normal API recovery uses completed actual control and changes only host strip plus verbosity',()=>{const r={id:BUILD_CONTROL.runId,head_sha:BUILD_CONTROL.sourceHead,run_attempt:1,status:'completed',conclusion:'success',event:'workflow_dispatch',path:'.github/workflows/h3-veda-cache-prepare.yml'},j={id:BUILD_CONTROL.jobId,run_id:BUILD_CONTROL.runId,status:'completed',conclusion:'success',runner_id:5281,name:'mac2_cache'};assert.equal(assertBuildControl(r,j).runId,r.id);assert.throws(()=>assertBuildControl({...r,status:'in_progress'},j));assert.throws(()=>assertBuildControl(r,{...j,conclusion:'failure'}));assert.deepEqual(buildArguments('mlx'),['build','--release','--locked','-vv','--message-format=json-render-diagnostics','-p','sceneworks-rust-api','--config','profile.release.build-override.strip="none"']);assert.ok(!buildArguments('candle_cuda').some(a=>a.includes('strip=')));});
-=======
 test('prepare internal root is source-owned, distinct from CPU build root, with closed scratch scope',()=>{
  const head='a'.repeat(40),base='/Users/MTrefry/.h3-veda-epic-25140';
  const p=cacheStorageProfile(base+'/private-cache-'+head.slice(0,9),head);assert.equal(p.mode,'owned_internal_cross_volume_copy');assert.equal(p.sourceHead,head);assert.equal(p.expectedRunnerId,5281);assert.equal(p.managedDownloadScratchBytes,5381086712);
@@ -29,4 +27,3 @@ test('actual Node194 entry projection is independently validated by Python intak
  assert.equal(run(entries).trim(),'verified frozen194');
  for(const mutate of [e=>e.pop(),e=>e[0].sha256='f'.repeat(64),e=>e[0].allowManagedFetch=!e[0].allowManagedFetch,e=>e[0].bytes++]){const e=structuredClone(entries);mutate(e);assert.throws(()=>run(e));}
 });
->>>>>>> 0f7001e43 (Stage the full H3 cache in bounded owned internal storage)
