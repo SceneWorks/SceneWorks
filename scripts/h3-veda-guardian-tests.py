@@ -300,4 +300,20 @@ class Fixture(unittest.TestCase):
         self.assertNotIn("GH_TOKEN",env);self.assertNotIn("GITHUB_TOKEN",env);self.assertNotIn("SCENEWORKS_TOKEN",env)
         self.assertEqual(env["SCENEWORKS_ACCESS_TOKEN"],"product-secret")
 
+    def test_cpu_import_api_explicitly_disables_engine_and_inprocess_worker_for_both_hosts(self):
+        m={"runners":{"candle_cuda":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18502},"apiUrl":"http://127.0.0.1:18502","workerId":"owned","requestedGpu":"0"}}}
+        service=g.Services(m,"candle_cuda",self.root,None)
+        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret","SCENEWORKS_GPU_CHECK":"1","SCENEWORKS_WORKER_ONLY":"1","SCENEWORKS_RUN_UTILITY_INPROCESS":"1","CUDA_VISIBLE_DEVICES":"0","NVIDIA_VISIBLE_DEVICES":"0","GH_TOKEN":"runner-secret"}):
+            env=service.env("api")
+        self.assertEqual([env[k] for k in ["SCENEWORKS_GPU_CHECK","SCENEWORKS_WORKER_ONLY","SCENEWORKS_RUN_UTILITY_INPROCESS","SCENEWORKS_GPU_ID","SCENEWORKS_RUST_WORKER_GPU_ID"]],["0","0","0","cpu","cpu"])
+        for key in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","GH_TOKEN","GITHUB_TOKEN"]:self.assertNotIn(key,env)
+        self.assertEqual(env["SCENEWORKS_ACCESS_TOKEN"],"product-secret")
+
+    def test_cpu_import_supervisor_consumes_only_job_owned_api_token(self):
+        env={"SCENEWORKS_ACCESS_TOKEN":"job-owned-secret","GH_TOKEN":"runner-read-secret"}
+        self.assertEqual(g.cpu_import_supervisor_token(env),"job-owned-secret")
+        self.assertNotIn("SCENEWORKS_ACCESS_TOKEN",env);self.assertNotIn("job-owned-secret",json.dumps(env))
+        for value in [None,"", "with whitespace"]:
+            with self.assertRaises(RuntimeError):g.cpu_import_supervisor_token({"SCENEWORKS_ACCESS_TOKEN":value})
+
 if __name__=="__main__":unittest.main()

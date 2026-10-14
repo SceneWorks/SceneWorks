@@ -129,7 +129,8 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   const snapshots = [];
   const planBinding=await boundFile(m.corpusPlan), importBinding=await boundFile(m.corpusImportReceipt);
   assert(planBinding.sha256===m.sourceFreeze.files["config/terminal-evidence/epic-25140-corpus.plan.json"],"corpus plan not frozen source");
-  const bound=bindCorpusPlan(m,JSON.parse(await readFile(planBinding.path,"utf8")),JSON.parse(await readFile(importBinding.path,"utf8")));
+  const importReceipt=JSON.parse(await readFile(importBinding.path,"utf8"));
+  const bound=bindCorpusPlan(m,JSON.parse(await readFile(planBinding.path,"utf8")),importReceipt);
   for(const key of ["projectId","assets","bindings","boundaryBindings"]) assert(digest(bound[key])===digest(m[key]),`owned imported corpus identity differs: ${key}`);
   snapshots.push(planBinding,importBinding);
   for (const p of m.productProofCases ?? []) if (p.setupReceipt && (backend === undefined || p.backend === backend)) {
@@ -163,9 +164,15 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
     for (const file of [r.physicalGuardAdapter,r.apiBinary,r.workerBinary,r.attestation]) assert(typeof file?.path === "string" && HEX.test(file.sha256) && Number.isSafeInteger(file.bytes) && file.bytes > 0, `host descriptor missing: ${target}`);
     if (backend !== undefined && target !== backend) continue;
     snapshots.push(await boundFile(r.physicalGuardAdapter));
+    const importClosureBinding=m.cpuImportApiClosures?.[target];
+    assert(importClosureBinding&&importReceipt.apiProcessClosure&&digest(importClosureBinding)===digest(importReceipt.apiProcessClosure),`CPU import API tree closure missing or differs: ${target}`);
+    const importClosureFile=await boundFile(importClosureBinding),importClosure=JSON.parse(await readFile(importClosureFile.path,"utf8"));
+    const importEnv=importClosure.api?.apiConfigBinding?.environment;
+    assert(importClosure.schemaVersion===1&&importClosure.backend===target&&importClosure.physicalLockClaimed===false&&importClosure.cpuOnlyEnvironment===true&&importClosure.sourceFreezeSha256===digest(m.sourceFreeze)&&importClosure.api?.reaped===true&&importClosure.api.descendantsDrained===true&&importClosure.api.apiBinarySha256===r.apiBinary.sha256&&importEnv&&digest(importClosure.api.apiConfigBinding)===importClosure.api.apiConfigSha256&&importEnv.SCENEWORKS_GPU_CHECK==="0"&&importEnv.SCENEWORKS_WORKER_ONLY==="0"&&importEnv.SCENEWORKS_RUN_UTILITY_INPROCESS==="0"&&importEnv.SCENEWORKS_GPU_ID==="cpu"&&importEnv.SCENEWORKS_RUST_WORKER_GPU_ID==="cpu"&&!Object.hasOwn(importEnv,"SCENEWORKS_ACCESS_TOKEN")&&!Object.hasOwn(importEnv,"SCENEWORKS_PARENT_PID")&&!Object.hasOwn(importEnv,"CUDA_VISIBLE_DEVICES")&&!Object.hasOwn(importEnv,"NVIDIA_VISIBLE_DEVICES"),`CPU import API process-tree receipt differs: ${target}`);
+    snapshots.push(importClosureFile);
     snapshots.push(await boundFile(r.apiBinary)); snapshots.push(await boundFile(r.workerBinary));
     const attestation = JSON.parse(await readFile((await boundFile(r.attestation)).path, "utf8"));
-    assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${target}`);
+    assert(attestation.schemaVersion === 2 && attestation.method === "actions_source_build_durable_same_binary_api_and_worker" && attestation.backend === target && attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.binaryBytes === r.apiBinary.bytes && attestation.workerId === r.workerId && attestation.buildIdentity?.backend === target && attestation.buildIdentity.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.buildIdentity.binary?.sha256 === r.apiBinary.sha256 && attestation.buildIdentity.binary?.bytes === r.apiBinary.bytes && attestation.buildIdentitySha256 === digest(attestation.buildIdentity), `installed product provenance differs: ${target}`);
   }
   return { rows, catalog, snapshots, fingerprint: digest(m), hostValidation: { selectedBackend: backend ?? "all-local", actualFileVerificationBackends: backend ? [backend] : ["mlx", "candle_cuda"], otherBackendAcceptance: false } };
 }

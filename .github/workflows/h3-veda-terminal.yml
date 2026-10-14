@@ -9,10 +9,10 @@ on:
         type: choice
         options: [mlx, candle_cuda]
       mode:
-        description: Prepare or resume the exact campaign, or export selected closed-batch media for review.
+        description: Build a source-bound host binary, prepare/import the owned campaign, resume a bounded batch, or export selected closed-batch review media.
         required: true
         type: choice
-        options: [prepare, resume, review]
+        options: [build, prepare, resume, review]
       review_case_ids:
         description: Review mode only; JSON array of 1-4 exact owned case IDs. Selection is never acceptance.
         required: false
@@ -30,16 +30,16 @@ on:
         required: true
         type: string
       manifest_path:
-        description: Absolute path to frozen host-local template (prepare) or bound manifest (resume).
+        description: Absolute source-frozen preparation manifest (build) or combined host-bound campaign manifest (prepare/resume).
         required: true
         type: string
       corpus_root:
-        description: Absolute host-local staged corpus root, only used by prepare.
-        required: true
+        description: Absolute host-local staged corpus root, used only by prepare.
+        required: false
         type: string
       offline_cache_root:
-        description: Absolute complete host-local offline HF cache root.
-        required: true
+        description: Absolute complete host-local offline HF cache root, used only by prepare/resume/review.
+        required: false
         type: string
       run_dir:
         description: Absolute external owned campaign directory, durable across bounded batches.
@@ -50,7 +50,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: h3-veda-terminal-${{ inputs.backend }}-${{ inputs.run_dir }}
+  group: h3-veda-terminal-${{ inputs.run_dir }}
   cancel-in-progress: false
 
 jobs:
@@ -70,7 +70,7 @@ jobs:
       S9_CACHE: ${{ inputs.offline_cache_root }}
       S9_RUN_DIR: ${{ inputs.run_dir }}
       HF_HOME: ${{ inputs.offline_cache_root }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/sceneworks/target
+      CARGO_TARGET_DIR: ${{ inputs.run_dir }}/cargo-target
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
@@ -89,6 +89,14 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.mode != 'review'
+        with:
+          python-version: "3.12"
+      - name: Bind Python 3.12 interpreter for owned process supervision
+        if: inputs.mode != 'review'
+        run: |
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 12); print(f"S9_GUARD_PYTHON={sys.executable}")' >> "$GITHUB_ENV"
       - name: Assert exact source and named runner before build
         run: |
           test "$GITHUB_SHA" = "$S9_SCENEWORKS_SHA"
@@ -102,13 +110,13 @@ jobs:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth mlx
       - name: Generate masked job-owned private API token
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: node scripts/h3-veda-actions.mjs owned-token
-      - name: Build normal product API and worker from frozen source
-        if: inputs.mode != 'review'
-        run: cargo build --release --locked -p sceneworks-rust-api
+      - name: Build durable normal product API and worker from frozen source
+        if: inputs.mode == 'build'
+        run: node scripts/h3-veda-actions.mjs build "$S9_MANIFEST" mlx "$S9_RUN_DIR"
       - name: Prepare or verify owned private corpus
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
@@ -118,12 +126,19 @@ jobs:
             node scripts/h3-veda-actions.mjs resume "$S9_MANIFEST" mlx "$S9_RUN_DIR" "$S9_CACHE"
           fi
       - name: Run bounded guardian-owned native campaign
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'resume'
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
           node scripts/h3-veda-actions.mjs admit mlx
           node scripts/h3-veda-acceptance.mjs run "$S9_RUN_DIR/manifest.bound.json" mlx "$S9_RUN_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.mode == 'build'
+        with:
+          name: h3-veda-product-build-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.run_dir }}/mlx-product-build-receipt.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Stage selected real output review media from closed owned batch
         if: inputs.mode == 'review'
         env:
@@ -164,7 +179,7 @@ jobs:
       S9_CACHE: ${{ inputs.offline_cache_root }}
       S9_RUN_DIR: ${{ inputs.run_dir }}
       HF_HOME: ${{ inputs.offline_cache_root }}
-      CARGO_TARGET_DIR: ${{ github.workspace }}/sceneworks/target
+      CARGO_TARGET_DIR: ${{ inputs.run_dir }}/cargo-target
       HF_HUB_OFFLINE: '1'
       TRANSFORMERS_OFFLINE: '1'
     steps:
@@ -183,6 +198,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: inputs.mode != 'review'
+        with:
+          python-version: "3.12"
+      - name: Bind Python 3.12 interpreter for owned process supervision
+        if: inputs.mode != 'review'
+        run: |
+          $python = (python -c "import sys; assert sys.version_info[:2] == (3, 12); print(sys.executable)").Trim()
+          Add-Content -Path $env:GITHUB_ENV -Value "S9_GUARD_PYTHON=$python"
       - name: Assert exact source and named runner before build
         run: |
           if ($env:GITHUB_SHA -ne $env:S9_SCENEWORKS_SHA) { throw 'workflow source SHA differs' }
@@ -195,17 +219,17 @@ jobs:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth candle_cuda
       - name: Generate masked job-owned private API token
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: node scripts/h3-veda-actions.mjs owned-token
-      - name: Build normal Candle/CUDA product API and worker from frozen source
-        if: inputs.mode != 'review'
+      - name: Build durable normal Candle/CUDA product API and worker from frozen source
+        if: inputs.mode == 'build'
         shell: cmd
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo build --release --locked -p sceneworks-rust-api --features backend-candle || exit /b 1
+          node scripts/h3-veda-actions.mjs build "%S9_MANIFEST%" candle_cuda "%S9_RUN_DIR%" || exit /b 1
       - name: Prepare or verify owned private corpus
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         shell: cmd
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
@@ -215,7 +239,7 @@ jobs:
           if "${{ inputs.mode }}" == "prepare" (node scripts/h3-veda-actions.mjs prepare "%S9_MANIFEST%" config/terminal-evidence/epic-25140-corpus.plan.json "%S9_CORPUS_ROOT%" candle_cuda "%S9_RUN_DIR%" "%S9_CACHE%") else (node scripts/h3-veda-actions.mjs resume "%S9_MANIFEST%" candle_cuda "%S9_RUN_DIR%" "%S9_CACHE%")
           if errorlevel 1 exit /b 1
       - name: Run bounded guardian-owned native campaign
-        if: inputs.mode != 'review'
+        if: inputs.mode == 'resume'
         shell: cmd
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
@@ -226,6 +250,13 @@ jobs:
           if errorlevel 1 exit /b 1
           node scripts/h3-veda-acceptance.mjs run "%S9_RUN_DIR%\manifest.bound.json" candle_cuda "%S9_RUN_DIR%"
           if errorlevel 1 exit /b 1
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.mode == 'build'
+        with:
+          name: h3-veda-product-build-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ inputs.run_dir }}/candle_cuda-product-build-receipt.json
+          if-no-files-found: error
+          retention-days: 30
       - name: Stage selected real output review media from closed owned batch
         if: inputs.mode == 'review'
         env:

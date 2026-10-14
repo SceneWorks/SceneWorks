@@ -5,7 +5,7 @@ import { spawn, execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { constants as fsConstants } from "node:fs";
-import { readFile, writeFile, appendFile, mkdir, lstat, copyFile, realpath } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, lstat, copyFile, realpath, rename, unlink } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -20,6 +20,145 @@ const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", timeout: 15000 }).trim();
 const absolute = (p) => typeof p === "string" && path.isAbsolute(p);
 const inside = (root, p) => { const r = path.relative(root, p); return r && r !== ".." && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r); };
+const productName = () => process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api";
+const productPath = (runDir, backend) => path.join(runDir, "product-binaries", backend, productName());
+const productAttestationPath = (runDir, backend) => path.join(runDir, `${backend}-product-binary-attestation.json`);
+
+function targetCargoDir(runDir, cargoTargetDir = process.env.CARGO_TARGET_DIR) {
+  check(absolute(cargoTargetDir) && path.resolve(cargoTargetDir) === path.join(path.resolve(runDir), "cargo-target") && !inside(ROOT, cargoTargetDir), "durable Cargo target must be the external owned run directory cargo-target");
+  return cargoTargetDir;
+}
+
+export function cpuImportApiEnvironment(base, { dataDir, configDir, jobsDbPath, cacheRoot, apiUrl, token } = {}) {
+  const env = {
+    ...base,
+    SCENEWORKS_DATA_DIR: dataDir,
+    SCENEWORKS_JOBS_DB_PATH: jobsDbPath,
+    SCENEWORKS_CONFIG_DIR: configDir,
+    SCENEWORKS_OWN_MANIFESTS: "1",
+    SCENEWORKS_API_HOST: "127.0.0.1",
+    SCENEWORKS_API_PORT: new URL(apiUrl).port,
+    SCENEWORKS_API_URL: apiUrl,
+    SCENEWORKS_ACCESS_TOKEN: token,
+    SCENEWORKS_GPU_ID: "cpu",
+    SCENEWORKS_RUST_WORKER_GPU_ID: "cpu",
+    SCENEWORKS_RUN_UTILITY_INPROCESS: "0",
+    SCENEWORKS_GPU_CHECK: "0",
+    SCENEWORKS_WORKER_ONLY: "0",
+    HF_HOME: cacheRoot,
+    HUGGINGFACE_HUB_CACHE: path.join(cacheRoot, "hub"),
+    HF_HUB_OFFLINE: "1",
+    TRANSFORMERS_OFFLINE: "1",
+  };
+  delete env.CUDA_VISIBLE_DEVICES;
+  delete env.NVIDIA_VISIBLE_DEVICES;
+  delete env.GH_TOKEN;
+  delete env.GITHUB_TOKEN;
+  delete env.SCENEWORKS_TOKEN;
+  return env;
+}
+
+function safeRunRoot(runDir) {
+  check(absolute(runDir) && path.resolve(runDir) === runDir && runDir !== ROOT && !inside(ROOT, runDir), "durable owned run directory must be absolute and external to the checkout");
+}
+
+export function buildArguments(backend) {
+  check(["mlx", "candle_cuda"].includes(backend), "explicit backend required");
+  return ["build", "--release", "--locked", "-p", "sceneworks-rust-api", ...(backend === "candle_cuda" ? ["--features", "backend-candle"] : [])];
+}
+
+function cargoFact(args) {
+  return execFileSync(args[0], args.slice(1), { cwd: ROOT, encoding: "utf8", timeout: 15000 }).trim();
+}
+
+function selectedPython() {
+  const python = process.env.S9_GUARD_PYTHON;
+  check(absolute(python), "absolute Actions-selected Python 3.12 interpreter required");
+  const version = execFileSync(python, ["-c", "import sys; print('.'.join(map(str, sys.version_info[:2])))"], { cwd: ROOT, encoding: "utf8", timeout: 15000 }).trim();
+  check(version === "3.12", "H3 owned process supervisor requires Python 3.12");
+  return { path: python, version };
+}
+
+function buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes, binarySha256, cargoLockSha256 }) {
+  const envKeys = ["CARGO_BUILD_TARGET", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "NVCC_CCBIN", "VCToolsInstallDir"];
+  const environment = Object.fromEntries(envKeys.map((key) => [key, process.env[key] ?? null]));
+  const rustc = cargoFact(["rustc", "-Vv"]), rustcHost = rustc.match(/^host: (.+)$/m)?.[1];
+  return {
+    schemaVersion: 1, backend, sourceFreezeSha256, runDir, targetDir,
+    host: { platform: process.platform, arch: process.arch, targetTriple: process.env.CARGO_BUILD_TARGET ?? rustcHost, runnerName: process.env.RUNNER_NAME ?? null, runnerId: process.env.S9_OBSERVED_RUNNER_ID },
+    cargo: { rustc, cargo: cargoFact(["cargo", "-V"]), python: selectedPython(), args, profile: "release", cargoLockSha256 },
+    environment, binary: { bytes: binaryBytes, sha256: binarySha256 },
+  };
+}
+
+export async function buildDurableProduct({ manifestPath, backend, runDir, runnerName, expectedRunner, sceneWorksSha, inferenceSha, build = execFileSync }) {
+  check(absolute(manifestPath), "absolute source-frozen manifest required");
+  safeRunRoot(runDir);
+  check(process.env.GITHUB_ACTIONS === "true", "owned Actions build-only mode required");
+  check(/^\d+$/.test(process.env.S9_OBSERVED_RUNNER_ID ?? ""), "live runner identity readback required before durable build");
+  selectedPython();
+  const m = await json(manifestPath);
+  assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest: m, runDir, cacheRoot: path.join(runDir, "offline-cache") });
+  check(git(ROOT, "rev-parse", "HEAD") === sceneWorksSha && git(ROOT, "status", "--porcelain") === "", "SceneWorks checkout dirty/stale");
+  check(git(m.sourceFreeze.inference.root, "rev-parse", "HEAD") === inferenceSha && git(m.sourceFreeze.inference.root, "status", "--porcelain") === "", "inference checkout dirty/stale");
+  check(git(m.sourceFreeze.inference.root, "rev-parse", "refs/remotes/origin/main") === inferenceSha, "inference pin is not fetched permanent main");
+  await inspectSources(m);
+  const targetDir = targetCargoDir(runDir);
+  const args = buildArguments(backend);
+  const runInfo = await lstat(runDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
+  check(!runInfo || (runInfo.isDirectory() && !runInfo.isSymbolicLink()), "durable run directory unsafe");
+  await mkdir(runDir, { recursive: true });
+  const receiptPath = path.join(runDir, `${backend}-product-build-receipt.json`), attestationPath = productAttestationPath(runDir, backend), destination = productPath(runDir, backend);
+  const existing = await Promise.all([receiptPath, attestationPath, destination].map((file) => lstat(file).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e))));
+  if (existing.some(Boolean)) {
+    check(existing.every((item) => item?.isFile() && !item.isSymbolicLink()), "partial or unsafe durable product build exists; preserve it for reconciliation");
+    const receipt = await json(receiptPath), attestation = await json(attestationPath), binarySha256 = await hashFile(destination), binaryBytes = existing[2].size;
+    check(receipt.schemaVersion === 1 && receipt.backend === backend && receipt.runnerName === runnerName && receipt.runnerId === process.env.S9_OBSERVED_RUNNER_ID && receipt.source?.sceneworksHead === sceneWorksSha && receipt.source?.inferencePin === inferenceSha && receipt.source?.sourceFreezeSha256 === digest(m.sourceFreeze), "existing durable build receipt source/runner differs");
+    check(receipt.inputManifestSha256 === await hashFile(manifestPath) && receipt.apiBinary?.path === destination && receipt.workerBinary?.path === destination && receipt.apiBinary.sha256 === binarySha256 && receipt.workerBinary.sha256 === binarySha256 && receipt.apiBinary.bytes === binaryBytes && receipt.workerBinary.bytes === binaryBytes, "existing durable build receipt binary/input differs");
+    check(receipt.attestation?.path === attestationPath && receipt.attestation.bytes === existing[1].size && receipt.attestation.sha256 === await hashFile(attestationPath), "existing durable build receipt attestation differs");
+    check(attestation.schemaVersion === 2 && attestation.backend === backend && attestation.sceneworksHead === sceneWorksSha && attestation.inferencePin === inferenceSha && attestation.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.inputManifestSha256 === receipt.inputManifestSha256 && attestation.apiBinarySha256 === binarySha256 && attestation.workerBinarySha256 === binarySha256 && attestation.binaryBytes === binaryBytes && attestation.workerId === m.runners[backend].workerId && attestation.buildIdentitySha256 === digest(attestation.buildIdentity) && receipt.buildIdentitySha256 === attestation.buildIdentitySha256, "existing durable build attestation differs");
+    return receipt;
+  }
+  await mkdir(targetDir, { recursive: true });
+  const targetInfo = await lstat(targetDir);
+  check(targetInfo.isDirectory() && !targetInfo.isSymbolicLink(), "durable Cargo target directory unsafe");
+  build("cargo", args, { cwd: ROOT, env: { ...process.env, CARGO_TARGET_DIR: targetDir }, stdio: "inherit", timeout: 60 * 60_000 });
+  const built = path.join(targetDir, "release", productName());
+  const builtInfo = await lstat(built);
+  check(builtInfo.isFile() && !builtInfo.isSymbolicLink() && builtInfo.size > 0, "release product API binary missing after build");
+  const destinationRoot = path.dirname(destination);
+  await mkdir(destinationRoot, { recursive: true });
+  const destinationRootInfo = await lstat(destinationRoot);
+  check(destinationRootInfo.isDirectory() && !destinationRootInfo.isSymbolicLink(), "durable product directory unsafe");
+  check(!await lstat(destination).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "durable product binary already exists; refusing replacement");
+  const tempBinary = `${destination}.pending-${process.pid}-${randomBytes(5).toString("hex")}`;
+  await copyFile(built, tempBinary, fsConstants.COPYFILE_EXCL);
+  try { await rename(tempBinary, destination); } catch (error) { await unlink(tempBinary).catch(() => {}); throw error; }
+  const productInfo = await lstat(destination);
+  check(productInfo.isFile() && !productInfo.isSymbolicLink() && productInfo.size === builtInfo.size, "durable product copy differs from build output");
+  const binarySha256 = await hashFile(destination);
+  const sourceFreezeSha256 = digest(m.sourceFreeze);
+  const identity = buildIdentity({ backend, sourceFreezeSha256, runDir, targetDir, args, binaryBytes: productInfo.size, binarySha256, cargoLockSha256: sha(await readFile(path.join(ROOT, "Cargo.lock"))) });
+  const attestation = {
+    schemaVersion: 2, method: "actions_source_build_durable_same_binary_api_and_worker", backend,
+    inferencePin: inferenceSha, sceneworksHead: sceneWorksSha, sourceFreezeSha256,
+    inputManifestSha256: await hashFile(manifestPath), apiBinarySha256: binarySha256,
+    workerBinarySha256: binarySha256, binaryBytes: productInfo.size,
+    workerId: m.runners[backend].workerId, buildIdentity: identity, buildIdentitySha256: digest(identity),
+  };
+  await writeFile(attestationPath, JSON.stringify(attestation, null, 2) + "\n", { flag: "wx" });
+  const receipt = {
+    schemaVersion: 1, backend, runnerName, runnerId: process.env.S9_OBSERVED_RUNNER_ID,
+    source: { sceneworksHead: sceneWorksSha, inferencePin: inferenceSha, sourceFreezeSha256 },
+    inputManifestSha256: attestation.inputManifestSha256,
+    apiBinary: { path: destination, bytes: productInfo.size, sha256: binarySha256 },
+    workerBinary: { path: destination, bytes: productInfo.size, sha256: binarySha256 },
+    attestation: { path: attestationPath, bytes: (await lstat(attestationPath)).size, sha256: await hashFile(attestationPath) },
+    buildIdentity: identity, buildIdentitySha256: digest(identity), campaignReady: false,
+  };
+  await writeFile(path.join(runDir, `${backend}-product-build-receipt.json`), JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
+  return receipt;
+}
 
 export async function emitOwnedApiToken({ envFile = process.env.GITHUB_ENV, stdout = process.stdout, random = randomBytes } = {}) {
   check(process.env.GITHUB_ACTIONS === "true" && absolute(envFile), "owned Actions environment file required");
@@ -72,6 +211,23 @@ export function assertActionsIdentity({ backend, runnerName, expectedRunner, sce
   return g;
 }
 
+export async function verifyDurableProduct(m, backend, runDir, { sceneWorksSha, inferenceSha } = {}) {
+  safeRunRoot(runDir);
+  const runner = m.runners?.[backend], expected = productPath(runDir, backend);
+  check(runner?.apiBinary?.path === expected && runner?.workerBinary?.path === expected && runner.apiBinary.sha256 === runner.workerBinary.sha256 && runner.apiBinary.bytes === runner.workerBinary.bytes, "API/worker descriptors must bind the exact same durable run-owned binary");
+  const binary = await boundFile(runner.apiBinary);
+  check(binary.path === expected && binary.bytes === runner.workerBinary.bytes, "durable product binary descriptor differs");
+  const attestationBinding = runner.attestation;
+  check(attestationBinding?.path === productAttestationPath(runDir, backend), "product attestation must use the exact durable run-owned path");
+  const attestationFile = await boundFile(attestationBinding);
+  const attestation = JSON.parse(await readFile(attestationFile.path, "utf8"));
+  check(attestation.schemaVersion === 2 && attestation.method === "actions_source_build_durable_same_binary_api_and_worker" && attestation.backend === backend, "durable product attestation schema/backend differs");
+  check(attestation.sceneworksHead === sceneWorksSha && attestation.inferencePin === inferenceSha && attestation.sourceFreezeSha256 === digest(m.sourceFreeze), "durable product source freeze differs");
+  check(attestation.apiBinarySha256 === binary.sha256 && attestation.workerBinarySha256 === binary.sha256 && attestation.binaryBytes === binary.bytes && attestation.workerId === runner.workerId, "durable product binary/worker identity differs");
+  check(attestation.buildIdentity?.backend === backend && attestation.buildIdentity.sourceFreezeSha256 === digest(m.sourceFreeze) && attestation.buildIdentity.binary?.sha256 === binary.sha256 && attestation.buildIdentity.binary?.bytes === binary.bytes && attestation.buildIdentitySha256 === digest(attestation.buildIdentity), "durable product build identity differs");
+  return { binary, attestation: attestationBinding, buildIdentitySha256: attestation.buildIdentitySha256 };
+}
+
 export async function preflight({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha }) {
   check(absolute(manifestPath), "absolute frozen manifest input required");
   check(process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN, "source-bound Actions execution and scoped live runner token required");
@@ -83,11 +239,7 @@ export async function preflight({ manifestPath, backend, runDir, cacheRoot, runn
   const cache = await lstat(cacheRoot); check(cache.isDirectory() && !cache.isSymbolicLink(), "offline cache unavailable/unsafe");
   const sw = await lstat(runDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
   check(!sw || (sw.isDirectory() && !sw.isSymbolicLink()), "run directory unsafe");
-  const active = m.runners[backend], built = path.join(ROOT, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
-  check(active.apiBinary?.path === built && active.workerBinary?.path === built && active.apiBinary?.sha256 === active.workerBinary?.sha256, "API/worker must be the same source-built normal product binary");
-  for (const binding of [active.apiBinary, active.workerBinary]) {
-    check(absolute(binding?.path) && HEX.test(binding.sha256) && await hashFile(binding.path) === binding.sha256, "normal product binary identity differs");
-  }
+  await verifyDurableProduct(m, backend, runDir, { sceneWorksSha, inferenceSha });
   check(m.artifacts?.length > 0 && m.artifactInventory && Object.keys(m.turboArtifacts ?? {}).length > 0 && m.styles?.length > 0, "complete model/style closure missing");
   for (const binding of [...artifactsForHost(m.artifacts, backend), ...Object.values(m.turboArtifacts), ...m.styles]) {
     check(inside(cacheRoot, binding.path), "model/style closure outside explicit offline cache");
@@ -98,27 +250,6 @@ export async function preflight({ manifestPath, backend, runDir, cacheRoot, runn
     check(HEX.test(m.sourceFreeze.files?.[relative]) && await hashFile(path.join(ROOT, relative)) === m.sourceFreeze.files[relative], `Actions source omitted from freeze: ${relative}`);
   }
   return { manifest: m, guardian: g };
-}
-
-export async function sealActiveBinary({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha }) {
-  check(absolute(manifestPath), "absolute frozen manifest template required");
-  const m = await json(manifestPath);
-  assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest: m, runDir, cacheRoot });
-  const existing = await lstat(runDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
-  check(!existing || (existing.isDirectory() && !existing.isSymbolicLink()), "owned run directory unsafe");
-  await inspectSources(m);
-  const binary = path.join(ROOT, "target", "release", process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
-  const info = await lstat(binary); check(info.isFile() && !info.isSymbolicLink() && info.size > 0, "source-built product binary unavailable");
-  const binding = { path: binary, bytes: info.size, sha256: await hashFile(binary) };
-  m.runners[backend].apiBinary = binding; m.runners[backend].workerBinary = { ...binding };
-  const attestation = { schemaVersion: 1, method: "actions_source_build_same_binary_api_and_worker", inferencePin: inferenceSha, sceneworksHead: sceneWorksSha, apiBinarySha256: binding.sha256, workerBinarySha256: binding.sha256, workerId: m.runners[backend].workerId };
-  await mkdir(runDir, { recursive: true });
-  const attestationPath = path.join(runDir, `${backend}-product-binary-attestation.json`);
-  await writeFile(attestationPath, JSON.stringify(attestation, null, 2) + "\n", { flag: "wx" });
-  const a = await lstat(attestationPath); m.runners[backend].attestation = { path: attestationPath, bytes: a.size, sha256: await hashFile(attestationPath) };
-  const sealedPath = path.join(runDir, "manifest.active-sealed.json");
-  await writeFile(sealedPath, JSON.stringify(m, null, 2) + "\n", { flag: "wx" });
-  return { sealedPath, binarySha256: binding.sha256, attestationSha256: m.runners[backend].attestation.sha256 };
 }
 
 function safeCorpusPath(root, relative) {
@@ -139,25 +270,35 @@ async function requireFreeLoopbackPort(port) {
   });
 }
 
-async function stopOwned(child) {
-  if (child.exitCode !== null || !child.pid) return;
-  const ended = new Promise((resolve) => child.once("exit", resolve));
-  child.kill("SIGTERM");
-  const stopped = await Promise.race([ended.then(() => true), delay(15000).then(() => false)]);
-  check(stopped, "private import API still alive; preserve owned workspace for inspection");
+async function stopOwnedImportSupervisor(child, { manifest, backend, runDir }) {
+  check(child?.pid, "owned CPU import API supervisor did not start");
+  if (child.exitCode === null) {
+    const ended = new Promise((resolve) => child.once("exit", resolve));
+    child.kill("SIGTERM");
+    const stopped = await Promise.race([ended.then((code) => ({ stopped: true, code })), delay(15000).then(() => ({ stopped: false }))]);
+    check(stopped.stopped, "CPU import API supervisor/tree still alive; preserve owned workspace for inspection");
+    check(stopped.code === 0, "CPU import API supervisor failed before recording process-tree closure");
+  }
+  const closurePath = path.join(runDir, "cpu-import-api", "closure.json"), closure = await json(closurePath);
+  check(closure.schemaVersion === 1 && closure.backend === backend && closure.physicalLockClaimed === false && closure.cpuOnlyEnvironment === true && closure.sourceFreezeSha256 === digest(manifest.sourceFreeze), "CPU import API closure source/device identity differs");
+  check(closure.api?.reaped === true && closure.api.descendantsDrained === true && Number.isSafeInteger(closure.api.pid) && closure.api.pid > 0 && closure.api.birth && closure.api.apiBinarySha256 === manifest.runners[backend].apiBinary.sha256, "CPU import API process-tree drain proof missing or wrong binary");
+  check(!Object.hasOwn(closure.api.apiConfigBinding?.environment ?? {}, "SCENEWORKS_ACCESS_TOKEN") && !Object.hasOwn(closure.api.apiConfigBinding?.environment ?? {}, "SCENEWORKS_PARENT_PID"), "CPU import closure exposes private API token or supervisor PID");
+  return { path: closurePath, bytes: (await lstat(closurePath)).size, sha256: await hashFile(closurePath), apiPid: closure.api.pid, apiBirth: closure.api.birth, apiBinarySha256: closure.api.apiBinarySha256, reaped: closure.api.reaped, descendantsDrained: closure.api.descendantsDrained };
 }
 
-export async function importOwnedCorpus({ manifest, plan, planPath, corpusRoot, runDir, cacheRoot, backend, token, spawnApi = spawn }) {
+export async function importOwnedCorpus({ manifest, manifestPath, plan, planPath, corpusRoot, runDir, cacheRoot, backend, token, spawnApi = spawn }) {
   check(token && !/\s/.test(token), "private product API token absent");
+  check(absolute(manifestPath), "absolute source-bound combined manifest required for CPU import supervisor");
   const g = manifest.runners[backend].guardian;
   check(!await lstat(g.dataDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "owned data directory already exists; no implicit reuse");
   check(!await lstat(g.configDir).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e)), "owned config directory already exists; no implicit reuse");
   await requireFreeLoopbackPort(g.port);
   await mkdir(g.dataDir, { recursive: true }); await mkdir(path.join(g.configDir, "manifests"), { recursive: true });
   for (const name of ["builtin.models.jsonc", "builtin.loras.jsonc"]) await copyFile(path.join(ROOT, "config/manifests", name), path.join(g.configDir, "manifests", name));
-  const env = { ...process.env, SCENEWORKS_DATA_DIR: g.dataDir, SCENEWORKS_JOBS_DB_PATH: path.join(g.dataDir, "cache/jobs.db"), SCENEWORKS_CONFIG_DIR: g.configDir, SCENEWORKS_OWN_MANIFESTS: "1", SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: String(g.port), SCENEWORKS_API_URL: manifest.runners[backend].apiUrl, SCENEWORKS_ACCESS_TOKEN: token, SCENEWORKS_GPU_ID: "cpu", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu", SCENEWORKS_UTILITY_JOBS: "0", HF_HOME: cacheRoot, HUGGINGFACE_HUB_CACHE: path.join(cacheRoot, "hub"), HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
-  for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "GH_TOKEN", "GITHUB_TOKEN", "SCENEWORKS_TOKEN"]) delete env[key];
-  const child = spawnApi(manifest.runners[backend].apiBinary.path, [], { cwd: ROOT, env, stdio: "ignore" });
+  const env = cpuImportApiEnvironment(process.env, { dataDir: g.dataDir, configDir: g.configDir, jobsDbPath: path.join(g.dataDir, "cache/jobs.db"), cacheRoot, apiUrl: manifest.runners[backend].apiUrl, token });
+  const python = selectedPython().path;
+  const child = spawnApi(python, [path.join(ROOT, "scripts/h3-veda-guardian.py"), "--cpu-import-api", manifestPath, backend, runDir], { cwd: ROOT, env, stdio: "ignore" });
+  let supervisorStopped = false, apiProcessClosure;
   let launchError; child.on("error", (error) => { launchError = error; });
   try {
     const base = manifest.runners[backend].apiUrl, headers = { "X-SceneWorks-Token": token };
@@ -193,24 +334,25 @@ export async function importOwnedCorpus({ manifest, plan, planPath, corpusRoot, 
       const normalized = path.join(normalizedRoot, `${key}${path.extname(input)}`); await writeFile(normalized, served);
       assets[key] = { assetId: asset.id, path: input, bytes: item.bytes, sha256: item.sha256, servedBytes: served.length, servedSha256: sha(served), normalized: { path: normalized, bytes: served.length, sha256: sha(served) } };
     }
-    const receipt = { projectId: project.id, planSha256: await hashFile(planPath), assets };
+    apiProcessClosure = await stopOwnedImportSupervisor(child, { manifest, backend, runDir }); supervisorStopped = true;
+    const receipt = { projectId: project.id, planSha256: await hashFile(planPath), apiProcessClosure, assets };
     const receiptPath = path.join(runDir, "corpus-import-receipt.json"); await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
     return { receipt, receiptPath };
-  } finally { await stopOwned(child); }
+  } finally { if (!supervisorStopped) await stopOwnedImportSupervisor(child, { manifest, backend, runDir }); }
 }
 
 export async function prepare({ manifestPath, planPath, corpusRoot, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha, token }) {
   check(absolute(corpusRoot) && corpusRoot !== ROOT && !inside(ROOT, corpusRoot), "external staged corpus root required");
   const staged = await lstat(corpusRoot); check(staged.isDirectory() && !staged.isSymbolicLink(), "staged corpus directory unavailable/unsafe");
-  const sealed = await sealActiveBinary({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha });
-  const { manifest } = await preflight({ manifestPath: sealed.sealedPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha });
+  const { manifest } = await preflight({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha });
   const plan = await json(planPath);
   check(path.resolve(planPath) === path.join(ROOT, "config/terminal-evidence/epic-25140-corpus.plan.json"), "corpus plan must be source-owned");
   check(HEX.test(manifest.sourceFreeze.files["config/terminal-evidence/epic-25140-corpus.plan.json"]) && await hashFile(planPath) === manifest.sourceFreeze.files["config/terminal-evidence/epic-25140-corpus.plan.json"], "corpus plan differs from freeze");
-  const { receipt, receiptPath } = await importOwnedCorpus({ manifest, plan, planPath, corpusRoot, runDir, cacheRoot, backend, token });
+  const { receipt, receiptPath } = await importOwnedCorpus({ manifest, manifestPath, plan, planPath, corpusRoot, runDir, cacheRoot, backend, token });
   const { bindCorpusPlan } = await import("./h3-veda-corpus.mjs");
   manifest.corpusPlan = { path: path.resolve(planPath), bytes: (await lstat(planPath)).size, sha256: await hashFile(planPath) };
   manifest.corpusImportReceipt = { path: receiptPath, bytes: (await lstat(receiptPath)).size, sha256: await hashFile(receiptPath) };
+  manifest.cpuImportApiClosures = { ...(manifest.cpuImportApiClosures ?? {}), [backend]: receipt.apiProcessClosure };
   const bound = bindCorpusPlan(manifest, plan, receipt);
   check(bound.projectId === receipt.projectId, "bound project differs from owned import");
   const marker = { campaignId: bound.campaignId, sourceFreezeSha256: digest(bound.sourceFreeze), projectId: bound.projectId };
@@ -222,13 +364,18 @@ export async function prepare({ manifestPath, planPath, corpusRoot, backend, run
 
 export async function resume({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha }) {
   check(path.resolve(manifestPath) === path.join(runDir, "manifest.bound.json"), "resume must use exact owned bound manifest");
-  const { manifest: m, guardian: g } = await preflight({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha });
+  check(process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN, "source-bound Actions execution and scoped live runner token required");
+  selectedPython();
+  const m = await json(manifestPath);
+  const g = assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest: m, runDir, cacheRoot });
+  check(git(ROOT, "rev-parse", "HEAD") === sceneWorksSha && git(ROOT, "status", "--porcelain") === "", "SceneWorks checkout dirty/stale");
+  check(git(m.sourceFreeze.inference.root, "rev-parse", "HEAD") === inferenceSha && git(m.sourceFreeze.inference.root, "status", "--porcelain") === "" && git(m.sourceFreeze.inference.root, "rev-parse", "refs/remotes/origin/main") === inferenceSha, "inference checkout dirty/stale or not permanent main");
+  await verifyDurableProduct(m, backend, runDir, { sceneWorksSha, inferenceSha });
   const marker = await json(path.join(g.dataDir, "s9-workspace-owner.json"));
   check(digest(marker) === digest({ campaignId: m.campaignId, sourceFreezeSha256: digest(m.sourceFreeze), projectId: m.projectId }), "resume owned workspace marker differs");
   // A new Actions job has a new private API token. Never attach to a retained
   // guardian whose API child still holds the previous job's token.
   await requirePreviousJobClosed(runDir);
-  await validateManifest(m, { backend });
   return { manifestPath, fingerprint: digest(m), backend, runnerName, resumed: true };
 }
 
@@ -420,7 +567,13 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
     } else if (command === "probe-auth") {
       check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "probe-auth BACKEND");
       const receipt = probeReadAuthority({ backend: args[0], runnerName: process.env.RUNNER_NAME, sceneWorksSha: process.env.S9_SCENEWORKS_SHA });
+      check(absolute(process.env.GITHUB_ENV) && Number.isSafeInteger(receipt.runnerId), "live Actions environment/runner readback unavailable");
+      await appendFile(process.env.GITHUB_ENV, `S9_OBSERVED_RUNNER_ID=${receipt.runnerId}\n`, { encoding: "utf8" });
       console.log(JSON.stringify(receipt));
+    } else if (command === "build") {
+      const [manifestPath, backend, runDir] = args;
+      check(args.length === 3, "build SOURCE_FROZEN_MANIFEST BACKEND RUN_DIR");
+      console.log(JSON.stringify(await buildDurableProduct({ manifestPath, backend, runDir, runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA })));
     } else if (command === "prepare") {
       const [manifestPath, planPath, corpusRoot, backend, runDir, cacheRoot] = args;
       check(args.length === 6, "prepare MANIFEST PLAN CORPUS_ROOT BACKEND RUN_DIR CACHE_ROOT");

@@ -231,11 +231,12 @@ class Services:
         self.children = {}; self.logs = []; self.windows = None; self.api_config = None
         if os.name == "nt":
             f=m["sourceFreeze"]; self.windows=source_module(f["inference"]["root"],"scripts/media_campaign_windows.py",f["inferenceFiles"].get("scripts/media_campaign_windows.py")).WindowsJob
-    def env(self):
+    def env(self,kind="api"):
         g=self.r["guardian"]; token=os.environ.get("SCENEWORKS_TOKEN"); require(token,"SCENEWORKS_TOKEN required; never persist API secret")
         env={k:v for k,v in os.environ.items() if not k.startswith("SCENEWORKS_") and k not in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","GH_TOKEN","GITHUB_TOKEN"]}
-        env.update(SCENEWORKS_DATA_DIR=g["dataDir"],SCENEWORKS_JOBS_DB_PATH=str(Path(g["dataDir"])/"cache/jobs.db"),SCENEWORKS_CONFIG_DIR=g["configDir"],SCENEWORKS_OWN_MANIFESTS="1",SCENEWORKS_API_HOST="127.0.0.1",SCENEWORKS_API_PORT=str(g["port"]),SCENEWORKS_API_URL=self.r["apiUrl"],SCENEWORKS_PARENT_PID=str(os.getpid()),SCENEWORKS_ACCESS_TOKEN=token,SCENEWORKS_GPU_ID="cpu",SCENEWORKS_RUST_WORKER_GPU_ID="cpu",SCENEWORKS_WORKER_ID=self.r["workerId"],HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1")
-        if self.backend=="candle_cuda":
+        env.update(SCENEWORKS_DATA_DIR=g["dataDir"],SCENEWORKS_JOBS_DB_PATH=str(Path(g["dataDir"])/"cache/jobs.db"),SCENEWORKS_CONFIG_DIR=g["configDir"],SCENEWORKS_OWN_MANIFESTS="1",SCENEWORKS_API_HOST="127.0.0.1",SCENEWORKS_API_PORT=str(g["port"]),SCENEWORKS_API_URL=self.r["apiUrl"],SCENEWORKS_PARENT_PID=str(os.getpid()),SCENEWORKS_ACCESS_TOKEN=token,SCENEWORKS_GPU_ID="cpu",SCENEWORKS_RUST_WORKER_GPU_ID="cpu",SCENEWORKS_WORKER_ID=self.r["workerId"],SCENEWORKS_GPU_CHECK="0",SCENEWORKS_WORKER_ONLY="0",SCENEWORKS_RUN_UTILITY_INPROCESS="0",HF_HUB_OFFLINE="1",TRANSFORMERS_OFFLINE="1")
+        if kind=="worker":env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
+        if self.backend=="candle_cuda" and kind=="worker":
             index=str(self.physical.device["index"])
             require(self.r["requestedGpu"]==index,"normal worker GPU selector does not match locked physical UUID/index")
             env.update(CUDA_VISIBLE_DEVICES=self.r["physicalGpuId"],NVIDIA_VISIBLE_DEVICES=index)
@@ -244,10 +245,9 @@ class Services:
         require(kind not in self.children,"owned service already running")
         binding=self.r["apiBinary" if kind=="api" else "workerBinary"]
         require(file_sha(binding["path"])==binding["sha256"],"normal product binary changed")
-        env=self.env()
+        env=self.env(kind)
         if kind=="worker":
             require(self.backend!="mlx" or self.r["requestedGpu"]=="mlx","normal MLX worker must explicitly select mlx, never auto")
-            env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
         config=self.config_binding(env)
         if kind=="api":
             require(self.api_config is None or self.api_config==config,"owned API config changed across physical phases")
@@ -271,7 +271,7 @@ class Services:
     def config_binding(self,env=None):
         # Hash the actual byte-bound launch configuration without persisting secrets or per-process parent PID.
         if env is None:
-            env=self.env();env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
+            env=self.env("worker")
         root=Path(self.r["guardian"]["configDir"])
         require(root.is_dir() and not root.is_symlink(),"owned worker config directory unavailable")
         files=[]
@@ -583,8 +583,54 @@ def serve(manifest_file,backend,run_dir,controller_pid):
         # Launch/initialization refusal cannot release a physical token while our child still exists.
         services.close();physical.close();raise
 
+def serve_cpu_import_api(manifest_file,backend,run_dir):
+    """Own only the normal API process tree for CPU corpus import; never claim GPU locks."""
+    from types import SimpleNamespace
+    token=cpu_import_supervisor_token(os.environ);os.environ["SCENEWORKS_TOKEN"]=token
+    m=json.loads(Path(manifest_file).read_text(encoding="utf-8"));root=Path(run_dir).resolve();r=m["runners"][backend];g=r["guardian"]
+    require(backend in ["mlx","candle_cuda"] and Path(manifest_file).is_absolute() and root.is_absolute(),"absolute selected import inputs required")
+    require(m["sourceFreeze"]["stage"]=="permanent-inference-main-pin" and m["sourceFreeze"]["inference"]["head"]==m["sourceFreeze"]["inferencePin"],"permanent source/pin freeze required")
+    for name in ["sceneworks","inference"]:
+        repo=m["sourceFreeze"][name];require(command(["git","-C",repo["root"],"rev-parse","HEAD"])==repo["head"] and not command(["git","-C",repo["root"],"status","--porcelain"]),"stale/dirty frozen source "+name)
+    require(command(["git","-C",m["sourceFreeze"]["inference"]["root"],"rev-parse","refs/remotes/origin/main"])==m["sourceFreeze"]["inferencePin"],"inference pin is not permanent main")
+    helper=Path(__file__).resolve();require(m["sourceFreeze"]["files"].get("scripts/h3-veda-guardian.py")==file_sha(helper),"CPU import supervisor is not bound to frozen source")
+    frozen_roots=[Path(m["sourceFreeze"][name]["root"]).resolve() for name in ["sceneworks","inference"]]
+    require(all(root!=frozen and frozen not in root.parents and root not in frozen.parents for frozen in frozen_roots),"owned run directory must stay outside frozen source")
+    for key in ["dataDir","configDir"]:
+        p=Path(g[key]).resolve();require(root in p.parents and p!=root and not p.is_symlink(),"CPU import API data/config must be task-owned under run directory")
+    require(r["apiUrl"]=="http://127.0.0.1:"+str(g["port"]),"CPU import API must bind loopback only")
+    binary=r["apiBinary"];worker=r["workerBinary"];require(binary["path"]==worker["path"] and binary["sha256"]==worker["sha256"] and binary["bytes"]==worker["bytes"] and Path(binary["path"]).is_absolute() and file_sha(binary["path"])==binary["sha256"],"durable source-bound API/worker binary differs")
+    att_binding=r["attestation"];att_path=Path(att_binding["path"]);require(att_path.is_absolute() and file_sha(att_path)==att_binding["sha256"],"durable normal API build attestation bytes differ")
+    att=json.loads(att_path.read_text(encoding="utf-8"));freeze_sha=digest(m["sourceFreeze"])
+    require(att.get("schemaVersion")==2 and att.get("method")=="actions_source_build_durable_same_binary_api_and_worker" and att.get("backend")==backend and att.get("sceneworksHead")==m["sourceFreeze"]["sceneworks"]["head"] and att.get("inferencePin")==m["sourceFreeze"]["inferencePin"] and att.get("sourceFreezeSha256")==freeze_sha and att.get("apiBinarySha256")==binary["sha256"] and att.get("workerBinarySha256")==r["workerBinary"]["sha256"] and att.get("workerId")==r["workerId"] and att.get("buildIdentitySha256")==digest(att.get("buildIdentity")),"normal API build attestation source/pin/binary differs")
+    control=root/"cpu-import-api";control.mkdir(parents=True,exist_ok=False)
+    class NoPhysicalLock:
+        handles=[]
+    services=Services(m,backend,root,SimpleNamespace(locks=NoPhysicalLock(),device=None))
+    stopping=threading.Event()
+    def stop_signal(signum,frame):stopping.set()
+    signal.signal(signal.SIGTERM,stop_signal);signal.signal(signal.SIGINT,stop_signal)
+    try:
+        with socket.socket() as probe:probe.bind(("127.0.0.1",g["port"]))
+        services.start("api");api=services.api_receipt()
+        atomic(control/"ready.json",{"schemaVersion":1,"managerPid":os.getpid(),"managerBirth":pid_birth(os.getpid()),"api":api,"sourceFreezeSha256":digest(m["sourceFreeze"]),"physicalLockClaimed":False,"cpuOnlyEnvironment":True})
+        while not stopping.wait(.2):services.owned_pids()
+        drained=services.stop("api")
+        require(drained and drained["reaped"] and drained["descendantsDrained"],"CPU import API process tree not verifiably drained")
+        closure={"schemaVersion":1,"backend":backend,"managerPid":os.getpid(),"managerBirth":pid_birth(os.getpid()),"api":{**api,**drained},"sourceFreezeSha256":digest(m["sourceFreeze"]),"physicalLockClaimed":False,"cpuOnlyEnvironment":True}
+        atomic(control/"closure.json",closure)
+    except Exception:
+        services.close();raise
+
+def cpu_import_supervisor_token(env):
+    token=env.pop("SCENEWORKS_ACCESS_TOKEN",None);require(token and not any(c.isspace() for c in token),"job-owned CPU import API token required");return token
+
 if __name__=="__main__":
     if len(sys.argv)==3 and sys.argv[1]=="--owner-state":
         print(json.dumps({"birth":pid_birth(int(sys.argv[2]))}));sys.exit(0)
+    if len(sys.argv)==5 and sys.argv[1]=="--cpu-import-api":
+        try:serve_cpu_import_api(sys.argv[2],sys.argv[3],sys.argv[4])
+        except Exception as error:print("H3 CPU import API: "+str(error),file=sys.stderr);sys.exit(1)
+        sys.exit(0)
     parser=argparse.ArgumentParser();parser.add_argument("manifest");parser.add_argument("backend",choices=["mlx","candle_cuda"]);parser.add_argument("run_dir");parser.add_argument("controller_pid",type=int)
     args=parser.parse_args();serve(args.manifest,args.backend,args.run_dir,args.controller_pid)

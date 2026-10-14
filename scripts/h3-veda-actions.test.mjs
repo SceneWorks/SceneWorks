@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt, approvedCampaignIdentity, buildHostEvidence, aggregateHostReceipts, exportReviewMedia, cpuImportApiEnvironment, buildArguments, verifyDurableProduct } from "./h3-veda-actions.mjs";
 import { digest } from "./h3-veda-acceptance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -35,6 +35,30 @@ test("owned import refuses missing private token before creating data or startin
   await assert.rejects(importOwnedCorpus({ manifest: m(root), plan: { assets: {} }, planPath: "plan", corpusRoot: root, runDir: root, cacheRoot: root, backend: "mlx", token: "", spawnApi: () => { starts++; } }), /token absent/);
   assert.equal(starts, 0);
   await assert.rejects(readFile(path.join(root, "data", "s9-workspace-owner.json")), /ENOENT/);
+});
+
+test("CPU-only import API environment overrides inherited engine startup switches and credentials", () => {
+  const env = cpuImportApiEnvironment({ CUDA_VISIBLE_DEVICES: "0", NVIDIA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_CHECK: "1", SCENEWORKS_WORKER_ONLY: "1", SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_TOKEN: "ambient", GH_TOKEN: "ambient" }, { dataDir: "/run/data", configDir: "/run/config", jobsDbPath: "/run/data/jobs.db", cacheRoot: "/cache", apiUrl: "http://127.0.0.1:12345", token: "owned" });
+  assert.deepEqual([env.SCENEWORKS_GPU_CHECK, env.SCENEWORKS_WORKER_ONLY, env.SCENEWORKS_RUN_UTILITY_INPROCESS, env.SCENEWORKS_GPU_ID, env.SCENEWORKS_RUST_WORKER_GPU_ID], ["0", "0", "0", "cpu", "cpu"]);
+  for (const key of ["CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "SCENEWORKS_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) assert.equal(Object.hasOwn(env, key), false, `${key} must not reach the import API`);
+  assert.equal(env.SCENEWORKS_ACCESS_TOKEN, "owned");
+});
+
+test("durable host binary verification binds both API and worker to one source-frozen executable", async (t) => {
+  const runDir = await mkdtemp(path.join(tmpdir(), "s9-product-build-")); t.after(() => rm(runDir, { recursive: true, force: true }));
+  const backend = "mlx", freeze = { inferencePin: H, sceneworks: { head: H } }, binaryPath = path.join(runDir, "product-binaries", backend, process.platform === "win32" ? "sceneworks-rust-api.exe" : "sceneworks-rust-api");
+  await mkdir(path.dirname(binaryPath), { recursive: true }); await writeFile(binaryPath, "source-built product fixture");
+  const binary = await readFile(binaryPath), binarySha256 = await (await import("./h3-veda-acceptance.mjs")).hashFile(binaryPath);
+  const identity = { backend, sourceFreezeSha256: digest(freeze), binary: { sha256: binarySha256, bytes: binary.length } };
+  const attestation = { schemaVersion: 2, method: "actions_source_build_durable_same_binary_api_and_worker", backend, inferencePin: H, sceneworksHead: H, sourceFreezeSha256: digest(freeze), apiBinarySha256: binarySha256, workerBinarySha256: binarySha256, binaryBytes: binary.length, workerId: "mlx-worker", buildIdentity: identity, buildIdentitySha256: digest(identity) };
+  const attestationPath = path.join(runDir, `${backend}-product-binary-attestation.json`); await writeFile(attestationPath, JSON.stringify(attestation));
+  const descriptor = { path: binaryPath, bytes: binary.length, sha256: binarySha256 }, m = { sourceFreeze: freeze, runners: { [backend]: { apiBinary: descriptor, workerBinary: { ...descriptor }, workerId: "mlx-worker", attestation: { path: attestationPath, bytes: (await readFile(attestationPath)).length, sha256: await (await import("./h3-veda-acceptance.mjs")).hashFile(attestationPath) } } } };
+  assert.equal((await verifyDurableProduct(m, backend, runDir, { sceneWorksSha: H, inferenceSha: H })).binary.sha256, binarySha256);
+  m.runners[backend].workerBinary = { ...descriptor, path: path.join(ROOT, "target", "release", "sceneworks-rust-api") };
+  await assert.rejects(verifyDurableProduct(m, backend, runDir, { sceneWorksSha: H, inferenceSha: H }), /same durable run-owned binary/);
+  assert.deepEqual(buildArguments("mlx"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api"]);
+  assert.deepEqual(buildArguments("candle_cuda"), ["build", "--release", "--locked", "-p", "sceneworks-rust-api", "--features", "backend-candle"]);
+  assert.throws(() => buildArguments("unknown"), /explicit backend/);
 });
 
 test("job-owned API token is random-length hex, masked before job env write, and never returned", async (t) => {
@@ -87,7 +111,7 @@ test("owned import refuses a foreign listener before creating data or spawning A
   const server = createServer(); await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve)); t.after(() => server.close());
   const manifest = m(root); manifest.runners.mlx.guardian.port = server.address().port;
   let starts = 0;
-  await assert.rejects(importOwnedCorpus({ manifest, plan: { assets: {} }, planPath: "plan", corpusRoot: root, runDir: root, cacheRoot: root, backend: "mlx", token: "owned-token", spawnApi: () => { starts++; } }), /port already claimed/);
+  await assert.rejects(importOwnedCorpus({ manifest, manifestPath: path.join(root, "manifest.json"), plan: { assets: {} }, planPath: "plan", corpusRoot: root, runDir: root, cacheRoot: root, backend: "mlx", token: "owned-token", spawnApi: () => { starts++; } }), /port already claimed/);
   assert.equal(starts, 0);
   await assert.rejects(readFile(path.join(root, "data", "s9-workspace-owner.json")), /ENOENT/);
 });
@@ -220,14 +244,22 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
 test("workflow binds explicit runner, source, owned import and guardian, with no blanket artifact upload", async () => {
   const workflow = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8");
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
-  assert.match(workflow, /options: \[prepare, resume, review\]/);
+  assert.match(workflow, /options: \[build, prepare, resume, review\]/);
   assert.match(workflow, /review_case_ids:/);
   assert.match(workflow, /h3-veda-actions\.mjs review/);
   assert.match(workflow, /h3-veda-review-media-(?:mlx|cuda)-/);
-  for (const step of ["Generate masked job-owned private API token", "Build normal product API and worker from frozen source", "Build normal Candle/CUDA product API and worker from frozen source", "Prepare or verify owned private corpus", "Run bounded guardian-owned native campaign"]) {
+  for (const step of ["Prepare or verify owned private corpus"]) {
     const escaped = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    assert.match(workflow, new RegExp(`- name: ${escaped}\\n\\s+if: inputs.mode != 'review'`), `review mode must skip ${step}`);
+    assert.match(workflow, new RegExp(`- name: ${escaped}\\n\\s+if: inputs.mode == 'prepare' \\|\\| inputs.mode == 'resume'`), `build/review modes must skip ${step}`);
   }
+  assert.match(workflow, /- name: Build durable normal product API and worker from frozen source\n\s+if: inputs\.mode == 'build'/);
+  assert.match(workflow, /- name: Build durable normal Candle\/CUDA product API and worker from frozen source\n\s+if: inputs\.mode == 'build'/);
+  assert.match(workflow, /- name: Run bounded guardian-owned native campaign\n\s+if: inputs\.mode == 'resume'/);
+  assert.match(workflow, /CARGO_TARGET_DIR: \$\{\{ inputs\.run_dir \}\}\/cargo-target/);
+  assert.match(workflow, /h3-veda-product-build-(?:mlx|cuda)-/);
+  assert.match(workflow, /actions\/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97/);
+  assert.match(workflow, /python-version: "3\.12"/);
+  assert.match(workflow, /S9_GUARD_PYTHON=/);
   assert.match(workflow, /runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/);
   assert.match(workflow, /test "\$RUNNER_NAME" = 'nax-macos-2'/);
   assert.match(workflow, /S9_EXPECTED_RUNNER: \$\{\{ inputs.expected_runner \}\}/);
@@ -240,5 +272,5 @@ test("workflow binds explicit runner, source, owned import and guardian, with no
   assert.equal((workflow.match(/h3-veda-actions\.mjs probe-auth/g) ?? []).length, 2);
   assert.equal((workflow.match(/h3-veda-actions\.mjs owned-token/g) ?? []).length, 2);
   assert.doesNotMatch(workflow, /SCENEWORKS_S9_TOKEN|S9_RUNNER_READ_TOKEN/);
-  assert.doesNotMatch(workflow, /path:.*\*\*|path:.*\$\{\{ inputs.run_dir \}\}/);
+  assert.doesNotMatch(workflow, /path:.*\*\*/);
 });
