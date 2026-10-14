@@ -26,9 +26,9 @@ def rpc(control,method,arg=None):
 class Physical:
     def __init__(self,root):self.root=root;self.locks=g.Locks([root/'CPU-ONLY-NOT-GPU.lock']);self.locks.claim();self.sequence=[]
     def owned(self):return self.locks.owned()
-    def probe(self,phase,owned):
+    def probe(self,phase,owned,drained_api=None):
         self.sequence.append(phase)
-        return {'phase':phase,'admitted':True,'observedAt':int(time.time()*1000),'queueObservedAt':int(time.time()*1000),'cpuFixtureOnly':True,'GPU':False}
+        return {'phase':phase,'admitted':True,'observedAt':int(time.time()*1000),'queueObservedAt':int(time.time()*1000),'drainedApi':drained_api,'cpuFixtureOnly':True,'GPU':False}
     def close(self):
         state=json.loads((self.root/'cpu-worker.json').read_text()) if (self.root/'cpu-worker.json').exists() else {}
         api=json.loads((self.root/'cpu-api.json').read_text()) if (self.root/'cpu-api.json').exists() else {}
@@ -73,6 +73,15 @@ def controller(root):
     if os.environ.get('S9_CPU_PROOF_VARIANT')=='absent':
         while True:time.sleep(.1)
     rpc(control,'phase',{'phase':'submit-or-reconcile'})
+    if os.environ.get('S9_CPU_PROOF_VARIANT')=='api_died':
+        api=wait_for(lambda:json.loads((root/'cpu-api.json').read_text()))
+        os.kill(api['pid'],signal.SIGKILL)
+        wait_for(lambda:g.pid_birth(api['pid']) is None)
+        try:rpc(control,'phase',{'phase':'submit-or-reconcile'});raise RuntimeError('dead owned API incorrectly admitted')
+        except RuntimeError as error:
+            g.require('dead owned API incorrectly admitted' not in str(error),'dead API admitted')
+            g.atomic(root/'api-death-refusal.json',{'deadApiPid':api['pid'],'refusal':str(error),'GPU':False})
+        while True:time.sleep(.1)
     request={'projectId':'owned-cpu-proof','advanced':{'s9Harness':{'key':'one-owned-intent','fingerprint':g.digest(m),'arm':'dense'}}}
     intent={'key':'one-owned-intent','requestSha256':g.digest(request),'request':request,'status':'submitting'}
     g.atomic(root/'campaign.json',{'fingerprint':g.digest(m),'cells':{'cpu-case':{'arms':{'dense':intent}}}})
@@ -83,17 +92,24 @@ def controller(root):
     g.atomic(root/'duplicate.json',{'result':duplicate})
     if os.environ.get('S9_CPU_PROOF_VARIANT')=='paired_completed':
         wait_for(lambda:(root/'cpu-worker.json').exists())
-        one=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':intent['key'],'jobId':r['value']['id']}})['drainedWorker']
-        rpc(control,'phase',{'phase':'submit-or-reconcile'})
+        first=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':intent['key'],'jobId':r['value']['id']}})
+        one=first['drainedWorker'];api_one=first['drainedApi']
+        g.require(api_one['reaped'] and api_one['descendantsDrained'] and g.pid_birth(api_one['pid']) is None,'dense owned API process/tree not actually drained')
+        between=rpc(control,'phase',{'phase':'submit-or-reconcile'})
+        g.require(between['drainedApi']['pid']!=api_one['pid'] and g.pid_birth(between['drainedApi']['pid']) is None,'between-arm owned API was retained')
         request['advanced']['s9Harness'].update(key='second-owned-intent',arm='sparse')
         second={'key':'second-owned-intent','requestSha256':g.digest(request),'request':request,'status':'submitting'}
         g.atomic(root/'campaign.json',{'fingerprint':g.digest(m),'cells':{'cpu-case':{'arms':{'sparse':second}}}})
         reply=rpc(control,'submit',second);wait_for(lambda:json.loads((root/'cpu-worker.json').read_text())['pid']!=one['pid'])
-        two=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':second['key'],'jobId':reply['value']['id']}})['drainedWorker']
+        last=rpc(control,'phase',{'phase':'collect-completed-evidence','context':{'key':second['key'],'jobId':reply['value']['id']}})
+        two=last['drainedWorker'];api_two=last['drainedApi']
+        g.require(api_two['pid'] not in [api_one['pid'],between['drainedApi']['pid']] and g.pid_birth(api_two['pid']) is None,'sparse owned API process/tree not actually drained')
+        g.require(api_one['apiBinarySha256']==api_two['apiBinarySha256']==between['drainedApi']['apiBinarySha256'],'fresh API binary identity changed across arms')
+        g.require(api_one['apiConfigSha256']==api_two['apiConfigSha256']==between['drainedApi']['apiConfigSha256'],'fresh API config identity changed across arms')
         g.require((one['pid'],one['birth'])!=(two['pid'],two['birth']),'paired arms reused process lifetime')
         for field in ['workerBinarySha256','workerConfigSha256','workerConfigBinding','backend','physicalGpuId','campaignId','sourceFingerprint','sourceFreezeSha256','workerId']:
             g.require(one[field]==two[field],'paired immutable identity differs: '+field)
-        g.atomic(root/'paired-lifetimes.json',{'dense':one,'sparse':two,'actualCPUProcesses':True,'GPU':False,'nativeProduct':False})
+        g.atomic(root/'paired-lifetimes.json',{'dense':one,'sparse':two,'denseApi':api_one,'betweenArmApi':between['drainedApi'],'sparseApi':api_two,'actualCPUProcesses':True,'GPU':False,'nativeProduct':False})
     while True:time.sleep(.1)
 
 def contender(root):
@@ -104,7 +120,7 @@ def contender(root):
 def run(output):
     g.require(os.name!='nt','this local CPU operational proof is POSIX; native Windows Job proof remains separately required')
     output.mkdir(parents=True,exist_ok=False);cases=[]
-    for variant in ['normal','response_loss','death_during_post','absent','paired_completed']:
+    for variant in ['normal','response_loss','death_during_post','absent','paired_completed','api_died']:
         root=output/variant;root.mkdir();port_socket=socket.socket();port_socket.bind(('127.0.0.1',0));port=port_socket.getsockname()[1];port_socket.close()
         fixture=ROOT/'fixtures/h3-veda/cpu-owned-product.py';binding={'path':str(fixture),'sha256':g.file_sha(fixture)}
         (root/'config').mkdir();g.atomic(root/'config/CPU_ONLY.json',{'mockProduct':True,'GPU':False})
@@ -119,6 +135,7 @@ def run(output):
             wait_for(lambda:(root/'control.json').exists());g.require(not contender(root),'actual CPU lock not held')
             if variant=='death_during_post':wait_for(lambda:(root/'cpu-product-state.json').exists())
             elif variant=='paired_completed':wait_for(lambda:(root/'paired-lifetimes.json').exists())
+            elif variant=='api_died':wait_for(lambda:(root/'api-death-refusal.json').exists())
             elif variant!='absent':wait_for(lambda:(root/'duplicate.json').exists())
             g.require(g.pid_birth(ctrl.pid) is not None,'controller must still be alive before actual SIGKILL')
             os.kill(ctrl.pid,signal.SIGKILL)  # real controller loss; deliberately observe before parent reap
@@ -130,11 +147,13 @@ def run(output):
             else:
                 receipt=wait_for(lambda:json.loads((root/'done.json').read_text()));guardian.wait(timeout=5)
                 g.require(receipt['closed'] and receipt['servicesDrained'] and contender(root),'owned CPU services not drained before actual lock release')
-                state=json.loads((root/'cpu-product-state.json').read_text())
+                state=json.loads((root/'cpu-product-state.json').read_text()) if (root/'cpu-product-state.json').exists() else {}
                 if variant=='paired_completed':g.require(state['postCount']==2 and all(j['status']=='completed' for j in state['jobs'].values()),'paired CPU jobs were duplicated/not completed')
+                elif variant=='api_died':g.require(not state or state['postCount']==0,'dead API variant submitted a product job')
                 else:g.require(state['postCount']==1 and state['jobs']['cpu-job']['status']=='canceled','duplicate POST or uncanceled owned CPU job')
             case={'variant':variant,'acceptedCPUProof':True,'receipt':receipt,'controllerSIGKILLActual':True,'GPU':False,'nativeProduct':False}
             if variant=='paired_completed':case['pairedLifetimes']=json.loads((root/'paired-lifetimes.json').read_text())
+            if variant=='api_died':case['apiDeathRefusal']=json.loads((root/'api-death-refusal.json').read_text())
             cases.append(case)
         finally:
             for child in [ctrl,guardian]:

@@ -12,17 +12,20 @@ spec=importlib.util.spec_from_file_location("guard",Path(__file__).with_name("h3
 
 class Physical:
     def __init__(self,events):self.events=events;self.held=True;self.reject=False
-    def probe(self,phase,owned):
+    def probe(self,phase,owned,drained_api=None):
         self.events.append("probe:"+phase)
         if self.reject:raise RuntimeError("foreign queue or physical activity")
-        return {"phase":phase,"admitted":True,"observedAt":int(time.time()*1000),"queueObservedAt":int(time.time()*1000)}
+        return {"phase":phase,"admitted":True,"observedAt":int(time.time()*1000),"queueObservedAt":int(time.time()*1000),"drainedApi":drained_api}
     def owned(self):return self.held
     def close(self):self.events.append("unlock");self.held=False
 
 class Services:
-    def __init__(self,events):self.events=events;self.children={"api":{}};self.pid=100
+    def __init__(self,events):self.events=events;self.children={"api":{"pid":100,"birth":"mock-birth-100","apiBinarySha256":"a"*64}};self.pid=100
     def start(self,name):
-        self.events.append("start:"+name);self.pid+=1;self.children[name]={"pid":self.pid,"birth":"mock-birth-"+str(self.pid),"workerBinarySha256":"b"*64,"workerConfigBinding":{"configFiles":[],"environment":{"MOCK":"CPU_ONLY"}}}
+        self.events.append("start:"+name);self.pid+=1;self.children[name]={"pid":self.pid,"birth":"mock-birth-"+str(self.pid),"apiBinarySha256":"a"*64,"workerBinarySha256":"b"*64,"workerConfigBinding":{"configFiles":[],"environment":{"MOCK":"CPU_ONLY"}}}
+    def api_receipt(self):
+        value=self.children["api"];binding={"configFiles":[{"path":"CPU_ONLY.json","sha256":"c"*64}],"environment":{"SCENEWORKS_GPU_ID":"cpu"}}
+        return {"pid":value["pid"],"birth":value["birth"],"apiBinarySha256":value["apiBinarySha256"],"apiConfigBinding":binding,"apiConfigSha256":g.digest(binding)}
     def worker_receipt(self):
         value=self.children["worker"];return {**value,"workerConfigSha256":g.digest(value["workerConfigBinding"])}
     def stop(self,name):
@@ -138,6 +141,18 @@ class Fixture(unittest.TestCase):
         self.assertEqual(self.events.count("probe:submit-or-reconcile"),count)
         self.jobs["job"]["status"]="completed";self.owner.before_phase("submit-or-reconcile")
         self.assertLess(self.events.index("stop:worker"),self.events.index("probe:submit-or-reconcile"))
+        post=self.events.index("POST:/api/v1/video/jobs");stop=self.events.index("stop:api",post);start=self.events.index("start:api",post)
+        probes=[n for n,event in enumerate(self.events) if event=="probe:submit-or-reconcile"]
+        self.assertEqual(len(probes),2);self.assertLess(stop,start);self.assertLess(start,probes[1])
+    def test_api_restart_failure_clears_prior_admission_without_unlocking(self):
+        self.owner.before_phase("submit-or-reconcile")
+        original=self.services.start
+        def refuse(name):
+            if name=="api":raise RuntimeError("owned API restart refused")
+            return original(name)
+        self.services.start=refuse
+        with self.assertRaisesRegex(RuntimeError,"owned API restart refused"):self.owner.before_phase("submit-or-reconcile")
+        self.assertIsNone(self.owner.last_phase);self.assertTrue(self.physical.held)
     def test_physical_conflict_keeps_canonical_lock(self):
         self.physical.reject=True
         with self.assertRaises(RuntimeError):self.owner.before_phase("next")
@@ -229,12 +244,14 @@ class Fixture(unittest.TestCase):
 
     def test_completed_arm_exact_worker_lifetime_is_bound_and_drained_before_admission(self):
         i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
-        receipt=self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"})["drainedWorker"]
+        phase=self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"});receipt=phase["drainedWorker"]
         self.assertEqual(receipt["admissionReceipt"],self.owner.intents["key"]["admissionReceipt"])
         self.assertEqual(receipt["sourceFreezeSha256"],g.digest(self.m["sourceFreeze"]));self.assertEqual(receipt["sourceFingerprint"],g.digest(self.m))
         self.assertEqual(receipt["workerConfigSha256"],g.digest(receipt["workerConfigBinding"]))
         self.assertTrue(receipt["reaped"] and receipt["descendantsDrained"]);self.assertNotIn(self.owner.token,json.dumps(receipt))
         self.assertLess(self.events.index("stop:worker",self.events.index("POST:/api/v1/video/jobs")),self.events.index("probe:collect-completed-evidence"))
+        self.assertTrue(phase["drainedApi"]["reaped"] and phase["drainedApi"]["descendantsDrained"])
+        self.assertLess(self.events.index("stop:api",self.events.index("POST:/api/v1/video/jobs")),self.events.index("probe:collect-completed-evidence"))
 
     def test_missing_wrong_unknown_and_mutated_worker_closure_never_authorize_collection(self):
         i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
@@ -246,9 +263,10 @@ class Fixture(unittest.TestCase):
 
     def test_lost_collection_reply_reuses_only_exact_durable_drained_lifetime(self):
         i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
-        context={"key":"key","jobId":"job"};one=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
-        two=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
+        context={"key":"key","jobId":"job"};first=self.owner.before_phase("collect-completed-evidence",context);one=first["drainedWorker"]
+        second=self.owner.before_phase("collect-completed-evidence",context);two=second["drainedWorker"]
         self.assertEqual(one,two);self.assertNotIn("worker",self.services.children)
+        self.assertNotEqual(first["drainedApi"]["pid"],second["drainedApi"]["pid"])
         self.jobs["job"]["projectId"]="foreign"
         with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",context)
 

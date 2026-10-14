@@ -199,7 +199,7 @@ class Physical:
         inventory=[r for page in raw["orgRunners"] for r in page["runners"] if r.get("id")==runner_id and r.get("name")==expected_runner]
         require(len(inventory)==1 and inventory[0]["status"]=="online" and inventory[0]["busy"] is True,"live Actions owner runner not busy/unique")
         return runner_id
-    def probe(self, phase, owned):
+    def probe(self, phase, owned, drained_api=None):
         require(re.fullmatch(r"[a-z][a-z0-9-]{0,63}",phase),"invalid phase identity")
         require(self.locks.owned(), "physical lock descriptor/path identity lost")
         queue = self.queue(); samples = []; self.sequence+=1; prefix=f"{phase}-{self.sequence:06d}"
@@ -218,6 +218,7 @@ class Physical:
                 if index: time.sleep(.5)
                 samples.append(self.mac_observation(owned))
         result = {"phase":phase,"admitted":True,"physicalGpuId":self.r["physicalGpuId"],"observedAt":int(time.time()*1000),"queueObservedAt":queue["observedAt"],"conflictingJobs":0,"driverSamples":samples}
+        if drained_api is not None:result["drainedApi"]=drained_api
         receipt=self.out/(prefix+"-phase.json")
         atomic(receipt,{**result,"queue":queue})
         result["sourceReceipt"]={"path":str(receipt),"sha256":file_sha(receipt)}
@@ -227,7 +228,7 @@ class Physical:
 class Services:
     def __init__(self, m, backend, run_dir, physical):
         self.m,self.r,self.backend,self.root,self.physical = m,m["runners"][backend],backend,Path(run_dir),physical
-        self.children = {}; self.logs = []; self.windows = None
+        self.children = {}; self.logs = []; self.windows = None; self.api_config = None
         if os.name == "nt":
             f=m["sourceFreeze"]; self.windows=source_module(f["inference"]["root"],"scripts/media_campaign_windows.py",f["inferenceFiles"].get("scripts/media_campaign_windows.py")).WindowsJob
     def env(self):
@@ -247,19 +248,25 @@ class Services:
         if kind=="worker":
             require(self.backend!="mlx" or self.r["requestedGpu"]=="mlx","normal MLX worker must explicitly select mlx, never auto")
             env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
-        config=self.config_binding(env) if kind=="worker" else None
+        config=self.config_binding(env)
+        if kind=="api":
+            require(self.api_config is None or self.api_config==config,"owned API config changed across physical phases")
+            self.api_config=config
         log=(self.root/(kind+".guardian.log")).open("ab"); self.logs.append(log)
         kwargs={"env":env,"stdout":log,"stderr":log,"stdin":subprocess.DEVNULL}
         job=None
         if os.name=="nt": kwargs["creationflags"]=0x00000004; job=self.windows()
         else: kwargs.update(start_new_session=True,pass_fds=tuple(f.fileno() for f in self.physical.locks.handles))
-        child=subprocess.Popen([binding["path"]],**kwargs)
+        try:child=subprocess.Popen([binding["path"]],**kwargs)
+        except Exception:
+            if job:job.close()
+            log.close();self.logs.remove(log);raise
         try:
             if job: job.assign_and_resume(child)
         except Exception:
-            child.kill();child.wait(timeout=10);job.close();raise
+            child.kill();child.wait(timeout=10);job.close();log.close();self.logs.remove(log);raise
         birth=pid_birth(child.pid)
-        self.children[kind]={"child":child,"birth":birth,"job":job,"workerConfigBinding":config,"binarySha256":binding["sha256"]}
+        self.children[kind]={"child":child,"birth":birth,"job":job,"log":log,"configBinding":config,"binarySha256":binding["sha256"]}
         require(birth is not None,"owned service has no live process birth identity")
     def config_binding(self,env=None):
         # Hash the actual byte-bound launch configuration without persisting secrets or per-process parent PID.
@@ -276,9 +283,15 @@ class Services:
     def worker_receipt(self):
         item=self.children.get("worker");require(item is not None,"owned worker descriptor missing")
         self.owned_pids()
-        require(item["workerConfigBinding"]==self.config_binding(),"actual worker configuration changed after launch")
+        require(item["configBinding"]==self.config_binding(),"actual worker configuration changed after launch")
         require(file_sha(self.r["workerBinary"]["path"])==item["binarySha256"],"actual worker binary changed after launch")
-        return {"pid":item["child"].pid,"birth":item["birth"],"workerBinarySha256":item["binarySha256"],"workerConfigSha256":digest(item["workerConfigBinding"]),"workerConfigBinding":item["workerConfigBinding"]}
+        return {"pid":item["child"].pid,"birth":item["birth"],"workerBinarySha256":item["binarySha256"],"workerConfigSha256":digest(item["configBinding"]),"workerConfigBinding":item["configBinding"]}
+    def api_receipt(self):
+        item=self.children.get("api");require(item is not None,"owned API descriptor missing")
+        self.owned_pids()
+        require(file_sha(self.r["apiBinary"]["path"])==item["binarySha256"],"actual API binary changed after launch")
+        require(item["configBinding"]==self.api_config==self.config_binding(self.env()),"actual API config changed after launch")
+        return {"pid":item["child"].pid,"birth":item["birth"],"apiBinarySha256":item["binarySha256"],"apiConfigSha256":digest(item["configBinding"]),"apiConfigBinding":item["configBinding"]}
     def owned_pids(self):
         require(all(pid_birth(x["child"].pid)==x["birth"] and x["birth"] is not None for x in self.children.values()),"owned service died/identity changed")
         return {os.getpid(),*[x["child"].pid for x in self.children.values()]}
@@ -292,23 +305,21 @@ class Services:
         else:
             current=pid_birth(child.pid)
             require(current is None or current==item["birth"],"owned root PID birth changed; never signal unrelated process group")
-            require(child.pid==os.getpgid(child.pid) if child.poll() is None else True,"owned process group identity changed")
-            try: os.killpg(child.pid,signal.SIGTERM)
-            except ProcessLookupError: pass
-            try: child.wait(timeout=grace)
-            except subprocess.TimeoutExpired: os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=grace)
-            # Root exit is insufficient if a same-group descendant survives.
+            live=child.poll() is None
+            if live:
+                require(current==item["birth"] and child.pid==os.getpgid(child.pid),"owned process group identity changed")
+                os.killpg(child.pid,signal.SIGTERM)
+                try: child.wait(timeout=grace)
+                except subprocess.TimeoutExpired:
+                    require(pid_birth(child.pid)==item["birth"] and os.getpgid(child.pid)==child.pid,"owned process group identity changed before kill")
+                    os.killpg(child.pid,signal.SIGKILL);child.wait(timeout=grace)
+            # A group that persists after its verified leader exits cannot be
+            # re-identified by PID alone; retain the lock instead of signaling it.
             try: os.killpg(child.pid,0)
             except ProcessLookupError: pass
-            else:
-                os.killpg(child.pid,signal.SIGKILL)
-                until=time.monotonic()+grace
-                while time.monotonic()<until:
-                    try:os.killpg(child.pid,0)
-                    except ProcessLookupError:break
-                    time.sleep(.1)
-                else:raise RuntimeError("owned process group descendants not drained")
+            else:raise RuntimeError("owned process group descendants or foreign reuse not verifiably drained")
         self.children.pop(kind)
+        item["log"].close();self.logs.remove(item["log"])
         return {"pid":child.pid,"birth":item["birth"],"reaped":child.poll() is not None,"descendantsDrained":True,"exitCode":child.returncode}
     def close(self):
         deadline=time.monotonic()+self.r["guardian"]["cleanupSeconds"]
@@ -339,7 +350,10 @@ class Guardian:
         self.save();return active
     def before_phase(self,phase,context=None):
         require(not self.closed and not self.retain and self.clock()<self.deadline and self.alive(),"dead controller/expired owner deadline")
-        # Never run idle baseline while the known owned job may be running. A next-phase guard drains only terminal owned worker.
+        self.last_phase=None  # A failed readback/restart/probe must never leave prior admission usable.
+        # Never run idle baseline while the known owned job may be running. Both
+        # owned service process groups are reaped before each fresh admission;
+        # a CPU-configured API may still have acquired a CUDA context.
         require(not self.active(),"owned job still active or ambiguous; phase unavailable")
         context={} if context is None else context
         require(isinstance(context,dict),"phase context must be an object")
@@ -352,18 +366,27 @@ class Guardian:
             require(job.get("id")==context["jobId"] and job.get("projectId")==self.m["projectId"] and job.get("status")=="completed" and job.get("payload",{}).get("advanced",{}).get("s9Harness")==record["request"]["advanced"]["s9Harness"],"fresh completed product readback differs")
             if "drainedWorker" in record:
                 require("worker" not in self.services.children,"new worker cannot reuse prior closure")
-                self.last_phase={**self.physical.probe(phase,self.services.owned_pids()),"ownerToken":self.token,"drainedWorker":record["drainedWorker"]}
-                return self.last_phase
-            require(record.get("workerProcess")==self.services.worker_receipt(),"acknowledged worker process/configuration differs")
+            else:require(record.get("workerProcess")==self.services.worker_receipt(),"acknowledged worker process/configuration differs")
         else:require(not context,"unexpected phase context")
         closure=self.services.stop("worker")
-        if record is not None:
+        if record is not None and "drainedWorker" not in record:
             process=record["workerProcess"]
             require(closure and closure["pid"]==process["pid"] and closure["birth"]==process["birth"] and closure["reaped"] and closure["descendantsDrained"],"owned worker lifetime not verifiably drained")
             r=self.m["runners"][self.backend]
             record["drainedWorker"]={"schemaVersion":1,**context,**process,**closure,"workerId":r["workerId"],"physicalGpuId":r["physicalGpuId"],"backend":self.backend,"campaignId":self.m["campaignId"],"sourceFingerprint":digest(self.m),"guardianOwnerTokenSha256":hashlib.sha256(self.token.encode()).hexdigest(),"sourceFreezeSha256":digest(self.m["sourceFreeze"]),"lifecycle":"fresh_per_arm_process_drained_before_next_admission","admissionReceipt":record["admissionReceipt"]}
             self.save()
-        self.last_phase={**self.physical.probe(phase,self.services.owned_pids()),"ownerToken":self.token}
+        api_process=self.services.api_receipt()
+        api_closure=self.services.stop("api")
+        require(api_closure and api_closure["pid"]==api_process["pid"] and api_closure["birth"]==api_process["birth"] and api_closure["reaped"] and api_closure["descendantsDrained"],"owned API lifetime not verifiably drained")
+        self.services.start("api")
+        until=min(self.deadline,self.clock()+30)
+        while self.clock()<until:
+            try:
+                self.services.owned_pids();self.api("GET","/api/v1/workers");break
+            except Exception:time.sleep(.2)
+        else:raise RuntimeError("restarted owned normal API not ready; no physical admission")
+        api_lifetime={"schemaVersion":1,**api_process,**api_closure,"sourceFingerprint":digest(self.m),"physicalGpuId":self.m["runners"][self.backend]["physicalGpuId"]}
+        self.last_phase={**self.physical.probe(phase,self.services.owned_pids(),api_lifetime),"ownerToken":self.token}
         if record is not None:self.last_phase["drainedWorker"]=record["drainedWorker"]
         return self.last_phase
     def acknowledge(self,intent):

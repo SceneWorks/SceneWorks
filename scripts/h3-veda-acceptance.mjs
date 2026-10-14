@@ -310,6 +310,8 @@ export async function physicalPhase(guard, m, backend, phase, { now, context = {
   const proof = await guard.beforePhase(phase, context); now ??= Date.now();
   assert(proof.phase === phase && proof.ownerToken === guard.ownerToken && proof.admitted === true && proof.physicalGpuId === r.physicalGpuId && proof.observedAt <= now && now - proof.observedAt <= 10000 && proof.conflictingJobs === 0 && proof.queueObservedAt <= now && now - proof.queueObservedAt <= 10000, "stale/unadmitted current phase or conflicting queue");
   assert(Array.isArray(proof.driverSamples) && proof.driverSamples.length === 5 && proof.driverSamples.every((x, i, a) => x.admitted === true && x.driverAvailable === true && Number.isFinite(x.observedAt) && x.observedAt <= now && now - x.observedAt <= 15000 && (!i || x.observedAt > a[i - 1].observedAt)), "five timed driver admission samples missing/stale");
+  const api = proof.drainedApi;
+  assert(api?.schemaVersion === 1 && Number.isSafeInteger(api.pid) && api.pid > 0 && (typeof api.birth === "string" ? api.birth.length > 0 : Number.isSafeInteger(api.birth) && api.birth > 0) && api.reaped === true && api.descendantsDrained === true && Number.isInteger(api.exitCode) && api.apiBinarySha256 === r.apiBinary?.sha256 && api.apiConfigBinding && digest(api.apiConfigBinding) === api.apiConfigSha256 && !Object.hasOwn(api.apiConfigBinding.environment ?? {}, "SCENEWORKS_ACCESS_TOKEN") && !Object.hasOwn(api.apiConfigBinding.environment ?? {}, "SCENEWORKS_PARENT_PID") && api.sourceFingerprint === digest(m) && api.physicalGpuId === r.physicalGpuId, "prior owned API tree not verifiably drained before physical admission");
   return proof;
 }
 export async function acquirePhysicalGuard(m, backend, runDir) {
@@ -403,7 +405,7 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         assert(TERMINAL.has(job.status), "unknown product job status"); attempt.job = job;
         if (job.status !== "completed") { attempt.status = job.status; cell.status = job.status; await atomic(campaignFile, state); continue; }
         const collectProof = await physicalPhase(guard, m, backend, "collect-completed-evidence", { context: { key, jobId: job.id } });
-        attempt.workerClosure = collectProof.drainedWorker; await atomic(campaignFile, state);
+        attempt.workerClosure = collectProof.drainedWorker; attempt.apiClosure = collectProof.drainedApi; await atomic(campaignFile, state);
         const metricsResult = await api.json(`/api/v1/jobs/${encodeURIComponent(job.id)}/metrics`); assert(metricsResult.status === 200, "metrics readback failed"); attempt.metrics = metricsResult.value;
         try {
           const asset = observed(job, attempt.metrics, row, arm, m.runners[backend]);

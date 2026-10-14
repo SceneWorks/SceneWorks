@@ -20,6 +20,7 @@ function manifest() {
   }
   m.boundaryBindings = Object.fromEntries(Object.entries(CAP_CASES).map(([id,spec]) => [id,Object.fromEntries(["images","clips","audio"].map((field,i)=>[field,Array.from({length:spec.counts[i]},(_,n)=>keys[field][n%keys[field].length])]))]));
   m.corpusPlan={sha256:D};m.corpusImportReceipt={sha256:D};
+  for (const runner of Object.values(m.runners)) runner.apiBinary = { sha256: D };
   return m;
 }
 const row = matrix(catalog)[0];
@@ -63,7 +64,8 @@ function guard(m) {
     isOwnerAlive: async () => true, ownsCanonicalLocks: async () => true, release: async () => {}, retainForOwnedJobs: async () => {},
     beforePhase: async (phase, context = {}) => {
       const now = Date.now();
-      const proof = { phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: now, queueObservedAt: now, conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: now - 5000 + i * 1000, admitted: true, driverAvailable: true })) };
+      const apiConfigBinding = {configFiles:[{path:"CPU_ONLY.json",sha256:D}],environment:{SCENEWORKS_GPU_ID:"cpu"}};
+      const proof = { phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: now, queueObservedAt: now, conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: now - 5000 + i * 1000, admitted: true, driverAvailable: true })), drainedApi: { schemaVersion: 1, pid: 5000 + ++incarnation, birth: `api-${incarnation}`, reaped: true, descendantsDrained: true, exitCode: 0, apiBinarySha256: m.runners.mlx.apiBinary.sha256, apiConfigBinding, apiConfigSha256: digest(apiConfigBinding), sourceFingerprint: digest(m), physicalGpuId: "gpu" } };
       if (phase === "submit-or-reconcile") { const { ownerToken, ...stored } = proof; admissionProof = stored; }
       if (phase === "collect-completed-evidence") {
         const request = { advanced: { s9Harness: { key: context.key, campaignId: m.campaignId, fingerprint: digest(m) } } };
@@ -148,7 +150,7 @@ test("decoded PSNR is quantitative without a quality threshold", async () => { a
 
 test("physical guard refuses unavailable adapter, wrong lock, unowned/dead holder, stale phase or missing timed driver samples", async () => {
   const m=manifest(); await assert.rejects(acquirePhysicalGuard(m,"mlx","/external"),/unavailable/);
-  for (const mutate of [(g)=>g.lockIdentities=["other-lock"],(g)=>g.owned=false,(g)=>g.isOwnerAlive=async()=>false,(g)=>g.ownsCanonicalLocks=async()=>false,(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),observedAt:0});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),driverSamples:[]});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),conflictingJobs:1});}]) { const g=guard(m);mutate(g);await assert.rejects(physicalPhase(g,m,"mlx","submit")); }
+  for (const mutate of [(g)=>g.lockIdentities=["other-lock"],(g)=>g.owned=false,(g)=>g.isOwnerAlive=async()=>false,(g)=>g.ownsCanonicalLocks=async()=>false,(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),observedAt:0});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),driverSamples:[]});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),conflictingJobs:1});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>({...await f(p),drainedApi:{reaped:false}});},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>{const proof=await f(p);return {...proof,drainedApi:{...proof.drainedApi,apiBinarySha256:"f".repeat(64)}};};},(g)=>{const f=g.beforePhase;g.beforePhase=async(p)=>{const proof=await f(p);return {...proof,drainedApi:{...proof.drainedApi,apiConfigSha256:"f".repeat(64)}};};}]) { const g=guard(m);mutate(g);await assert.rejects(physicalPhase(g,m,"mlx","submit")); }
   await physicalPhase(guard(m),m,"mlx","submit");
 });
 test("declared fallback proof requires the actual exact reason and dense execution",()=> { const m=manifest(),request=requestFor(m,row,"sparse");request.advanced.s9Harness={arm:"sparse"};const e=evidence(request),report=e.metrics.vedaExecution;Object.assign(report,{effective:"dense",sparseCalls:0,denseCalls:10,fallbackReason:"predictor component missing"});const proof={...row,expectation:"fallback_dense",fallbackReason:"predictor component missing"};observed(e.job,e.metrics,proof,"sparse",m.runners.mlx);assert.throws(()=>observed(e.job,e.metrics,{...proof,fallbackReason:"other"},"sparse",m.runners.mlx)); });
