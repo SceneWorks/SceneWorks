@@ -1,0 +1,273 @@
+"""CPU failure proofs. No product, GPU, NVIDIA/Metal probe or network server starts."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+
+spec=importlib.util.spec_from_file_location("guard",Path(__file__).with_name("h3-veda-guardian.py"));g=importlib.util.module_from_spec(spec);spec.loader.exec_module(g)
+
+class Physical:
+    def __init__(self,events):self.events=events;self.held=True;self.reject=False
+    def probe(self,phase,owned):
+        self.events.append("probe:"+phase)
+        if self.reject:raise RuntimeError("foreign queue or physical activity")
+        return {"phase":phase,"admitted":True,"observedAt":int(time.time()*1000),"queueObservedAt":int(time.time()*1000)}
+    def owned(self):return self.held
+    def close(self):self.events.append("unlock");self.held=False
+
+class Services:
+    def __init__(self,events):self.events=events;self.children={"api":{}};self.pid=100
+    def start(self,name):
+        self.events.append("start:"+name);self.pid+=1;self.children[name]={"pid":self.pid,"birth":"mock-birth-"+str(self.pid),"workerBinarySha256":"b"*64,"workerConfigBinding":{"configFiles":[],"environment":{"MOCK":"CPU_ONLY"}}}
+    def worker_receipt(self):
+        value=self.children["worker"];return {**value,"workerConfigSha256":g.digest(value["workerConfigBinding"])}
+    def stop(self,name):
+        self.events.append("stop:"+name);item=self.children.pop(name,None)
+        return None if item is None else {"pid":item["pid"],"birth":item["birth"],"reaped":True,"descendantsDrained":True,"exitCode":0}
+    def close(self):self.events.append("drain-owned-descendants");self.children={}
+    def owned_pids(self):return {111}
+
+class ActionsOwnership(unittest.TestCase):
+    def setUp(self):
+        self.uuid="BBBBBBBB-CCCC-DDDD-EEEE-FFFFFFFFFFFF"
+        self.physical=g.Physical.__new__(g.Physical)
+        self.physical.backend="mlx"
+        self.physical.r={"physicalGpuId":self.uuid}
+        self.physical.contract={"hostRunnerNames":["nax-macos-2"]}
+        self.physical.m={"sourceFreeze":{"sceneworks":{"head":"a"*40}}}
+        self.runners={"id":2310,"name":"nax-macos","status":"online","busy":True},{"id":5281,"name":"nax-macos-2","status":"online","busy":True}
+        self.run={"id":123,"run_attempt":1,"event":"workflow_dispatch","head_sha":"a"*40,"status":"in_progress","conclusion":None,"name":"H3 Veda terminal owned campaign"}
+        self.job={"name":"mac2","runner_name":"nax-macos-2","run_id":123,"run_attempt":1,"head_sha":"a"*40,"status":"in_progress","conclusion":None,"runner_id":5281}
+        self.env={"GITHUB_ACTIONS":"true","GH_TOKEN":"CPU_FAKE","GITHUB_REPOSITORY":"SceneWorks/SceneWorks","GITHUB_EVENT_NAME":"workflow_dispatch","GITHUB_SHA":"a"*40,"GITHUB_WORKFLOW_REF":"SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@refs/heads/main","GITHUB_JOB":"mac2","RUNNER_NAME":"nax-macos-2","GITHUB_RUN_ID":"123","GITHUB_RUN_ATTEMPT":"1"}
+    def command(self,args,timeout=0):
+        route=args[-1]
+        if "orgs/SceneWorks/actions/runners" in route:return json.dumps([{"runners":self.runners}])
+        if "lensRunning" in route or "lensQueued" in route:raise AssertionError("unexpected alias")
+        if "michaeltrefry/LensWorks" in route:return json.dumps([{"workflow_runs":[]}])
+        if route.endswith("/runs/123"):return json.dumps(self.run)
+        if "/runs/123/jobs?" in route:return json.dumps([{"jobs":[self.job]}])
+        if args[:2]==["system_profiler","SPHardwareDataType"]:return json.dumps({"SPHardwareDataType":[{"platform_UUID":self.uuid}]})
+        raise AssertionError("unexpected command " + repr(args))
+    def test_exact_actions_owner_allows_only_its_own_busy_mac2_on_distinct_host(self):
+        with patch.dict(os.environ,self.env,clear=True),patch.object(g,"command",side_effect=self.command):
+            self.assertEqual(self.physical.actions_owner({"orgRunners":[{"runners":self.runners}]}),5281)
+            self.assertIsInstance(self.physical.queue()["observedAt"],int)
+            self.job["runner_id"]=2310
+            with self.assertRaisesRegex(RuntimeError,"identity ambiguous|runner not busy") : self.physical.queue()
+    def test_stale_or_unknown_mac_topology_refuses_even_with_live_own_job(self):
+        with patch.dict(os.environ,self.env,clear=True),patch.object(g,"command",side_effect=self.command):
+            self.physical.r["physicalGpuId"]="D299B954-4C63-5322-86A5-BD5667051634"
+            with self.assertRaisesRegex(RuntimeError,"topology unbound"):self.physical.queue()
+            self.physical.r["physicalGpuId"]=self.uuid;self.runners[0]["id"]=999
+            with self.assertRaisesRegex(RuntimeError,"topology changed"):self.physical.queue()
+            self.runners[0]["id"]=2310;self.run["status"]="completed"
+            with self.assertRaisesRegex(RuntimeError,"run identity"):self.physical.queue()
+
+class Fixture(unittest.TestCase):
+    def setUp(self):
+        self.dir=tempfile.TemporaryDirectory();self.addCleanup(self.dir.cleanup);self.root=Path(self.dir.name)
+        self.m={"campaignId":"cpu-campaign","sourceFreeze":{"CPU_ONLY":True},"projectId":"owned","runners":{"mlx":{"workerId":"worker","physicalGpuId":"CPU_ONLY_NOT_GPU","guardian":{"maxSeconds":10,"cleanupSeconds":1}}}}
+        self.events=[];self.alive=True;self.now=0;self.physical=Physical(self.events);self.services=Services(self.events);self.jobs={};self.variant="ok"
+        self.owner=g.Guardian(self.m,"mlx",self.root,self.physical,self.services,self.api,lambda:self.alive,lambda:self.now)
+    def intent(self,key="key",arm="dense"):
+        req={"projectId":"owned","advanced":{"s9Harness":{"key":key,"fingerprint":g.digest(self.m),"arm":arm}}}
+        return {"key":key,"request":req,"requestSha256":g.digest(req),"status":"submitting"}
+    def persist(self,intent):
+        g.atomic(self.root/"campaign.json",{"fingerprint":g.digest(self.m),"cells":{"cell":{"arms":{"dense":intent}}}})
+        self.owner.before_phase("submit-or-reconcile")
+    def api(self,method,route,body=None):
+        self.events.append(method+":"+route)
+        if route=="/api/v1/workers":return [{"id":"worker","status":"idle"}]
+        if route=="/api/v1/video/jobs":
+            journal=json.loads((self.root/"guardian-journal.json").read_text());self.assertEqual(journal["intents"][body["advanced"]["s9Harness"]["key"]]["status"],"submitting")
+            self.assertIn("start:worker",self.events)
+            job={"id":"job","projectId":"owned","payload":body,"status":"running"};self.jobs["job"]=job
+            if self.variant=="transport":raise OSError("transport lost after commit")
+            if self.variant=="refusal":raise g.ProductError(400,{"error":"declared for model"})
+            return job
+        if "?" in route:
+            if self.variant=="duplicate":return [self.jobs["job"],self.jobs["job"]]
+            if self.variant=="full":return [{}]*500
+            return list(self.jobs.values())
+        job_id=route.split("/")[4]
+        if route.endswith("/cancel"):
+            self.assertEqual(job_id,"job");self.jobs[job_id]["status"]="canceled";return {}
+        return self.jobs[job_id]
+    def test_acknowledgement_is_fsynced_before_ordinary_post_and_id_readback(self):
+        intent=self.intent();self.persist(intent);r=self.owner.submit(intent)
+        self.assertEqual(r["status"],201);self.assertEqual(json.loads((self.root/"guardian-journal.json").read_text())["intents"]["key"]["jobId"],"job")
+        self.assertLess(self.events.index("start:worker"),self.events.index("POST:/api/v1/video/jobs"))
+    def test_undurable_and_mutated_intents_never_start_worker_or_post(self):
+        intent=self.intent()
+        with self.assertRaises(Exception):self.owner.submit(intent)
+        self.persist(intent);intent["request"]["projectId"]="foreign"
+        with self.assertRaises(Exception):self.owner.submit(intent)
+        self.assertNotIn("start:worker",self.events);self.assertFalse(self.jobs)
+    def test_controller_sigkill_semantics_guardian_cancels_drains_before_unlock(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.alive=False;self.owner.tick()
+        self.assertEqual(self.jobs["job"]["status"],"canceled");self.assertTrue(self.owner.closed)
+        self.assertLess(self.events.index("POST:/api/v1/jobs/job/cancel"),self.events.index("drain-owned-descendants"));self.assertLess(self.events.index("drain-owned-descendants"),self.events.index("unlock"))
+    def test_lost_post_response_reconciles_actual_product_job_without_second_post(self):
+        self.variant="transport";i=self.intent();self.persist(i)
+        with self.assertRaises(OSError):self.owner.submit(i)
+        self.alive=False;self.owner.tick();self.assertTrue(self.owner.closed)
+        self.assertEqual(self.events.count("POST:/api/v1/video/jobs"),1)
+    def test_absent_duplicate_and_full_history_keep_lock_after_owned_cleanup(self):
+        for variant in ["absent","duplicate","full"]:
+            self.owner=g.Guardian(self.m,"mlx",self.root,self.physical,self.services,self.api,lambda:False,lambda:self.now);i=self.intent();self.owner.intents={"key":{**i,"status":"ambiguous"}};self.variant=variant;self.physical.held=True
+            self.jobs={} if variant=="absent" else {"job":{"id":"job","status":"running","projectId":"owned","payload":i["request"]}}
+            with self.assertRaises(RuntimeError):self.owner.tick()
+            self.assertTrue(self.physical.held);self.assertFalse(self.services.children)
+            self.assertNotIn("unlock",self.events)
+    def test_expired_guardian_uses_same_owned_cleanup(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.now=11;self.owner.tick();self.assertTrue(self.owner.closed)
+    def test_foreign_attach_and_cancel_never_touch_foreign_job(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["foreign"]={"id":"foreign","projectId":"someone-else","payload":i["request"],"status":"running"}
+        with self.assertRaises(RuntimeError):self.owner.attach("key","foreign")
+        self.owner.intents["key"]["jobId"]="foreign"
+        with self.assertRaises(RuntimeError):self.owner.drain()
+        self.assertNotIn("POST:/api/v1/jobs/foreign/cancel",self.events);self.assertTrue(self.physical.held)
+    def test_next_phase_cannot_probe_or_restart_worker_while_owned_job_active(self):
+        i=self.intent();self.persist(i);self.owner.submit(i)
+        count=self.events.count("probe:submit-or-reconcile")
+        with self.assertRaises(RuntimeError):self.owner.before_phase("submit-or-reconcile")
+        self.assertEqual(self.events.count("probe:submit-or-reconcile"),count)
+        self.jobs["job"]["status"]="completed";self.owner.before_phase("submit-or-reconcile")
+        self.assertLess(self.events.index("stop:worker"),self.events.index("probe:submit-or-reconcile"))
+    def test_physical_conflict_keeps_canonical_lock(self):
+        self.physical.reject=True
+        with self.assertRaises(RuntimeError):self.owner.before_phase("next")
+        self.assertTrue(self.physical.held)
+    def test_source_helper_same_size_corruption_refused_before_import(self):
+        p=self.root/"policy.py";p.write_text("VALUE=1\n");sha=g.file_sha(p);p.write_text("VALUE=2\n")
+        with self.assertRaises(RuntimeError):g.source_module(self.root,"policy.py",sha)
+    @unittest.skipIf(os.name=="nt","POSIX flock CPU proof runs on POSIX only; WindowsJob policy tested below with fake API")
+    def test_real_cpu_flock_contention_and_path_inode_replacement_refused(self):
+        p=self.root/"global.lock";one=g.Locks([p]);two=g.Locks([p]);one.claim();self.addCleanup(one.close)
+        with self.assertRaises(OSError):two.claim()
+        self.assertTrue(one.owned());p.unlink();p.touch();self.assertFalse(one.owned())
+    def test_prior_unresolved_journal_is_preserved_on_new_owner(self):
+        i=self.intent();self.owner.intents={"key":i};self.owner.save()
+        owner=g.Guardian(self.m,"mlx",self.root,self.physical,self.services,self.api,lambda:True,lambda:self.now)
+        with self.assertRaises(RuntimeError):owner.before_phase("next")
+        self.assertEqual(owner.intents["key"]["requestSha256"],i["requestSha256"])
+
+    def test_actual_frozen_cuda_policy_keeps_five_timed_samples_and_all_negative_refusals(self):
+        source=Path(__file__).with_name("fixtures")/"h3-veda"/"cuda-policy.py"
+        cuda=g.source_module(source.parent,"cuda-policy.py",g.file_sha(source))
+        from types import SimpleNamespace
+        device={"index":0,"uuid":"GPU-a","used_mib":1000,"utilization_percent":0}
+        base_rows=[["GPU-a","10","desktop","C+G"]]
+        def run(variant):
+            times=[0.0];calls=[]
+            cuda.time=SimpleNamespace(monotonic=lambda:times[0],sleep=lambda n:times.__setitem__(0,times[0]+n))
+            def inventory(*args):
+                calls.append(args);d=dict(device);rows=[list(x) for x in base_rows]
+                if variant=="pureC":rows[0][3]="C"
+                if variant=="unknown":rows[0][3]="unknown"
+                if variant=="high-memory":d["used_mib"]=2048
+                if variant=="high-util":d["utilization_percent"]=5
+                if variant=="rising" and len(calls)>1:d["used_mib"]+=1
+                if variant=="changedPID" and len(calls)>1:rows[0][1]="11"
+                if variant=="changedUUID" and len(calls)>1:d["uuid"]="GPU-other"
+                if variant=="timeout":times[0]=6
+                return [d],rows
+            cuda.inventory=inventory
+            result=cuda.sample_baseline(device,self.root,"frozen-policy")
+            return calls,result
+        calls,_=run("ok");self.assertEqual(len(calls),5)
+        receipt=json.loads((self.root/"frozen-policy-samples.json").read_text());self.assertEqual([x["elapsed_seconds"] for x in receipt],[0,.5,1,1.5,2])
+        for variant in ["pureC","unknown","high-memory","high-util","rising","changedPID","changedUUID","timeout"]:
+            with self.subTest(variant=variant),self.assertRaises(RuntimeError):run(variant)
+    def test_normal_worker_launch_ownership_failure_kills_only_suspended_owned_child(self):
+        from types import SimpleNamespace
+        events=self.events;self.physical.device={"index":0};binary=self.root/"fake-api";binary.write_bytes(b"never executed")
+        m={"runners":{"candle_cuda":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18000},"apiUrl":"http://127.0.0.1:18000","workerId":"owned-worker","requestedGpu":"0","physicalGpuId":"GPU-a","apiBinary":{"path":str(binary),"sha256":g.file_sha(binary)},"workerBinary":{"path":str(binary),"sha256":g.file_sha(binary)}}},"sourceFreeze":{"inference":{"root":"/frozen"},"inferenceFiles":{"scripts/media_campaign_windows.py":"frozen"}}}
+        (self.root/"config").mkdir()
+        class Job:
+            def assign_and_resume(self,child):events.append("assign-suspended");raise RuntimeError("job assignment refused")
+            def close(self):events.append("close-job")
+        class Child:
+            pid=111
+            def kill(self):events.append("kill-owned-111")
+            def wait(self,timeout):events.append("reap-owned-111")
+        def spawn(args,**kw):
+            self.assertEqual(args,[str(binary)]);self.assertEqual(kw["creationflags"],0x00000004);self.assertEqual(kw["env"]["SCENEWORKS_WORKER_ONLY"],"1");self.assertEqual(kw["env"]["SCENEWORKS_DATA_DIR"],str(self.root/"data"));self.assertEqual(kw["env"]["SCENEWORKS_PARENT_PID"],"999");return Child()
+        os_fake=SimpleNamespace(name="nt",environ={"SCENEWORKS_TOKEN":"private-token","SCENEWORKS_GPU_CHECK":"1"},getpid=lambda:999)
+        with patch.object(g,"os",os_fake),patch.object(g,"source_module",return_value=SimpleNamespace(WindowsJob=Job)),patch.object(g.subprocess,"Popen",side_effect=spawn):
+            services=g.Services(m,"candle_cuda",self.root,self.physical)
+            with self.assertRaises(RuntimeError):services.start("worker")
+            self.assertFalse(services.children)
+            for log in services.logs:log.close()
+        self.assertEqual(events,["assign-suspended","kill-owned-111","reap-owned-111","close-job"])
+    def test_cleanup_reap_failure_never_closes_physical_token(self):
+        def unsafe_close():raise RuntimeError("owned descendant still alive")
+        self.services.close=unsafe_close
+        with self.assertRaises(RuntimeError):self.owner.drain()
+        self.assertTrue(self.physical.held);self.assertNotIn("unlock",self.events)
+
+    def test_stale_phase_and_lost_actual_lock_prevent_any_product_post(self):
+        i=self.intent();self.persist(i);self.owner.last_phase["observedAt"]=0
+        with self.assertRaises(RuntimeError):self.owner.submit(i)
+        self.assertNotIn("POST:/api/v1/video/jobs",self.events)
+        self.owner.before_phase("submit-or-reconcile");self.physical.held=False
+        with self.assertRaises(RuntimeError):self.owner.submit(i)
+        self.assertFalse(self.jobs)
+    def test_duplicate_ack_cannot_erase_already_submitted_job_identity(self):
+        i=self.intent();self.persist(i);self.owner.submit(i)
+        with self.assertRaises(RuntimeError):self.owner.submit(i)
+        self.assertEqual(self.owner.intents["key"]["jobId"],"job");self.assertEqual(self.owner.intents["key"]["status"],"running")
+
+    def test_physical_owner_secret_is_not_persisted_in_evidence_journal(self):
+        i=self.intent();self.persist(i);self.owner.submit(i)
+        journal=(self.root/"guardian-journal.json").read_text()
+        self.assertNotIn(self.owner.token,journal)
+
+    def test_completed_arm_exact_worker_lifetime_is_bound_and_drained_before_admission(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        receipt=self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"})["drainedWorker"]
+        self.assertEqual(receipt["admissionReceipt"],self.owner.intents["key"]["admissionReceipt"])
+        self.assertEqual(receipt["sourceFreezeSha256"],g.digest(self.m["sourceFreeze"]));self.assertEqual(receipt["sourceFingerprint"],g.digest(self.m))
+        self.assertEqual(receipt["workerConfigSha256"],g.digest(receipt["workerConfigBinding"]))
+        self.assertTrue(receipt["reaped"] and receipt["descendantsDrained"]);self.assertNotIn(self.owner.token,json.dumps(receipt))
+        self.assertLess(self.events.index("stop:worker",self.events.index("POST:/api/v1/video/jobs")),self.events.index("probe:collect-completed-evidence"))
+
+    def test_missing_wrong_unknown_and_mutated_worker_closure_never_authorize_collection(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        for context in [{},{"key":"unknown","jobId":"job"},{"key":"key","jobId":"foreign"}]:
+            with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",context)
+        self.services.children["worker"]["birth"]="wrong-birth"
+        with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"})
+        self.assertNotIn("probe:collect-completed-evidence",self.events);self.assertIn("worker",self.services.children)
+
+    def test_lost_collection_reply_reuses_only_exact_durable_drained_lifetime(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        context={"key":"key","jobId":"job"};one=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
+        two=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
+        self.assertEqual(one,two);self.assertNotIn("worker",self.services.children)
+        self.jobs["job"]["projectId"]="foreign"
+        with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",context)
+
+    def test_actual_config_binding_hashes_bytes_refuses_symlinks_and_omits_secrets(self):
+        config=self.root/"config";config.mkdir();p=config/"builtin.models.jsonc";p.write_bytes(b"catalog-a")
+        m={"runners":{"mlx":{"guardian":{"configDir":str(config)}}}}
+        service=g.Services(m,"mlx",self.root,self.physical)
+        env={"SCENEWORKS_DATA_DIR":"owned","SCENEWORKS_ACCESS_TOKEN":"never-persist","SCENEWORKS_PARENT_PID":"123","HF_HUB_OFFLINE":"1"}
+        one=service.config_binding(env);self.assertNotIn("never-persist",json.dumps(one));self.assertNotIn("SCENEWORKS_PARENT_PID",one["environment"])
+        p.write_bytes(b"catalog-b");self.assertNotEqual(g.digest(one),g.digest(service.config_binding(env)))
+        (config/"alias").symlink_to(p)
+        with self.assertRaises(RuntimeError):service.config_binding(env)
+
+    def test_actions_runner_read_token_is_not_inherited_by_normal_product_children(self):
+        m={"runners":{"mlx":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18501},"apiUrl":"http://127.0.0.1:18501","workerId":"owned"}}}
+        service=g.Services(m,"mlx",self.root,self.physical)
+        with patch.dict(os.environ,{"SCENEWORKS_TOKEN":"product-secret","GH_TOKEN":"runner-read-secret","GITHUB_TOKEN":"default-secret"}):
+            env=service.env()
+        self.assertNotIn("GH_TOKEN",env);self.assertNotIn("GITHUB_TOKEN",env);self.assertNotIn("SCENEWORKS_TOKEN",env)
+        self.assertEqual(env["SCENEWORKS_ACCESS_TOKEN"],"product-secret")
+
+if __name__=="__main__":unittest.main()

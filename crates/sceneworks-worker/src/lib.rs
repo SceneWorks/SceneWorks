@@ -2120,7 +2120,16 @@ async fn run_utility_job(
     // runs, so peak memory + peak load cover the whole job. Consumed after the
     // handler returns to POST the hardware/timing block; settings + phase
     // timings are posted separately by the handlers and coalesce-merge server-side.
-    let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id);
+    let terminal_h3 = std::env::var("SCENEWORKS_H3_TERMINAL_TELEMETRY").as_deref() == Ok("1")
+        && matches!(
+            job.job_type,
+            JobType::VideoGenerate | JobType::VideoExtend | JobType::VideoBridge
+        )
+        && matches!(
+            job.payload.get("model").and_then(serde_json::Value::as_str),
+            Some("minimax_h3" | "minimax_h3_ref")
+        );
+    let metrics_probe = job_metrics::JobMetricsProbe::start(&settings.gpu_id, terminal_h3);
     let result = with_shutdown_flag(shutdown.clone(), async {
         // sc-19708: the ONE pre-loader guard. Typed model-source admission happens here for every
         // job type, before any handler runs; handlers never carry availability or cache policy.

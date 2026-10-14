@@ -76,6 +76,13 @@ pub(crate) struct JobMetricsProbe {
     started: Instant,
     backend: &'static str,
     sampler: Option<tokio::task::JoinHandle<()>>,
+    terminal_host_sampler: Option<tokio::task::JoinHandle<()>>,
+    terminal_host_rss_max: Arc<AtomicU64>,
+    terminal_host_sample_count: Arc<AtomicU64>,
+    terminal_host_rss_start: Option<u64>,
+    terminal_h3: bool,
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    terminal_cuda_pool_identity: Option<usize>,
     load_permille_max: Arc<AtomicU32>,
     mem_used_mb_max: Arc<AtomicU64>,
     mem_total_mb: Arc<AtomicU64>,
@@ -89,13 +96,60 @@ pub(crate) struct JobMetricsProbe {
 /// lightweight `ioreg` / `nvidia-smi` read; `MissedTickBehavior::Delay`
 /// self-throttles if one ever runs long, so this never stacks subprocesses.
 const GPU_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+const TERMINAL_HOST_SAMPLE_INTERVAL: Duration = Duration::from_millis(40);
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn terminal_cuda_pool_at_start() -> Option<usize> {
+    let pool = candle_gen::cuda_mempool::MemPool::device_current(0)?;
+    pool.reset_high_water().then_some(pool.raw() as usize)
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn terminal_cuda_pool_at_finish(identity: Option<usize>) -> serde_json::Value {
+    let pool = candle_gen::cuda_mempool::MemPool::device_current(0);
+    let same = pool.is_some_and(|p| Some(p.raw() as usize) == identity) && identity.is_some();
+    serde_json::json!({
+        "method": "cuda_current_pool_job_scoped_highwater_reset_before_handler",
+        "sameCurrentPool": same,
+        "usedHighBytes": if same { pool.and_then(|p| p.used_high()) } else { None },
+        "reservedHighBytes": if same { pool.and_then(|p| p.reserved_high()) } else { None },
+    })
+}
 
 impl JobMetricsProbe {
     /// Reset the MLX peak counter and spawn the background GPU-load/memory
     /// sampler (see [`GPU_SAMPLE_INTERVAL`]). A CPU-only worker has no GPU to
     /// query, so no sampler is spawned.
-    pub(crate) fn start(gpu_id: &str) -> Self {
+    pub(crate) fn start(gpu_id: &str, terminal_h3: bool) -> Self {
         reset_peak_memory();
+        let terminal_host_rss_max = Arc::new(AtomicU64::new(0));
+        let terminal_host_sample_count = Arc::new(AtomicU64::new(0));
+        let terminal_host_rss_start = terminal_h3
+            .then(gen_core::h3_terminal_telemetry::host_process_rss_bytes)
+            .flatten();
+        if let Some(bytes) = terminal_host_rss_start {
+            terminal_host_rss_max.store(bytes, Ordering::Relaxed);
+            terminal_host_sample_count.store(1, Ordering::Relaxed);
+        }
+        let terminal_host_sampler = terminal_h3.then(|| {
+            let max = terminal_host_rss_max.clone();
+            let count = terminal_host_sample_count.clone();
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(TERMINAL_HOST_SAMPLE_INTERVAL);
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    if let Some(bytes) = gen_core::h3_terminal_telemetry::host_process_rss_bytes() {
+                        max.fetch_max(bytes, Ordering::Relaxed);
+                        count.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            })
+        });
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        let terminal_cuda_pool_identity = (terminal_h3 && normalize_backend(gpu_id) == "cuda")
+            .then(terminal_cuda_pool_at_start)
+            .flatten();
         let load_permille_max = Arc::new(AtomicU32::new(0));
         let mem_used_mb_max = Arc::new(AtomicU64::new(0));
         let mem_total_mb = Arc::new(AtomicU64::new(0));
@@ -130,6 +184,13 @@ impl JobMetricsProbe {
             started: Instant::now(),
             backend: normalize_backend(gpu_id),
             sampler,
+            terminal_host_sampler,
+            terminal_host_rss_max,
+            terminal_host_sample_count,
+            terminal_host_rss_start,
+            terminal_h3,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            terminal_cuda_pool_identity,
             load_permille_max,
             mem_used_mb_max,
             mem_total_mb,
@@ -141,6 +202,17 @@ impl JobMetricsProbe {
     pub(crate) async fn finish(mut self) -> GenerationMetrics {
         if let Some(handle) = self.sampler.take() {
             handle.abort();
+        }
+        if let Some(handle) = self.terminal_host_sampler.take() {
+            handle.abort();
+        }
+        if self.terminal_h3 {
+            if let Some(bytes) = gen_core::h3_terminal_telemetry::host_process_rss_bytes() {
+                self.terminal_host_rss_max
+                    .fetch_max(bytes, Ordering::Relaxed);
+                self.terminal_host_sample_count
+                    .fetch_add(1, Ordering::Relaxed);
+            }
         }
         let total_ms = self.started.elapsed().as_millis() as u64;
         let load_permille = self.load_permille_max.load(Ordering::Relaxed);
@@ -157,12 +229,41 @@ impl JobMetricsProbe {
             }
             _ => None,
         };
+        let terminal_memory = self.terminal_h3.then(|| {
+            let host_max = self.terminal_host_rss_max.load(Ordering::Relaxed);
+            let host_count = self.terminal_host_sample_count.load(Ordering::Relaxed);
+            #[cfg(target_os = "macos")]
+            let device = if self.backend == "mlx" {
+                serde_json::json!({
+                    "method": "mlx_allocator_job_scoped_peak_no_step_resets",
+                    "allocatorPeakBytes": peak_memory_bytes,
+                })
+            } else {
+                serde_json::json!({"method": "unavailable_cpu"})
+            };
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            let device = terminal_cuda_pool_at_finish(self.terminal_cuda_pool_identity);
+            #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+            let device = serde_json::json!({"method": "unavailable_without_cuda"});
+            serde_json::json!({
+                "schemaVersion": 1,
+                "scope": "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save",
+                "hostMethod": "current_process_rss_independent_40ms_poll_plus_end_sample",
+                "hostSampleIntervalMs": 40,
+                "hostSampleCount": host_count,
+                "hostProcessRssAtStartBytes": self.terminal_host_rss_start,
+                "hostProcessRssSampleMaxBytes": (host_max > 0).then_some(host_max),
+                "hostLimit": "sampled maxima can miss sub-40ms transients; Apple unified-memory RSS overlaps MLX allocator and is not additive",
+                "device": device,
+            })
+        });
         GenerationMetrics {
             backend: Some(self.backend.to_owned()),
             total_ms: Some(total_ms),
             peak_memory_bytes,
             peak_memory_pct,
             peak_gpu_load_pct,
+            terminal_memory,
             ..Default::default()
         }
     }
@@ -350,11 +451,25 @@ mod tests {
     async fn cpu_probe_reports_wall_clock_without_gpu_samples() {
         // A CPU worker spawns no sampler; finish() still reports total_ms + a
         // normalized backend, and no GPU peaks (nothing to sample).
-        let probe = JobMetricsProbe::start("cpu");
+        let probe = JobMetricsProbe::start("cpu", false);
         let metrics = probe.finish().await;
         assert_eq!(metrics.backend.as_deref(), Some("cpu"));
         assert!(metrics.total_ms.is_some());
         assert!(metrics.peak_gpu_load_pct.is_none());
         assert!(metrics.peak_memory_pct.is_none());
+        assert!(metrics.terminal_memory.is_none());
+    }
+
+    #[tokio::test]
+    async fn owned_terminal_probe_records_host_whole_job_without_claiming_cpu_device_memory() {
+        let probe = JobMetricsProbe::start("cpu", true);
+        let metrics = probe.finish().await;
+        let terminal = metrics.terminal_memory.expect("terminal receipt");
+        assert_eq!(terminal["schemaVersion"], 1);
+        assert_eq!(terminal["hostSampleIntervalMs"], 40);
+        assert!(terminal["hostSampleCount"].as_u64().unwrap() > 0);
+        assert!(terminal["hostProcessRssSampleMaxBytes"].as_u64().unwrap() > 0);
+        assert!(terminal["hostProcessRssAtStartBytes"].as_u64().unwrap() > 0);
+        assert_eq!(terminal["device"]["method"], "unavailable_cpu");
     }
 }

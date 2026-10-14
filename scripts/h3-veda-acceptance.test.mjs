@@ -5,22 +5,76 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { Readable } from "node:stream";
-import { catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
+import { artifactsForHost, catalogs, matrix, validateShape, boundFile, hashFile, digest, requestFor, reconcile, observed, verifiedArmLifetime, pairedMemoryEnvelope, runCampaign, summary, inspectSources, PROFILES, PROOFS, ProductApi, claimLease, physicalPhase, acquirePhysicalGuard } from "./h3-veda-acceptance.mjs";
 import { mse, pairedStreams } from "./h3-veda-metrics.mjs";
+import { CAP_CASES, carrierBinding, publishedBoundaryRows, validateRefusal, bindCorpusPlan } from "./h3-veda-corpus.mjs";
 const catalog = await catalogs();
 const H = "a".repeat(40), D = "b".repeat(64);
 function manifest() {
-  const m = { schemaVersion: 1, scope: "named-required", campaignId: "cpu-test", projectId: "owned-project", sourceFreeze: { stage: "permanent-inference-main-pin", inferencePin: H, sceneworks: { root: "/frozen/sw", head: H }, inference: { root: "/frozen/inference", head: H } }, styles: [{ id: "style", source: { repo: "author/style", revision: H, file: "style.safetensors" }, licenseEvidence: "declared model card license", compatibilityEvidence: { sha256: D }, weight: 1, trigger: "cartoon", models: ["minimax_h3", "minimax_h3_ref"], path: "/fixture/style" }], artifacts: [{}], assets: { first: { assetId: "first" }, last: { assetId: "last" }, image: { assetId: "image" }, clip: { assetId: "clip", hasAudio: true }, audio: { assetId: "audio" } }, prompts: Object.fromEntries(Object.keys(PROFILES).map((p) => [p, "A cyclist by the sea, surf and bell audible."])), bindings: { t2va: { seed: 1 }, fl2va_first: { seed: 2, first: "first" }, fl2va_last: { seed: 3, last: "last" }, fl2va_both: { seed: 4, first: "first", last: "last" }, r2va_mixed: { seed: 5, images: ["image"], clips: ["clip"], audio: ["audio"] } }, turboArtifacts: Object.fromEntries(catalog.loras.map((l) => [l.id, { ...l.source, modelIds: l.modelIds, path: `/fixture/${l.id}` }])), runners: { mlx: { requestedGpu: "local-mlx", workerId: "worker", reportedBackend: "mlx", kernel: "masked_sdpa" }, candle_cuda: { requestedGpu: "cuda-owned", workerId: "cuda-worker", reportedBackend: "candle", kernel: "cuda_kernel" } }, proofRoutes: Object.fromEntries(PROOFS.map((id) => [id, { route: "product_job", requirement: "approved E1-E9" }])), limits: { maxJobs: 2, jobTimeoutMs: 10000, maxMediaBytes: 100000 } };
+  const m = { schemaVersion: 1, scope: "named-required", campaignId: "cpu-test", projectId: "owned-project", sourceFreeze: { stage: "permanent-inference-main-pin", inferencePin: H, sceneworks: { root: "/frozen/sw", head: H }, inference: { root: "/frozen/inference", head: H } }, styles: [{ id: "style", source: { repo: "author/style", revision: H, file: "style.safetensors" }, licenseEvidence: "declared model card license", compatibilityEvidence: { sha256: D }, weight: 1, trigger: "cartoon", models: ["minimax_h3", "minimax_h3_ref"], path: "/fixture/style" }], artifacts: [{}], assets: { first: { assetId: "first" }, last: { assetId: "last" }, image: { assetId: "image" }, clip: { assetId: "clip", hasAudio: true }, audio: { assetId: "audio" } }, prompts: Object.fromEntries(Object.keys(PROFILES).map((p) => [p, "A cyclist by the sea, surf and bell audible."])), bindings: { t2va: { seed: 1 }, fl2va_first: { seed: 2, first: "first" }, fl2va_last: { seed: 3, last: "last" }, fl2va_both: { seed: 4, first: "first", last: "last" }, r2va_mixed: { seed: 5, images: ["image"], clips: ["clip"], audio: ["audio"] } }, turboArtifacts: Object.fromEntries(catalog.loras.map((l) => [l.id, { ...l.source, modelIds: l.modelIds, path: `/fixture/${l.id}` }])), runners: { mlx: { requestedGpu: "local-mlx", workerId: "worker", reportedBackend: "mlx", kernel: "masked_sdpa", physicalGpuId: "gpu", workerBinary: { sha256: D } }, candle_cuda: { requestedGpu: "cuda-owned", workerId: "cuda-worker", reportedBackend: "cuda", kernel: "cuda_kernel", physicalGpuId: "cuda-uuid", workerBinary: { sha256: D } } }, proofRoutes: Object.fromEntries(PROOFS.map((id) => [id, { route: "product_job", requirement: "approved E1-E9" }])), limits: { maxJobs: 2, jobTimeoutMs: 10000, maxMediaBytes: 100000 } };
+  for (const key of ["first", "last", "image"]) m.assets[key].type = "image";
+  m.assets.clip.type = "video"; m.assets.audio.type = "audio";
+  const keys = { images: ["image"], clips: ["clip"], audio: ["audio"] };
+  for (const [field, count, type] of [["images",9,"image"],["clips",3,"video"],["audio",3,"audio"]]) for(let i=1;i<count;i++) {
+    const key = `${field}-${i}`; keys[field].push(key); m.assets[key] = { assetId:key,type,hasAudio:field!=="images" };
+  }
+  m.boundaryBindings = Object.fromEntries(Object.entries(CAP_CASES).map(([id,spec]) => [id,Object.fromEntries(["images","clips","audio"].map((field,i)=>[field,Array.from({length:spec.counts[i]},(_,n)=>keys[field][n%keys[field].length])]))]));
+  m.corpusPlan={sha256:D};m.corpusImportReceipt={sha256:D};
   return m;
 }
 const row = matrix(catalog)[0];
-function outcome(arm) { return { requested: arm === "sparse", effective: arm === "sparse" ? "sparse" : "dense", kernel: "masked_sdpa", predictor: "frozen", plan: "plan", planMatch: "exact", denseTokenPairs: 100, selectedTokenPairs: arm === "sparse" ? 90 : 100, totalAttentionFraction: arm === "sparse" ? .9 : 1, sparseCalls: arm === "sparse" ? 10 : 0, denseCalls: arm === "sparse" ? 0 : 10, predictorScoreCalls: arm === "sparse" ? 10 : 0, predictorLoadAttempts: arm === "sparse" ? 1 : 0, workspaceBytes: arm === "sparse" ? 100 : 0, fallbackReason: null }; }
-function evidence(request, id = "job") { const arm = request.advanced.s9Harness.arm, report = outcome(arm), [width, height] = row.canvas.split("x").map(Number); const asset = { id: `${id}-asset`, url: "/api/v1/projects/owned-project/files/out.mp4", lineage: { jobId: id }, file: { width, height, fps: 24, frameCount: row.frames, hasAudio: true }, recipe: { rawAdapterSettings: { vedaExecution: report } } }; return { asset, job: { id, projectId: request.projectId, payload: request, workerId: "worker", status: "completed", result: { assets: [asset] } }, metrics: { vedaExecution: report, model: row.model, quantLabel: row.tier, width, height, steps: row.sampling.steps, backend: "mlx", totalMs: 10, peakMemoryBytes: 20 } }; }
+function outcome(arm) { return { requested: arm === "sparse", effective: arm === "sparse" ? "sparse" : "dense", kernel: "masked_sdpa", predictor: "frozen", plan: "plan", planMatch: "exact", denseTokenPairs: 100, selectedTokenPairs: arm === "sparse" ? 90 : 100, totalAttentionFraction: arm === "sparse" ? .9 : 1, sparseCalls: arm === "sparse" ? 10 : 0, denseCalls: arm === "sparse" ? 0 : 10, predictorScoreCalls: arm === "sparse" ? 10 : 0, predictorLoadAttempts: arm === "sparse" ? 1 : 0, workspaceBytes: arm === "sparse" ? 100 : 0, fallbackReason: null, terminalEstimate: { schemaVersion: 1, method: "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace", interpretation: "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling", baseBytes: 100, headroomBytes: 10, sparseWorkspaceBoundBytes: arm === "sparse" ? 100 : 0, estimatedTotalBytes: arm === "sparse" ? 210 : 110, hostFullJobEstimateBytes: null }, terminalTelemetry: { schemaVersion: 1, backend: "mlx", hostMethod: "current_process_rss_independent_40ms_poll_plus_completed_step_sample", hostSampleIntervalMs: 40, hostSampleMaxBytes: 10, workspaceComparison: "unavailable: full denoise allocations are not attributable to Veda workspace", steps: Array.from({length: row.sampling.steps}, (_, i) => ({ index: i + 1, wallNs: 1, hostProcessRssSampleBytes: 10, hostWindowSampleMaxBytes: 10, hostWindowSampleCount: 1, device: { method: "mlx_process_allocator_cumulative_highwater_no_reset", allocatorActiveSampleBytes: 1, allocatorCacheSampleBytes: 0, allocatorPeakBytesCumulative: 1 } })) } }; }
+function evidence(request, id = "job") { const arm = request.advanced.s9Harness.arm, report = outcome(arm), [width, height] = row.canvas.split("x").map(Number); const asset = { id: `${id}-asset`, url: "/api/v1/projects/owned-project/files/out.mp4", lineage: { jobId: id }, file: { width, height, fps: 24, frameCount: row.frames, hasAudio: true }, recipe: { rawAdapterSettings: { vedaExecution: report } } }; return { asset, job: { id, projectId: request.projectId, payload: request, workerId: "worker", status: "completed", result: { assets: [asset] } }, metrics: { vedaExecution: report, model: row.model, quantLabel: row.tier, width, height, steps: row.sampling.steps, backend: "mlx", totalMs: 10, peakMemoryBytes: 20, terminalMemory: { schemaVersion: 1, scope: "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save", hostMethod: "current_process_rss_independent_40ms_poll_plus_end_sample", hostSampleIntervalMs: 40, hostSampleCount: 1, hostProcessRssAtStartBytes: 10, hostProcessRssSampleMaxBytes: 10, device: { method: "mlx_allocator_job_scoped_peak_no_step_resets", allocatorPeakBytes: 20 } } } }; }
+function armLifetime(m, backend, request, job, incarnation, admissionProof) {
+  const runner = m.runners[backend], marker = request.advanced.s9Harness;
+  const workerConfigBinding = { configFiles: [{ path: "manifests/builtin.models.jsonc", sha256: D }], environment: { SCENEWORKS_GPU_ID: runner.requestedGpu } };
+  return { key: marker.key, jobId: job.id, request, job, admissionProof,
+    workerClosure: { schemaVersion: 1, key: marker.key, jobId: job.id, pid: 1000 + incarnation, birth: `birth-${incarnation}`, workerId: runner.workerId, workerBinarySha256: runner.workerBinary.sha256, workerConfigBinding, workerConfigSha256: digest(workerConfigBinding), backend, physicalGpuId: runner.physicalGpuId, campaignId: marker.campaignId, sourceFingerprint: marker.fingerprint, guardianOwnerTokenSha256: D, sourceFreezeSha256: digest(m.sourceFreeze), lifecycle: "fresh_per_arm_process_drained_before_next_admission", reaped: true, descendantsDrained: true, exitCode: 0, admissionReceipt: structuredClone(admissionProof) } };
+}
+function pairedEvidence(backend = "mlx") {
+  const m = manifest();
+  const caseRow = { ...row, backend, id: row.id.replace(/^mlx\//, `${backend}/`) };
+  const make = (arm) => {
+    const request = requestFor(m, caseRow, arm);
+    request.advanced.s9Harness = { campaignId: m.campaignId, caseId: caseRow.id, arm, fingerprint: D, key: arm };
+    const e = evidence(request, `${arm}-job`);
+    e.job.workerId = m.runners[backend].workerId;
+    if (backend === "candle_cuda") {
+      e.metrics.backend = "cuda";
+      const report = e.metrics.vedaExecution;
+      report.kernel = "cuda_kernel";
+      report.terminalTelemetry.backend = "candle_cuda";
+      for (const step of report.terminalTelemetry.steps) step.device = { method: "cuda_current_pool_cumulative_highwater_no_reset", poolAvailable: true, usedHighBytesCumulative: 20, reservedHighBytesCumulative: 20, reservedSampleBytes: 20 };
+      report.terminalEstimate.hostWorkspaceBoundBytes = arm === "sparse" ? 30 : null;
+      e.metrics.terminalMemory.device = { method: "cuda_current_pool_job_scoped_highwater_reset_before_handler", sameCurrentPool: true, usedHighBytes: 20, reservedHighBytes: 20 };
+    }
+    const admissionProof = { phase: "submit-or-reconcile", admitted: true, physicalGpuId: m.runners[backend].physicalGpuId, driverSamples: Array.from({length:5},(_,i)=>({observedAt:i+1,admitted:true,driverAvailable:true})) };
+    return { status: "collected", metrics: e.metrics, ...armLifetime(m, backend, request, e.job, arm === "dense" ? 1 : 2, admissionProof) };
+  };
+  return { dense: make("dense"), sparse: make("sparse"), row: caseRow, runner: m.runners[backend] };
+}
 async function temp(t) { const dir = await mkdtemp(path.join(tmpdir(), "h3-s9-")); t.after(() => rm(dir, { recursive: true, force: true })); return dir; }
 async function receipt(file, data = "mock media; never real-weight acceptance") { await writeFile(file, data); return { path: file, bytes: Buffer.byteLength(data), sha256: await hashFile(file) }; }
-function guard(m) { m.sourceFreeze.resourceContract = { mlx: { physicalGpuId: "gpu", canonicalLocks: ["canonical-gpu-local", "canonical-nax-ci"] } }; m.runners.mlx.physicalGpuId = "gpu"; const g = { owned: true, ownerToken: "live-token", lockIdentities: m.sourceFreeze.resourceContract.mlx.canonicalLocks, isOwnerAlive: async () => true, ownsCanonicalLocks: async () => true, release: async () => {}, retainForOwnedJobs: async () => {}, beforePhase: async (phase) => ({ phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: Date.now(), queueObservedAt: Date.now(), conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: Date.now()-5000+i*1000, admitted: true, driverAvailable: true })) }) }; return g; }
-function mock(m, variant = "ok") { const jobs = new Map(), assets = new Map(); let posts = 0, releases = 0; return { get posts() { return posts; }, get releases() { return releases; }, lease: async () => async () => { releases++; }, api: { verifyCarrier: async () => {}, async json(route, options = {}) { if (route === "/api/v1/video/jobs") { posts++; if (variant === "ambiguous") throw new Error("lost transport"); const e = evidence(options.body, `job-${posts}`); if (variant === "timeout") e.job.status = "running"; if (variant === "unknown") e.job.status = "new_unknown_status"; if (variant === "missing") delete e.metrics.vedaExecution; if (variant === "fallback") { e.metrics.vedaExecution.fallbackReason = "missing predictor"; e.metrics.vedaExecution.effective = "dense"; } jobs.set(e.job.id, e); assets.set(e.asset.id, e.asset); return { status: 201, value: e.job }; } if (route.endsWith("/cancel")) { jobs.get(route.split("/").at(-2)).job.status="canceled"; return {status:200,value:{}}; } if (route.endsWith("/metrics")) return { status: 200, value: jobs.get(route.split("/").at(-2)).metrics }; if (route.includes("/assets/")) return { status: 200, value: assets.get(route.split("/").at(-1)) }; if (route.includes("?")) return { status: 200, value: [...jobs.values()].map((e) => e.job) }; return { status: 200, value: jobs.get(route.split("/").at(-1))?.job }; }, download: async (_, target) => receipt(target) } }; }
-async function execute(t, variant = "ok", edit = () => {}) { const dir = await temp(t), m = manifest(); m.assets = {}; edit(m); const g = guard(m), mocks = mock(m, variant), compare = async (dense, sparse) => ({ sideBySide: dense, denseAudio: dense, sparseAudio: sparse, video: { psnr: "Infinity" }, audio: { psnr: "Infinity" } }); const options = { backend: "mlx", runDir: dir, validate: async () => ({ rows: [row], snapshots: [], fingerprint: digest(m) }), sourceCheck: async () => {}, physical: async () => g, ...mocks, compare }; return { m, dir, mocks, options, run: () => runCampaign(m, options) }; }
+function guard(m) {
+  m.sourceFreeze.resourceContract = { mlx: { physicalGpuId: "gpu", canonicalLocks: ["canonical-gpu-local", "canonical-nax-ci"] } };
+  m.runners.mlx.physicalGpuId = "gpu";
+  let admissionProof, incarnation = 0;
+  const g = { owned: true, ownerToken: "live-token", lockIdentities: m.sourceFreeze.resourceContract.mlx.canonicalLocks,
+    isOwnerAlive: async () => true, ownsCanonicalLocks: async () => true, release: async () => {}, retainForOwnedJobs: async () => {},
+    beforePhase: async (phase, context = {}) => {
+      const now = Date.now();
+      const proof = { phase, ownerToken: g.ownerToken, admitted: true, physicalGpuId: "gpu", observedAt: now, queueObservedAt: now, conflictingJobs: 0, driverSamples: Array.from({ length: 5 }, (_,i) => ({ observedAt: now - 5000 + i * 1000, admitted: true, driverAvailable: true })) };
+      if (phase === "submit-or-reconcile") { const { ownerToken, ...stored } = proof; admissionProof = stored; }
+      if (phase === "collect-completed-evidence") {
+        const request = { advanced: { s9Harness: { key: context.key, campaignId: m.campaignId, fingerprint: digest(m) } } };
+        proof.drainedWorker = armLifetime(m, "mlx", request, { id: context.jobId }, ++incarnation, admissionProof).workerClosure;
+      }
+      return proof;
+    } };
+  return g;
+}
+function mock(m, variant = "ok") { const jobs = new Map(), assets = new Map(); let posts = 0, releases = 0; return { get posts() { return posts; }, get releases() { return releases; }, lease: async () => async () => { releases++; }, api: { verifyCarrier: async () => {}, async json(route, options = {}) { if (route === "/api/v1/video/jobs") { posts++; if (variant === "ambiguous") throw new Error("lost transport"); const e = evidence(options.body, `job-${posts}`); if (variant === "timeout") e.job.status = "running"; if (variant === "unknown") e.job.status = "new_unknown_status"; if (variant === "missing") delete e.metrics.vedaExecution; if (variant === "fallback") { e.metrics.vedaExecution.fallbackReason = "missing predictor"; e.metrics.vedaExecution.effective = "dense"; } if (variant === "overbound" && options.body.advanced.s9Harness.arm === "sparse") { e.metrics.terminalMemory.device.allocatorPeakBytes = 121; e.metrics.peakMemoryBytes = 121; } jobs.set(e.job.id, e); assets.set(e.asset.id, e.asset); return { status: 201, value: e.job }; } if (route.endsWith("/cancel")) { jobs.get(route.split("/").at(-2)).job.status="canceled"; return {status:200,value:{}}; } if (route.endsWith("/metrics")) return { status: 200, value: jobs.get(route.split("/").at(-2)).metrics }; if (route.includes("/assets/")) return { status: 200, value: assets.get(route.split("/").at(-1)) }; if (route.includes("?")) return { status: 200, value: [...jobs.values()].map((e) => e.job) }; return { status: 200, value: jobs.get(route.split("/").at(-1))?.job }; }, download: async (_, target) => receipt(target) } }; }
+async function execute(t, variant = "ok", edit = () => {}) { const dir = await temp(t), m = manifest(); m.assets = {}; edit(m); const g = guard(m), mocks = mock(m, variant); g.submit = (intent) => mocks.api.json("/api/v1/video/jobs", { method: "POST", body: intent.request }); g.attachJob = async () => {}; const compare = async (dense, sparse) => ({ sideBySide: dense, denseAudio: dense, sparseAudio: sparse, video: { psnr: "Infinity" }, audio: { psnr: "Infinity" } }); const options = { backend: "mlx", runDir: dir, validate: async () => ({ rows: [row], snapshots: [], fingerprint: digest(m) }), sourceCheck: async () => {}, physical: async () => g, ...mocks, compare }; return { m, dir, mocks, options, run: () => runCampaign(m, options) }; }
 
 test("catalog independently derives 5400 named cells, 3888 eligible and 1512 explicit refusals", () => { const rows = matrix(catalog); assert.equal(rows.length, 5400); assert.equal(rows.filter((r) => r.kind === "media").length, 3888); assert.equal(rows.filter((r) => r.kind === "expected_refusal").length, 1512); assert.equal(new Set(rows.map((r) => r.id)).size, 5400); assert.equal(new Set(rows.map((r) => r.canvas)).size, 9); assert.deepEqual([...new Set(rows.map((r) => r.frames))].sort((a,b) => a-b), [124,141,243,345]); assert.equal(matrix(catalog, manifest().styles).length, 8208); });
 test("binding intake rejects narrowed/stress scope, missing styles/carriers/proofs and invented catalog", () => { validateShape(manifest(), catalog); for (const mutate of [(m) => m.scope = "optional-stress", (m) => m.styles = [], (m) => m.assets.first.assetId = "UNBOUND", (m) => m.bindings.r2va_mixed.audio = [], (m) => delete m.proofRoutes.exact_frozen_masks, (m) => m.sourceFreeze.stage = "feature-head", (m) => m.prompts.t2va = "UNBOUND"]) { const m = manifest(); mutate(m); assert.throws(() => validateShape(m, catalog)); } assert.throws(() => matrix({ ...catalog, loras: catalog.loras.slice(1) })); });
@@ -28,8 +82,61 @@ test("paired requests preserve every knob except Veda and all three mixed carrie
 test("byte bound files reject same-size corruption and missing style bytes", async (t) => { const dir = await temp(t), r = await receipt(path.join(dir,"style"),"abcd"); await boundFile(r); await writeFile(r.path,"abce"); await assert.rejects(boundFile(r),/digest/); await assert.rejects(boundFile({ ...r,path:path.join(dir,"missing") })); });
 test("exact source verifier rejects stale and dirty HEADs before any job", async (t) => { const dir = await temp(t); execFileSync("git",["init","-q",dir]); execFileSync("git",["-C",dir,"-c","user.name=CPU","-c","user.email=cpu@example.invalid","commit","--allow-empty","-qm","fixture"]); const m=manifest(); m.sourceFreeze.sceneworks.root=dir; await assert.rejects(inspectSources(m),/stale/); m.sourceFreeze.sceneworks.head=execFileSync("git",["-C",dir,"rev-parse","HEAD"],{encoding:"utf8"}).trim(); await writeFile(path.join(dir,"dirty"),"dirty"); await assert.rejects(inspectSources(m),/dirty/); });
 test("reconciliation adopts exactly one marker and refuses absence, duplicate or full windows", async () => { const intent={key:"key",request:{projectId:"p",advanced:{s9Harness:{key:"key",fingerprint:"f"}}}}; const job={id:"j",payload:intent.request}; assert.equal((await reconcile({json:async()=>({status:200,value:[job]})},intent)).id,"j"); for (const list of [[],[job,job],Array(500).fill({})]) await assert.rejects(reconcile({json:async()=>({status:200,value:list})},intent)); });
-test("actual observations reject missing, forged, unknown, fallback and unmeasured outputs", () => { const m=manifest(), request=requestFor(m,row,"sparse"); request.advanced.s9Harness={arm:"sparse"}; for (const mutate of [(e)=>delete e.metrics.vedaExecution,(e)=>e.job.status="unknown",(e)=>e.metrics.vedaExecution.fallbackReason="failed self-test",(e)=>e.metrics.peakMemoryBytes=null,(e)=>e.asset.file.hasAudio=false,(e)=>e.metrics.quantLabel="q8",(e)=>e.job.workerId="other"]) { const e=evidence(request); mutate(e); assert.throws(()=>observed(e.job,e.metrics,row,"sparse",m.runners.mlx)); } });
+test("actual observations reject missing, forged, unknown, fallback and unmeasured outputs", () => { const m=manifest(), request=requestFor(m,row,"sparse"); request.advanced.s9Harness={arm:"sparse"}; for (const mutate of [(e)=>delete e.metrics.vedaExecution,(e)=>e.job.status="unknown",(e)=>e.metrics.vedaExecution.fallbackReason="failed self-test",(e)=>e.metrics.peakMemoryBytes=null,(e)=>delete e.metrics.terminalMemory,(e)=>e.metrics.terminalMemory.device.allocatorPeakBytes=null,(e)=>e.asset.file.hasAudio=false,(e)=>e.metrics.quantLabel="q8",(e)=>e.job.workerId="other",(e)=>delete e.metrics.vedaExecution.terminalEstimate,(e)=>e.metrics.vedaExecution.terminalEstimate.estimatedTotalBytes=1,(e)=>delete e.metrics.vedaExecution.terminalTelemetry,(e)=>e.metrics.vedaExecution.terminalTelemetry.steps.pop(),(e)=>e.metrics.vedaExecution.terminalTelemetry.steps[0].device.allocatorPeakBytesCumulative=null]) { const e=evidence(request); mutate(e); assert.throws(()=>observed(e.job,e.metrics,row,"sparse",m.runners.mlx)); } });
+test("admission floor plus workspace is retained as a comparison, not a peak ceiling", () => { const m=manifest(), request=requestFor(m,row,"sparse"); request.advanced.s9Harness={arm:"sparse"}; const e=evidence(request), estimate=e.metrics.vedaExecution.terminalEstimate; Object.assign(estimate,{baseBytes:5,headroomBytes:5,sparseWorkspaceBoundBytes:100,estimatedTotalBytes:110}); e.metrics.terminalMemory.device.allocatorPeakBytes=111; e.metrics.peakMemoryBytes=111; assert.equal(observed(e.job,e.metrics,row,"sparse",m.runners.mlx).id,e.asset.id); });
+test("paired measured whole-job peaks use matched fresh owned worker incarnations and problem bound", () => {
+  const { dense, sparse } = pairedEvidence();
+  const proof = pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze));
+  assert.notDeepEqual(proof.workerIncarnations[0], proof.workerIncarnations[1]);
+  assert.equal(proof.device.nativeSparseWorkspaceBoundBytes, 100);
+  assert.equal(proof.device.denseObservedPlusBoundBytes, 120);
+  assert.equal(proof.device.withinEmpiricalEnvelope, true);
+  assert.equal(proof.host.withinEmpiricalEnvelope, true);
+  sparse.metrics.terminalMemory.device.allocatorPeakBytes = 121;
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze)).device.withinEmpiricalEnvelope, false);
+  sparse.metrics.terminalMemory.device.allocatorPeakBytes = 20;
+  sparse.metrics.terminalMemory.hostProcessRssSampleMaxBytes = 111;
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "mlx", manifest().runners.mlx, digest(manifest().sourceFreeze)).host.withinEmpiricalEnvelope, false);
+});
+test("paired memory refuses missing, reused, or unbound worker process lifetimes", () => {
+  for (const [caseIndex, mutate] of [
+    (p) => { delete p.sparse.workerClosure; },
+    (p) => { p.sparse.workerClosure.pid = p.dense.workerClosure.pid; p.sparse.workerClosure.birth = p.dense.workerClosure.birth; },
+    (p) => { p.sparse.workerClosure.jobId = "foreign-job"; },
+    (p) => { p.sparse.workerClosure.reaped = false; },
+    (p) => { p.sparse.workerClosure.workerBinarySha256 = "f".repeat(64); },
+    (p) => { p.sparse.workerClosure.workerConfigBinding.environment.SCENEWORKS_GPU_ID = "foreign"; },
+    (p) => { p.sparse.workerClosure.sourceFreezeSha256 = "f".repeat(64); },
+    (p) => { p.sparse.workerClosure.admissionReceipt.observedAt = 999; },
+  ].entries()) { const p = pairedEvidence(); mutate(p); assert.throws(() => pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze)), undefined, `worker lifetime mutation ${caseIndex}`); }
+  const p = pairedEvidence(); p.sparse.workerClosure.guardianOwnerTokenSha256 = "f".repeat(64);
+  assert.equal(pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze)).device.withinEmpiricalEnvelope, true);
+});
+test("paired memory refuses identity, method, and runtime workspace mismatches", () => {
+  for (const mutate of [
+    (p) => { p.sparse.job.workerId = "foreign"; },
+    (p) => { p.sparse.request.advanced.s9Harness.fingerprint = "other"; },
+    (p) => { p.sparse.request.seed = 999; },
+    (p) => { p.sparse.metrics.terminalMemory.device.method = "driver_global_sample"; },
+    (p) => { p.sparse.metrics.vedaExecution.workspaceBytes = 101; },
+    (p) => { p.sparse.metrics.vedaExecution.terminalEstimate.baseBytes = 101; },
+  ]) { const p = pairedEvidence(); mutate(p); assert.throws(() => pairedMemoryEnvelope(p.dense, p.sparse, "mlx", p.runner, digest(manifest().sourceFreeze))); }
+});
+test("CUDA worker backend and native backend retain distinct identities and host bound", () => {
+  const { dense, sparse, row: cudaRow, runner } = pairedEvidence("candle_cuda");
+  assert.equal(observed(dense.job, dense.metrics, cudaRow, "dense", runner).id, dense.job.result.assets[0].id);
+  assert.equal(observed(sparse.job, sparse.metrics, cudaRow, "sparse", runner).id, sparse.job.result.assets[0].id);
+  const proof = pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze));
+  assert.equal(proof.backend, "candle_cuda");
+  assert.equal(proof.host.nativeSparseHostWorkspaceBoundBytes, 30);
+  assert.equal(proof.host.denseObservedPlusBoundBytes, 40);
+  sparse.metrics.terminalMemory.hostProcessRssSampleMaxBytes = 41;
+  assert.equal(pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze)).host.withinEmpiricalEnvelope, false);
+  sparse.metrics.vedaExecution.terminalEstimate.hostWorkspaceBoundBytes = null;
+  assert.throws(() => pairedMemoryEnvelope(dense, sparse, "candle_cuda", runner, digest(manifest().sourceFreeze)));
+});
 test("mock product pair collects only pending evidence; resume never rerenders", async (t) => { const x=await execute(t); const state=await x.run(); assert.equal(x.mocks.posts,2); assert.equal(x.mocks.releases,1); assert.equal(state.cells[row.id].status,"media_collected_evidence_incomplete"); assert.equal(summary(state).completedAcceptance,false); await x.run(); assert.equal(x.mocks.posts,2); assert.equal(summary(state).instrumentationIncomplete,1); });
+test("whole-job empirical bound excess remains unresolved", async (t) => { const x=await execute(t,"overbound"); const state=await x.run(); const cell=state.cells[row.id]; assert.equal(cell.status,"unresolved"); assert.equal(cell.memoryEnvelope.device.withinEmpiricalEnvelope,false); assert.match(cell.memoryEnvelopeError,/exceeds/); assert.equal(summary(state).completedAcceptance,false); });
 test("resume byte corruption fails closed", async (t) => { const x=await execute(t); const state=await x.run(); await writeFile(state.cells[row.id].arms.dense.media.path,"corrupt"); await assert.rejects(x.run(),/size|digest/); assert.equal(x.mocks.posts,2); });
 test("missing native telemetry and actual fallback stay unresolved", async (t) => { for (const variant of ["missing","fallback"]) { const x=await execute(t,variant); const state=await x.run(); assert.equal(state.cells[row.id].status,"unresolved"); assert.equal(summary(state).mediaCollectedPendingMichael,0); assert.equal(summary(state).completedAcceptance,false); } });
 test("transport ambiguity retains lease and durable intent; never blindly resubmits", async (t) => { const x=await execute(t,"ambiguous"); await assert.rejects(x.run(),/transport/); assert.equal(x.mocks.releases,0); const state=JSON.parse(await readFile(path.join(x.dir,"campaign.json"))); assert.equal(state.cells[row.id].arms.dense.status,"ambiguous"); await assert.rejects(x.run(),/not found/); assert.equal(x.mocks.posts,1); });
@@ -49,3 +156,45 @@ test("declared fallback proof requires the actual exact reason and dense executi
 test("phase resource guard failure stops submission even after source intake passes",async(t)=> {const x=await execute(t);const g=guard(x.m);g.beforePhase=async(phase)=>({phase,admitted:false});x.options.physical=async()=>g;await assert.rejects(x.run(),/stale\/unadmitted/);assert.equal(x.mocks.posts,0);});
 
 test("bounded timeout cancels only the persisted owned job and reads back before releasing",async(t)=> { const x=await execute(t,"timeout",m=>m.limits.jobTimeoutMs=1);x.options.sleep=async()=>new Promise(resolve=>setTimeout(resolve,2));await assert.rejects(x.run(),/owned job timeout/);const state=JSON.parse(await readFile(path.join(x.dir,"campaign.json")));assert.equal(state.cells[row.id].arms.dense.job.id,"job-1");assert.equal(state.cells[row.id].arms.dense.job.status,"canceled");assert.equal(state.cells[row.id].arms.dense.status,"timeout_cancelled_read_back");assert.equal(x.mocks.posts,1);assert.equal(x.mocks.releases,1); });
+
+
+test("complete corpus overrides retain every named bucket and all pair identities",()=>{
+  const m=manifest();for(const profile of Object.keys(PROFILES)) { const original=m.bindings[profile],{seed,...carriers}=original;m.bindings[profile]={seed,byCanvas:Object.fromEntries([...new Set(matrix(catalog).map(r=>r.canvas))].map(canvas=>[canvas,{...carriers}]))}; }
+  const rows=validateShape(m,catalog);assert.equal(rows.filter(r=>!r.style).length,5400);
+  for(const r of rows) { const d=requestFor(m,r,"dense"),s=requestFor(m,r,"sparse");delete s.advanced.veda;assert.deepEqual(d,s);assert.equal(d.seed,m.bindings[r.profile].seed); }
+  delete m.bindings.fl2va_first.byCanvas["768x768"];assert.throws(()=>validateShape(m,catalog),/canvas/);
+});
+test("published boundary corpus has exact14 duration rungs and9\/3\/3\/12 caps without stress",()=>{
+  const m=manifest(),rows=publishedBoundaryRows(catalog,m);assert.equal(rows.length,102);assert.equal(new Set(rows.map(r=>r.id)).size,102);assert.equal(rows.filter(r=>r.kind==="expected_refusal").length,28);
+  for(const backend of ["mlx","candle_cuda"]) for(const profile of ["t2va","r2va_mixed"]) assert.equal(rows.filter(r=>r.backend===backend&&r.profile===profile&&r.boundary.startsWith("published_duration_")).length,14);
+  for(const id of ["images_at_cap","clips_at_cap","audio_at_cap_with_visual","combined_at_cap","combined_over"]) {const r=rows.find(r=>r.boundary===id),q=requestFor(m,r,"sparse");assert.deepEqual([q.referenceAssetIds?.length??0,q.sourceClipAssetIds?.length??0,q.referenceAudioAssetIds?.length??0],CAP_CASES[id].counts);}
+  assert.equal(rows.find(r=>r.boundary==="in_window_duration_snap").frames,158);assert.equal(matrix(catalog).length,5400);
+});
+test("boundary/canvas drift, missing IDs and unrelated refusals fail closed",()=>{
+  for(const mutate of [m=>delete m.boundaryBindings.images_at_cap,m=>m.boundaryBindings.combined_over.audio.pop(),m=>m.assets.image.type="audio",m=>m.assets.clip.assetId="UNBOUND",m=>m.bindings.t2va.seed=-1]) {const m=manifest();mutate(m);assert.throws(()=>validateShape(m,catalog));}
+  const r=publishedBoundaryRows(catalog,manifest()).find(r=>r.boundary==="combined_over");validateRefusal(r,{status:400,value:{error:"minimax_h3_ref takes up to 12 reference files in total, but this request supplies 13"}});
+  for(const response of [{status:201,value:{status:"failed"}},{status:400,value:{error:"missing predictor"}},{status:422,value:{error:"catalog adapter not compatible"}}])assert.throws(()=>validateRefusal(r,response));
+  assert.equal(carrierBinding(manifest(),r).seed,5);
+});
+test("production H3 keyframe predicate compiles and passes CPU Rust tests without native builds",async(t)=>{
+  const dir=await temp(t),binary=path.join(dir,"h3-keyframes-cpu-tests"),source=path.join(path.dirname(new URL(import.meta.url).pathname),"../crates/sceneworks-core/src/h3_keyframes.rs");
+  execFileSync("rustc",["--edition=2021","--test",source,"-o",binary],{timeout:15000});const output=execFileSync(binary,[],{encoding:"utf8",timeout:5000});assert.match(output,/2 passed; 0 failed/);
+});
+
+test("portable33 corpus binds only complete exact owned imports and source byte readbacks",async()=>{
+  const plan=JSON.parse(await readFile(new URL('../config/terminal-evidence/epic-25140-corpus.plan.json',import.meta.url),'utf8')),m=manifest();
+  m.sourceFreeze.files={"config/manifests/builtin.models.jsonc":plan.catalogSha256};
+  const receipt={projectId:"actual-mock-owned-project",planSha256:D,assets:Object.fromEntries(Object.entries(plan.assets).map(([key,a])=>[key,{assetId:`mock-imported-${key}`,path:`/mock/${key}`,bytes:a.bytes,sha256:a.sha256,servedBytes:a.bytes,servedSha256:a.sha256,normalized:{path:`/mock/prepared-${key}`,bytes:1,sha256:D}}]))};
+  const bound=bindCorpusPlan(m,plan,receipt);assert.equal(Object.keys(bound.assets).length,33);assert.equal(Object.keys(bound.boundaryBindings).length,13);assert.equal(publishedBoundaryRows(catalog,bound).length,102);
+  const shape=validateShape(bound,catalog);assert.equal(shape.filter(r=>!r.style).length,5400);
+  for(const r of shape.filter(r=>r.profile==='fl2va_last'))assert.equal(requestFor(bound,r,'sparse').lastFrameAssetId,`mock-imported-last_${r.canvas}`);
+  for(const mutate of [x=>delete x.assets.audio_3,x=>x.assets.audio_3.assetId='UNBOUND',x=>x.assets.audio_3.servedSha256=D,x=>x.planSha256='c'.repeat(64),x=>delete x.assets.audio_3.normalized]){const copy=structuredClone(receipt);mutate(copy);assert.throws(()=>bindCorpusPlan(m,plan,copy));}
+  const twoStyles=[{models:['minimax_h3','minimax_h3_ref'],id:'rough'},{models:['minimax_h3','minimax_h3_ref'],id:'clay'}];assert.equal(matrix(catalog,twoStyles).length,11016);assert.equal(matrix(catalog,twoStyles).filter(r=>r.kind==='expected_refusal').length,1512);
+});
+
+
+test("selected host hashes its artifact projection while complete matrix declarations remain",async(t)=>{
+  const files=[{id:"mlx",coverage:[{backend:"mlx"}]},{id:"cuda",coverage:[{backend:"candle_cuda"}]},{id:"shared",coverage:[{backend:"mlx"},{backend:"candle_cuda"}]}];
+  assert.deepEqual(artifactsForHost(files,"mlx").map(x=>x.id),["mlx","shared"]);assert.deepEqual(artifactsForHost(files,"candle_cuda").map(x=>x.id),["cuda","shared"]);assert.equal(artifactsForHost(files).length,3);assert.throws(()=>artifactsForHost(files,"cpu"));assert.equal(files.length,3);
+  const x=await execute(t);let selection;const validate=x.options.validate;x.options.validate=async(m,options)=>{selection=options.backend;return validate(m,options);};await x.run();assert.equal(selection,"mlx");assert.equal(matrix(catalog).length,5400);assert.equal(new Set(matrix(catalog).map(r=>r.backend)).size,2);
+});

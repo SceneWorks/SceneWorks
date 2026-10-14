@@ -1085,6 +1085,10 @@ pub struct GenerationMetrics {
     /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub veda_execution: Option<Value>,
+    /// Operator-owned terminal full-job memory observation. Methods/scopes are carried in the
+    /// JSON receipt; sampled host RSS and backend allocator/driver counters are never summed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_memory: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,

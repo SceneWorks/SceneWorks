@@ -19,7 +19,10 @@
     "runners",
     "proofRoutes",
     "productProofCases",
-    "limits"
+    "limits",
+    "boundaryBindings",
+    "corpusPlan",
+    "corpusImportReceipt"
   ],
   "properties": {
     "schemaVersion": {
@@ -180,7 +183,8 @@
             "type": "object",
             "required": [
               "assetId",
-              "normalized"
+              "normalized",
+              "type"
             ],
             "properties": {
               "assetId": {
@@ -191,6 +195,13 @@
               },
               "normalized": {
                 "$ref": "#/$defs/file"
+              },
+              "type": {
+                "enum": [
+                  "image",
+                  "video",
+                  "audio"
+                ]
               }
             }
           }
@@ -230,6 +241,23 @@
             "type": "integer",
             "minimum": 0,
             "maximum": 4294967295
+          },
+          "byCanvas": {
+            "type": "object",
+            "required": [
+              "1536x672",
+              "672x1536",
+              "1344x768",
+              "768x1344",
+              "1024x768",
+              "768x1024",
+              "768x768",
+              "576x320",
+              "320x576"
+            ],
+            "additionalProperties": {
+              "$ref": "#/$defs/carriers"
+            }
           }
         }
       }
@@ -300,7 +328,15 @@
       }
     },
     "productProofCases": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "carriers": {
+            "$ref": "#/$defs/carriers"
+          }
+        }
+      }
     },
     "limits": {
       "type": "object",
@@ -312,6 +348,33 @@
       "additionalProperties": {
         "type": "integer",
         "minimum": 1
+      }
+    },
+    "corpusPlan": {
+      "$ref": "#/$defs/file"
+    },
+    "corpusImportReceipt": {
+      "$ref": "#/$defs/file"
+    },
+    "boundaryBindings": {
+      "type": "object",
+      "required": [
+        "images_at_cap",
+        "clips_at_cap",
+        "audio_at_cap_with_visual",
+        "combined_at_cap",
+        "combined_images_clips_at_cap",
+        "combined_images_audio_at_cap",
+        "soundtrack_slot_accounting",
+        "images_over",
+        "clips_over",
+        "audio_over",
+        "combined_over",
+        "audio_only",
+        "empty_refs"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/carriers"
       }
     }
   },
@@ -326,7 +389,7 @@
       "properties": {
         "path": {
           "type": "string",
-          "pattern": "^/"
+          "minLength": 1
         },
         "bytes": {
           "type": "integer",
@@ -355,10 +418,45 @@
       "properties": {
         "root": {
           "type": "string",
-          "pattern": "^/"
+          "minLength": 1
         },
         "head": {
           "$ref": "#/$defs/head"
+        }
+      }
+    },
+    "carriers": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "first": {
+          "type": "string",
+          "minLength": 1
+        },
+        "last": {
+          "type": "string",
+          "minLength": 1
+        },
+        "images": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "clips": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "audio": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     }

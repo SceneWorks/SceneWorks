@@ -539,7 +539,7 @@ export function VideoStudio() {
   // (sendAssetToVideo) still sets the source directly in an effect below, overriding this seed. A
   // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
   // / person-track catalogs land.
-  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId);
+  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (saved.model === "minimax_h3" && saved.lastFrameAssetId));
   const [sourceAssetId, setSourceAssetId] = useState(
     hasRestoredSource
       ? (saved.sourceAssetId ?? "")
@@ -1707,7 +1707,7 @@ export function VideoStudio() {
     outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
-    (mode === "image_to_video" && sourceAssetId) ||
+    (mode === "image_to_video" && (sourceAssetId || (model === "minimax_h3" && lastFrameAssetId))) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
@@ -1917,7 +1917,7 @@ export function VideoStudio() {
         fitMode: ["image_to_video", "first_last_frame"].includes(mode)
           ? effectiveFitMode(fitMode, false)
           : undefined,
-        lastFrameAssetId: mode === "first_last_frame" ? lastFrameAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? lastFrameAssetId || null : null,
         sourceClipAssetId: [
           "extend_clip",
           "replace_person",
@@ -2179,7 +2179,7 @@ export function VideoStudio() {
               />
             ) : null}
 
-            {mode === "first_last_frame" ? (
+            {mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? (
               <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"

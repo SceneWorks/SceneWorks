@@ -868,6 +868,12 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics",
+            "terminal_memory_json",
+            "text",
+        )?;
         // Retention may remove the owning queue row, but Generation Stats is
         // historical product data rather than queue history. Materialize the
         // joined row before purging so aggregate charts remain complete.
@@ -927,6 +933,12 @@ impl JobsStore {
             "veda_execution_json",
             "text",
         )?;
+        ensure_column(
+            &transaction,
+            "generation_metrics_history",
+            "terminal_memory_json",
+            "text",
+        )?;
         backfill_claim_routing_facts(&transaction)?;
         transaction.commit()?;
         Ok(())
@@ -980,14 +992,14 @@ impl JobsStore {
                 // the columns makes the mapping independent of physical order in both tables.
                 "insert or replace into generation_metrics_history (
                      job_id, model, quant_label, quant_bits, source_codec,
-                     execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift, steps,
+                     execution_representation, veda_execution_json, terminal_memory_json, sampler, scheduler, scheduler_shift, steps,
                      image_count, guidance_scale, true_cfg_scale, guidance_method, use_pid,
                      pid_target, width, height, seed, loras_json, load_ms, sample_ms, decode_ms,
                      total_ms, peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
                      updated_at, j_type, j_status, j_project_id, j_created_at
                  )
                  select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                        m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                        m.execution_representation, m.veda_execution_json, m.terminal_memory_json, m.sampler, m.scheduler, m.scheduler_shift,
                         m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                         m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                         m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -1584,11 +1596,11 @@ impl JobsStore {
                 guidance_method, use_pid, pid_target, width, height, seed,
                 loras_json, load_ms, sample_ms, decode_ms, total_ms,
                 peak_memory_bytes, peak_memory_pct, peak_gpu_load_pct, backend,
-                image_count, source_codec, execution_representation, updated_at, veda_execution_json
+                image_count, source_codec, execution_representation, updated_at, veda_execution_json, terminal_memory_json
             ) values (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27,
-                ?28, ?29, ?30
+                ?28, ?29, ?30, ?31
             )
             on conflict(job_id) do update set
                 model = coalesce(excluded.model, generation_metrics.model),
@@ -1622,6 +1634,7 @@ impl JobsStore {
                     generation_metrics.execution_representation
                 ),
                 veda_execution_json = coalesce(excluded.veda_execution_json, generation_metrics.veda_execution_json),
+                terminal_memory_json = coalesce(excluded.terminal_memory_json, generation_metrics.terminal_memory_json),
                 updated_at = excluded.updated_at
             ",
             params![
@@ -1655,6 +1668,7 @@ impl JobsStore {
                 metrics.execution_representation,
                 now,
                 optional_dumps(metrics.veda_execution.as_ref())?,
+                optional_dumps(metrics.terminal_memory.as_ref())?,
             ],
         )?;
         Ok(())
@@ -1717,7 +1731,7 @@ impl JobsStore {
             // value shifted, breaking Generation Stats on every existing install.
             "select stats.* from (
                select m.job_id, m.model, m.quant_label, m.quant_bits, m.source_codec,
-                      m.execution_representation, m.veda_execution_json, m.sampler, m.scheduler, m.scheduler_shift,
+                      m.execution_representation, m.veda_execution_json, m.terminal_memory_json, m.sampler, m.scheduler, m.scheduler_shift,
                       m.steps, m.image_count, m.guidance_scale, m.true_cfg_scale,
                       m.guidance_method, m.use_pid, m.pid_target, m.width, m.height, m.seed,
                       m.loras_json, m.load_ms, m.sample_ms, m.decode_ms, m.total_ms,
@@ -1727,7 +1741,7 @@ impl JobsStore {
                  from generation_metrics m join jobs j on j.id = m.job_id
                union all
                select job_id, model, quant_label, quant_bits, source_codec,
-                      execution_representation, veda_execution_json, sampler, scheduler, scheduler_shift,
+                      execution_representation, veda_execution_json, terminal_memory_json, sampler, scheduler, scheduler_shift,
                       steps, image_count, guidance_scale, true_cfg_scale,
                       guidance_method, use_pid, pid_target, width, height, seed,
                       loras_json, load_ms, sample_ms, decode_ms, total_ms,
@@ -3843,6 +3857,18 @@ fn row_to_generation_metrics(row: &Row<'_>) -> rusqlite::Result<GenerationMetric
         quant_bits: row.get("quant_bits")?,
         source_codec: row.get("source_codec")?,
         execution_representation: row.get("execution_representation")?,
+        terminal_memory: row
+            .get::<_, Option<String>>("terminal_memory_json")?
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })
+            .transpose()?,
         veda_execution: row
             .get::<_, Option<String>>("veda_execution_json")?
             .map(|value| {

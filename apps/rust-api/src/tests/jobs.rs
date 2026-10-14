@@ -15921,3 +15921,34 @@ async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incomp
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert!(body["payload"]["advanced"].get("veda").is_none());
 }
+
+#[test]
+fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_source() {
+    for (model, has_last, accepted) in [
+        ("minimax_h3", true, true),
+        ("minimax_h3", false, false),
+        ("minimax_h3_ref", true, false),
+        ("ltx_2_3", true, false),
+    ] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
+            "lastFrameAssetId": if has_last { Some("last") } else { None },
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::validate_video_job(&payload).is_ok(),
+            accepted,
+            "{model}/{has_last}"
+        );
+    }
+}
+
+#[test]
+fn h3_empty_last_frame_is_not_a_keyframe_input() {
+    for id in ["", " "] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":"minimax_h3", "mode":"image_to_video", "prompt":"A cyclist rides", "lastFrameAssetId":id,
+        })).unwrap();
+        assert!(crate::validate_video_job(&payload).is_err());
+    }
+}

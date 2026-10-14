@@ -1,0 +1,214 @@
+name: H3 Veda terminal owned campaign
+
+on:
+  workflow_dispatch:
+    inputs:
+      backend:
+        description: Explicit physical backend; no automatic host selection.
+        required: true
+        type: choice
+        options: [mlx, candle_cuda]
+      mode:
+        description: Prepare a new owned corpus or resume the exact existing campaign.
+        required: true
+        type: choice
+        options: [prepare, resume]
+      sceneworks_sha:
+        description: Exact frozen SceneWorks commit containing this workflow.
+        required: true
+        type: string
+      inference_main_sha:
+        description: Exact permanent inference main and Cargo pin commit.
+        required: true
+        type: string
+      expected_runner:
+        description: Exact runner name; Mac must be nax-macos-2, Windows must be an explicitly selected cuda-windows host.
+        required: true
+        type: string
+      manifest_path:
+        description: Absolute path to frozen host-local template (prepare) or bound manifest (resume).
+        required: true
+        type: string
+      corpus_root:
+        description: Absolute host-local staged corpus root, only used by prepare.
+        required: true
+        type: string
+      offline_cache_root:
+        description: Absolute complete host-local offline HF cache root.
+        required: true
+        type: string
+      run_dir:
+        description: Absolute external owned campaign directory, durable across bounded batches.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: h3-veda-terminal-${{ inputs.backend }}-${{ inputs.run_dir }}
+  cancel-in-progress: false
+
+jobs:
+  mac2:
+    if: inputs.backend == 'mlx'
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    timeout-minutes: 75
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/sceneworks
+    env:
+      S9_EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+      S9_SCENEWORKS_SHA: ${{ inputs.sceneworks_sha }}
+      S9_INFERENCE_SHA: ${{ inputs.inference_main_sha }}
+      S9_MANIFEST: ${{ inputs.manifest_path }}
+      S9_CORPUS_ROOT: ${{ inputs.corpus_root }}
+      S9_CACHE: ${{ inputs.offline_cache_root }}
+      S9_RUN_DIR: ${{ inputs.run_dir }}
+      HF_HOME: ${{ inputs.offline_cache_root }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/sceneworks/target
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          path: sceneworks
+          fetch-depth: 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_main_sha }}
+          path: inference
+          fetch-depth: 0
+          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Assert exact source and named runner before build
+        run: |
+          test "$GITHUB_SHA" = "$S9_SCENEWORKS_SHA"
+          test "$RUNNER_NAME" = 'nax-macos-2'
+          test "$S9_EXPECTED_RUNNER" = 'nax-macos-2'
+          test "$(git rev-parse HEAD)" = "$S9_SCENEWORKS_SHA"
+          test "$(git -C ../inference rev-parse HEAD)" = "$S9_INFERENCE_SHA"
+          test "$(git -C ../inference rev-parse refs/remotes/origin/main)" = "$S9_INFERENCE_SHA"
+      - name: Verify existing read credential against live run, runner, and LensWorks queue
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs probe-auth mlx
+      - name: Generate masked job-owned private API token
+        run: node scripts/h3-veda-actions.mjs owned-token
+      - name: Build normal product API and worker from frozen source
+        run: cargo build --release --locked -p sceneworks-rust-api
+      - name: Prepare or verify owned private corpus
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: |
+          if test '${{ inputs.mode }}' = prepare; then
+            node scripts/h3-veda-actions.mjs prepare "$S9_MANIFEST" config/terminal-evidence/epic-25140-corpus.plan.json "$S9_CORPUS_ROOT" mlx "$S9_RUN_DIR" "$S9_CACHE"
+          else
+            node scripts/h3-veda-actions.mjs resume "$S9_MANIFEST" mlx "$S9_RUN_DIR" "$S9_CACHE"
+          fi
+      - name: Run bounded guardian-owned native campaign
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: |
+          node scripts/h3-veda-actions.mjs admit mlx
+          node scripts/h3-veda-acceptance.mjs run "$S9_RUN_DIR/manifest.bound.json" mlx "$S9_RUN_DIR"
+      - name: Redact transport receipt without media or control token
+        if: always()
+        run: node scripts/h3-veda-actions.mjs redact "$S9_RUN_DIR" "$RUNNER_TEMP/h3-veda-terminal/receipt.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: h3-veda-terminal-mlx-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h3-veda-terminal/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows_cuda:
+    if: inputs.backend == 'candle_cuda'
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 75
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: ${{ github.workspace }}/sceneworks
+    env:
+      S9_EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+      S9_SCENEWORKS_SHA: ${{ inputs.sceneworks_sha }}
+      S9_INFERENCE_SHA: ${{ inputs.inference_main_sha }}
+      S9_MANIFEST: ${{ inputs.manifest_path }}
+      S9_CORPUS_ROOT: ${{ inputs.corpus_root }}
+      S9_CACHE: ${{ inputs.offline_cache_root }}
+      S9_RUN_DIR: ${{ inputs.run_dir }}
+      HF_HOME: ${{ inputs.offline_cache_root }}
+      CARGO_TARGET_DIR: ${{ github.workspace }}/sceneworks/target
+      HF_HUB_OFFLINE: '1'
+      TRANSFORMERS_OFFLINE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          path: sceneworks
+          fetch-depth: 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_main_sha }}
+          path: inference
+          fetch-depth: 0
+          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Assert exact source and named runner before build
+        run: |
+          if ($env:GITHUB_SHA -ne $env:S9_SCENEWORKS_SHA) { throw 'workflow source SHA differs' }
+          if ($env:RUNNER_NAME -ne $env:S9_EXPECTED_RUNNER -or $env:S9_EXPECTED_RUNNER -notin @('cuda-windows','cuda-windows-2')) { throw 'unadmitted Windows physical runner' }
+          if ((git rev-parse HEAD) -ne $env:S9_SCENEWORKS_SHA) { throw 'SceneWorks checkout differs' }
+          if ((git -C ../inference rev-parse HEAD) -ne $env:S9_INFERENCE_SHA) { throw 'inference checkout differs' }
+          if ((git -C ../inference rev-parse refs/remotes/origin/main) -ne $env:S9_INFERENCE_SHA) { throw 'inference permanent main differs' }
+      - name: Verify existing read credential against live run, runner, and LensWorks queue
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs probe-auth candle_cuda
+      - name: Generate masked job-owned private API token
+        run: node scripts/h3-veda-actions.mjs owned-token
+      - name: Build normal Candle/CUDA product API and worker from frozen source
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo build --release --locked -p sceneworks-rust-api --features backend-candle || exit /b 1
+      - name: Prepare or verify owned private corpus
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if "${{ inputs.mode }}" == "prepare" (node scripts/h3-veda-actions.mjs prepare "%S9_MANIFEST%" config/terminal-evidence/epic-25140-corpus.plan.json "%S9_CORPUS_ROOT%" candle_cuda "%S9_RUN_DIR%" "%S9_CACHE%") else (node scripts/h3-veda-actions.mjs resume "%S9_MANIFEST%" candle_cuda "%S9_RUN_DIR%" "%S9_CACHE%")
+          if errorlevel 1 exit /b 1
+      - name: Run bounded guardian-owned native campaign
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/h3-veda-actions.mjs admit candle_cuda
+          if errorlevel 1 exit /b 1
+          node scripts/h3-veda-acceptance.mjs run "%S9_RUN_DIR%\manifest.bound.json" candle_cuda "%S9_RUN_DIR%"
+          if errorlevel 1 exit /b 1
+      - name: Redact transport receipt without media or control token
+        if: always()
+        run: node scripts/h3-veda-actions.mjs redact "$env:S9_RUN_DIR" "$env:RUNNER_TEMP/h3-veda-terminal/receipt.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: h3-veda-terminal-cuda-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h3-veda-terminal/receipt.json
+          if-no-files-found: error
+          retention-days: 30

@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { collectComparison } from "./h3-veda-metrics.mjs";
+import { carrierBinding, validateCarrierBinding, validateCorpusBindings, publishedBoundaryRows, validateRefusal, bindCorpusPlan } from "./h3-veda-corpus.mjs";
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const FRAMES = [124, 141, 243, 345];
@@ -77,13 +78,10 @@ export function validateShape(m, catalog) {
   assert(m.styles.every((s) => typeof s.trigger === "string" && !s.trigger.includes("UNBOUND")), "style trigger unbound");
   for (const profile of Object.keys(PROFILES)) {
     assert(m.prompts[profile]?.trim() && !m.prompts[profile].includes("UNBOUND"), `prompt unbound: ${profile}`);
-    const b = m.bindings[profile]; assert(b && Number.isSafeInteger(b.seed), `seed/binding missing: ${profile}`);
-    const first = !!b.first, last = !!b.last;
-    assert(first === ["fl2va_first", "fl2va_both"].includes(profile) && last === ["fl2va_last", "fl2va_both"].includes(profile), `keyframe shape mismatch: ${profile}`);
-    if (profile === "r2va_mixed") assert(b.images?.length && b.clips?.length && b.audio?.length && b.clips.some((id) => m.assets[id]?.hasAudio === true), "mixed R2VA image/clip soundtrack/standalone audio required");
-    else assert(!b.images?.length && !b.clips?.length && !b.audio?.length, `unexpected reference carriers: ${profile}`);
-    for (const id of [b.first, b.last, ...(b.images ?? []), ...(b.clips ?? []), ...(b.audio ?? [])].filter(Boolean)) assert(m.assets[id]?.assetId && m.assets[id].assetId !== "UNBOUND", `asset ID unbound: ${id}`);
+
   }
+  assert(HEX.test(m.corpusPlan?.sha256) && HEX.test(m.corpusImportReceipt?.sha256), "source corpus plan/import receipt missing");
+  validateCorpusBindings(m, CANVASES);
   const allowedIds = new Set(catalog.loras.map((l) => l.id));
   assert(m.turboArtifacts && Object.keys(m.turboArtifacts).length === allowedIds.size && Object.keys(m.turboArtifacts).every((id) => allowedIds.has(id)), "missing/unknown published Turbo artifact");
   assert(m.limits && Number.isSafeInteger(m.limits.jobTimeoutMs) && m.limits.jobTimeoutMs > 0 && Number.isSafeInteger(m.limits.maxJobs) && m.limits.maxJobs > 0 && Number.isSafeInteger(m.limits.maxMediaBytes) && m.limits.maxMediaBytes > 0, "bounded execution limits required");
@@ -102,22 +100,34 @@ export async function inspectSources(m) {
   const pins = [...cargo.matchAll(/git\s*=\s*"https:\/\/github.com\/SceneWorks\/inference"\s*,\s*rev\s*=\s*"([a-f0-9]{40})"/g)].map((x) => x[1]);
   assert(pins.length && pins.every((p) => p === f.inferencePin), "SceneWorks actual inference pins stale");
   for (const [file, expected] of Object.entries(f.files ?? {})) assert(HEX.test(expected) && await hashFile(path.join(f.sceneworks.root, file)) === expected, `source file fingerprint differs: ${file}`);
-  for (const file of ["config/manifests/builtin.models.jsonc", "config/manifests/builtin.loras.jsonc", "config/terminal-evidence/epic-25140-requirements.json", "scripts/h3-veda-acceptance.mjs", "scripts/h3-veda-metrics.mjs"]) assert(f.files?.[file], `required source fingerprint omitted: ${file}`);
+  for (const file of ["config/manifests/builtin.models.jsonc", "config/manifests/builtin.loras.jsonc", "config/terminal-evidence/epic-25140-requirements.json", "scripts/h3-veda-acceptance.mjs", "scripts/h3-veda-metrics.mjs", "scripts/h3-veda-corpus.mjs", "config/terminal-evidence/epic-25140-corpus.plan.json"]) assert(f.files?.[file], `required source fingerprint omitted: ${file}`);
 }
-export async function validateManifest(m, { catalog, sourceCheck = inspectSources } = {}) {
+export function artifactsForHost(artifacts, backend) {
+  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
+  return backend === undefined ? artifacts : artifacts.filter((a) => a.coverage?.some((c) => c.backend === backend));
+}
+export async function validateManifest(m, { catalog, sourceCheck = inspectSources, backend } = {}) {
+  assert(backend === undefined || ["mlx", "candle_cuda"].includes(backend), "unknown host projection backend");
   catalog ??= await catalogs(m.sourceFreeze?.sceneworks?.root);
-  const rows = validateShape(m, catalog);
+  const rows = [...validateShape(m, catalog), ...publishedBoundaryRows(catalog, m)];
   for (const p of m.productProofCases ?? []) {
     assert(PROOFS.includes(p.proof) && ["mlx", "candle_cuda"].includes(p.backend) && Object.keys(PROFILES).includes(p.profile), "unknown terminal product proof");
     const template = rows.find((r) => r.kind === "media" && !r.style && r.backend === p.backend && r.tier === p.tier && r.profile === p.profile && r.recipe === p.recipe && r.canvas === p.canvas && r.frames === p.frames);
     assert(template && ["sparse", "fallback_dense", "controlled_dense"].includes(p.expectation), "terminal product proof outside named configuration or expected outcome missing");
     assert(p.veda?.enabled === true && typeof p.veda.generated === "string" && typeof p.veda.reference === "string" && typeof p.veda.fullAttentionLayers === "string" && typeof p.veda.fullAttentionSteps === "string", "proof control binding incomplete");
     if (p.expectation === "fallback_dense") assert(p.fallbackReason?.trim() && p.setupReceipt?.sha256, "fallback cause/setup receipt unbound");
+    if (p.carriers) validateCarrierBinding(m, carrierBinding(m, { ...template, carriers: p.carriers }), p.profile, { mixed: p.profile === "r2va_mixed" && p.proof !== "published_input_boundaries" });
     rows.push({ ...template, ...p, kind: "product_proof", id: `proof/${p.proof}/${p.id}/${p.backend}` });
   }
   assert(new Set(rows.map((r) => r.id)).size === rows.length, "duplicate terminal case identity");
   await sourceCheck(m);
+  const localArtifacts = artifactsForHost(m.artifacts, backend);
   const snapshots = [];
+  const planBinding=await boundFile(m.corpusPlan), importBinding=await boundFile(m.corpusImportReceipt);
+  assert(planBinding.sha256===m.sourceFreeze.files["config/terminal-evidence/epic-25140-corpus.plan.json"],"corpus plan not frozen source");
+  const bound=bindCorpusPlan(m,JSON.parse(await readFile(planBinding.path,"utf8")),JSON.parse(await readFile(importBinding.path,"utf8")));
+  for(const key of ["projectId","assets","bindings","boundaryBindings"]) assert(digest(bound[key])===digest(m[key]),`owned imported corpus identity differs: ${key}`);
+  snapshots.push(planBinding,importBinding);
   for (const p of m.productProofCases ?? []) if (p.setupReceipt) {
     const binding = await boundFile(p.setupReceipt), setup = JSON.parse(await readFile(binding.path, "utf8"));
     assert(setup.fingerprint === digest(m.sourceFreeze) && setup.backend === p.backend && setup.proof === p.proof, "forced-condition setup provenance differs"); snapshots.push(binding);
@@ -125,7 +135,8 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   for (const a of m.artifacts) {
     assert(a.id && a.repo && HEAD.test(a.revision) && a.file && a.coverage?.length, "model artifact identity incomplete");
     // A frozen catalog inventory binds every expected file, not a self-selected happy-path subset.
-    snapshots.push(await boundFile(a));
+    assert(HEX.test(a.sha256) && Number.isSafeInteger(a.bytes) && a.bytes > 0 && typeof a.path === "string", "artifact descriptor unbound on either backend");
+    if (localArtifacts.includes(a)) snapshots.push(await boundFile(a));
   }
   assert(new Set(m.artifacts.map((a) => a.id)).size === m.artifacts.length, "duplicate model artifacts");
   assert(m.sourceFreeze.artifactInventorySha256 === m.artifactInventory.sha256, "complete artifact inventory absent from source freeze");
@@ -143,21 +154,24 @@ export async function validateManifest(m, { catalog, sourceCheck = inspectSource
   }
   for (const s of m.styles) { snapshots.push(await boundFile(s)); snapshots.push(await boundFile(s.compatibilityEvidence)); }
   for (const a of Object.values(m.assets)) { snapshots.push(await boundFile(a)); snapshots.push(await boundFile(a.normalized)); }
-  for (const backend of ["mlx", "candle_cuda"]) {
-    const r = m.runners?.[backend]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[backend]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${backend}`); snapshots.push(await boundFile(r.physicalGuardAdapter)); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend && r.kernel && r.physicalGpuId, `runner identity missing: ${backend}`);
+  for (const target of ["mlx", "candle_cuda"]) {
+    const r = m.runners?.[target]; assert(r?.physicalGuardAdapter && m.sourceFreeze.resourceContract?.[target]?.canonicalLocks?.length, `physical guard adapter/contract unavailable: ${target}`); assert(r && new URL(r.apiUrl).protocol.match(/^https?:$/) && r.requestedGpu && r.workerId && r.reportedBackend === (target === "mlx" ? "mlx" : "cuda") && r.kernel && r.physicalGpuId, `runner identity missing or wrong worker backend: ${target}`);
+    for (const file of [r.physicalGuardAdapter,r.apiBinary,r.workerBinary,r.attestation]) assert(typeof file?.path === "string" && HEX.test(file.sha256) && Number.isSafeInteger(file.bytes) && file.bytes > 0, `host descriptor missing: ${target}`);
+    if (backend !== undefined && target !== backend) continue;
+    snapshots.push(await boundFile(r.physicalGuardAdapter));
     snapshots.push(await boundFile(r.apiBinary)); snapshots.push(await boundFile(r.workerBinary));
     const attestation = JSON.parse(await readFile((await boundFile(r.attestation)).path, "utf8"));
-    assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${backend}`);
+    assert(attestation.inferencePin === m.sourceFreeze.inferencePin && attestation.sceneworksHead === m.sourceFreeze.sceneworks.head && attestation.apiBinarySha256 === r.apiBinary.sha256 && attestation.workerBinarySha256 === r.workerBinary.sha256 && attestation.workerId === r.workerId, `installed product provenance differs: ${target}`);
   }
-  return { rows, catalog, snapshots, fingerprint: digest(m) };
+  return { rows, catalog, snapshots, fingerprint: digest(m), hostValidation: { selectedBackend: backend ?? "all-local", actualFileVerificationBackends: backend ? [backend] : ["mlx", "candle_cuda"], otherBackendAcceptance: false } };
 }
 async function unchanged(snapshots) { for (const b of snapshots) { const s = await stat(b.path); assert(s.size === b.bytes && s.mtimeMs === b.mtimeMs && s.ino === b.ino, `artifact/carrier changed during campaign: ${b.path}`); } }
 export function requestFor(m, row, arm) {
-  const b = m.bindings[row.profile], [width, height] = row.canvas.split("x").map(Number);
+  const b = carrierBinding(m, row), [width, height] = row.canvas.split("x").map(Number);
   const recipe = m.turboArtifacts[row.recipe]; const style = m.styles.find((s) => s.id === row.style);
   const loras = [recipe && { id: row.recipe, family: "minimax-h3", modelIds: recipe.modelIds, path: recipe.path, weight: 1, file: recipe.file }, style && { id: style.id, family: "minimax-h3", path: style.path, weight: style.weight, file: style.source.file }].filter(Boolean);
   const id = (key) => m.assets[key].assetId;
-  const request = { projectId: m.projectId, model: row.model, mode: row.profile === "t2va" ? "text_to_video" : row.profile === "r2va_mixed" ? "reference_to_video" : row.profile === "fl2va_both" ? "first_last_frame" : "image_to_video", prompt: m.prompts[row.profile] + (style ? ` ${style.trigger}` : ""), seed: b.seed, duration: row.duration, fps: 24, width, height, requestedGpu: m.runners[row.backend].requestedGpu, loras, fitMode: "crop", advanced: { steps: row.sampling.steps, mlxQuantize: row.tier === "bf16" ? 0 : Number(row.tier.slice(1)), schedulerShift: row.sampling.schedulerShift } };
+  const request = { projectId: m.projectId, model: row.model, mode: row.profile === "t2va" ? "text_to_video" : row.profile === "r2va_mixed" ? "reference_to_video" : row.profile === "fl2va_both" ? "first_last_frame" : "image_to_video", prompt: m.prompts[row.profile] + (style ? ` ${style.trigger}` : ""), seed: b.seed, duration: row.duration, fps: 24, width, height, requestedGpu: m.runners[row.backend].requestedGpu, loras, fitMode: "crop", advanced: { steps: row.sampling.steps, mlxQuantize: row.tier === "bf16" ? 0 : Number(row.tier.slice(1)), schedulerShift: row.sampling.schedulerShift, audioSchedulerShift: row.sampling.audioSchedulerShift } };
   if (b.first) request.sourceAssetId = id(b.first); if (b.last) request.lastFrameAssetId = id(b.last);
   for (const [field, list] of [["referenceAssetIds", b.images], ["sourceClipAssetIds", b.clips], ["referenceAudioAssetIds", b.audio]]) if (list?.length) request[field] = list.map(id);
   if (arm === "sparse") request.advanced.veda = row.veda ?? { enabled: true, generated: "90%", reference: "90%", fullAttentionLayers: "", fullAttentionSteps: "" };
@@ -201,19 +215,95 @@ export function observed(job, metrics, row, arm, runner) {
   assert(report && metrics?.vedaExecution && digest(report) === digest(metrics.vedaExecution), "missing/disagreeing native observed Veda outcome");
   assert(metrics.model === row.model && metrics.quantLabel === row.tier && metrics.width === asset.file.width && metrics.height === asset.file.height && metrics.steps === row.sampling.steps && metrics.backend === runner.reportedBackend, "actual metrics tier/schedule/backend identity differs");
   assert(Number.isFinite(metrics.totalMs) && metrics.totalMs > 0 && Number.isFinite(metrics.peakMemoryBytes) && metrics.peakMemoryBytes > 0, "actual timing/peak metrics absent");
+  const whole = metrics.terminalMemory;
+  assert(whole?.schemaVersion === 1 && whole.scope === "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save" && whole.hostMethod === "current_process_rss_independent_40ms_poll_plus_end_sample" && whole.hostSampleIntervalMs === 40 && whole.hostSampleCount > 0 && whole.hostProcessRssAtStartBytes > 0 && whole.hostProcessRssSampleMaxBytes >= whole.hostProcessRssAtStartBytes, "full-job process memory observation missing");
+  if (row.backend === "mlx") assert(whole.device?.method === "mlx_allocator_job_scoped_peak_no_step_resets" && whole.device.allocatorPeakBytes > 0 && whole.device.allocatorPeakBytes === metrics.peakMemoryBytes, "MLX full-job allocator peak missing or disagrees with product peak");
+  else assert(whole.device?.method === "cuda_current_pool_job_scoped_highwater_reset_before_handler" && whole.device.sameCurrentPool === true && whole.device.usedHighBytes > 0 && whole.device.reservedHighBytes > 0, "CUDA current-pool full-job peak missing");
+  const estimate = report.terminalEstimate;
+  assert(estimate?.schemaVersion === 1 && estimate.method === "native_staged_dense_floor_plus_spec_headroom_plus_problem_sparse_workspace" && estimate.interpretation === "admission_lower_floor_plus_conservative_workspace_not_an_upper_peak_ceiling" && [estimate.baseBytes, estimate.headroomBytes, estimate.sparseWorkspaceBoundBytes, estimate.estimatedTotalBytes].every(Number.isSafeInteger) && estimate.baseBytes > 0 && estimate.headroomBytes >= 0 && estimate.sparseWorkspaceBoundBytes >= 0 && estimate.estimatedTotalBytes === estimate.baseBytes + estimate.headroomBytes + estimate.sparseWorkspaceBoundBytes && estimate.hostFullJobEstimateBytes === null, "native absolute admission estimate missing or inconsistent");
+  assert((arm === "dense") === (estimate.sparseWorkspaceBoundBytes === 0), "dense/sparse admission workspace identity differs");
+  assert(Number.isSafeInteger(report.workspaceBytes) && report.workspaceBytes >= 0 && report.workspaceBytes <= estimate.sparseWorkspaceBoundBytes, "native runtime workspace exceeds the pre-admitted problem bound");
+  if (row.backend === "candle_cuda") assert(arm === "dense" ? estimate.hostWorkspaceBoundBytes === null : Number.isSafeInteger(estimate.hostWorkspaceBoundBytes) && estimate.hostWorkspaceBoundBytes > 0, "CUDA native host workspace bound missing");
+  const measuredDevicePeak = row.backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
+  assert(Number.isSafeInteger(measuredDevicePeak) && measuredDevicePeak > 0, "full-job device peak byte count is not exact");
   assert(report.denseTokenPairs > 0 && Number.isFinite(report.totalAttentionFraction) && report.totalAttentionFraction > 0 && report.totalAttentionFraction <= 1, "attention denominator unobserved");
+  const telemetry = report.terminalTelemetry;
+  assert(telemetry?.schemaVersion === 1 && telemetry.backend === row.backend && telemetry.hostMethod === "current_process_rss_independent_40ms_poll_plus_completed_step_sample" && telemetry.hostSampleIntervalMs === 40 && telemetry.hostSampleMaxBytes > 0 && telemetry.workspaceComparison === "unavailable: full denoise allocations are not attributable to Veda workspace", "owned terminal producer telemetry missing or wrong scope");
+  assert(Array.isArray(telemetry.steps) && telemetry.steps.length === metrics.steps && telemetry.steps.every((s, i) => s.index === i + 1 && Number.isSafeInteger(s.wallNs) && s.wallNs > 0 && s.hostProcessRssSampleBytes > 0 && s.hostWindowSampleMaxBytes > 0 && s.hostWindowSampleCount > 0), "completed synchronized step/host observations incomplete");
+  const key = row.backend === "mlx" ? "allocatorPeakBytesCumulative" : "reservedHighBytesCumulative";
+  const method = row.backend === "mlx" ? "mlx_process_allocator_cumulative_highwater_no_reset" : "cuda_current_pool_cumulative_highwater_no_reset";
+  assert(telemetry.steps.every((s, i) => s.device?.method === method && s.device[key] > 0 && (!i || s.device[key] >= telemetry.steps[i - 1].device[key]) && (row.backend === "mlx" ? s.device.allocatorActiveSampleBytes > 0 && s.device.allocatorCacheSampleBytes >= 0 : s.device.poolAvailable === true && s.device.usedHighBytesCumulative > 0 && s.device.reservedSampleBytes > 0)), "device allocator/current-pool counters missing or nonmonotone");
   if (arm === "dense") assert(report.requested === false && report.effective === "dense" && report.sparseCalls === 0 && report.denseCalls > 0 && report.totalAttentionFraction === 1 && report.predictorLoadAttempts === 0 && report.workspaceBytes === 0 && !report.fallbackReason, "off path not observed unchanged dense");
   else if (row.expectation === "controlled_dense") assert(report.requested === true && report.effective === "dense" && report.sparseCalls === 0 && report.denseCalls > 0 && report.totalAttentionFraction === 1 && !report.fallbackReason, "forced full-attention controls not observed dense");
   else if (row.expectation === "fallback_dense") assert(report.requested === true && report.effective === "dense" && report.sparseCalls === 0 && report.denseCalls > 0 && typeof row.fallbackReason === "string" && row.fallbackReason.length > 0 && report.fallbackReason === row.fallbackReason, "expected explicit dense fallback not observed");
   else assert(report.requested === true && ["sparse", "mixed"].includes(report.effective) && report.sparseCalls > 0 && report.predictorScoreCalls > 0 && report.kernel === runner.kernel && report.plan && ["exact", "nearest"].includes(report.planMatch) && !report.fallbackReason, "enabled request did not execute learned sparse (fallback is unresolved)");
   return asset;
 }
+
+// A logical worker ID is stable across guardian-controlled process restarts.
+// Each arm must instead carry its own reaped process-birth receipt, bound to
+// the exact admitted request and frozen binary/config/device/campaign.
+export function verifiedArmLifetime(attempt, runner, backend, sourceFreezeSha256) {
+  const closure = attempt?.workerClosure, admission = attempt?.admissionProof;
+  const marker = attempt?.request?.advanced?.s9Harness;
+  assert(admission?.phase === "submit-or-reconcile" && admission.admitted === true && admission.physicalGpuId === runner.physicalGpuId && Array.isArray(admission.driverSamples) && admission.driverSamples.length === 5, "arm admission proof missing or wrong device");
+  assert(closure?.schemaVersion === 1 && closure.lifecycle === "fresh_per_arm_process_drained_before_next_admission" && closure.reaped === true && closure.descendantsDrained === true && Number.isInteger(closure.exitCode), "owned worker process drain proof missing");
+  assert(closure.key === attempt.key && closure.jobId === attempt.jobId && closure.jobId === attempt.job?.id && marker?.key === closure.key && marker?.campaignId === closure.campaignId && marker?.fingerprint === closure.sourceFingerprint, "worker process is not bound to this admitted product job");
+  assert(Number.isSafeInteger(closure.pid) && closure.pid > 0 && (typeof closure.birth === "string" ? closure.birth.length > 0 : Number.isSafeInteger(closure.birth) && closure.birth > 0), "owned worker PID/birth identity missing");
+  assert(closure.workerId === runner.workerId && attempt.job.workerId === runner.workerId && closure.backend === backend && closure.physicalGpuId === runner.physicalGpuId && closure.workerBinarySha256 === runner.workerBinary?.sha256, "worker incarnation differs from frozen binary/backend/device");
+  assert([closure.workerBinarySha256, closure.workerConfigSha256, closure.sourceFreezeSha256, closure.guardianOwnerTokenSha256, closure.sourceFingerprint].every((value) => typeof value === "string" && HEX.test(value)), "worker incarnation fingerprint missing");
+  assert(closure.sourceFreezeSha256 === sourceFreezeSha256 && closure.workerConfigBinding && Array.isArray(closure.workerConfigBinding.configFiles) && closure.workerConfigBinding.configFiles.length > 0 && closure.workerConfigBinding.environment && digest(closure.workerConfigBinding) === closure.workerConfigSha256, "worker source/config launch attestation differs");
+  assert(!Object.hasOwn(closure.workerConfigBinding.environment, "SCENEWORKS_ACCESS_TOKEN") && !Object.hasOwn(closure.workerConfigBinding.environment, "SCENEWORKS_PARENT_PID"), "private worker launch fields persisted");
+  assert(digest(closure.admissionReceipt) === digest(admission), "worker incarnation admission differs from the pre-submit five-sample proof");
+  return closure;
+}
+
+// The dense arm is an observed baseline for this exact pair, never an ex-ante
+// native peak prediction. Compare like-scoped whole-job counters; the native
+// problem bound is the only additive term. A passing comparison is empirical
+// evidence, not Veda-only allocation attribution or a continuously measured RSS peak.
+export function pairedMemoryEnvelope(dense, sparse, backend, runner, sourceFreezeSha256) {
+  assert(dense?.status === "collected" && sparse?.status === "collected", "paired memory needs both completed arms");
+  const d = dense.metrics, s = sparse.metrics, dj = dense.job, sj = sparse.job;
+  assert(dj?.id && sj?.id && dj.id !== sj.id && dj.workerId && dj.workerId === sj.workerId, "paired logical worker/job identity differs");
+  const dp = verifiedArmLifetime(dense, runner, backend, sourceFreezeSha256), sp = verifiedArmLifetime(sparse, runner, backend, sourceFreezeSha256);
+  assert(dp.pid !== sp.pid || dp.birth !== sp.birth, "paired arms reused one process incarnation");
+  assert(dp.workerBinarySha256 === sp.workerBinarySha256 && dp.workerConfigSha256 === sp.workerConfigSha256 && dp.sourceFreezeSha256 === sp.sourceFreezeSha256 && dp.sourceFingerprint === sp.sourceFingerprint && dp.physicalGpuId === sp.physicalGpuId, "paired owned worker binary/config/source/device identity differs");
+  assert(["mlx", "candle_cuda"].includes(backend) && d?.backend === (backend === "mlx" ? "mlx" : "cuda") && s?.backend === d.backend, "paired memory backend differs");
+  const dh = dense.request?.advanced?.s9Harness, sh = sparse.request?.advanced?.s9Harness;
+  assert(dh?.arm === "dense" && sh?.arm === "sparse" && dh.campaignId && dh.campaignId === sh.campaignId && dh.caseId && dh.caseId === sh.caseId && dh.fingerprint && dh.fingerprint === sh.fingerprint, "paired memory campaign identity differs");
+  const withoutArm = (request) => { const copy = structuredClone(request); delete copy.advanced.veda; delete copy.advanced.s9Harness; return copy; };
+  assert(digest(withoutArm(dense.request)) === digest(withoutArm(sparse.request)), "paired memory requests differ beyond Veda");
+  const de = d.vedaExecution?.terminalEstimate, se = s.vedaExecution?.terminalEstimate;
+  assert(de?.baseBytes === se?.baseBytes && de?.headroomBytes === se?.headroomBytes && de?.sparseWorkspaceBoundBytes === 0 && se?.sparseWorkspaceBoundBytes > 0, "paired native admission base/problem identity differs");
+  assert(s.vedaExecution.workspaceBytes <= se.sparseWorkspaceBoundBytes, "sparse runtime workspace exceeds admitted problem bound");
+  const deviceMethod = backend === "mlx" ? "mlx_allocator_job_scoped_peak_no_step_resets" : "cuda_current_pool_job_scoped_highwater_reset_before_handler";
+  assert(d.terminalMemory?.scope === "whole_worker_job_before_handler_through_after_handler_including_load_denoise_decode_save" && s.terminalMemory?.scope === d.terminalMemory.scope && d.terminalMemory?.hostMethod === "current_process_rss_independent_40ms_poll_plus_end_sample" && s.terminalMemory?.hostMethod === d.terminalMemory.hostMethod, "paired whole-job memory scopes differ");
+  assert(d.terminalMemory?.device?.method === deviceMethod && s.terminalMemory?.device?.method === deviceMethod, "paired device peak methods differ");
+  const deviceKey = backend === "mlx" ? "allocatorPeakBytes" : "reservedHighBytes";
+  const densePeak = d.terminalMemory.device[deviceKey], sparsePeak = s.terminalMemory.device[deviceKey];
+  const deviceCeiling = densePeak + se.sparseWorkspaceBoundBytes;
+  assert([densePeak, sparsePeak, deviceCeiling].every(Number.isSafeInteger) && densePeak > 0 && sparsePeak > 0, "paired device peak or bound is not an exact byte count");
+  const denseHost = d.terminalMemory.hostProcessRssSampleMaxBytes, sparseHost = s.terminalMemory.hostProcessRssSampleMaxBytes;
+  const hostBound = backend === "candle_cuda" ? se.hostWorkspaceBoundBytes : se.sparseWorkspaceBoundBytes;
+  const hostCeiling = denseHost + hostBound;
+  assert([denseHost, sparseHost, hostBound, hostCeiling].every(Number.isSafeInteger) && denseHost > 0 && sparseHost > 0 && hostBound > 0, "paired host RSS or workspace bound is not an exact byte count");
+  return {
+    schemaVersion: 1, method: "same_frozen_binary_config_device_distinct_worker_process_dense_observed_peak_plus_problem_workspace_bound",
+    campaignId: dh.campaignId, caseId: dh.caseId, sourceFingerprint: dh.fingerprint,
+    denseJobId: dj.id, sparseJobId: sj.id, logicalWorkerId: dj.workerId, backend,
+    workerIncarnations: [{pid: dp.pid, birth: dp.birth, jobId: dp.jobId}, {pid: sp.pid, birth: sp.birth, jobId: sp.jobId}],
+    device: { method: deviceMethod, denseObservedPeakBytes: densePeak, sparseObservedPeakBytes: sparsePeak, nativeSparseWorkspaceBoundBytes: se.sparseWorkspaceBoundBytes, denseObservedPlusBoundBytes: deviceCeiling, withinEmpiricalEnvelope: sparsePeak <= deviceCeiling },
+    host: { method: d.terminalMemory.hostMethod, scope: "sampled process RSS whole-job maxima; Apple unified RSS overlaps MLX allocation", denseObservedSampleMaxBytes: denseHost, sparseObservedSampleMaxBytes: sparseHost, nativeSparseHostWorkspaceBoundBytes: hostBound, denseObservedPlusBoundBytes: hostCeiling, withinEmpiricalEnvelope: sparseHost <= hostCeiling },
+    limit: "paired observed dense baseline, not ex-ante admission ceiling; sampled host RSS can miss transients; whole-job allocator/current-pool peaks cannot isolate Veda allocations; MLX native cumulative steps share the existing worker job-start peak reset window",
+  };
+}
 // This adapter must hold the established physical OS lock; campaign.json/marker is not that lock.
-export async function physicalPhase(guard, m, backend, phase, { now } = {}) {
+export async function physicalPhase(guard, m, backend, phase, { now, context = {} } = {}) {
   const r = m.runners[backend], expected = m.sourceFreeze.resourceContract?.[backend];
   assert(expected?.canonicalLocks?.length && expected.physicalGpuId === r.physicalGpuId && digest(guard.lockIdentities) === digest(expected.canonicalLocks), "wrong canonical physical resource lock");
   assert(guard.owned === true && guard.ownerToken && await guard.isOwnerAlive() === true && await guard.ownsCanonicalLocks() === true, "unowned/dead physical guard owner");
-  const proof = await guard.beforePhase(phase); now ??= Date.now();
+  const proof = await guard.beforePhase(phase, context); now ??= Date.now();
   assert(proof.phase === phase && proof.ownerToken === guard.ownerToken && proof.admitted === true && proof.physicalGpuId === r.physicalGpuId && proof.observedAt <= now && now - proof.observedAt <= 10000 && proof.conflictingJobs === 0 && proof.queueObservedAt <= now && now - proof.queueObservedAt <= 10000, "stale/unadmitted current phase or conflicting queue");
   assert(Array.isArray(proof.driverSamples) && proof.driverSamples.length === 5 && proof.driverSamples.every((x, i, a) => x.admitted === true && x.driverAvailable === true && Number.isFinite(x.observedAt) && x.observedAt <= now && now - x.observedAt <= 15000 && (!i || x.observedAt > a[i - 1].observedAt)), "five timed driver admission samples missing/stale");
   return proof;
@@ -228,7 +318,7 @@ export async function acquirePhysicalGuard(m, backend, runDir) {
   assert(adapter.protocol === "epic-25140-physical-guard-v1" && typeof adapter.acquire === "function", "actual physical guard adapter unavailable");
   const guard = await adapter.acquire({ manifest: m, backend, runDir });
   try { await physicalPhase(guard, m, backend, "campaign-start"); } catch (error) { if (guard?.release) await guard.release(); throw error; }
-  assert(typeof guard.release === "function" && typeof guard.retainForOwnedJobs === "function", "physical guard release/owned-job retention adapter missing"); return guard;
+  assert(typeof guard.release === "function" && typeof guard.retainForOwnedJobs === "function" && typeof guard.submit === "function" && typeof guard.attachJob === "function", "physical guard release/owned-job retention adapter missing"); return guard;
 }
 export async function claimLease(m, backend, runDir) {
   const r = m.runners[backend]; assert(path.isAbsolute(r.leasePath), "campaign resume marker path required");
@@ -251,7 +341,7 @@ export async function claimLease(m, backend, runDir) {
 export async function runCampaign(m, { backend, runDir, validate = validateManifest, api = new ProductApi(m.runners?.[backend]?.apiUrl, process.env.SCENEWORKS_TOKEN), lease = claimLease, physical = acquirePhysicalGuard, sleep = delay, compare = collectComparison, sourceCheck = inspectSources } = {}) {
   assert(["mlx", "candle_cuda"].includes(backend) && path.isAbsolute(runDir), "explicit backend and external output directory required");
   assert(!runDir.startsWith(`${m.sourceFreeze.sceneworks.root}/`) && !runDir.startsWith(`${m.sourceFreeze.inference.root}/`), "receipts must stay outside frozen source repos");
-  const v = await validate(m); await mkdir(runDir, { recursive: true });
+  const v = await validate(m, { backend }); await mkdir(runDir, { recursive: true });
   const campaignFile = path.join(runDir, "campaign.json"); let state;
   try { state = JSON.parse(await readFile(campaignFile, "utf8")); assert(state.fingerprint === v.fingerprint, "resume input/source/artifact identity differs"); } catch (e) { if (e.code !== "ENOENT") throw e; state = { fingerprint: v.fingerprint, campaignId: m.campaignId, namedCells: 5400, optionalStressExecuted: 0, cells: {}, qualityAcceptance: "pending Michael", completedAcceptance: false }; }
   const guard = await physical(m, backend, runDir); let release;
@@ -269,31 +359,31 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       await sourceCheck(m); await unchanged(v.snapshots); await physicalPhase(guard, m, backend, "prepare-carriers");
       for (const asset of Object.values(m.assets)) {
         const r = await api.json(`/api/v1/projects/${encodeURIComponent(m.projectId)}/assets/${encodeURIComponent(asset.assetId)}`);
-        assert(r.status === 200 && r.value.id === asset.assetId, "product carrier asset missing/stale");
+        assert(r.status === 200 && r.value.id === asset.assetId && r.value.type === asset.type, "product carrier asset missing/stale/wrong type");
         await api.verifyCarrier(r.value, { ...asset, projectId: m.projectId }, m.limits.maxMediaBytes);
       }
       cell ??= { kind: row.kind, status: "planned", arms: {} }; state.cells[row.id] = cell;
       for (const arm of row.kind === "expected_refusal" ? ["refusal"] : row.kind === "product_proof" ? ["sparse"] : ["dense", "sparse"]) {
         if (submitted >= m.limits.maxJobs) break;
-        await sourceCheck(m); await unchanged(v.snapshots); if (release.check) await release.check(); await physicalPhase(guard, m, backend, "submit-or-reconcile");
+        await sourceCheck(m); await unchanged(v.snapshots); if (release.check) await release.check(); const submitProof = await physicalPhase(guard, m, backend, "submit-or-reconcile");
         let attempt = cell.arms[arm];
         if (attempt?.status === "collected") { await boundFile(attempt.media); continue; }
         if (attempt?.status === "expected_refusal") continue;
         const request = requestFor(m, row, arm); const key = digest({ fingerprint: v.fingerprint, row: row.id, arm, request });
         request.advanced.s9Harness = { campaignId: m.campaignId, caseId: row.id, arm, key, fingerprint: v.fingerprint };
-        if (!attempt) { attempt = { key, request, requestSha256: digest(request), status: "intent", deadline: Date.now() + m.limits.jobTimeoutMs }; cell.arms[arm] = attempt; await atomic(campaignFile, state); }
+        if (!attempt) { const admissionProof = { ...submitProof }; delete admissionProof.ownerToken; attempt = { key, request, requestSha256: digest(request), admissionProof, status: "intent", deadline: Date.now() + m.limits.jobTimeoutMs }; cell.arms[arm] = attempt; await atomic(campaignFile, state); }
         assert(attempt.key === key && attempt.requestSha256 === digest(request), "persisted arm request identity differs");
         let job;
         if (attempt.jobId) { const r = await api.json(`/api/v1/jobs/${encodeURIComponent(attempt.jobId)}`); assert(r.status === 200, "recorded job not readable; do not resubmit"); job = r.value; }
-        else if (attempt.status === "submitting" || attempt.status === "ambiguous") { job = await reconcile(api, attempt); attempt.jobId = job.id; await atomic(campaignFile, state); }
+        else if (attempt.status === "submitting" || attempt.status === "ambiguous") { job = await reconcile(api, attempt); attempt.jobId = job.id; await atomic(campaignFile, state); await guard.attachJob(attempt); }
         else {
           assert(attempt.status === "intent", "failed attempt requires explicit human resolution; no automatic rerender");
           attempt.status = "submitting"; await atomic(campaignFile, state); submitted++;
-          let r; try { r = await api.json("/api/v1/video/jobs", { method: "POST", body: request }); } catch (error) { attempt.status = "ambiguous"; attempt.error = String(error); await atomic(campaignFile, state); throw error; }
+          let r; try { r = await guard.submit(attempt); } catch (error) { attempt.status = "ambiguous"; attempt.error = String(error); await atomic(campaignFile, state); throw error; }
           if (row.kind === "expected_refusal") {
-            const text = JSON.stringify(r.value); assert([400, 422].includes(r.status) && text.includes(row.recipe) && /declared.*not|not.*compatible/i.test(text), "expected modelIds refusal absent or unrelated error"); attempt.status = "expected_refusal"; attempt.response = r; cell.status = "expected_refusal_observed"; await atomic(campaignFile, state); continue;
+            validateRefusal(row, r); attempt.status = "expected_refusal"; attempt.response = r; cell.status = "expected_refusal_observed"; cell.refusalCategory = row.refusal?.category ?? "catalog_model_ids"; await atomic(campaignFile, state); continue;
           }
-          assert(r.status === 201 && r.value.id, `product enqueue failed: HTTP ${r.status}`); job = r.value; attempt.jobId = job.id; attempt.status = "enqueued"; await atomic(campaignFile, state);
+          assert(r.status === 201 && r.value.id, `product enqueue failed: HTTP ${r.status}`); job = r.value; attempt.jobId = job.id; attempt.status = "enqueued"; await atomic(campaignFile, state); await guard.attachJob(attempt);
         }
         assert(job.payload?.advanced?.s9Harness?.key === key && job.projectId === m.projectId, "product job request readback differs");
         for (const field of ["model", "mode", "prompt", "seed", "width", "height", "duration", "fps", "sourceAssetId", "lastFrameAssetId", "referenceAssetIds", "sourceClipAssetIds", "referenceAudioAssetIds"]) assert(digest(job.payload[field] ?? null) === digest(request[field] ?? null), `actual request readback differs: ${field}`);
@@ -308,10 +398,24 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
         }
         assert(TERMINAL.has(job.status), "unknown product job status"); attempt.job = job;
         if (job.status !== "completed") { attempt.status = job.status; cell.status = job.status; await atomic(campaignFile, state); continue; }
-        await physicalPhase(guard, m, backend, "collect-completed-evidence");
+        const collectProof = await physicalPhase(guard, m, backend, "collect-completed-evidence", { context: { key, jobId: job.id } });
+        attempt.workerClosure = collectProof.drainedWorker; await atomic(campaignFile, state);
         const metricsResult = await api.json(`/api/v1/jobs/${encodeURIComponent(job.id)}/metrics`); assert(metricsResult.status === 200, "metrics readback failed"); attempt.metrics = metricsResult.value;
         try {
           const asset = observed(job, attempt.metrics, row, arm, m.runners[backend]);
+          verifiedArmLifetime(attempt, m.runners[backend], backend, digest(m.sourceFreeze));
+          const admission = attempt.metrics.vedaExecution.terminalEstimate;
+          const whole = attempt.metrics.terminalMemory;
+          const measuredDevicePeak = backend === "mlx" ? whole.device.allocatorPeakBytes : whole.device.reservedHighBytes;
+          attempt.terminalMemoryComparison = {
+            method: "observed_full_job_allocator_or_current_pool_peak_against_native_admission_floor_plus_workspace",
+            measuredDevicePeakBytes: measuredDevicePeak,
+            admissionCompositionBytes: admission.estimatedTotalBytes,
+            differenceBytes: measuredDevicePeak - admission.estimatedTotalBytes,
+            hostProcessRssSampleMaxBytes: whole.hostProcessRssSampleMaxBytes,
+            hostWorkspaceBoundBytes: admission.hostWorkspaceBoundBytes,
+            interpretation: admission.interpretation,
+          };
           const reread = await api.json(`/api/v1/projects/${encodeURIComponent(m.projectId)}/assets/${encodeURIComponent(asset.id)}`); assert(reread.status === 200 && digest(reread.value.recipe?.rawAdapterSettings?.vedaExecution) === digest(asset.recipe.rawAdapterSettings.vedaExecution), "persisted asset observed outcome differs");
           const dir = path.join(runDir, key); await mkdir(dir, { recursive: true });
           attempt.media = await api.download(reread.value, path.join(dir, `${arm}.mp4`), m.limits.maxMediaBytes); attempt.asset = reread.value; attempt.status = "collected"; if (row.kind === "product_proof") cell.status = "product_proof_observed";
@@ -321,8 +425,16 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
       if (cell.arms.dense?.status === "collected" && cell.arms.sparse?.status === "collected") {
         cell.comparison = await compare(cell.arms.dense.media, cell.arms.sparse.media, row, path.join(runDir, digest(row.id)), m.limits.jobTimeoutMs);
         cell.review = { reviewer: "Michael", disposition: "pending" }; cell.status = "media_collected_evidence_incomplete";
-        // Product metrics expose only a combined peak and phase timing. Preserve missing instrumentation.
-        cell.nativeMeasurementGaps = ["per-step timing", "separate host/device peaks", "complete sparse bound versus observed peak"];
+        try {
+          cell.memoryEnvelope = pairedMemoryEnvelope(cell.arms.dense, cell.arms.sparse, backend, m.runners[backend], digest(m.sourceFreeze));
+          if (!cell.memoryEnvelope.device.withinEmpiricalEnvelope || !cell.memoryEnvelope.host.withinEmpiricalEnvelope) {
+            cell.status = "unresolved";
+            cell.memoryEnvelopeError = "observed sparse full-job peak exceeds the matched owned dense observed peak plus native problem workspace bound";
+          }
+        } catch (error) {
+          cell.status = "unresolved"; cell.memoryEnvelopeError = String(error);
+        }
+        cell.nativeMeasurementGaps = ["the paired dense observed peak is an empirical baseline, not an ex-ante device admission ceiling", "sampled host RSS may miss short transients and overlaps unified MLX allocation", "whole-job allocator/current-pool highwaters cannot attribute bytes to Veda alone; native MLX cumulative steps share the existing worker job-start reset window"];
       }
       await atomic(campaignFile, state);
     }
@@ -330,19 +442,28 @@ export async function runCampaign(m, { backend, runDir, validate = validateManif
     // An ambiguous enqueue or active timeout keeps the lease for reconciliation/cancel. Never free a GPU that may still be rendering.
     const uncertain = Object.values(state.cells).some((c) => Object.values(c.arms).some((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))));
     if (!uncertain) { await release(); await guard.release(); }
-    else { assert(typeof guard.retainForOwnedJobs === "function", "physical guard cannot retain uncertain owned jobs"); await guard.retainForOwnedJobs(Object.values(state.cells).flatMap((c) => Object.values(c.arms)).filter((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))).map((a) => ({ jobId: a.jobId ?? null, key: a.key, requestSha256: a.requestSha256 }))); }
+    else { assert(typeof guard.retainForOwnedJobs === "function" && typeof guard.submit === "function" && typeof guard.attachJob === "function", "physical guard cannot retain uncertain owned jobs"); await guard.retainForOwnedJobs(Object.values(state.cells).flatMap((c) => Object.values(c.arms)).filter((a) => ["submitting", "ambiguous", "timeout_owned_job_active"].includes(a.status) || (a.jobId && !TERMINAL.has(a.job?.status))).map((a) => ({ jobId: a.jobId ?? null, key: a.key, requestSha256: a.requestSha256 }))); }
     await atomic(campaignFile, state);
   }
   return state;
 }
 export function summary(state) {
   const cells = Object.values(state.cells), count = (status) => cells.filter((c) => c.status === status).length;
-  return { namedCells: 5400, knownCells: cells.length, expectedRefusalsObserved: count("expected_refusal_observed"), mediaCollectedPendingMichael: count("media_collected_review_pending") + count("media_collected_evidence_incomplete"), instrumentationIncomplete: count("media_collected_evidence_incomplete"), productProofsObserved: count("product_proof_observed"), unresolved: count("unresolved"), qualityAcceptance: "pending Michael", completedAcceptance: false };
+  return { namedCells: 5400, knownCells: cells.length, expectedRefusalsObserved: cells.filter((c) => c.status === "expected_refusal_observed" && c.refusalCategory !== "input_boundary").length, inputBoundaryRefusalsObserved: cells.filter((c) => c.status === "expected_refusal_observed" && c.refusalCategory === "input_boundary").length, mediaCollectedPendingMichael: count("media_collected_review_pending") + count("media_collected_evidence_incomplete"), instrumentationIncomplete: count("media_collected_evidence_incomplete"), productProofsObserved: count("product_proof_observed"), unresolved: count("unresolved"), qualityAcceptance: "pending Michael", completedAcceptance: false };
 }
 async function main() {
   const [command, manifestPath, ...args] = process.argv.slice(2);
   const m = JSON.parse(await readFile(manifestPath, "utf8"));
-  if (command === "validate") { const v = await validateManifest(m); console.log(JSON.stringify({ fingerprint: v.fingerprint, cells: v.rows.length, named: 5400, expectedRefusals: v.rows.filter((r) => r.kind === "expected_refusal").length, acceptance: false })); return; }
+  if(command==="bind-corpus") {
+    assert(args.length===3,"usage: bind-corpus MANIFEST PLAN IMPORT_RECEIPT OUTPUT");
+    const binding=async(file)=>({path:path.resolve(file),bytes:(await stat(file)).size,sha256:await hashFile(file)});
+    m.corpusPlan=await binding(args[0]);m.corpusImportReceipt=await binding(args[1]);
+    const result=bindCorpusPlan(m,JSON.parse(await readFile(args[0],"utf8")),JSON.parse(await readFile(args[1],"utf8")));
+    const output=path.resolve(args[2]);
+    for(const repo of [m.sourceFreeze.sceneworks.root,m.sourceFreeze.inference.root]) assert(output!==path.resolve(repo) && !output.startsWith(path.resolve(repo)+path.sep),"bound corpus output must stay outside frozen repos");
+    await atomic(output,result);console.log(JSON.stringify({assets:Object.keys(result.assets).length,boundaryBindings:Object.keys(result.boundaryBindings).length,status:"IDs bound from supplied actual import/readback receipt; runtime/source validation still required",acceptance:false}));return;
+  }
+  if (command === "validate") { assert(args.length <= 1, "usage: validate MANIFEST [BACKEND]"); const v = await validateManifest(m, { backend: args[0] }); console.log(JSON.stringify({ fingerprint: v.fingerprint, cells: v.rows.length, named: 5400, expectedRefusals: v.rows.filter((r) => r.kind === "expected_refusal" && !r.boundary).length, inputBoundaryRefusals: v.rows.filter((r) => r.kind === "expected_refusal" && r.boundary).length, hostValidation: v.hostValidation, acceptance: false })); return; }
   assert(command === "run" && args.length === 2, "usage: validate MANIFEST | run MANIFEST BACKEND EXTERNAL_RUN_DIR");
   console.log(JSON.stringify(summary(await runCampaign(m, { backend: args[0], runDir: path.resolve(args[1]) }))));
 }
