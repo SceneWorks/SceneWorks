@@ -15838,8 +15838,72 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
 
 #[tokio::test]
 async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incompatible_requests() {
+    let _hf_cache = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     let (app, project_id) = shipped_manifest_app(&temp).await;
+    // This test selects the shipped Turbo LoRA. Seed a small, structurally valid adapter at its
+    // immutable manifest source so the real installed-file and receipt/hash checks run without
+    // depending on whichever models happen to be cached on the machine running the test.
+    let builtin_path = temp.path().join("config/manifests/builtin.loras.jsonc");
+    let builtin: Value = serde_json::from_str(&strip_jsonc_comments(
+        &std::fs::read_to_string(&builtin_path).unwrap(),
+    ))
+    .unwrap();
+    let turbo = builtin["loras"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "minimax_h3_turbo_8step")
+        .unwrap();
+    let source = &turbo["source"];
+    let (repo, revision, filename) = (
+        source["repo"].as_str().unwrap(),
+        source["revision"].as_str().unwrap(),
+        source["file"].as_str().unwrap(),
+    );
+    let data_dir = temp.path().join("data");
+    let snapshot = huggingface_repo_cache_path(&data_dir, repo)
+        .unwrap()
+        .join("snapshots")
+        .join(revision);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let turbo_file = snapshot.join(filename);
+    write_test_safetensors_with_keys(
+        &turbo_file,
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let metadata = std::fs::metadata(&turbo_file).unwrap();
+    let modified_nanos = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_string();
+    use sha2::Digest as _;
+    let sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(std::fs::read(&turbo_file).unwrap())
+    );
+    let receipt_dir = data_dir
+        .join("loras")
+        .join(safe_download_dir("minimax_h3_turbo_8step"));
+    std::fs::create_dir_all(&receipt_dir).unwrap();
+    std::fs::write(
+        receipt_dir.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&json!({
+            "repo": repo,
+            "loraFileName": filename,
+            "loraFileBytes": metadata.len(),
+            "loraFileModifiedNanos": modified_nanos,
+            "loraFileSha256": sha256
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     std::fs::write(temp.path().join("config/manifests/user.loras.jsonc"),
         json!({"schemaVersion":1,"loras":[{"id":"user_style","name":"H3 style","family":"minimax-h3","triggerWords":[],"compatibility":{"families":["minimax-h3"]},"source":{"provider":"local","path":"loras/h3_style.safetensors"}}]}).to_string()).unwrap();
     std::fs::create_dir_all(temp.path().join("data/loras")).unwrap();
