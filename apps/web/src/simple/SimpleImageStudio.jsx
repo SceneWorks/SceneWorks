@@ -35,7 +35,7 @@ import { minStepsForModel } from "../videoModelLimits.js";
 import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
-  QWEN_IMAGE_2_1_MODEL_ID,
+  qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
@@ -73,6 +73,9 @@ const TIER_SCREEN = "image";
 export function SimpleImageStudio() {
   const {
     imageModels = [],
+    // The whole catalog (sc-25908): the Qwen rewriters are `type: "utility"` entries, which
+    // `imageModels` (generation pickers only) never contains.
+    models: catalogModels = [],
     macCapabilities,
     createImageJob,
     rememberLocalGenerationJob,
@@ -308,12 +311,12 @@ export function SimpleImageStudio() {
     [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
   );
   const qwenRewriteModel = useMemo(() => {
-    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
+    if (!qwenRewriterAppliesTo(selectedModel)) return null;
     const id = qwenRewriteReferenceIds.length
       ? QWEN_REWRITE_I2I_MODEL_ID
       : QWEN_REWRITE_T2I_MODEL_ID;
-    return imageModels.find((entry) => entry.id === id) ?? null;
-  }, [imageModels, selectedModel?.id, qwenRewriteReferenceIds.length]);
+    return catalogModels.find((entry) => entry.id === id) ?? null;
+  }, [catalogModels, selectedModel, qwenRewriteReferenceIds.length]);
   const qwenRewriteAvailable =
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&

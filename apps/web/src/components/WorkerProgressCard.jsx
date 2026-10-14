@@ -17,6 +17,7 @@ import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailConte
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
+import { PrefixKvCacheDetail } from "./PrefixKvCacheDetail.jsx";
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -862,6 +863,9 @@ export function WorkerProgressCard({
       {job.error ? (
         <p className="worker-progress-card__message error">{job.error}</p>
       ) : null}
+      {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
+          a prefix KV cache; renders nothing for every other job. */}
+      <PrefixKvCacheDetail job={job} />
       <div className="worker-progress-card__actions">
         {canCancel ? (
           <button

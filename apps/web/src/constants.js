@@ -109,6 +109,17 @@ export const QWEN_IMAGE_2_1_MODEL_ID = "qwen_image_2_1";
 export const QWEN_REWRITE_T2I_MODEL_ID = "qwen_image_2_1_pe_t2i";
 export const QWEN_REWRITE_I2I_MODEL_ID = "qwen_image_2_1_pe_i2i";
 
+// The catalog family both rewriter targets share: base 2.1 and its distilled Turbo sibling
+// (sc-25908, epic 25899) — one prompt format, one template. The worker accepts exactly that pair as
+// a rewrite target (`sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS`), and
+// `qwenImage21Turbo.test.js` holds this family to that list over the shipped catalog.
+export const QWEN_IMAGE_2_1_FAMILY = "qwen-image-2-1";
+
+// Whether the official Qwen rewriters apply to the selected generation model.
+export function qwenRewriterAppliesTo(model) {
+  return model?.family === QWEN_IMAGE_2_1_FAMILY;
+}
+
 // DWPose whole-body pose detector (sc-17634 re-host, `type: "utility"` in builtin.models.jsonc).
 // One catalog entry carrying BOTH ONNX graphs the pose lane loads — YOLOX person boxes + the RTMW
 // 133-point COCO-WholeBody model. Since sc-17634 the worker's resolver is CACHE-ONLY: it never

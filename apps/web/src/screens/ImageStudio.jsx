@@ -40,6 +40,7 @@ import {
 } from "../qwenAlpha.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
+import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
@@ -177,7 +178,7 @@ import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
   PROMPT_REFINE_MODEL_ID,
-  QWEN_IMAGE_2_1_MODEL_ID,
+  qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
   terminalStatuses,
@@ -900,12 +901,12 @@ export function ImageStudio() {
     return single ? [single] : [];
   }, [mode, referenceAssetIds, referenceAssetId, sourceAssetId]);
   const qwenRewriteModel = useMemo(() => {
-    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return undefined;
+    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
     const id = qwenRewriteReferenceIds.length
       ? QWEN_REWRITE_I2I_MODEL_ID
       : QWEN_REWRITE_T2I_MODEL_ID;
     return models.find((entry) => entry.id === id);
-  }, [models, selectedModel?.id, qwenRewriteReferenceIds.length]);
+  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
   // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
   // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
   // install, no degraded path": with nothing installed there is no affordance at all, not a
@@ -1142,6 +1143,17 @@ export function ImageStudio() {
   // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
   // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
   const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
+  // sc-25908: the model's declared reference cap (`limits.maxReferenceAssets` — 10 for the Qwen
+  // Image 2.1 family) on the multi-reference picker, which replaces the source, so the count is
+  // exactly the list sent. Null for a model that declares none (FLUX.2-dev): no cap is shown and
+  // the enqueue gate stays the only bound, as before.
+  const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
+  const referenceOverflowError =
+    mode === "edit_image" && maxStudioReferences != null && referenceAssetIds.length > maxStudioReferences
+      ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
+          referenceAssetIds.length - maxStudioReferences
+        }.`
+      : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -2999,6 +3011,7 @@ export function ImageStudio() {
       // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
       // not only on click. null when the dimensions are valid.
       dimensionError,
+      referenceOverflowError,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -3022,6 +3035,7 @@ export function ImageStudio() {
       selectedModel,
       multiPhaseValidationIssues,
       dimensionError,
+      referenceOverflowError,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -3516,7 +3530,11 @@ export function ImageStudio() {
                     buttonLabel="Select images"
                     changeLabel="Edit references"
                     emptyLabel="No reference images selected"
-                    label="Reference images"
+                    label={
+                      maxStudioReferences != null
+                        ? `Reference images (up to ${maxStudioReferences}, in order)`
+                        : "Reference images"
+                    }
                     multiple
                     onChange={setReferenceAssetIds}
                     values={referenceAssetIds}
