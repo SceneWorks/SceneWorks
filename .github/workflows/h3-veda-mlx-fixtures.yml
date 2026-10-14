@@ -31,13 +31,96 @@ on:
 permissions:
   contents: read
 
-# Default-main registration only; the source-owned feature workflow runs the guarded fixtures.
+concurrency:
+  group: h3-veda-mlx-five-${{ inputs.physical_gpu_id }}
+  cancel-in-progress: false
+
 jobs:
-  registration_only:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+  mac2:
+    runs-on: [self-hosted, macOS, ARM64, rw-mage]
+    timeout-minutes: 75
+    env:
+      S9_SCENEWORKS_SHA: ${{ inputs.sceneworks_sha }}
+      S9_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      S9_EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+      S9_PHYSICAL_GPU_ID: ${{ inputs.physical_gpu_id }}
+      S9_METAL_DEVICE_NAME: ${{ inputs.metal_device_name }}
+      S9_RUN_DIR: ${{ inputs.run_dir }}
+    defaults:
+      run:
+        working-directory: ${{ github.workspace }}/sceneworks
     steps:
-      - name: Confirm default-branch registration only
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          path: sceneworks
+          fetch-depth: 1
+      - name: Prove private inference source read authority before checkout
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
-          test "$GITHUB_REF" = refs/heads/main
-          echo "H3 Veda Mac2 fixture workflow registered; this run is not device acceptance."
+          test "$S9_INFERENCE_SHA" = 'ba6ed0db452ecbed780ab8eeeac883cd9758ed3a'
+          test "$(gh api "repos/SceneWorks/inference/git/commits/$S9_INFERENCE_SHA" --jq .sha)" = "$S9_INFERENCE_SHA"
+          blob_sha=$(gh api "repos/SceneWorks/inference/contents/rust-toolchain.toml?ref=$S9_INFERENCE_SHA" --jq .sha)
+          [[ "$blob_sha" =~ ^[0-9a-f]{40}$ ]]
+          test "$(gh api 'orgs/SceneWorks/actions/runners?per_page=100' --jq '.runners[] | select(.id == 5281) | .name')" = 'nax-macos-2'
+          gh api 'repos/michaeltrefry/LensWorks/actions/runs?status=in_progress&per_page=1' --jq .total_count >/dev/null
+          gh api 'repos/michaeltrefry/LensWorks/actions/runs?status=queued&per_page=1' --jq .total_count >/dev/null
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 1
+          token: ${{ secrets.INFERENCE_READ_TOKEN }}
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Bind verified owned Python 3.12
+        run: node scripts/h3-veda-owned-python.mjs bootstrap --run-dir "$S9_RUN_DIR"
+      - name: Assert exact source, toolchain and physical runner before build
+        run: |
+          test "$GITHUB_SHA" = "$S9_SCENEWORKS_SHA"
+          test "$RUNNER_NAME" = 'nax-macos-2'
+          test "$S9_EXPECTED_RUNNER" = 'nax-macos-2'
+          test "$S9_INFERENCE_SHA" = 'ba6ed0db452ecbed780ab8eeeac883cd9758ed3a'
+          test "$(git rev-parse HEAD)" = "$S9_SCENEWORKS_SHA"
+          test "$(git -C ../inference rev-parse HEAD)" = "$S9_INFERENCE_SHA"
+          test "$(git -C ../inference status --porcelain=v1 --untracked-files=all)" = ''
+          test "$(git status --porcelain=v1 --untracked-files=all)" = ''
+          test "$(rustup run 1.96.0 rustc --version)" = 'rustc 1.96.0 (ac68faa20 2026-05-25)'
+          test "$S9_PHYSICAL_GPU_ID" = '734A72AE-13DA-52A8-B0CF-F97E1D646124'
+          test "$S9_METAL_DEVICE_NAME" = 'Apple M5 Max'
+          "$S9_GUARD_PYTHON" -I -S -c 'import sys; assert sys.version_info[:2] == (3, 12)'
+      - name: Build and run five exact native MLX fixtures under Mac2 admission
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+          HF_HUB_OFFLINE: '1'
+          TRANSFORMERS_OFFLINE: '1'
+        run: |
+          "$S9_GUARD_PYTHON" scripts/h3-veda-mlx-fixtures.py \
+            --sceneworks "$GITHUB_WORKSPACE/sceneworks" \
+            --inference "$GITHUB_WORKSPACE/inference" \
+            --sceneworks-sha "$S9_SCENEWORKS_SHA" \
+            --inference-sha "$S9_INFERENCE_SHA" \
+            --expected-runner "$S9_EXPECTED_RUNNER" \
+            --physical-gpu-id "$S9_PHYSICAL_GPU_ID" \
+            --metal-device-name "$S9_METAL_DEVICE_NAME" \
+            --run-dir "$S9_RUN_DIR"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: h3-veda-mlx-fixtures-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ inputs.run_dir }}/tools/python-3.12-attestation.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/receipt.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/running.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*-receipt.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stdout.log
+            ${{ inputs.run_dir }}/mlx-five-fixtures/fixture-*.stderr.log
+            ${{ inputs.run_dir }}/mlx-five-fixtures/*-phase.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/actions-ancestor-proof.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/watchdog-closure.json
+            ${{ inputs.run_dir }}/mlx-five-fixtures/watchdog-unresolved.json
+          if-no-files-found: error
+          retention-days: 30
