@@ -20,16 +20,21 @@ class Physical:
     def close(self):self.events.append("unlock");self.held=False
 
 class Services:
-    def __init__(self,events):self.events=events;self.children={"api":{}}
-    def start(self,name):self.events.append("start:"+name);self.children[name]={}
-    def stop(self,name):self.events.append("stop:"+name);self.children.pop(name,None)
+    def __init__(self,events):self.events=events;self.children={"api":{}};self.pid=100
+    def start(self,name):
+        self.events.append("start:"+name);self.pid+=1;self.children[name]={"pid":self.pid,"birth":"mock-birth-"+str(self.pid),"workerBinarySha256":"b"*64,"workerConfigBinding":{"configFiles":[],"environment":{"MOCK":"CPU_ONLY"}}}
+    def worker_receipt(self):
+        value=self.children["worker"];return {**value,"workerConfigSha256":g.digest(value["workerConfigBinding"])}
+    def stop(self,name):
+        self.events.append("stop:"+name);item=self.children.pop(name,None)
+        return None if item is None else {"pid":item["pid"],"birth":item["birth"],"reaped":True,"descendantsDrained":True,"exitCode":0}
     def close(self):self.events.append("drain-owned-descendants");self.children={}
     def owned_pids(self):return {111}
 
 class Fixture(unittest.TestCase):
     def setUp(self):
         self.dir=tempfile.TemporaryDirectory();self.addCleanup(self.dir.cleanup);self.root=Path(self.dir.name)
-        self.m={"projectId":"owned","runners":{"mlx":{"workerId":"worker","guardian":{"maxSeconds":10,"cleanupSeconds":1}}}}
+        self.m={"campaignId":"cpu-campaign","sourceFreeze":{"CPU_ONLY":True},"projectId":"owned","runners":{"mlx":{"workerId":"worker","physicalGpuId":"CPU_ONLY_NOT_GPU","guardian":{"maxSeconds":10,"cleanupSeconds":1}}}}
         self.events=[];self.alive=True;self.now=0;self.physical=Physical(self.events);self.services=Services(self.events);self.jobs={};self.variant="ok"
         self.owner=g.Guardian(self.m,"mlx",self.root,self.physical,self.services,self.api,lambda:self.alive,lambda:self.now)
     def intent(self,key="key",arm="dense"):
@@ -146,6 +151,7 @@ class Fixture(unittest.TestCase):
         from types import SimpleNamespace
         events=self.events;self.physical.device={"index":0};binary=self.root/"fake-api";binary.write_bytes(b"never executed")
         m={"runners":{"candle_cuda":{"guardian":{"dataDir":str(self.root/"data"),"configDir":str(self.root/"config"),"port":18000},"apiUrl":"http://127.0.0.1:18000","workerId":"owned-worker","requestedGpu":"0","physicalGpuId":"GPU-a","apiBinary":{"path":str(binary),"sha256":g.file_sha(binary)},"workerBinary":{"path":str(binary),"sha256":g.file_sha(binary)}}},"sourceFreeze":{"inference":{"root":"/frozen"},"inferenceFiles":{"scripts/media_campaign_windows.py":"frozen"}}}
+        (self.root/"config").mkdir()
         class Job:
             def assign_and_resume(self,child):events.append("assign-suspended");raise RuntimeError("job assignment refused")
             def close(self):events.append("close-job")
@@ -184,5 +190,40 @@ class Fixture(unittest.TestCase):
         i=self.intent();self.persist(i);self.owner.submit(i)
         journal=(self.root/"guardian-journal.json").read_text()
         self.assertNotIn(self.owner.token,journal)
+
+    def test_completed_arm_exact_worker_lifetime_is_bound_and_drained_before_admission(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        receipt=self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"})["drainedWorker"]
+        self.assertEqual(receipt["admissionReceipt"],self.owner.intents["key"]["admissionReceipt"])
+        self.assertEqual(receipt["sourceFreezeSha256"],g.digest(self.m["sourceFreeze"]));self.assertEqual(receipt["sourceFingerprint"],g.digest(self.m))
+        self.assertEqual(receipt["workerConfigSha256"],g.digest(receipt["workerConfigBinding"]))
+        self.assertTrue(receipt["reaped"] and receipt["descendantsDrained"]);self.assertNotIn(self.owner.token,json.dumps(receipt))
+        self.assertLess(self.events.index("stop:worker",self.events.index("POST:/api/v1/video/jobs")),self.events.index("probe:collect-completed-evidence"))
+
+    def test_missing_wrong_unknown_and_mutated_worker_closure_never_authorize_collection(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        for context in [{},{"key":"unknown","jobId":"job"},{"key":"key","jobId":"foreign"}]:
+            with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",context)
+        self.services.children["worker"]["birth"]="wrong-birth"
+        with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",{"key":"key","jobId":"job"})
+        self.assertNotIn("probe:collect-completed-evidence",self.events);self.assertIn("worker",self.services.children)
+
+    def test_lost_collection_reply_reuses_only_exact_durable_drained_lifetime(self):
+        i=self.intent();self.persist(i);self.owner.submit(i);self.jobs["job"]["status"]="completed"
+        context={"key":"key","jobId":"job"};one=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
+        two=self.owner.before_phase("collect-completed-evidence",context)["drainedWorker"]
+        self.assertEqual(one,two);self.assertNotIn("worker",self.services.children)
+        self.jobs["job"]["projectId"]="foreign"
+        with self.assertRaises(RuntimeError):self.owner.before_phase("collect-completed-evidence",context)
+
+    def test_actual_config_binding_hashes_bytes_refuses_symlinks_and_omits_secrets(self):
+        config=self.root/"config";config.mkdir();p=config/"builtin.models.jsonc";p.write_bytes(b"catalog-a")
+        m={"runners":{"mlx":{"guardian":{"configDir":str(config)}}}}
+        service=g.Services(m,"mlx",self.root,self.physical)
+        env={"SCENEWORKS_DATA_DIR":"owned","SCENEWORKS_ACCESS_TOKEN":"never-persist","SCENEWORKS_PARENT_PID":"123","HF_HUB_OFFLINE":"1"}
+        one=service.config_binding(env);self.assertNotIn("never-persist",json.dumps(one));self.assertNotIn("SCENEWORKS_PARENT_PID",one["environment"])
+        p.write_bytes(b"catalog-b");self.assertNotEqual(g.digest(one),g.digest(service.config_binding(env)))
+        (config/"alias").symlink_to(p)
+        with self.assertRaises(RuntimeError):service.config_binding(env)
 
 if __name__=="__main__":unittest.main()

@@ -70,7 +70,7 @@ export async function acquire({manifest:m,backend,runDir}) {
   return {owned:true,ownerToken:control.token,lockIdentities:control.locks,
     isOwnerAlive:async()=>{const s=await status();return s.pid===control.pid && !s.closed;},
     ownsCanonicalLocks:async()=>{const s=await status();return s.pid===control.pid && s.owned===true;},
-    beforePhase:async(phase)=>rpc(control,"phase",{phase}),
+    beforePhase:async(phase,context={})=>rpc(control,"phase",{phase,context}),
     submit:async(intent)=>rpc(control,"submit",{key:intent.key,requestSha256:intent.requestSha256,request:intent.request}),
     attachJob:async(intent)=>rpc(control,"attach",{key:intent.key,jobId:intent.jobId}),
     retainForOwnedJobs:async()=>rpc(control,"retain"),

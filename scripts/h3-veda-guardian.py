@@ -74,7 +74,9 @@ def pid_birth(pid):
             if code.value != 259: return None
             return (stamps[0].dwHighDateTime << 32) | stamps[0].dwLowDateTime
         finally: k.CloseHandle(h)
-    try: return command(["/bin/ps", "-p", str(pid), "-o", "lstart="], 3) or None
+    try:
+        identity=command(["/bin/ps","-p",str(pid),"-o","stat=","-o","lstart="],3).split(None,1)
+        return identity[1] if len(identity)==2 and not identity[0].startswith("Z") else None
     except subprocess.CalledProcessError: return None
 
 class Locks:
@@ -207,6 +209,7 @@ class Services:
         if kind=="worker":
             require(self.backend!="mlx" or self.r["requestedGpu"]=="mlx","normal MLX worker must explicitly select mlx, never auto")
             env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
+        config=self.config_binding(env) if kind=="worker" else None
         log=(self.root/(kind+".guardian.log")).open("ab"); self.logs.append(log)
         kwargs={"env":env,"stdout":log,"stderr":log,"stdin":subprocess.DEVNULL}
         job=None
@@ -217,14 +220,34 @@ class Services:
             if job: job.assign_and_resume(child)
         except Exception:
             child.kill();child.wait(timeout=10);job.close();raise
-        self.children[kind]={"child":child,"birth":pid_birth(child.pid),"job":job}
+        birth=pid_birth(child.pid)
+        self.children[kind]={"child":child,"birth":birth,"job":job,"workerConfigBinding":config,"binarySha256":binding["sha256"]}
+        require(birth is not None,"owned service has no live process birth identity")
+    def config_binding(self,env=None):
+        # Hash the actual byte-bound launch configuration without persisting secrets or per-process parent PID.
+        if env is None:
+            env=self.env();env.update(SCENEWORKS_WORKER_ONLY="1",SCENEWORKS_GPU_ID=self.r["requestedGpu"],SCENEWORKS_UTILITY_JOBS="0")
+        root=Path(self.r["guardian"]["configDir"])
+        require(root.is_dir() and not root.is_symlink(),"owned worker config directory unavailable")
+        files=[]
+        for p in sorted(root.rglob("*")):
+            require(not p.is_symlink(),"worker config symlink refused")
+            if p.is_file():files.append({"path":p.relative_to(root).as_posix(),"sha256":file_sha(p)})
+        public={k:v for k,v in env.items() if (k.startswith("SCENEWORKS_") and k not in ["SCENEWORKS_ACCESS_TOKEN","SCENEWORKS_PARENT_PID"]) or k in ["CUDA_VISIBLE_DEVICES","NVIDIA_VISIBLE_DEVICES","HF_HUB_OFFLINE","TRANSFORMERS_OFFLINE"]}
+        return {"configFiles":files,"environment":public}
+    def worker_receipt(self):
+        item=self.children.get("worker");require(item is not None,"owned worker descriptor missing")
+        self.owned_pids()
+        require(item["workerConfigBinding"]==self.config_binding(),"actual worker configuration changed after launch")
+        require(file_sha(self.r["workerBinary"]["path"])==item["binarySha256"],"actual worker binary changed after launch")
+        return {"pid":item["child"].pid,"birth":item["birth"],"workerBinarySha256":item["binarySha256"],"workerConfigSha256":digest(item["workerConfigBinding"]),"workerConfigBinding":item["workerConfigBinding"]}
     def owned_pids(self):
         require(all(pid_birth(x["child"].pid)==x["birth"] and x["birth"] is not None for x in self.children.values()),"owned service died/identity changed")
         return {os.getpid(),*[x["child"].pid for x in self.children.values()]}
     def stop(self,kind,deadline=None):
         grace=10 if deadline is None else max(.1,min(10,deadline-time.monotonic()))
         item=self.children.get(kind)
-        if not item:return
+        if not item:return None
         child=item["child"]
         if item["job"]:
             item["job"].terminate_and_reap(child,grace);item["job"].close()
@@ -248,6 +271,7 @@ class Services:
                     time.sleep(.1)
                 else:raise RuntimeError("owned process group descendants not drained")
         self.children.pop(kind)
+        return {"pid":child.pid,"birth":item["birth"],"reaped":child.poll() is not None,"descendantsDrained":True,"exitCode":child.returncode}
     def close(self):
         deadline=time.monotonic()+self.r["guardian"]["cleanupSeconds"]
         self.stop("worker",deadline);self.stop("api",deadline)
@@ -275,12 +299,34 @@ class Guardian:
                 intent["status"]=job["status"]
             if intent.get("status") not in TERMINAL:active=True
         self.save();return active
-    def before_phase(self,phase):
+    def before_phase(self,phase,context=None):
         require(not self.closed and not self.retain and self.clock()<self.deadline and self.alive(),"dead controller/expired owner deadline")
         # Never run idle baseline while the known owned job may be running. A next-phase guard drains only terminal owned worker.
         require(not self.active(),"owned job still active or ambiguous; phase unavailable")
-        self.services.stop("worker")
+        context={} if context is None else context
+        require(isinstance(context,dict),"phase context must be an object")
+        record=None
+        if phase=="collect-completed-evidence":
+            require(set(context)=={"key","jobId"},"completed evidence requires exact acknowledged key/job context")
+            record=self.intents.get(context["key"])
+            require(record is not None and record.get("jobId")==context["jobId"] and record.get("status")=="completed","completed evidence job identity/status differs")
+            job=self.api("GET","/api/v1/jobs/"+context["jobId"])
+            require(job.get("id")==context["jobId"] and job.get("projectId")==self.m["projectId"] and job.get("status")=="completed" and job.get("payload",{}).get("advanced",{}).get("s9Harness")==record["request"]["advanced"]["s9Harness"],"fresh completed product readback differs")
+            if "drainedWorker" in record:
+                require("worker" not in self.services.children,"new worker cannot reuse prior closure")
+                self.last_phase={**self.physical.probe(phase,self.services.owned_pids()),"ownerToken":self.token,"drainedWorker":record["drainedWorker"]}
+                return self.last_phase
+            require(record.get("workerProcess")==self.services.worker_receipt(),"acknowledged worker process/configuration differs")
+        else:require(not context,"unexpected phase context")
+        closure=self.services.stop("worker")
+        if record is not None:
+            process=record["workerProcess"]
+            require(closure and closure["pid"]==process["pid"] and closure["birth"]==process["birth"] and closure["reaped"] and closure["descendantsDrained"],"owned worker lifetime not verifiably drained")
+            r=self.m["runners"][self.backend]
+            record["drainedWorker"]={"schemaVersion":1,**context,**process,**closure,"workerId":r["workerId"],"physicalGpuId":r["physicalGpuId"],"backend":self.backend,"campaignId":self.m["campaignId"],"sourceFingerprint":digest(self.m),"guardianOwnerTokenSha256":hashlib.sha256(self.token.encode()).hexdigest(),"sourceFreezeSha256":digest(self.m["sourceFreeze"]),"lifecycle":"fresh_per_arm_process_drained_before_next_admission","admissionReceipt":record["admissionReceipt"]}
+            self.save()
         self.last_phase={**self.physical.probe(phase,self.services.owned_pids()),"ownerToken":self.token}
+        if record is not None:self.last_phase["drainedWorker"]=record["drainedWorker"]
         return self.last_phase
     def acknowledge(self,intent):
         require(not self.retain and self.clock()<self.deadline and self.alive(),"controller/deadline expired before submission")
@@ -297,6 +343,7 @@ class Guardian:
         self.intents[key]={"key":key,"requestSha256":intent["requestSha256"],"request":request,"status":"submitting","admissionReceipt":{k:v for k,v in self.last_phase.items() if k!="ownerToken"}};self.save()
         if marker["arm"] == "refusal": return {"key":key,"acknowledged":True,"ownerToken":self.token}
         self.services.start("worker")
+        self.intents[key]["workerProcess"]=self.services.worker_receipt();self.save()
         until=min(self.deadline,self.clock()+30)
         while self.clock()<until:
             try:
@@ -435,7 +482,7 @@ def serve(manifest_file,backend,run_dir,controller_pid):
                     with owner.mu:
                         method=q["method"];arg=q.get("arg",{})
                         if method=="status":result={"owned":physical.locks.owned(),"pid":os.getpid(),"birth":pid_birth(os.getpid()),"controllerAlive":alive(),"controllerPid":controller["pid"],"closed":owner.closed,"blocked":blocked,"intents":{k:{x:v for x,v in a.items() if x!="request"} for k,a in owner.intents.items()}}
-                        elif method=="phase":result=owner.before_phase(arg["phase"])
+                        elif method=="phase":result=owner.before_phase(arg["phase"],arg.get("context",{}))
                         elif method=="submit":result=owner.submit(arg)
                         elif method=="attach":owner.attach(arg["key"],arg["jobId"]);result={"attached":True}
                         elif method=="retain":owner.retain=True;owner.save();result={"retained":True}

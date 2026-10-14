@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { launchShape, rpc } from "./h3-veda-guard-adapter.mjs";
 function shape() { return { sourceFreeze:{ resourceContract:{ mlx:{ canonicalLocks:["exact-gpu","exact-nax"],physicalGpuId:"device" } } }, runners:{mlx:{ physicalGpuId:"device",apiUrl:"http://127.0.0.1:19173",guardian:{maxSeconds:3600,cleanupSeconds:30,port:19173,dataDir:"/run/data",configDir:"/run/config",pythonPath:"/bound/python3",guardianSource:{path:"/bound/guardian.py"}}}} }; }
@@ -14,3 +16,5 @@ test("IPC EOF without explicit readback stays ambiguous",async()=>{await assert.
 test("CPU guardian state/lock/process policy tests use fakes and never launch product",()=>{const file=path.join(path.dirname(fileURLToPath(import.meta.url)),"h3-veda-guardian-tests.py");const candidates=[process.env.S9_GUARD_TEST_PYTHON,"python3","python3.12","python3.14"].filter(Boolean);let python;
   for(const candidate of candidates){try{const v=JSON.parse(execFileSync(candidate,["-c","import sys,json; print(json.dumps(list(sys.version_info[:2])))"],{encoding:"utf8",timeout:5000}));if(v[0]===3&&v[1]>=10){python=candidate;break;}}catch{}}
   assert.ok(python,"Python>=3.10 required for unchanged frozen policy");const result=execFileSync(python,[file,"-v"],{encoding:"utf8",timeout:15000,stdio:["ignore","pipe","pipe"]});assert.equal(result,"");});
+
+test("actual POSIX CPU processes prove SIGKILL/lost-response ownership and retained lock",{skip:process.platform==="win32"?"POSIX operational proof; native Windows Job operational proof remains required":false},async(t)=>{const parent=await mkdtemp(path.join(tmpdir(),"s9-guardian-ops-"));t.after(()=>rm(parent,{recursive:true,force:true}));let python;for(const candidate of [process.env.S9_GUARD_TEST_PYTHON,"python3","python3.12","python3.14"].filter(Boolean)){try{const v=JSON.parse(execFileSync(candidate,["-c","import sys,json; print(json.dumps(list(sys.version_info[:2])))"],{encoding:"utf8"}));if(v[0]===3&&v[1]>=10){python=candidate;break;}}catch{}}assert.ok(python);const file=path.join(path.dirname(fileURLToPath(import.meta.url)),"h3-veda-guardian-operations.py"),out=path.join(parent,"operations");execFileSync(python,[file,"run",out],{encoding:"utf8",timeout:90000});const receipt=JSON.parse(await readFile(path.join(out,"receipt.json"),"utf8"));assert.equal(receipt.cases.length,5);assert.ok(receipt.cases.every(c=>c.acceptedCPUProof&&c.controllerSIGKILLActual&&!c.GPU&&!c.nativeProduct));assert.equal(receipt.CPUProofOnly,true);const pair=receipt.cases.find(c=>c.variant==="paired_completed").pairedLifetimes;assert.notEqual(pair.dense.pid,pair.sparse.pid);assert.deepEqual(pair.dense.workerConfigBinding,pair.sparse.workerConfigBinding);});
