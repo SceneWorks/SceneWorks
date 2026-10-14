@@ -71,7 +71,6 @@ fn write_synthetic_dataset(dir: &Path, n: u32, res: u32, trigger: &str) -> Vec<T
             .save(&path)
             .expect("write swatch");
             TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path: path,
                 caption: caption.clone(),

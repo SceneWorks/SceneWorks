@@ -8839,20 +8839,6 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            perceptual_decoder_dir: None,
-            subject_mask_loss: None,
-            body_losses: Default::default(),
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -8901,7 +8887,6 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
@@ -8983,20 +8968,6 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            perceptual_decoder_dir: None,
-            subject_mask_loss: None,
-            body_losses: Default::default(),
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -9045,7 +9016,6 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
@@ -9129,20 +9099,6 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            perceptual_decoder_dir: None,
-            subject_mask_loss: None,
-            body_losses: Default::default(),
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -9192,7 +9148,6 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
@@ -9314,20 +9269,6 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let config = TrainingConfig {
-            weight_noise_sigma: 0.0,
-            gradient_noise_eta: 0.0,
-            gradient_noise_gamma: gen_core::train::DEFAULT_GRADIENT_NOISE_GAMMA,
-            resolution_buckets: Vec::new(),
-            depth_anchoring: Default::default(),
-            perceptual_decoder_dir: None,
-            subject_mask_loss: None,
-            body_losses: Default::default(),
-            identity_loss: Default::default(),
-            face_landmark_loss: Default::default(),
-            face_analysis_dir: None,
-            vae_anchor: Default::default(),
-            latent_lpips: Default::default(),
-            training_adapter: None,
             rank: 4,
             alpha: 4.0,
             learning_rate: 1e-4,
@@ -9377,7 +9318,6 @@ mod tests {
         };
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
@@ -9564,7 +9504,6 @@ mod tests {
         let preview_guidance = config.sample_guidance_scale;
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
@@ -9807,7 +9746,6 @@ mod tests {
         std::fs::create_dir_all(&output_dir).expect("output");
         let request = TrainingRequest {
             items: vec![TrainingItem {
-                subject_mask_path: None,
                 reference_image_paths: Vec::new(),
                 image_path,
                 caption: "a colorful test swatch".to_owned(),
