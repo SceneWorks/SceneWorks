@@ -2,9 +2,9 @@
 // Owned, fail-closed Actions entrypoint. GPU execution remains exclusively in
 // h3-veda-acceptance.mjs and its physical guardian.
 import { spawn, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:net";
-import { readFile, writeFile, mkdir, lstat, copyFile } from "node:fs/promises";
+import { readFile, writeFile, appendFile, mkdir, lstat, copyFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -19,6 +19,44 @@ const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
 const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8", timeout: 15000 }).trim();
 const absolute = (p) => typeof p === "string" && path.isAbsolute(p);
 const inside = (root, p) => { const r = path.relative(root, p); return r && r !== ".." && !r.startsWith(`..${path.sep}`) && !path.isAbsolute(r); };
+
+export async function emitOwnedApiToken({ envFile = process.env.GITHUB_ENV, stdout = process.stdout, random = randomBytes } = {}) {
+  check(process.env.GITHUB_ACTIONS === "true" && absolute(envFile), "owned Actions environment file required");
+  const token = random(32).toString("hex");
+  check(HEX.test(token), "private API token generation failed");
+  stdout.write(`::add-mask::${token}\n`);
+  await appendFile(envFile, `SCENEWORKS_TOKEN=${token}\n`, { encoding: "utf8" });
+}
+
+export async function requirePreviousJobClosed(runDir) {
+  const control = await lstat(path.join(runDir, "physical-guardian/control.json")).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
+  const closed = await lstat(path.join(runDir, "physical-guardian/closed.json")).catch((e) => e.code === "ENOENT" ? null : Promise.reject(e));
+  check(!control || (control.isFile() && !control.isSymbolicLink() && closed?.isFile() && !closed.isSymbolicLink()), "retained guardian uses a previous job API token; reconcile its owned process and physical lock before a new job");
+}
+
+export function probeReadAuthority({ backend, runnerName, sceneWorksSha, runId = process.env.GITHUB_RUN_ID, attempt = process.env.GITHUB_RUN_ATTEMPT, exec = execFileSync } = {}) {
+  check(process.env.GITHUB_ACTIONS === "true" && process.env.GH_TOKEN, "existing runner-read credential unavailable");
+  check(process.env.GITHUB_REPOSITORY === "SceneWorks/SceneWorks" && process.env.GITHUB_EVENT_NAME === "workflow_dispatch", "Actions owner repository/event differs");
+  check(process.env.GITHUB_SHA === sceneWorksSha && process.env.GITHUB_WORKFLOW_REF?.startsWith("SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@") && process.env.GITHUB_JOB === (backend === "mlx" ? "mac2" : "windows_cuda") && process.env.RUNNER_NAME === runnerName, "Actions owner workflow/source/job/runner differs");
+  check(/^\d+$/.test(runId ?? "") && /^\d+$/.test(attempt ?? ""), "live Actions run/attempt required");
+  const read = (endpoint, paginated = false) => {
+    try {
+      const args = paginated ? ["api", "--paginate", "--slurp", endpoint] : ["api", endpoint];
+      return JSON.parse(exec("gh", args, { encoding: "utf8", timeout: 15000, stdio: ["ignore", "pipe", "pipe"] }));
+    } catch { throw new Error(`H3 S9 Actions: existing credential cannot read ${endpoint.split("?")[0]}`); }
+  };
+  const run = read(`repos/SceneWorks/SceneWorks/actions/runs/${runId}`);
+  const pages = read(`repos/SceneWorks/SceneWorks/actions/runs/${runId}/jobs?per_page=100`, true);
+  const runners = read("orgs/SceneWorks/actions/runners?per_page=100", true);
+  const lensRunning = read("repos/michaeltrefry/LensWorks/actions/runs?status=in_progress&per_page=100", true);
+  const lensQueued = read("repos/michaeltrefry/LensWorks/actions/runs?status=queued&per_page=100", true);
+  check(run?.id === Number(runId) && run.run_attempt === Number(attempt) && run.head_sha === sceneWorksSha && run.status === "in_progress" && run.conclusion === null && run.event === "workflow_dispatch" && run.name === "H3 Veda terminal owned campaign", "live workflow readback differs");
+  const matchingJobs = pages.flatMap((page) => page.jobs ?? []).filter((job) => job.run_id === Number(runId) && job.run_attempt === Number(attempt) && job.head_sha === sceneWorksSha && job.name === process.env.GITHUB_JOB && job.runner_name === runnerName && job.status === "in_progress" && job.conclusion === null);
+  check(matchingJobs.length === 1 && Number.isSafeInteger(matchingJobs[0].runner_id), "live job/runner readback missing or ambiguous");
+  check(runners.flatMap((page) => page.runners ?? []).filter((runner) => runner.id === matchingJobs[0].runner_id && runner.name === runnerName && runner.status === "online" && runner.busy === true).length === 1, "organization runner readback missing or ambiguous");
+  check([lensRunning, lensQueued].every((pages) => Array.isArray(pages) && pages.every((page) => Array.isArray(page.workflow_runs))), "LensWorks queue readback malformed");
+  return { runId: Number(runId), jobId: matchingJobs[0].id, runnerId: matchingJobs[0].runner_id, runnerName, readable: true };
+}
 
 export function assertActionsIdentity({ backend, runnerName, expectedRunner, sceneWorksSha, inferenceSha, manifest, runDir, cacheRoot }) {
   check(["mlx", "candle_cuda"].includes(backend), "explicit backend required");
@@ -186,6 +224,9 @@ export async function resume({ manifestPath, backend, runDir, cacheRoot, runnerN
   const { manifest: m, guardian: g } = await preflight({ manifestPath, backend, runDir, cacheRoot, runnerName, expectedRunner, sceneWorksSha, inferenceSha });
   const marker = await json(path.join(g.dataDir, "s9-workspace-owner.json"));
   check(digest(marker) === digest({ campaignId: m.campaignId, sourceFreezeSha256: digest(m.sourceFreeze), projectId: m.projectId }), "resume owned workspace marker differs");
+  // A new Actions job has a new private API token. Never attach to a retained
+  // guardian whose API child still holds the previous job's token.
+  await requirePreviousJobClosed(runDir);
   await validateManifest(m, { backend });
   return { manifestPath, fingerprint: digest(m), backend, runnerName, resumed: true };
 }
@@ -226,7 +267,14 @@ export async function redactReceipt({ runDir, output }) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   (async () => {
-    if (command === "prepare") {
+    if (command === "owned-token") {
+      check(args.length === 0, "owned-token takes no arguments");
+      await emitOwnedApiToken();
+    } else if (command === "probe-auth") {
+      check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "probe-auth BACKEND");
+      const receipt = probeReadAuthority({ backend: args[0], runnerName: process.env.RUNNER_NAME, sceneWorksSha: process.env.S9_SCENEWORKS_SHA });
+      console.log(JSON.stringify(receipt));
+    } else if (command === "prepare") {
       const [manifestPath, planPath, corpusRoot, backend, runDir, cacheRoot] = args;
       check(args.length === 6, "prepare MANIFEST PLAN CORPUS_ROOT BACKEND RUN_DIR CACHE_ROOT");
       const receipt = await prepare({ manifestPath, planPath, corpusRoot, backend, runDir, cacheRoot, runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA, token: process.env.SCENEWORKS_TOKEN });

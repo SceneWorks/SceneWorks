@@ -93,12 +93,17 @@ jobs:
           test "$(git rev-parse HEAD)" = "$S9_SCENEWORKS_SHA"
           test "$(git -C ../inference rev-parse HEAD)" = "$S9_INFERENCE_SHA"
           test "$(git -C ../inference rev-parse refs/remotes/origin/main)" = "$S9_INFERENCE_SHA"
+      - name: Verify existing read credential against live run, runner, and LensWorks queue
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs probe-auth mlx
+      - name: Generate masked job-owned private API token
+        run: node scripts/h3-veda-actions.mjs owned-token
       - name: Build normal product API and worker from frozen source
         run: cargo build --release --locked -p sceneworks-rust-api
       - name: Prepare or verify owned private corpus
         env:
-          SCENEWORKS_TOKEN: ${{ secrets.SCENEWORKS_S9_TOKEN }}
-          GH_TOKEN: ${{ secrets.S9_RUNNER_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
           if test '${{ inputs.mode }}' = prepare; then
             node scripts/h3-veda-actions.mjs prepare "$S9_MANIFEST" config/terminal-evidence/epic-25140-corpus.plan.json "$S9_CORPUS_ROOT" mlx "$S9_RUN_DIR" "$S9_CACHE"
@@ -107,8 +112,7 @@ jobs:
           fi
       - name: Run bounded guardian-owned native campaign
         env:
-          SCENEWORKS_TOKEN: ${{ secrets.SCENEWORKS_S9_TOKEN }}
-          GH_TOKEN: ${{ secrets.S9_RUNNER_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
           node scripts/h3-veda-actions.mjs admit mlx
           node scripts/h3-veda-acceptance.mjs run "$S9_RUN_DIR/manifest.bound.json" mlx "$S9_RUN_DIR"
@@ -166,6 +170,12 @@ jobs:
           if ((git rev-parse HEAD) -ne $env:S9_SCENEWORKS_SHA) { throw 'SceneWorks checkout differs' }
           if ((git -C ../inference rev-parse HEAD) -ne $env:S9_INFERENCE_SHA) { throw 'inference checkout differs' }
           if ((git -C ../inference rev-parse refs/remotes/origin/main) -ne $env:S9_INFERENCE_SHA) { throw 'inference permanent main differs' }
+      - name: Verify existing read credential against live run, runner, and LensWorks queue
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs probe-auth candle_cuda
+      - name: Generate masked job-owned private API token
+        run: node scripts/h3-veda-actions.mjs owned-token
       - name: Build normal Candle/CUDA product API and worker from frozen source
         shell: cmd
         run: |
@@ -175,8 +185,7 @@ jobs:
       - name: Prepare or verify owned private corpus
         shell: cmd
         env:
-          SCENEWORKS_TOKEN: ${{ secrets.SCENEWORKS_S9_TOKEN }}
-          GH_TOKEN: ${{ secrets.S9_RUNNER_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -185,8 +194,7 @@ jobs:
       - name: Run bounded guardian-owned native campaign
         shell: cmd
         env:
-          SCENEWORKS_TOKEN: ${{ secrets.SCENEWORKS_S9_TOKEN }}
-          GH_TOKEN: ${{ secrets.S9_RUNNER_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64

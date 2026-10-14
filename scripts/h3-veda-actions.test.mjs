@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
-import { assertActionsIdentity, assertActionsTimeBudget, importOwnedCorpus, redactReceipt } from "./h3-veda-actions.mjs";
+import { assertActionsIdentity, assertActionsTimeBudget, emitOwnedApiToken, probeReadAuthority, requirePreviousJobClosed, importOwnedCorpus, redactReceipt } from "./h3-veda-actions.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const H = "a".repeat(40);
@@ -34,6 +34,51 @@ test("owned import refuses missing private token before creating data or startin
   await assert.rejects(importOwnedCorpus({ manifest: m(root), plan: { assets: {} }, planPath: "plan", corpusRoot: root, runDir: root, cacheRoot: root, backend: "mlx", token: "", spawnApi: () => { starts++; } }), /token absent/);
   assert.equal(starts, 0);
   await assert.rejects(readFile(path.join(root, "data", "s9-workspace-owner.json")), /ENOENT/);
+});
+
+test("job-owned API token is random-length hex, masked before job env write, and never returned", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "s9-token-")); t.after(() => rm(root, { recursive: true, force: true }));
+  const prior = process.env.GITHUB_ACTIONS; process.env.GITHUB_ACTIONS = "true";
+  try {
+    const output = [], envFile = path.join(root, "job-env");
+    const result = await emitOwnedApiToken({ envFile, stdout: { write: (value) => { output.push(value); } }, random: (n) => { assert.equal(n, 32); return Buffer.alloc(n, 0xab); } });
+    assert.equal(result, undefined);
+    assert.deepEqual(output, [`::add-mask::${"ab".repeat(32)}\n`]);
+    assert.equal(await readFile(envFile, "utf8"), `SCENEWORKS_TOKEN=${"ab".repeat(32)}\n`);
+    await assert.rejects(emitOwnedApiToken({ envFile: "relative", random: () => Buffer.alloc(32) }), /owned Actions environment file/);
+  } finally { if (prior === undefined) delete process.env.GITHUB_ACTIONS; else process.env.GITHUB_ACTIONS = prior; }
+});
+
+test("existing credential probe requires exact live job, physical runner and cross-repository queue readbacks", () => {
+  const before = Object.fromEntries(["GITHUB_ACTIONS", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_EVENT_NAME", "GITHUB_SHA", "GITHUB_WORKFLOW_REF", "GITHUB_JOB", "RUNNER_NAME"].map((key) => [key, process.env[key]]));
+  Object.assign(process.env, { GITHUB_ACTIONS: "true", GH_TOKEN: "not-logged-test-token", GITHUB_REPOSITORY: "SceneWorks/SceneWorks", GITHUB_EVENT_NAME: "workflow_dispatch", GITHUB_SHA: H, GITHUB_WORKFLOW_REF: `SceneWorks/SceneWorks/.github/workflows/h3-veda-terminal.yml@${H}`, GITHUB_JOB: "mac2", RUNNER_NAME: "nax-macos-2" });
+  const responses = (endpoint) => {
+    if (endpoint.endsWith("/actions/runs/123")) return { id: 123, run_attempt: 1, head_sha: H, status: "in_progress", conclusion: null, event: "workflow_dispatch", name: "H3 Veda terminal owned campaign" };
+    if (endpoint.includes("/actions/runs/123/jobs")) return [{ jobs: [{ id: 456, run_id: 123, run_attempt: 1, head_sha: H, name: "mac2", runner_name: "nax-macos-2", runner_id: 5281, status: "in_progress", conclusion: null }] }];
+    if (endpoint.startsWith("orgs/")) return [{ runners: [{ id: 5281, name: "nax-macos-2", status: "online", busy: true }] }];
+    if (endpoint.startsWith("repos/michaeltrefry/LensWorks/")) return [{ workflow_runs: [] }];
+    throw Error("unexpected endpoint");
+  };
+  const seen = [], exec = (_bin, args) => { const endpoint = args.at(-1); seen.push(endpoint); return JSON.stringify(responses(endpoint)); };
+  try {
+    assert.equal(probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec }).runnerId, 5281);
+    assert.equal(seen.length, 5);
+    assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos", sceneWorksSha: H, runId: "123", attempt: "1", exec }), /workflow\/source\/job\/runner differs/);
+    const failed = (_bin, args) => { if (args.at(-1).startsWith("orgs/")) throw Error("credential value must not surface"); return JSON.stringify(responses(args.at(-1))); };
+    assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: failed }), (error) => error.message.includes("cannot read orgs/SceneWorks/actions/runners") && !error.message.includes("credential value"));
+    const wrong = (_bin, args) => { const result = responses(args.at(-1)); if (args.at(-1).includes("/jobs")) result[0].jobs[0].runner_id = 999; return JSON.stringify(result); };
+    assert.throws(() => probeReadAuthority({ backend: "mlx", runnerName: "nax-macos-2", sceneWorksSha: H, runId: "123", attempt: "1", exec: wrong }), /runner readback missing/);
+  } finally { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } }
+});
+
+test("new job token refuses retained guardian before fresh physical admission", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "s9-token-")); t.after(() => rm(root, { recursive: true, force: true }));
+  await requirePreviousJobClosed(root);
+  await mkdir(path.join(root, "physical-guardian"));
+  await writeFile(path.join(root, "physical-guardian/control.json"), "{}");
+  await assert.rejects(requirePreviousJobClosed(root), /previous job API token/);
+  await writeFile(path.join(root, "physical-guardian/closed.json"), "{}");
+  await requirePreviousJobClosed(root);
 });
 
 test("owned import refuses a foreign listener before creating data or spawning API", async (t) => {
@@ -82,5 +127,8 @@ test("workflow binds explicit runner, source, owned import and guardian, with no
   assert.equal((workflow.match(/vcvars64\.bat/g) ?? []).length, 3, "Windows build, owned import, and GPU guardian must inherit VS/NVCC setup");
   assert.match(workflow, /h3-veda-acceptance\.mjs run/);
   assert.match(workflow, /h3-veda-actions\.mjs redact/);
+  assert.equal((workflow.match(/h3-veda-actions\.mjs probe-auth/g) ?? []).length, 2);
+  assert.equal((workflow.match(/h3-veda-actions\.mjs owned-token/g) ?? []).length, 2);
+  assert.doesNotMatch(workflow, /SCENEWORKS_S9_TOKEN|S9_RUNNER_READ_TOKEN/);
   assert.doesNotMatch(workflow, /path:.*\*\*|path:.*\$\{\{ inputs.run_dir \}\}/);
 });
