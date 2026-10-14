@@ -307,6 +307,7 @@ async fn generate_krea_edit_stream(
         use_pid,
         has_phases: false,
         negative_branch: false,
+        prefix_kv_cache_eligible: false,
     };
     // Krea "text style" tap-reweight gain (sc-12009) — self-gates on `ui.textStyleGain` (Krea only),
     // applied to the edit lane's POSITIVE grounded context by the engine (inference sc-12009).

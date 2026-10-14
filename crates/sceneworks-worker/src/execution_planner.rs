@@ -18,9 +18,11 @@
 //!    `Capabilities::execution` and refused fail-closed at `Capabilities::validate_request`.
 //!    [`select_execution_domains`] chooses values ONLY from what a provider declares, so the worker
 //!    can never trip that refusal. The prefix KV cache (epic 25899) is the one domain chosen from the
-//!    memory budget: the lane's admission prices it ([`prefix_kv_cache_surcharge_bytes`]) and runs the
-//!    ladder cached-first, shed-last ([`plan_prefix_kv_cache`]), and the selection is re-applied after
-//!    the provider's request scope ([`ExecutionDomainSelection::reapply_after_request_scope`]).
+//!    memory budget: the lane's admission prices it ([`prefix_kv_cache_surcharge_bytes`]) and adds
+//!    it rung-for-rung ([`plan_prefix_kv_cache`]): the shed admission picks the rung exactly as it
+//!    did before the cache existed, and the cache is taken only when that SAME rung also fits with
+//!    it, so the cache never changes which rung a request runs on. The selection is re-applied
+//!    after the provider's request scope ([`ExecutionDomainSelection::reapply_after_request_scope`]).
 //!
 //! ## Why the warm decision is shaped by memory monotonicity rather than by a cost model
 //!
@@ -850,9 +852,9 @@ pub(crate) fn plan_request_execution_domains(
 ///
 /// `priced_bytes` is the provider's own surcharge for this request — its pricing function over the
 /// request's geometry, reference count and prompt branches — and `mode` is the path the admission
-/// selected with it: [`PrefixKvCacheMode::Cached`] when the ladder admitted a candidate at the
-/// cached demand (`shed + priced_bytes`), [`PrefixKvCacheMode::Prefill`] when only the shed demand
-/// fitted. Recorded beside what the render REPORTS it ran, which may differ: the engine sheds a
+/// selected with it: [`PrefixKvCacheMode::Cached`] when the rung the shed admission chose also fits
+/// at the cached demand (`shed + priced_bytes`), [`PrefixKvCacheMode::Prefill`] when it fits only
+/// shed. Recorded beside what the render REPORTS it ran, which may differ: the engine sheds a
 /// cached selection whose real prefix exceeds the priced bound (`PrefixKvCacheReport::overflow`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PrefixKvCachePlan {
@@ -881,53 +883,58 @@ impl PrefixKvCachePlan {
     }
 }
 
-/// Run a memory ladder with the prefix KV cache priced in, shedding the cache LAST.
+/// Add the prefix KV cache to an admitted memory rung, rung-for-rung (epic 25899).
 ///
-/// `select(extra)` runs the lane's whole ladder selection — every candidate, the same budget, the
-/// same allowance margins and reserve charge — with `extra` bytes added to every candidate's peak;
-/// `admitted` says whether a result admits the request. With a surcharge, the ladder is tried
-/// WITH the cache first, so every rung is tried cached before any rung is tried without it (the
-/// cache costs time when shed, never an image, a reference or a tier). Only when no rung fits
-/// cached is the ladder re-run at the shed demand — which is exactly today's admission, so:
+/// The cache must never change WHICH rung a request runs on: a lower rung (MLX bounded decode, a
+/// numerically different tiled decode; Candle staged residency, per-request reloads) changes the
+/// request's output path, and the cache is a speed-up, not a reason to take one. So the lane runs its
+/// ladder exactly as it did before the cache existed and hands that result in as `shed`; this
+/// function then asks `cached_on_the_same_rung(&shed, priced_bytes)` whether the SAME rung — same
+/// tier, residency and decode policy — also fits with `priced_bytes` added to its peak, under the
+/// same budget, margins and reserve charge the ladder applies. `admitted` says whether a ladder
+/// result admits the request.
 ///
-/// * fits cached → `(cached result, Some(Cached))`;
-/// * fits only shed → `(shed result, Some(Prefill))` — admitted, NOT refused;
-/// * fits neither → `(shed result, None)` — the caller refuses exactly as it did before the cache
-///   existed, with the shed demand's diagnostic.
+/// * the shed rung also fits cached → `(cached result, Some(Cached))`;
+/// * it fits only shed → `(shed, Some(Prefill))` — the same rung, admitted, NOT refused;
+/// * the shed ladder refuses → `(shed, None)`: refused exactly as before the cache existed (a
+///   surcharge only ever raises demand, so there is nothing to try).
 ///
-/// `surcharge = None` (a provider with no cache, or no pricing function for it) runs the ladder
-/// once at `extra = 0`, byte-for-byte the pre-cache admission, and reports no plan.
+/// `surcharge = None` (a provider with no cache, or no pricing function for it) returns the shed
+/// result untouched and reports no plan.
 ///
-/// The three outcomes are `PrefixKvCacheMode::select`'s, applied at the granularity the ladder
-/// grades at: `select` compares raw bytes with `MemoryBudget::fits`, which knows nothing of the
-/// per-candidate estimate margins and reserve charge the selector applies, so calling it per
-/// candidate would admit a cached candidate at a looser bound than the shed candidates are held
-/// to. `plan_prefix_kv_cache_agrees_with_gen_core_select_on_a_plain_budget` holds the two to the
-/// same answer whenever the ladder IS a plain budget comparison.
+/// On a ladder that IS a plain budget comparison the three outcomes are
+/// `PrefixKvCacheMode::select`'s (`plan_prefix_kv_cache_agrees_with_gen_core_select_on_a_plain_budget`);
+/// `select` itself is not called per candidate because it compares raw bytes with
+/// `MemoryBudget::fits`, which knows nothing of the per-candidate estimate margins and reserve
+/// charge the selector applies.
 pub(crate) fn plan_prefix_kv_cache<T>(
     surcharge_bytes: Option<u64>,
-    mut select: impl FnMut(u64) -> T,
+    shed: T,
     admitted: impl Fn(&T) -> bool,
+    cached_on_the_same_rung: impl FnOnce(&T, u64) -> Option<T>,
 ) -> (T, Option<PrefixKvCachePlan>) {
     let Some(priced_bytes) = surcharge_bytes else {
-        return (select(0), None);
+        return (shed, None);
     };
-    let cached = select(priced_bytes);
-    if admitted(&cached) {
-        return (
+    if !admitted(&shed) {
+        return (shed, None);
+    }
+    match cached_on_the_same_rung(&shed, priced_bytes) {
+        Some(cached) => (
             cached,
             Some(PrefixKvCachePlan {
                 mode: PrefixKvCacheMode::Cached,
                 priced_bytes,
             }),
-        );
+        ),
+        None => (
+            shed,
+            Some(PrefixKvCachePlan {
+                mode: PrefixKvCacheMode::Prefill,
+                priced_bytes,
+            }),
+        ),
     }
-    let shed = select(0);
-    let plan = admitted(&shed).then_some(PrefixKvCachePlan {
-        mode: PrefixKvCacheMode::Prefill,
-        priced_bytes,
-    });
-    (shed, plan)
 }
 
 /// The surcharge one request's prefix KV cache is priced at, from the LINKED provider's own pricing
@@ -1591,14 +1598,13 @@ mod tests {
         }
     }
 
-    /// Epic 25899: on a ladder that IS a plain budget comparison, the shed-last planner answers
+    /// Epic 25899: on a ladder that IS a plain budget comparison, the rung-for-rung planner answers
     /// exactly what gen-core's `PrefixKvCacheMode::select` answers — cached when shed + cache fits,
     /// prefill when only the shed demand fits, refuse when neither — at every boundary, including
     /// the exact fits `MemoryBudget::fits` accepts.
     ///
-    /// *Mutations that red this:* returning the cached result without checking it was admitted;
-    /// skipping the shed re-run (a request that fits only shed is then refused); reporting
-    /// `Prefill` for a refused request.
+    /// *Mutations that red this:* returning `Cached` without asking the same-rung check; reporting
+    /// `Prefill` for a refused request; dropping the shed result on a prefill admission.
     #[test]
     fn plan_prefix_kv_cache_agrees_with_gen_core_select_on_a_plain_budget() {
         let shed = 1_000u64;
@@ -1612,8 +1618,12 @@ mod tests {
             };
             let (admitted, plan) = plan_prefix_kv_cache(
                 Some(cache),
-                |extra| budget.fits(shed + extra).then_some(shed + extra),
+                budget.fits(shed).then_some(shed),
                 Option::is_some,
+                |shed, extra| {
+                    let shed = shed.expect("only an admitted shed rung is re-graded");
+                    budget.fits(shed + extra).then_some(Some(shed + extra))
+                },
             );
             let expected = PrefixKvCacheMode::select(budget, shed, cache);
             assert_eq!(plan.map(|plan| plan.mode), expected, "total={total}");
@@ -1626,45 +1636,44 @@ mod tests {
                 assert_eq!(plan.priced_bytes, cache);
             }
         }
-        // No pricing function: one run at the shed demand and no plan — the pre-cache admission.
-        let mut runs = Vec::new();
-        let (admitted, plan) = plan_prefix_kv_cache(
-            None,
-            |extra| {
-                runs.push(extra);
-                Some(shed + extra)
-            },
-            Option::is_some,
-        );
-        assert_eq!((admitted, plan, runs), (Some(shed), None, vec![0]));
+        // No pricing function: the shed result untouched, no same-rung check, no plan.
+        let (admitted, plan) = plan_prefix_kv_cache(None, Some(shed), Option::is_some, |_, _| {
+            panic!("a provider with no cache is never re-graded")
+        });
+        assert_eq!((admitted, plan), (Some(shed), None));
     }
 
-    /// The cache is shed LAST: the cached pass runs before the shed pass, and a cached admission
-    /// never runs the shed one.
+    /// The rung rule: the cached check is asked about the shed admission's OWN rung, and never
+    /// runs for a refused request.
+    ///
+    /// *Mutations that red this:* handing the check anything but the shed result; running it for a
+    /// refused request; skipping it (an admitted shed rung then never becomes `Cached`).
     #[test]
-    fn plan_prefix_kv_cache_tries_the_cache_before_shedding_it() {
-        let mut runs = Vec::new();
-        let (_, plan) = plan_prefix_kv_cache(
-            Some(7),
-            |extra| {
-                runs.push(extra);
-                true
-            },
-            |admitted| *admitted,
+    fn plan_prefix_kv_cache_re_grades_only_the_shed_admissions_own_rung() {
+        let mut asked = Vec::new();
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), Some("staged"), Option::is_some, |shed, extra| {
+                asked.push((*shed, extra));
+                Some(Some("staged+cache"))
+            });
+        assert_eq!(
+            asked,
+            vec![(Some("staged"), 7)],
+            "the shed rung, at the surcharge"
         );
-        assert_eq!(runs, vec![7], "a cached fit never re-runs the ladder");
+        assert_eq!(result, Some("staged+cache"));
         assert_eq!(plan.map(|plan| plan.mode), Some(PrefixKvCacheMode::Cached));
-        let mut runs = Vec::new();
-        let (_, plan) = plan_prefix_kv_cache(
-            Some(7),
-            |extra| {
-                runs.push(extra);
-                extra == 0
-            },
-            |admitted| *admitted,
-        );
-        assert_eq!(runs, vec![7, 0], "cached first, shed second");
+
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), Some("resident"), Option::is_some, |_, _| None);
+        assert_eq!(result, Some("resident"), "the same rung, shed");
         assert_eq!(plan.map(|plan| plan.mode), Some(PrefixKvCacheMode::Prefill));
+
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), None::<&str>, Option::is_some, |_, _| {
+                panic!("a refused request is never re-graded")
+            });
+        assert_eq!((result, plan), (None, None));
     }
 
     /// The re-application after a request scope: an admitted `Cached` survives a scope that

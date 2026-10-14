@@ -5638,6 +5638,71 @@ fn apply_candle_qwen_load_shape(
     )
 }
 
+/// The Candle shared lane's prefix-KV-cache surcharge for one request (epic 25899): priced from the
+/// LINKED provider's descriptor and pricing function, or `None` for every provider without a cache
+/// and for a request whose admitted block is not handed to ONE render at exactly this geometry and
+/// reference set (`single_pass == false`: hires fix, native prompt batch).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_prefix_kv_cache_surcharge(
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    negative_branch: bool,
+    single_pass: bool,
+) -> Option<u64> {
+    if !single_pass {
+        return None;
+    }
+    crate::inference_runtime::media_descriptor(engine_id).and_then(|descriptor| {
+        crate::execution_planner::prefix_kv_cache_surcharge_bytes(
+            engine_id,
+            &descriptor.capabilities.execution,
+            None,
+            width,
+            height,
+            reference_count,
+            negative_branch,
+        )
+    })
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_prefix_kv_cache_pricing_tests {
+    use super::*;
+
+    /// The production Candle pricing site, against the LINKED registry: a single-pass 2.1 request
+    /// is priced at exactly the provider's own `prefix_kv_cache_demand_bytes`, a multi-pass one and
+    /// a provider with no cache at nothing.
+    ///
+    /// *Mutations that red this:* returning `None` from the site (no surcharge for Turbo); dropping
+    /// the single-pass gate (the hires request is priced); passing another geometry, reference
+    /// count or branch flag through (the byte equality).
+    #[test]
+    fn the_candle_lane_prices_the_linked_turbo_cache_only_for_a_single_pass_request() {
+        let expected = runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+            1024, 768, 2, true,
+        );
+        for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, true),
+                Some(expected),
+                "{engine_id}"
+            );
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, false),
+                None,
+                "{engine_id}: a multi-pass request is priced no cache"
+            );
+        }
+        assert_eq!(
+            candle_prefix_kv_cache_surcharge("qwen_image", 1024, 768, 2, true, true),
+            None,
+            "a provider with no cache is priced nothing"
+        );
+    }
+}
+
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_image_load_shape_tests {
     use super::*;
@@ -10344,6 +10409,10 @@ async fn generate_stream_using(
                 true_cfg,
                 guidance,
             ),
+            // A hires refinement hands this block to a first pass at the base size with the caller's
+            // own references and re-resolved CFG, and a native prompt batch renders one prefix per
+            // prompt in one pass: the cache is priced for neither render.
+            prefix_kv_cache_eligible: hires_fix.is_none() && native_batch.is_none(),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -13363,24 +13432,21 @@ async fn generate_candle_stream_using(
     // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
     // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
     // follows the build's production device width, not the tier.
-    let prefix_kv_cache_surcharge = crate::inference_runtime::media_descriptor(engine_id)
-        .and_then(|descriptor| {
-            crate::execution_planner::prefix_kv_cache_surcharge_bytes(
-                engine_id,
-                &descriptor.capabilities.execution,
-                None,
-                memory_width,
-                memory_height,
-                reference_count,
-                crate::execution_planner::evaluates_negative_branch(
-                    negative_prompt.as_deref().unwrap_or_default(),
-                    true_cfg,
-                    guidance,
-                ),
-            )
-        })
-        // A hires refinement is a second, differently shaped pass the cache was never priced for.
-        .filter(|_| hires_fix.is_none());
+    let prefix_kv_cache_surcharge = candle_prefix_kv_cache_surcharge(
+        engine_id,
+        memory_width,
+        memory_height,
+        reference_count,
+        crate::execution_planner::evaluates_negative_branch(
+            negative_prompt.as_deref().unwrap_or_default(),
+            true_cfg,
+            guidance,
+        ),
+        // A hires refinement is a second, differently shaped pass, and a native prompt batch holds
+        // one prefix per prompt: the cache is priced for neither (the MLX lane's same rule,
+        // `MlxRequestInputs::prefix_kv_cache_eligible`).
+        hires_fix.is_none() && native_batch.is_none(),
+    );
     let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(
         engine_id,
         &request.model,

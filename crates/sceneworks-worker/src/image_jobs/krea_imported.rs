@@ -1512,6 +1512,7 @@ fn krea_imported_memory_inputs(
         has_phases: false,
         conditioning_windows: None,
         negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 
