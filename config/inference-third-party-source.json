@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference feature merge 75e03b5a: 756 provenance candidates and 108 production-Rust crate prefixes. Veda selector/predictor/layout ports retain the frozen 60bfae6 MIT notice; the native INT8 arithmetic retains its SageAttention BSD-3-Clause notice, and the captured partial-sort implementation retains the LLVM Apache-2.0-with-LLVM-exceptions notice. Those exact source notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The Veda source paths are explicitly mapped rather than inheriting only the model architecture disposition. Other candidate changes include the current training/body/perceptual inventory and shared checkpoint parser relocation; unresolved body/perceptual classifications and other compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution and makes no measurement currency claim.",
-  "inferenceRevision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
-  "auditDigest": "d7a50159b857bc859e97404678eca63c9402cb02b7a54b83c1abf381bf4964aa",
+  "_comment": "Audit inventory rescanned at permanent inference main merge 1e0b4c0c: 771 provenance candidates and 110 production-Rust crate prefixes. Veda selector/predictor/layout ports retain the frozen 60bfae6 MIT notice; the native INT8 arithmetic retains its SageAttention BSD-3-Clause notice, and the captured partial-sort implementation retains the LLVM Apache-2.0-with-LLVM-exceptions notice. Those exact source notices are bundled in the existing MiniMax-H3 About notice, separately from model-weight terms. The Veda source paths are explicitly mapped rather than inheriting only the model architecture disposition. Other candidate changes include the current training/body/perceptual inventory and shared checkpoint parser relocation; unresolved body/perceptual classifications and other compliance items remain advisory under sc-19751. Historical source and measurement records retain their own revisions. This mapping grants no model-weight redistribution and makes no measurement currency claim.",
+  "inferenceRevision": "1e0b4c0c65371ab9c295cb59644dd769c8b4e37c",
+  "auditDigest": "512fb72d90b2c7c10ac7784c590950bacaebcbb860caf69bc7d207e3cb5a2080",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
+    "revision": "1e0b4c0c65371ab9c295cb59644dd769c8b4e37c",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 756,
-    "populationSha256": "99632eeb946ae0fcd78179ed15f518038ee5ec23afc6e3d7405fcdbe021d6efd"
+    "matchedFiles": 771,
+    "populationSha256": "43ed91a7e8745881fb71344d0ec90bb75f645b0da8e95d7bc49b2f065751416c"
   },
   "portedSourceAreas": [
     {
@@ -959,10 +959,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "75e03b5abc504d06688b75c9f7bc7a23f0873f5b",
+    "revision": "1e0b4c0c65371ab9c295cb59644dd769c8b4e37c",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 108,
-    "cratePopulationSha256": "6fad70d0f24443f9fd11309c33afc84b9e6b7b70532437a7c0be6c7982af82cc"
+    "cratePrefixes": 110,
+    "cratePopulationSha256": "8a5440c3b8504b13d2ea61380b47e52087962d80e48d5df07b18651c315910e3"
   },
   "crateDispositions": [
     {

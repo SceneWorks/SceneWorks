@@ -46,6 +46,7 @@ crates/media/candle-gen/candle-gen-flux
 crates/media/candle-gen/candle-gen-flux2
 crates/media/candle-gen/candle-gen-ideogram
 crates/media/candle-gen/candle-gen-instantid
+crates/media/candle-gen/candle-gen-iris
 crates/media/candle-gen/candle-gen-joycaption
 crates/media/candle-gen/candle-gen-kolors
 crates/media/candle-gen/candle-gen-krea
@@ -85,6 +86,7 @@ crates/media/mlx-gen/mlx-gen-flux
 crates/media/mlx-gen/mlx-gen-flux2
 crates/media/mlx-gen/mlx-gen-ideogram
 crates/media/mlx-gen/mlx-gen-instantid
+crates/media/mlx-gen/mlx-gen-iris
 crates/media/mlx-gen/mlx-gen-joycaption
 crates/media/mlx-gen/mlx-gen-kolors
 crates/media/mlx-gen/mlx-gen-krea
