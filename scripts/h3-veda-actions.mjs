@@ -561,7 +561,16 @@ export async function redactReceipt({ runDir, output, backend }) {
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
   (async () => {
-    if (command === "owned-token") {
+    if (command === "inventory" || command === "stage") {
+      check(args.length === 1 && ["mlx", "candle_cuda"].includes(args[0]), "inventory|stage BACKEND");
+      const setup = await import("./h3-veda-host-setup.mjs");
+      const observation = await setup.inventory({ backend: args[0], runnerName: process.env.RUNNER_NAME, expectedRunner: process.env.S9_EXPECTED_RUNNER, sceneWorksSha: process.env.S9_SCENEWORKS_SHA, inferenceSha: process.env.S9_INFERENCE_SHA, authority: probeReadAuthority });
+      const receipt = command === "inventory" ? observation : await setup.stage({ observation, runDir: process.env.S9_RUN_DIR || undefined, corpusRoot: process.env.S9_CORPUS_ROOT || undefined, cacheRoot: process.env.S9_CACHE || undefined });
+      check(absolute(process.env.RUNNER_TEMP), "owned Actions temporary directory unavailable");
+      const output = path.join(process.env.RUNNER_TEMP, "h3-veda-terminal", "setup-receipt.json");
+      await mkdir(path.dirname(output), { recursive: true }); await writeFile(output, JSON.stringify(receipt, null, 2) + "\n", { flag: "wx" });
+      console.log(JSON.stringify({ command, output, campaignReady: false, stagedCarriers: receipt.stagedCarriers ?? 0 }));
+    } else if (command === "owned-token") {
       check(args.length === 0, "owned-token takes no arguments");
       await emitOwnedApiToken();
     } else if (command === "probe-auth") {

@@ -4,46 +4,46 @@ on:
   workflow_dispatch:
     inputs:
       backend:
-        description: Explicit physical backend; no automatic host selection.
+        description: "Explicit physical backend; no automatic host selection."
         required: true
         type: choice
         options: [mlx, candle_cuda]
       mode:
-        description: Build a source-bound host binary, prepare/import the owned campaign, resume a bounded batch, or export selected closed-batch review media.
+        description: "Inspect or stage the host, build a durable source-bound binary, prepare/import, resume a bounded batch, or export selected closed-batch media."
         required: true
         type: choice
-        options: [build, prepare, resume, review]
+        options: [inventory, stage, build, prepare, resume, review]
       review_case_ids:
-        description: Review mode only; JSON array of 1-4 exact owned case IDs. Selection is never acceptance.
+        description: "Review mode only; JSON array of 1-4 exact owned case IDs. Selection is never acceptance."
         required: false
         type: string
       sceneworks_sha:
-        description: Exact frozen SceneWorks commit containing this workflow.
+        description: "Exact frozen SceneWorks commit containing this workflow."
         required: true
         type: string
       inference_main_sha:
-        description: Exact permanent inference main and Cargo pin commit.
+        description: "Exact inference source; prepare/resume/review require permanent main and Cargo pin."
         required: true
         type: string
       expected_runner:
-        description: Exact runner name; Mac must be nax-macos-2, Windows must be an explicitly selected cuda-windows host.
+        description: "Exact runner name; Mac must be nax-macos-2, Windows must be an explicitly selected cuda-windows host."
         required: true
         type: string
       manifest_path:
-        description: Absolute source-frozen preparation manifest (build) or combined host-bound campaign manifest (prepare/resume).
-        required: true
+        description: "Build: absolute source-frozen template; prepare/resume/review: absolute host manifest; unused by inventory/stage."
+        required: false
         type: string
       corpus_root:
-        description: Absolute host-local staged corpus root, used only by prepare.
+        description: "Prepare: absolute staged corpus root; stage defaults to owned source-bound directory."
         required: false
         type: string
       offline_cache_root:
-        description: Absolute complete host-local offline HF cache root, used only by prepare/resume/review.
+        description: "HF_HOME parent containing hub; prepare/resume require complete cache, inventory needs no cache."
         required: false
         type: string
       run_dir:
-        description: Absolute external owned campaign directory, durable across bounded batches.
-        required: true
+        description: "Persistent external owned directory; stage may derive it from the observed Actions checkout."
+        required: false
         type: string
 
 permissions:
@@ -57,7 +57,7 @@ jobs:
   mac2:
     if: inputs.backend == 'mlx'
     runs-on: [self-hosted, macOS, ARM64, rw-mage]
-    timeout-minutes: 75
+    timeout-minutes: ${{ (inputs.mode == 'inventory' || inputs.mode == 'stage') && 10 || 75 }}
     defaults:
       run:
         working-directory: ${{ github.workspace }}/sceneworks
@@ -104,11 +104,25 @@ jobs:
           test "$S9_EXPECTED_RUNNER" = 'nax-macos-2'
           test "$(git rev-parse HEAD)" = "$S9_SCENEWORKS_SHA"
           test "$(git -C ../inference rev-parse HEAD)" = "$S9_INFERENCE_SHA"
-          test "$(git -C ../inference rev-parse refs/remotes/origin/main)" = "$S9_INFERENCE_SHA"
+          if test '${{ inputs.mode }}' != inventory && test '${{ inputs.mode }}' != stage; then
+            test "$(git -C ../inference rev-parse refs/remotes/origin/main)" = "$S9_INFERENCE_SHA"
+          fi
       - name: Verify existing read credential against live run, runner, and LensWorks queue
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth mlx
+      - name: CPU-only host inventory or synthetic corpus staging
+        if: inputs.mode == 'inventory' || inputs.mode == 'stage'
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs ${{ inputs.mode }} mlx
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.mode == 'inventory' || inputs.mode == 'stage'
+        with:
+          name: h3-veda-mlx-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/h3-veda-terminal/setup-receipt.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Generate masked job-owned private API token
         if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: node scripts/h3-veda-actions.mjs owned-token
@@ -152,10 +166,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Redact transport receipt without media or control token
-        if: always()
+        if: always() && (inputs.mode == 'prepare' || inputs.mode == 'resume' || inputs.mode == 'review')
         run: node scripts/h3-veda-actions.mjs redact "$S9_RUN_DIR" "$RUNNER_TEMP/h3-veda-terminal/receipt.json" mlx
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
+        if: always() && (inputs.mode == 'prepare' || inputs.mode == 'resume' || inputs.mode == 'review')
         with:
           name: h3-veda-terminal-mlx-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/h3-veda-terminal/receipt.json
@@ -165,7 +179,7 @@ jobs:
   windows_cuda:
     if: inputs.backend == 'candle_cuda'
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
-    timeout-minutes: 75
+    timeout-minutes: ${{ (inputs.mode == 'inventory' || inputs.mode == 'stage') && 10 || 75 }}
     defaults:
       run:
         shell: pwsh
@@ -213,11 +227,23 @@ jobs:
           if ($env:RUNNER_NAME -ne $env:S9_EXPECTED_RUNNER -or $env:S9_EXPECTED_RUNNER -notin @('cuda-windows','cuda-windows-2')) { throw 'unadmitted Windows physical runner' }
           if ((git rev-parse HEAD) -ne $env:S9_SCENEWORKS_SHA) { throw 'SceneWorks checkout differs' }
           if ((git -C ../inference rev-parse HEAD) -ne $env:S9_INFERENCE_SHA) { throw 'inference checkout differs' }
-          if ((git -C ../inference rev-parse refs/remotes/origin/main) -ne $env:S9_INFERENCE_SHA) { throw 'inference permanent main differs' }
+          if ('${{ inputs.mode }}' -notin @('inventory','stage') -and (git -C ../inference rev-parse refs/remotes/origin/main) -ne $env:S9_INFERENCE_SHA) { throw 'inference permanent main differs' }
       - name: Verify existing read credential against live run, runner, and LensWorks queue
         env:
           GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
         run: node scripts/h3-veda-actions.mjs probe-auth candle_cuda
+      - name: CPU-only host inventory or synthetic corpus staging
+        if: inputs.mode == 'inventory' || inputs.mode == 'stage'
+        env:
+          GH_TOKEN: ${{ secrets.INFERENCE_READ_TOKEN }}
+        run: node scripts/h3-veda-actions.mjs ${{ inputs.mode }} candle_cuda
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: inputs.mode == 'inventory' || inputs.mode == 'stage'
+        with:
+          name: h3-veda-candle_cuda-${{ inputs.mode }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/h3-veda-terminal/setup-receipt.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Generate masked job-owned private API token
         if: inputs.mode == 'prepare' || inputs.mode == 'resume'
         run: node scripts/h3-veda-actions.mjs owned-token
@@ -270,10 +296,10 @@ jobs:
           if-no-files-found: error
           retention-days: 30
       - name: Redact transport receipt without media or control token
-        if: always()
+        if: always() && (inputs.mode == 'prepare' || inputs.mode == 'resume' || inputs.mode == 'review')
         run: node scripts/h3-veda-actions.mjs redact "$env:S9_RUN_DIR" "$env:RUNNER_TEMP/h3-veda-terminal/receipt.json" candle_cuda
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: always()
+        if: always() && (inputs.mode == 'prepare' || inputs.mode == 'resume' || inputs.mode == 'review')
         with:
           name: h3-veda-terminal-cuda-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/h3-veda-terminal/receipt.json

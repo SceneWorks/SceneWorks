@@ -3,10 +3,12 @@
   "scope": "named-required",
   "status": "Source-bound synthetic conditioning plan; actualIDs unbound until normal owned imports/readbacks; no GPU/mediaquality acceptance",
   "approvedPayloadSha256": "016e6c467244ed1cf6b51d19e360e5f391a71f9abca88a4688610740b3de37a9",
-  "catalogSha256": "07e3079ecd9af63221743fbc6ec7125ffd2ea7f50303f83cd257e49265ab4989",
+  "catalogSha256": "660c37f5907ada0a714964fc7cac0852e3e1aedd07b390edc7fdd1d0a974cc95",
   "sourceAuthority": {
     "sceneworksRef": "4f2885ca0cc89343d84f8d591dd90d22e294894c",
-    "inferenceRef": "90768c9c481543cd3f24ea24dd0a43ef22183fa1"
+    "inferenceRef": "90768c9c481543cd3f24ea24dd0a43ef22183fa1",
+    "catalogReboundAtSceneworksRef": "cfee01933c4e35fdd6b7de8190267e0c0e201260",
+    "catalogReboundFromSha256": "07e3079ecd9af63221743fbc6ec7125ffd2ea7f50303f83cd257e49265ab4989"
   },
   "canvases": [
     "1536x672",

@@ -244,13 +244,13 @@ test("cross-host aggregate joins approved scope, exact row dispositions and dist
 test("workflow binds explicit runner, source, owned import and guardian, with no blanket artifact upload", async () => {
   const workflow = await readFile(path.join(ROOT, ".github/workflows/h3-veda-terminal.yml"), "utf8");
   assert.match(workflow, /runs-on: \[self-hosted, macOS, ARM64, rw-mage\]/);
-  assert.match(workflow, /options: \[build, prepare, resume, review\]/);
+  assert.match(workflow, /options: \[inventory, stage, build, prepare, resume, review\]/);
   assert.match(workflow, /review_case_ids:/);
   assert.match(workflow, /h3-veda-actions\.mjs review/);
   assert.match(workflow, /h3-veda-review-media-(?:mlx|cuda)-/);
   for (const step of ["Prepare or verify owned private corpus"]) {
     const escaped = step.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    assert.match(workflow, new RegExp(`- name: ${escaped}\\n\\s+if: inputs.mode == 'prepare' \\|\\| inputs.mode == 'resume'`), `build/review modes must skip ${step}`);
+    assert.match(workflow, new RegExp(`- name: ${escaped}\\n\\s+if: inputs.mode == 'prepare' \\|\\| inputs.mode == 'resume'`), `inventory/stage/build/review modes must skip ${step}`);
   }
   assert.match(workflow, /- name: Build durable normal product API and worker from frozen source\n\s+if: inputs\.mode == 'build'/);
   assert.match(workflow, /- name: Build durable normal Candle\/CUDA product API and worker from frozen source\n\s+if: inputs\.mode == 'build'/);
