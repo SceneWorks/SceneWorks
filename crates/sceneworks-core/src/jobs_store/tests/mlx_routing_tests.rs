@@ -2142,8 +2142,9 @@ fn candle_video_routed_models_have_an_installable_off_mac_download() {
 }
 
 /// sc-25679: Iris-3B generation routes to MLX only as plain text-to-image. Every carrier the
-/// `iris_3b` engine has no input for (source/reference/mask/control/pose, a quant tier)
-/// keeps the job off the lane instead of reaching an engine that refuses it by name.
+/// `iris_3b` engine has no input for (source/reference/mask/control/pose, a non-tier quant value)
+/// keeps the job off the lane instead of reaching an engine that refuses it by name. sc-26266: the
+/// engine's three load-time tiers (`mlxQuantize` 0 / 8 / 4) route.
 #[test]
 fn iris_routes_plain_text_to_image_only() {
     assert!(MLX_ROUTED_MODELS.contains(&"iris_3b"));
@@ -2162,11 +2163,29 @@ fn iris_routes_plain_text_to_image_only() {
         json!({ "maskAssetId": "a" }),
         json!({ "controls": [{}] }),
         json!({ "advanced": { "poses": [{}] } }),
-        json!({ "advanced": { "mlxQuantize": 8 } }),
         json!({ "advanced": { "quantTier": "nvfp4" } }),
+        json!({ "advanced": { "quantTier": "int8-convrot" } }),
+        json!({ "advanced": { "mlxQuantize": 2 } }),
+        json!({ "advanced": { "mlxQuantize": 6 } }),
+        json!({ "advanced": { "mlxQuantize": "q4" } }),
+        json!({ "advanced": { "mlxQuantize": true } }),
         json!({ "hiresFix": { "enabled": true } }),
     ] {
         assert!(!eligible(refused.clone()), "{refused}");
+    }
+    // sc-26266: every tier the engine loads routes, as an integer or its decimal string.
+    for tier in [
+        json!(0),
+        json!(8),
+        json!(4),
+        json!("4"),
+        json!(" 8 "),
+        Value::Null,
+    ] {
+        assert!(
+            eligible(json!({ "model": "iris_3b", "advanced": { "mlxQuantize": tier } })),
+            "{tier}"
+        );
     }
     // A disabled (or malformed, which the worker parses as disabled) hires fix stays eligible.
     assert!(eligible(json!({ "hiresFix": { "enabled": false } })));

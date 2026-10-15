@@ -5888,7 +5888,13 @@
       // the checkpoint's flow.shift = 4.0; there is one shifted time grid, so no scheduler menu),
       // the CFG interval, the caption-overflow policy, and generation-task LoRA/LoKr adapters
       // stamped family=iris + irisTask=generation. Prediction target / train timesteps come from
-      // the checkpoint (no knob). It refuses quantization by name, so there is no tier axis.
+      // the checkpoint (no knob).
+      //
+      // TIERS (sc-26266). Both native engines quantize the backbone and Qwen3-VL text
+      // encoder at LOAD TIME from the same dense upstream files; no converted weights are
+      // downloaded or redistributed. Embeddings and norms remain dense. All three rows share
+      // one complete snapshot. `advanced.mlxQuantize` 0 / 8 / 4 selects bf16 / q8 / q4 on
+      // either backend; `mlx.quantize: 0` preserves bf16 when no tier is selected.
       // A negative prompt or a CFG interval only exists under CFG: at guidance 1.0 the engine
       // refuses either, so the API refuses them and Image Studio disables both controls there.
       "id": "iris_3b",
@@ -5916,12 +5922,32 @@
       },
       "downloads": [
         // The upstream generation backbone, pulled directly (Apache-2.0; no SceneWorks re-host).
-        // FP32 on disk; the engine casts to bf16 at load. EXACT bytes of the two pinned files.
+        // FP32 on disk; the engine casts to bf16 at load. EXACT bytes of the two pinned files. One
+        // row per tier (sc-26266), all three the SAME files: q8 / q4 are quantized at load on both backends.
         {
           "provider": "huggingface",
           "repo": "speridlabs/iris-3b",
           "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "variant": "bf16",
           "default": true,
+          "files": ["config.yaml", "model.safetensors"],
+          "estimatedSizeBytes": 11950114087,
+          "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "variant": "q8",
+          "files": ["config.yaml", "model.safetensors"],
+          "estimatedSizeBytes": 11950114087,
+          "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "speridlabs/iris-3b",
+          "revision": "7445443349bc9abe3c96f01ff793e2098ca012b3",
+          "variant": "q4",
           "files": ["config.yaml", "model.safetensors"],
           "estimatedSizeBytes": 11950114087,
           "footprint": { "diskSizeBytes": 11950114087, "residentMemoryBytes": null, "peakMemoryBytes": null }
@@ -5978,8 +6004,13 @@
       "mlx": {
         // Conservative DECLARED floor (no measurement campaign): bf16 backbone (~6 GB) + Qwen3-VL-4B
         // (~8.9 GB) resident plus pixel-space activations; the engine bring-up observed ~20 GB at
-        // 512² and ~22.6 GB at 1024². Replaced by measured evidence at the epic-end campaign.
+        // 512² and ~22.6 GB at 1024². Replaced by measured evidence at the epic-end campaign. It
+        // stays the floor of every tier: q8 / q4 shrink the weights, not the activations, and no
+        // tier has been measured (sc-26266).
         "minMemoryGb": 32,
+        // sc-26266: the tier a request without an `advanced.mlxQuantize` pick loads — bf16, the
+        // release's own policy. Without it the worker's `resolve_quant` default (q8) would apply.
+        "quantize": 0,
         // sc-25690: what the pinned mlx-gen-iris contract declares beyond Resident and
         // StagedResidency (both implemented). Bounded decode is a truth about the architecture, not
         // undelivered work; bounded attention and bounded transformer residency are applicable but

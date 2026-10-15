@@ -998,8 +998,9 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             "Iris-3B request outside plain text-to-image",
             &format!(
                 "Iris-3B serves text-to-image only — no source/reference/mask, controls, poses, \
-                 quant tier (advanced.mlxQuantize / advanced.quantTier) or hires fix, on either \
-                 backend (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
+                 advanced.quantTier, an advanced.mlxQuantize other than its bf16 / q8 / q4 tiers \
+                 (0 / 8 / 4 on both native backends) or hires fix \
+                 (generation-task LoRA / LoKr adapters do apply). This request (mode {mode:?}) carries one of those, so it is \
                  refused rather than rendered with the carrier silently dropped.{remediation}{also}",
                 remediation = if also.is_empty() {
                     " Re-submit as plain text_to_image without it and the same prompt routes."
