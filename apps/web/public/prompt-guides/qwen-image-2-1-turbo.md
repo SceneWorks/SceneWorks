@@ -67,9 +67,10 @@ Good: `a bookshop sign reading "NIGHT EDITION" in condensed serif capitals, cent
 
 Turbo's weights ship with their own **8-step schedule**, and that is what runs by default.
 
-* **Other step counts are allowed.** Any count from 1 up is accepted; a count other than 8
-  *resamples* the saved 8-step curve rather than switching to the base model's schedule. 8 is
-  the count the schedule was distilled for.
+* **Other step counts are allowed.** Any count from 4 up is accepted (4 is the lowest count tested
+  to hold up; fewer steps are refused); a count other than 8 *resamples* the saved 8-step curve
+  rather than switching to the base model's schedule. 8 is the count the schedule was distilled
+  for.
 * **Scheduler `Default` keeps the distilled schedule.** Picking any other scheduler replaces it
   with that scheduler's own curve. Every scheduler the base model offers is available, but only
   `Default` is the schedule Turbo was distilled for.
@@ -152,8 +153,9 @@ with, the engine drops the cache for that render and says so there; the render s
 
 ## Quant tiers
 
-The BF16 tier downloads from Qwen's own repository. The Q8 and Q4 tiers are listed in the Model
-Manager but are not yet published; they become installable once they are.
+The BF16 tier downloads from Qwen's own repository. The Q8 and Q4 tiers are quantized copies
+re-hosted by SceneWorks, each carrying the licence and a record of what was changed; Q4 is the
+default download, the smallest of the three.
 
 ## Licence
 

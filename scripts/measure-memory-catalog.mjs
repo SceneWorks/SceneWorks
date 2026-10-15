@@ -1277,7 +1277,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // upstream `Qwen/Qwen-Image-2.1` snapshot at its OWN root (the converter refuses to emit a `bf16/`
   // copy) — hence `layout: "flat"` on that tier alone. Both lanes load the same three roots (the
   // Candle port binds the MLX-packed tiers through `AdaptLinear::linear_detect_gs`), mirroring the
-  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are published (sc-24114, @1691de01…)
+  // worker's `qwen_image_2_1_declared_tier_dir`. The re-host rows are published (sc-24114; @ef03535e… since sc-25909)
   // and resolve like any pinned row; a `pendingArtifact` row would be reported by
   // `resolveArtifactRoot` rather than probed.
   qwen_image_2_1: {
@@ -1288,9 +1288,8 @@ export const PROVIDER_FAMILIES = Object.freeze({
   // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): base's shape over the distilled checkpoint's OWN
   // two repositories and env families, split the way `lens_turbo` is from `lens` — a Turbo plan
   // satisfied by base weights would re-label base's peaks as Turbo's (E10). Its `q8`/`q4` re-host
-  // rows are still `pendingArtifact` (40-zero revision) until the epic's terminal story publishes
-  // them, so `resolveArtifactRoot` reports those cells as pending rather than probing a snapshot;
-  // the `bf16` upstream row is pinned and resolves like base's.
+  // rows are published (sc-25909, @9095dfbb…) and resolve like base's; the `bf16` upstream row is
+  // pinned and resolves the same way.
   qwen_image_2_1_turbo: {
     env: "QWEN_IMAGE_2_1_TURBO", repo: "SceneWorks/qwen-image-2-1-turbo-mlx", arms: ["mlx", "candle"],
     tiers: { bf16: { env: "QWEN_IMAGE_2_1_TURBO_BF16", repo: "Qwen/Qwen-Image-2.1-Turbo", layout: "flat" } },

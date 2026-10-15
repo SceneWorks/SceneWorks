@@ -149,18 +149,27 @@ describe("Model Manager with Qwen Image 2.1 Turbo (sc-25908)", () => {
       row.querySelector(".model-tier-label").textContent.includes(label),
     );
 
-  // *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` from the Turbo entry (the
-  // bf16 checkbox is then live with no accept), or `pendingArtifact` from q8/q4.
-  it("lists three tiers, q8/q4 not yet published, behind Turbo's own licence accept", async () => {
+  // q8/q4 are PUBLISHED (sc-25909): all three tiers install, each behind the same accept.
+  // *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` from the Turbo entry (a
+  // checkbox is then live with no accept), or restoring `pendingArtifact` on q8/q4.
+  it("lists three installable tiers behind Turbo's own licence accept", async () => {
     await render([catalogModel(TURBO_ENTRY)]);
     expect(container.querySelectorAll(".model-tier-row")).toHaveLength(3);
-    for (const label of ["Q8", "Q4"]) {
-      expect(rowFor(label).querySelector(".status-badge").textContent).toBe("not published yet");
-      expect(rowFor(label).querySelector("input").disabled).toBe(true);
+    const input = (label) => rowFor(label).querySelector("input");
+    for (const label of ["bf16", "Q8", "Q4"]) {
+      expect(rowFor(label).textContent).not.toContain("not published yet");
+      expect(input(label).disabled, `${label} is blocked until the licence is accepted`).toBe(true);
     }
-    const bf16 = () => rowFor("bf16").querySelector("input");
-    expect(bf16().disabled, "bf16 is blocked until the licence is accepted").toBe(true);
     expect(container.querySelector(".model-gated-notice")?.textContent).toContain("Qwen-Image 2.1 Turbo");
+    // Before any click the panel preselects exactly the tier it SUGGESTS for this host — the
+    // highest-fidelity tier that fits (`suggestTier`), which on this 64 GB Mac is bf16 — not the
+    // catalog's `default: true` row (q4, what a variant-less download fetches). So the Q4 pick
+    // below is a real change of selection, and the queued variant proves it was honoured.
+    for (const label of ["bf16", "Q8", "Q4"]) {
+      const suggested = rowFor(label).classList.contains("suggested");
+      expect(suggested, `${label} is the host suggestion only if bf16`).toBe(label === "bf16");
+      expect(input(label).checked, `${label} preselected only if suggested`).toBe(suggested);
+    }
 
     const ack = container.querySelector(".model-license-ack input");
     expect(ack).toBeTruthy();
@@ -168,12 +177,15 @@ describe("Model Manager with Qwen Image 2.1 Turbo (sc-25908)", () => {
       Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "checked").set.call(ack, true);
       ack.dispatchEvent(new window.Event("click", { bubbles: true }));
     });
-    expect(bf16().disabled).toBe(false);
-    if (!bf16().checked) await click(bf16());
+    for (const label of ["bf16", "Q8", "Q4"]) {
+      expect(input(label).disabled).toBe(false);
+      if (input(label).checked !== (label === "Q4")) await click(input(label));
+    }
     await click(container.querySelector(".model-tier-actions button"));
+    expect(createModelDownloadJob).toHaveBeenCalledTimes(1);
     expect(createModelDownloadJob).toHaveBeenCalledWith(
       expect.objectContaining({ id: "qwen_image_2_1_turbo" }),
-      { variant: "bf16" },
+      { variant: "q4" },
     );
   });
 });
@@ -221,16 +233,16 @@ describe("Simple Model Manager quotes Turbo's own tier floor (sc-25908)", () => 
   }
   const meta = () => [...container.querySelectorAll(".su-row-meta")].map((node) => node.textContent).join(" ");
 
-  // While q8/q4 are pending only bf16 installs, so the floor quoted is Turbo's bf16 row on each
-  // lane — read from Turbo's entry, and on MLX different from base's (43 vs 44), so a quote that
+  // With q8/q4 published, the floor quoted is the lightest installable tier's (q4) on each
+  // lane — read from Turbo's entry, and on MLX different from base's (20 vs 21), so a quote that
   // fell through to base's numbers would show.
-  // *Mutation that reds this:* Turbo's `mlx.minMemoryGbByTier.bf16` reading base's 44.
-  it("quotes the bf16 floor of Turbo's own rows while the packed tiers are pending", async () => {
-    expect(TURBO_ENTRY.mlx.minMemoryGbByTier.bf16).not.toBe(BASE_ENTRY.mlx.minMemoryGbByTier.bf16);
+  // *Mutation that reds this:* Turbo's `mlx.minMemoryGbByTier.q4` reading base's 21.
+  it("quotes the q4 entry floor of Turbo's own rows", async () => {
+    expect(TURBO_ENTRY.mlx.minMemoryGbByTier.q4).not.toBe(BASE_ENTRY.mlx.minMemoryGbByTier.q4);
     await render([catalogModel(TURBO_ENTRY)], true);
-    expect(meta()).toContain(`needs ${TURBO_ENTRY.mlx.minMemoryGbByTier.bf16} GB`);
+    expect(meta()).toContain(`needs ${TURBO_ENTRY.mlx.minMemoryGbByTier.q4} GB`);
     await render([catalogModel(TURBO_ENTRY)], false);
-    expect(meta()).toContain(`needs ${TURBO_ENTRY.candle.minMemoryGbByTier.bf16} GB`);
+    expect(meta()).toContain(`needs ${TURBO_ENTRY.candle.minMemoryGbByTier.q4} GB`);
   });
 });
 

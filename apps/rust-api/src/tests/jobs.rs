@@ -16251,10 +16251,11 @@ fn write_shipped_qwen_image_2_1_pair(config_dir: &std::path::Path) {
 
 /// sc-25907 AC: `GET /api/v1/models` lists `qwen_image_2_1_turbo` with its distilled defaults
 /// (8 steps, guidance 1.0), three tier rows and the licence-acknowledgment gate; a download without
-/// the accept is refused (and queues nothing), and one with it queues the upstream Turbo snapshot.
+/// the accept is refused (and queues nothing), and one with it queues the DEFAULT tier — the
+/// published q4 re-host (sc-25909), the lightest installable tier, as on base.
 ///
 /// *Mutation that reds this:* dropping `requiresLicenseAcknowledgment` from the Turbo entry (the
-/// bare download is then created), or copying base's 40-step default.
+/// bare download is then created), copying base's 40-step default, or leaving `default` on bf16.
 #[tokio::test]
 async fn qwen_image_2_1_turbo_is_listed_with_its_defaults_tiers_and_licence_gate() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -16307,15 +16308,25 @@ async fn qwen_image_2_1_turbo_is_listed_with_its_defaults_tiers_and_licence_gate
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
-    assert_eq!(job["payload"]["repo"], "Qwen/Qwen-Image-2.1-Turbo");
+    assert_eq!(
+        job["payload"]["repo"], "SceneWorks/qwen-image-2-1-turbo-mlx",
+        "{job}"
+    );
+    assert_eq!(
+        job["payload"]["revision"], "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
+        "{job}"
+    );
+    assert_eq!(job["payload"]["files"], json!(["q4/*"]), "{job}");
 }
 
-/// sc-25907: `create_image_job` gates a Turbo request on Turbo's OWN declarations — the 1-step
-/// engine floor (where base refuses below 2), base's 10-reference cap and base's scheduler menu —
-/// so a request the engine would refuse is a 400 at enqueue, and one it serves is created.
+/// sc-25907: `create_image_job` gates a Turbo request on Turbo's OWN declarations — the 4-step
+/// floor the terminal step sweep measured (sc-25909; base's is 2), base's 10-reference cap and
+/// base's scheduler menu — so a request below the floor is a 400 at enqueue, and one it serves is
+/// created.
 ///
-/// *Mutation that reds this:* copying base's `hardMinSteps: 2` onto Turbo (the 1-step job is
-/// refused), or dropping Turbo's `maxReferenceAssets` (the 11-reference job is created).
+/// *Mutation that reds this:* restoring the pre-sweep `hardMinSteps: 1` (the 3-step job is created)
+/// or copying base's `hardMinSteps: 2`, or dropping Turbo's `maxReferenceAssets` (the 11-reference
+/// job is created).
 #[tokio::test]
 async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
     std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
@@ -16348,13 +16359,33 @@ async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
     let (status, body) = enqueue("qwen_image_2_1_turbo", json!({})).await;
     assert_eq!(status, StatusCode::CREATED, "{body}");
 
-    // One step: Turbo's engine floor admits it; base refuses it by its own floor.
+    // Four steps: Turbo's floor admits it; three is below it; base refuses one by its own floor.
     let (status, body) = enqueue(
         "qwen_image_2_1_turbo",
-        json!({ "advanced": { "steps": 1 } }),
+        json!({ "advanced": { "steps": 4 } }),
     )
     .await;
-    assert_eq!(status, StatusCode::CREATED, "Turbo admits 1 step: {body}");
+    assert_eq!(status, StatusCode::CREATED, "Turbo admits 4 steps: {body}");
+    let (status, body) = enqueue(
+        "qwen_image_2_1_turbo",
+        json!({ "advanced": { "steps": 3 } }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Turbo refuses 3 steps: {body}"
+    );
+    // Refused by TURBO's own 4-step floor, not by base's (2) or a generic bound.
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1_turbo"),
+        "names the Turbo model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 4 sampling steps"),
+        "names Turbo's 4-step floor: {detail}"
+    );
     let (status, body) = enqueue("qwen_image_2_1", json!({ "advanced": { "steps": 1 } })).await;
     assert_eq!(
         status,
