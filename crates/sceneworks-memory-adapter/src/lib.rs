@@ -209,8 +209,8 @@ pub const QWEN_IMAGE_2_1_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1";
 /// subdirs laid out exactly as [`QWEN_IMAGE_2_1_REPOSITORY`]'s, but a DIFFERENT repository at a
 /// different revision, bound through its own `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` family the way
 /// [`LENS_TURBO_REPOSITORY`] is split from [`LENS_REPOSITORY`] — so a Turbo plan can never be
-/// satisfied by base weights. Not yet published (the catalog rows are `pendingArtifact`); the
-/// epic's terminal story publishes it before any Turbo capture can bind it.
+/// satisfied by base weights. Published by the epic's terminal story (sc-25909) at
+/// `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`.
 pub const QWEN_IMAGE_2_1_TURBO_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-turbo-mlx";
 /// The Qwen-Image 2.1 Turbo bf16 tier: the upstream distilled snapshot at its ROOT, as
 /// [`QWEN_IMAGE_2_1_BF16_REPOSITORY`] is for base.

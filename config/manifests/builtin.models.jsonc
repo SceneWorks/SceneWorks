@@ -3302,25 +3302,30 @@
         // embeds these bytes; re-hosting them on the Hub is not embedding them in a build.
         //
         // PUBLISHED (sc-24114) at revision `1691de01c24a070131e0a28bf4c065fd027f4fe9` (q8 landed in
-        // 2f5ad8bb…, q4 in 1691de01…). The sc-24112 null-SHA placeholder and its `pendingArtifact`
+        // 2f5ad8bb…, q4 in 1691de01…), and REPUBLISHED (sc-25909, epic 25899) at
+        // `ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, which adds ONLY `q8/NOTICE` and `q4/NOTICE`
+        // (148 B each — the verbatim §3 attribution notice as its own file, as the Turbo re-host
+        // ships it); every other blob, `SHA256SUMS` included, is unchanged, and `SHA256SUMS` does
+        // not list NOTICE. The sc-24112 null-SHA placeholder and its `pendingArtifact`
         // flag are gone together, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
         // keeps rigid (a null SHA without the flag, or the flag with a real SHA, fails the audit),
         // and `default` sits on q4, the lightest installable tier — the catalog convention
         // `qwen_image` / `qwen_image_edit_2511` above follow, and what
         // `test_qwen_image_2_1_defaults_to_its_lightest_installable_tier` demands.
         //
-        // `estimatedSizeBytes` is MEASURED from the published blobs at 1691de01…: the EXACT sum of
+        // `estimatedSizeBytes` is MEASURED from the published blobs at ef03535e…: the EXACT sum of
         // every file under the tier's subdir as the Hub API reports it (`model_info(...,
-        // files_metadata=True)`), the same way the bf16 row's total was obtained:
+        // files_metadata=True)`), the same way the bf16 row's total was obtained (the 1691de01…
+        // totals plus the one 148 B NOTICE):
         //
-        //   q8 = 19_949_564_007 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
+        //   q8 = 19_949_564_155 B (18.58 GiB) — TE 11_022_747_191 + DiT 7_559_920_470
         //                                       + VAE 1_350_989_512 + small files
-        //   q4 = 12_919_123_211 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
+        //   q4 = 12_919_123_359 B (12.03 GiB) — TE  7_549_863_030 + DiT 4_002_363_835
         //                                       + VAE 1_350_989_512 + small files
         //
         // Cross-check against the sc-24112 derivation (bf16 tree total with the DiT's 232 and the
         // tower's 252 group-64 Linears swapped from bf16 to packed width, the arithmetic of the
-        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_325 B and q4 3_311_185 B
+        // engine's `memory_strategy::derived::packed_bytes`): q8 lands 3_310_177 B and q4 3_311_037 B
         // BELOW the derived number — ~3.31 MB each, within 860 B of one another, so the packed-weight
         // arithmetic holds and the residue is the non-weight files the re-host carries instead of
         // upstream's.
@@ -3331,21 +3336,21 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q8",
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19949564007,
-          "footprint": { "diskSizeBytes": 19949564007, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19949564155,
+          "footprint": { "diskSizeBytes": 19949564155, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-mlx",
-          "revision": "1691de01c24a070131e0a28bf4c065fd027f4fe9",
+          "revision": "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 12919123211,
-          "footprint": { "diskSizeBytes": 12919123211, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 12919123359,
+          "footprint": { "diskSizeBytes": 12919123359, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3798,21 +3803,16 @@
         // `residentMemoryBytes`/`peakMemoryBytes` are null: nothing has been measured for Turbo,
         // and base's figures are not Turbo's. NO `platforms` key, for base's reason (both backends
         // load this tree).
-        //
-        // `default` sits HERE, on bf16, only while the packed tiers below are pending — the
-        // `test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier` rule (the same rule
-        // base follows) moves it to q4 the moment the terminal story publishes them.
         {
           "provider": "huggingface",
           "repo": "Qwen/Qwen-Image-2.1-Turbo",
           "revision": "fc13ba1986fcb905854dc8de2f52eee395f49b5b",
           "variant": "bf16",
-          "default": true,
           "files": [],
           "estimatedSizeBytes": 32493327348,
           "footprint": { "diskSizeBytes": 32493327348, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
-        // ── The SceneWorks re-host: q8 and q4 — PENDING (the epic's terminal story) ─────────────
+        // ── The SceneWorks re-host: q8 and q4, one complete standalone snapshot per subdir ───────
         //
         // `SceneWorks/qwen-image-2-1-turbo-mlx` with `q8/` and `q4/` subdirs, named and laid out
         // exactly as base's `SceneWorks/qwen-image-2-1-mlx`: each a complete standalone tree whose
@@ -3821,37 +3821,51 @@
         // --example qwen_image_2_1_prequant -p mlx-gen-qwen-image-2-1`). The converter reads which
         // checkpoint it re-packs off the source, so a Turbo tier keeps the saved `sample_sigmas`,
         // the static scheduler config and the bf16 VAE byte for byte. Each tier dir carries the
-        // §3 licence record — LICENSE, README, CHANGES.md, SHA256SUMS and the attribution NOTICE.
+        // §3 licence record — LICENSE, README.md, CHANGES.md, SHA256SUMS and the attribution
+        // NOTICE — beside model_index.json + processor/ + scheduler/ + text_encoder/ +
+        // transformer/ + vae/ (17 files per tier; the repo-root README.md is outside both scopes).
         //
-        // NOT YET PUBLISHED, so both rows carry the 40-zero placeholder revision and
-        // `pendingArtifact: true`, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
-        // keeps rigid: publishing is one edit (real SHA in, flag out) that cannot be half-done.
+        // PUBLISHED (sc-25909, the epic's terminal story) at revision
+        // `9095dfbbb7e3edc753fbeb6bde8b92e0cf803912`. The 40-zero placeholder and its
+        // `pendingArtifact` flag left together, as `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
+        // requires, and `default` moved from bf16 to q4 — the lightest installable tier, base's
+        // convention, which `test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier`
+        // demands.
         //
-        // `estimatedSizeBytes` is DERIVED, not measured: the engine's
-        // `derived::tier_tree_bytes(Variant::Turbo, tier).weight_bytes()` (q8 19,258,058,768 B,
-        // q4 12,227,618,832 B — 17.94 / 11.39 GiB) plus the non-weight files (tokenizer, configs,
-        // licence record) base's PUBLISHED tiers carry above their own derived weight bytes
-        // (q8 16,025,479 B, q4 16,024,619 B). The terminal story replaces both with the published
-        // blob totals, as sc-24114 did for base.
+        // `estimatedSizeBytes` is MEASURED from the published blobs at 9095dfbb…: the EXACT sum of
+        // every file under the tier's subdir as the Hub API reports it (`/api/models/…/revision/
+        // <sha>?blobs=true`), as base's tiers were measured:
+        //
+        //   q8 = 19_269_638_211 B (17.95 GiB)
+        //   q4 = 12_239_197_415 B (11.40 GiB)
+        //
+        // Cross-check against the derivation these rows carried while pending (the engine's
+        // `derived::tier_tree_bytes(Variant::Turbo, tier).weight_bytes()` plus base's published
+        // non-weight files): both tiers land EXACTLY 4_446_036 B below it — the same residue on
+        // both, so the packed-weight arithmetic is exact and only the non-weight files differ
+        // from base's.
+        //
+        // `residentMemoryBytes`/`peakMemoryBytes` stay null on every tier: the epic-end memory
+        // campaign fills the measured rows, and the per-tier derived ladder lives in the
+        // `mlx`/`candle` blocks below where it is labelled derived.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
-          "revision": "0000000000000000000000000000000000000000",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
           "variant": "q8",
-          "pendingArtifact": true,
           "files": ["q8/*"],
-          "estimatedSizeBytes": 19274084247,
-          "footprint": { "diskSizeBytes": 19274084247, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 19269638211,
+          "footprint": { "diskSizeBytes": 19269638211, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
           "provider": "huggingface",
           "repo": "SceneWorks/qwen-image-2-1-turbo-mlx",
-          "revision": "0000000000000000000000000000000000000000",
+          "revision": "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912",
           "variant": "q4",
-          "pendingArtifact": true,
+          "default": true,
           "files": ["q4/*"],
-          "estimatedSizeBytes": 12243643451,
-          "footprint": { "diskSizeBytes": 12243643451, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "estimatedSizeBytes": 12239197415,
+          "footprint": { "diskSizeBytes": 12239197415, "residentMemoryBytes": null, "peakMemoryBytes": null }
         }
       ],
       "paths": {
@@ -3866,7 +3880,7 @@
       "licenseUrl": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo/blob/fc13ba1986fcb905854dc8de2f52eee395f49b5b/LICENSE",
       // Base's notice, adapted to name Turbo and its NOTICE file: the LICENSE beside the pinned
       // Turbo weights is byte-identical to base's (sha256 8dc973f0…), so every clause cited holds.
-      "licenseNotice": "Qwen-Image 2.1 Turbo's weights are governed (the same Agreement, byte for byte, as the base Qwen Image 2.1 model's) by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own Qwen-Image-2.1-Turbo repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks (they are offered only once published): they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above (also as a NOTICE file) inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
+      "licenseNotice": "Qwen-Image 2.1 Turbo's weights are governed (the same Agreement, byte for byte, as the base Qwen Image 2.1 model's) by the Qwen RESEARCH LICENSE AGREEMENT — not by SceneWorks' own AGPL-3.0 licence, and not by the Apache-2.0 terms that cover the separate \"Qwen Image\" (2512) model in this catalog. Three of its terms decide whether you may use this model at all. (1) NON-COMMERCIAL ONLY (§1(i), §2(a)): the licence grants you a non-exclusive, worldwide, non-transferable, royalty-free licence to use, reproduce, distribute and modify the model FOR NON-COMMERCIAL PURPOSES ONLY, where \"Non-Commercial\" means for research or evaluation purposes only. §2(b) requires a separate commercial licence from Hangzhou Tongyi Laboratory, requested at model-business@notice.qwencloud.com, for any commercial use. (2) NO \"QWEN\" NAMING, AND ATTRIBUTION ON DERIVED MODELS (§4(b), §4(c)): if you use this model or anything it produces to create, train, fine-tune or improve an AI model that you distribute or make available, you must prominently display \"Built with Qwen\" or \"Improved using Qwen\" in that product's documentation; and you may not use \"Qwen\" as the primary name of a derivative work, though descriptive use such as \"fine-tuned from Qwen Image\" is permitted. SceneWorks ships a LoRA trainer and a training studio, so this is the restriction the product's own features are most likely to reach. (3) REDISTRIBUTION CARRIES THE AGREEMENT (§3): if you pass the weights or a derivative on, you must include a copy of this Agreement, mark any files you changed, and retain the attribution notice \"Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c) 2026 Hangzhou Tongyi Laboratory Technology Co., Ltd. All Rights Reserved.\" The bf16 tier is downloaded from Qwen's own Qwen-Image-2.1-Turbo repository into your machine on first use, so SceneWorks redistributes nothing there. The q8 and q4 tiers ARE re-hosted by SceneWorks: they are quantized derivatives, §3 therefore applies to them, and SceneWorks discharges it by shipping a copy of this Agreement, a CHANGES.md change record naming exactly which files were changed, a SHA256SUMS manifest of those files, and the attribution notice above (also as a NOTICE file) inside each tier's own directory. SceneWorks never embeds any of these weights in a build or an installer. The licence is SILENT on the images you generate: §2(a)'s restriction is on the Materials (the weights, code and documentation), and no clause restricts outputs, so SceneWorks does not read one in. Read the full text at the link below before downloading.",
       // Feeds the packaging NC-weights guard (scripts/check-no-nc-weights.mjs), as base's does.
       "nonCommercial": true,
       "defaults": {
@@ -3900,12 +3914,13 @@
         "maxDimension": 2752,
         "requiresDimensionsMultipleOf": 32,
         "maxReferenceAssets": 10,
-        // The ENGINE floor for the Turbo id is 1 step (a distilled curve resampled to one step is
-        // still a legal schedule), so the enqueue gate declares exactly that for now. It is the
-        // engine's floor, not a quality floor: the epic's terminal story runs the step sweep on
-        // real weights and raises this to the lowest count that holds up. Step counts other than 8
-        // are a resample of the saved distilled curve.
-        "hardMinSteps": 1,
+        // A PRODUCT floor of 4 steps, set from the epic's terminal step sweep on real weights
+        // (sc-25909): 4, 6, 8, 12 and 16 steps all rendered coherent, so 4 is the lowest count
+        // MEASURED to hold up. The engine itself would accept 1 (a distilled curve resampled to
+        // one step is still a legal schedule), but nothing below 4 was swept, and the floor is
+        // never set below evidence. Step counts other than 8 are a resample of the saved
+        // distilled curve.
+        "hardMinSteps": 4,
         // Base's curated solver menu, verbatim (both providers publish the same menu under the
         // Turbo id). ⚠️ On this id a non-`default` SCHEDULER replaces the distilled sigmas with
         // that scheduler's own unshifted curve; `default` keeps them.
@@ -3993,13 +4008,13 @@
       },
       "ui": {
         "label": "Qwen Image 2.1 Turbo",
-        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. The bf16 tier is downloaded from Qwen's own repository on first use; Q8 and Q4 tiers re-hosted by SceneWorks are offered once they are published.",
+        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. Three precision tiers — bf16, Q8 and Q4 — install and run on both backends. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
         "recommendedFor": ["text_to_image", "edit_image"],
         // Base's multi-reference editor surface; the picker's ceiling is `limits.maxReferenceAssets`.
         "multiReference": true,
         // Turbo's own guide (sc-25908): base's prompt format and ordered-reference conventions,
         // plus what differs here — the 8-step distilled schedule, CFG-free defaults, no training
-        // base, pending q8/q4. It reaches the generic refiner as the selected model's guide.
+        // base, the 4-step floor. It reaches the generic refiner as the selected model's guide.
         "promptGuide": {
           "title": "Qwen Image 2.1 Turbo Prompt Guide",
           "path": "/prompt-guides/qwen-image-2-1-turbo.md",

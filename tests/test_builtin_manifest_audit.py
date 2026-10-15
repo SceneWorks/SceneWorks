@@ -4261,11 +4261,13 @@ def test_qwen_image_2_1_ships_three_tiers_on_both_backends_from_pinned_bundles()
     assert "re-hosted by SceneWorks" in qwen["licenseNotice"]
 
 
-#: The q8/q4 re-host as PUBLISHED (sc-24114): the revision and each tier's EXACT byte total, summed
-#: over every file under the tier's subdir from `HfApi().model_info(repo, revision=...,
-#: files_metadata=True)`.
-_QWEN_IMAGE_2_1_REHOST_REVISION = "1691de01c24a070131e0a28bf4c065fd027f4fe9"
-_QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES = {"q8": 19_949_564_007, "q4": 12_919_123_211}
+#: The q8/q4 re-host as PUBLISHED (sc-24114 at 1691de01…, republished by sc-25909 with each tier's
+#: 148 B `NOTICE` added): the revision and each tier's EXACT byte total, summed over every file
+#: under the tier's subdir from `HfApi().model_info(repo, revision=..., files_metadata=True)`.
+_QWEN_IMAGE_2_1_REHOST_REVISION = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0"
+_QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES = {"q8": 19_949_564_155, "q4": 12_919_123_359}
+#: The base tier totals at the pre-NOTICE revision, which the Turbo derivation below was built on.
+_QWEN_IMAGE_2_1_PRE_NOTICE_TIER_BYTES = {"q8": 19_949_564_007, "q4": 12_919_123_211}
 
 
 def test_qwen_image_2_1_tier_download_sizes_are_measured_from_the_published_blobs():
@@ -4306,7 +4308,7 @@ def test_qwen_image_2_1_tier_download_sizes_are_measured_from_the_published_blob
             + (packed(lm_linear_params, bits) - lm_linear_params * bf16_width)
         )
         residues.add(derived - measured)
-    # q8 3_310_325 B, q4 3_311_185 B: the weight arithmetic is exact to within the few KB of
+    # q8 3_310_177 B, q4 3_311_037 B: the weight arithmetic is exact to within the few KB of
     # per-tier text files, and the rest is the non-weight files the re-host carries instead of
     # upstream's. A residue outside this band means a weight file is not what the tier claims.
     assert all(3_300_000 < residue < 3_320_000 for residue in residues), residues
@@ -4402,7 +4404,8 @@ def test_qwen_image_2_1_packed_tiers_pin_the_published_revision():
 #: The published `SHA256SUMS` of each re-host tier at `_QWEN_IMAGE_2_1_REHOST_REVISION`, vendored
 #: verbatim as `<tier>/SHA256SUMS.txt` (fetched once with `hf_hub_download`; the `.txt` suffix is only
 #: so the source-control byte scanner classifies it) so E7 is checked without the network. Each value
-#: is the Hub's git blob id for that file at the revision, so a hand edit of the fixture reds.
+#: is the Hub's git blob id for that file at the revision, so a hand edit of the fixture reds. The
+#: sc-25909 NOTICE republish left both blobs unchanged (SHA256SUMS does not list NOTICE).
 _QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS = {
     "q8": "0eb8019c89740398a363e7c8f74db20d9aeb438c",
     "q4": "4b0494d9db0efa7096c304b5612df56085d3675e",
@@ -4430,6 +4433,49 @@ def test_qwen_image_2_1_published_tiers_carry_the_licence_record():
     }
     for tier, blob_id in _QWEN_IMAGE_2_1_SHA256SUMS_BLOB_IDS.items():
         raw = (ROOT / "tests/fixtures/qwen_image_2_1_rehost" / tier / "SHA256SUMS.txt").read_bytes()
+        git_blob = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
+        assert git_blob == blob_id, f"{tier}: fixture is not the SHA256SUMS published at the pin"
+        listed = {}
+        for line in raw.decode().splitlines():
+            digest, name = line.split(maxsplit=1)
+            assert re.fullmatch(r"[0-9a-f]{64}", digest), line
+            listed[name] = digest
+        missing = required - listed.keys()
+        assert not missing, f"{tier}: SHA256SUMS does not list {sorted(missing)}"
+
+
+#: The published `SHA256SUMS` of each Turbo re-host tier at `_QWEN_IMAGE_2_1_TURBO_REHOST_REVISION`,
+#: vendored verbatim as `tests/fixtures/qwen_image_2_1_turbo_rehost/<tier>/SHA256SUMS.txt`, keyed by
+#: the Hub's git blob id for that file at the revision (so a hand edit of the fixture reds).
+_QWEN_IMAGE_2_1_TURBO_SHA256SUMS_BLOB_IDS = {
+    "q8": "e076416a739c593c6c201223888a28a04d63a34b",
+    "q4": "3353ebc6330479e7807a74abc6d9780cfc862807",
+}
+
+
+def test_qwen_image_2_1_turbo_published_tiers_carry_the_licence_record():
+    """E7 (§3) for the Turbo re-host, pinned against the PUBLISHED artefacts: each tier's
+    `SHA256SUMS` lists the Agreement, the attribution README and NOTICE, the §3(b) change record
+    and the three safetensors the tier ships.
+
+    *Mutation that reds this:* deleting any of those lines from a vendored `SHA256SUMS`, or
+    vendoring a file that is not the one published at the revision.
+    """
+    import hashlib
+
+    required = {
+        "LICENSE",
+        "NOTICE",
+        "README.md",
+        "CHANGES.md",
+        "transformer/model.safetensors",
+        "text_encoder/model.safetensors",
+        "vae/diffusion_pytorch_model.safetensors",
+    }
+    for tier, blob_id in _QWEN_IMAGE_2_1_TURBO_SHA256SUMS_BLOB_IDS.items():
+        raw = (
+            ROOT / "tests/fixtures/qwen_image_2_1_turbo_rehost" / tier / "SHA256SUMS.txt"
+        ).read_bytes()
         git_blob = hashlib.sha1(b"blob %d\0" % len(raw) + raw).hexdigest()
         assert git_blob == blob_id, f"{tier}: fixture is not the SHA256SUMS published at the pin"
         listed = {}
@@ -4545,9 +4591,11 @@ def test_qwen_image_2_1_turbo_is_its_own_id_on_the_base_family_and_lora_pool():
 
 def test_qwen_image_2_1_turbo_defaults_are_the_distilled_operating_point():
     """8 steps, guidance 1.0, one 2048-square image, the `default` solver (which keeps the saved
-    distilled sigmas) — and the engine's 1-step floor until the terminal step sweep raises it.
+    distilled sigmas) — and the 4-step floor the terminal step sweep (4/6/8/12/16, all coherent)
+    measured as the lowest count that holds up.
 
-    *Mutation that reds this:* copying base's 40-step default, or base's `hardMinSteps: 2`.
+    *Mutation that reds this:* copying base's 40-step default, base's `hardMinSteps: 2`, or
+    restoring the pre-sweep engine floor of 1.
     """
     turbo = _qwen_image_2_1_turbo_entry()
     assert turbo["defaults"] == {
@@ -4558,7 +4606,7 @@ def test_qwen_image_2_1_turbo_defaults_are_the_distilled_operating_point():
         "sampler": "default",
         "scheduler": "default",
     }
-    assert turbo["limits"]["hardMinSteps"] == 1
+    assert turbo["limits"]["hardMinSteps"] == 4
 
 
 def test_qwen_image_2_1_turbo_serves_base_request_envelope_verbatim():
@@ -4584,13 +4632,19 @@ def test_qwen_image_2_1_turbo_serves_base_request_envelope_verbatim():
     assert turbo["ui"]["multiReference"] is True
 
 
-def test_qwen_image_2_1_turbo_ships_three_tiers_bf16_upstream_and_the_pending_rehost():
-    """E7: bf16 is the upstream Turbo snapshot at its pinned revision with its exact Hub byte
-    total; q8/q4 are the SceneWorks re-host, PENDING (40-zero placeholder + flag) until the
-    terminal story publishes them; while pending, bf16 is the default (the base rule below).
+#: The Turbo q8/q4 re-host as PUBLISHED (sc-25909): the revision and each tier's EXACT byte total,
+#: summed over the 17 files under the tier's subdir from the Hub API at that revision.
+_QWEN_IMAGE_2_1_TURBO_REHOST_REVISION = "9095dfbbb7e3edc753fbeb6bde8b92e0cf803912"
+_QWEN_IMAGE_2_1_TURBO_PUBLISHED_TIER_BYTES = {"q8": 19_269_638_211, "q4": 12_239_197_415}
 
-    *Mutation that reds this:* pointing bf16 at base's repo/revision, rounding its size, or
-    giving a pending row a real-looking revision.
+
+def test_qwen_image_2_1_turbo_ships_three_tiers_bf16_upstream_and_the_published_rehost():
+    """E7: bf16 is the upstream Turbo snapshot at its pinned revision with its exact Hub byte
+    total; q8/q4 are the SceneWorks re-host, PUBLISHED (sc-25909) at a real revision with no
+    `pendingArtifact` flag, and q4 — the lightest installable tier, base's rule — is the default.
+
+    *Mutation that reds this:* pointing bf16 at base's repo/revision, rounding its size, restoring
+    the 40-zero placeholder or the flag, or leaving the default on bf16.
     """
     downloads = _qwen_image_2_1_turbo_entry()["downloads"]
     assert [d.get("variant") for d in downloads] == ["bf16", "q8", "q4"]
@@ -4607,19 +4661,20 @@ def test_qwen_image_2_1_turbo_ships_three_tiers_bf16_upstream_and_the_pending_re
         row = by_variant[tier]
         assert row["repo"] == "SceneWorks/qwen-image-2-1-turbo-mlx", tier
         assert row["files"] == [f"{tier}/*"], tier
-        assert row["pendingArtifact"] is True, tier
-        assert row["revision"] == _PENDING_ARTIFACT_REVISION, tier
-        assert row.get("default") is not True, tier
+        assert "pendingArtifact" not in row, f"{tier}: the flag left with the placeholder"
+        assert row["revision"] == _QWEN_IMAGE_2_1_TURBO_REHOST_REVISION, tier
     # Nothing has been measured for Turbo on any backend: no tier claims a memory footprint.
     for row in downloads:
         assert row["footprint"]["residentMemoryBytes"] is None
         assert row["footprint"]["peakMemoryBytes"] is None
-    assert bf16.get("default") is True
+    assert by_variant["q4"].get("default") is True
+    assert by_variant["q8"].get("default") is not True
+    assert bf16.get("default") is not True
 
 
 def test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier():
     """Base's rule, applied to Turbo: the default is the lightest tier that can actually be
-    fetched. Today that is bf16 (q8/q4 pending); once they publish, this REQUIRES q4."""
+    fetched — q4, now that the re-host is published."""
     downloads = _qwen_image_2_1_turbo_entry()["downloads"]
     installable = [
         d
@@ -4632,12 +4687,16 @@ def test_qwen_image_2_1_turbo_defaults_to_its_lightest_installable_tier():
     assert chosen is not None and chosen["variant"] == lightest["variant"]
 
 
-def test_qwen_image_2_1_turbo_pending_tier_sizes_are_derived_from_the_engine_tree():
-    """The pending q8/q4 sizes are DERIVED: `derived::tier_tree_bytes(Variant::Turbo, tier)`'s
-    weight files (the engine's packed-weight arithmetic over the Turbo release's file sizes) plus
-    the non-weight files base's PUBLISHED tiers carry above their own derived weights.
+def test_qwen_image_2_1_turbo_tier_download_sizes_are_measured_from_the_published_blobs():
+    """The q8/q4 sizes are the EXACT published totals at the pinned revision — measured, not
+    derived — and they are cross-checked against the derivation the rows carried while pending:
+    `derived::tier_tree_bytes(Variant::Turbo, tier)`'s weight files (the engine's packed-weight
+    arithmetic over the Turbo release's file sizes) plus the non-weight files base's published
+    tiers carried above their own derived weights. Both tiers sit the SAME distance below that
+    derivation, so the packed-weight arithmetic is exact and only the non-weight files differ.
 
-    *Mutation that reds this:* copying base's published q8/q4 totals onto Turbo (E10).
+    *Mutation that reds this:* restoring the derived 19_274_084_247 / 12_243_643_451, copying
+    base's published q8/q4 totals onto Turbo (E10), or rounding a tier's size.
     """
     group_size = 64
     dit_linear = 7_115_112_448
@@ -4660,14 +4719,22 @@ def test_qwen_image_2_1_turbo_pending_tier_sizes_are_derived_from_the_engine_tre
 
     base_text_encoder = 4_998_056_552 + 4_915_962_464 + 4_915_962_496 + 2_704_357_976
     by_variant = {d["variant"]: d for d in _qwen_image_2_1_turbo_entry()["downloads"]}
+    residues = set()
     for tier, bits in (("q8", 8), ("q4", 4)):
-        base_non_weight = _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier] - tree(
+        measured = _QWEN_IMAGE_2_1_TURBO_PUBLISHED_TIER_BYTES[tier]
+        assert by_variant[tier]["estimatedSizeBytes"] == measured, tier
+        assert by_variant[tier]["footprint"]["diskSizeBytes"] == measured, tier
+        assert measured != _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier], tier
+        base_non_weight = _QWEN_IMAGE_2_1_PRE_NOTICE_TIER_BYTES[tier] - tree(
             base_text_encoder, 1_350_989_512, bits
         )
         derived = tree(17_534_340_584, 675_508_656, bits) + base_non_weight
-        assert by_variant[tier]["estimatedSizeBytes"] == derived, tier
-        assert by_variant[tier]["footprint"]["diskSizeBytes"] == derived, tier
-        assert derived != _QWEN_IMAGE_2_1_PUBLISHED_TIER_BYTES[tier], tier
+        residues.add(derived - measured)
+    # 4_446_036 B on BOTH tiers: one constant, so no weight file is other than its tier claims.
+    assert residues == {4_446_036}, residues
+
+    sizes = [by_variant[t]["estimatedSizeBytes"] for t in ("q4", "q8", "bf16")]
+    assert sizes == sorted(sizes), f"a denser tier must be larger: {sizes}"
 
 
 def test_qwen_image_2_1_turbo_floors_are_turbos_own_derivation():

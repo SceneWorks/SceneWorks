@@ -28507,9 +28507,10 @@ mod qwen_image_2_1_tiers {
     const UPSTREAM_REPO: &str = "Qwen/Qwen-Image-2.1";
     const UPSTREAM_REVISION: &str = "790c92633540aa0cb11d9abf19eb46d861714758";
     const REHOST_REPO: &str = "SceneWorks/qwen-image-2-1-mlx";
-    /// The revision the q8/q4 tiers were PUBLISHED at (sc-24114). The shipped catalog pins it, and
+    /// The revision the q8/q4 tiers are PUBLISHED at (sc-24114; republished with each tier's NOTICE by
+    /// sc-25909). The shipped catalog pins it, and
     /// `the_shipped_catalog_pins_the_published_rehost` asserts so.
-    const REHOST_REVISION: &str = "1691de01c24a070131e0a28bf4c065fd027f4fe9";
+    const REHOST_REVISION: &str = "ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0";
 
     fn isolate_hf_cache() -> crate::test_env::EnvVars {
         crate::test_env::EnvVars::set(&[

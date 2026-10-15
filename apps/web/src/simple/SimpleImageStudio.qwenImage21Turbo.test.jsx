@@ -174,12 +174,12 @@ describe("SimpleImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
 
   // *Mutation that reds this:* reading the step default from base's entry (40) or clamping the
   // field to the distilled count.
-  it("defaults steps to the distilled 8, floors them at 1, and sends another count unchanged", async () => {
+  it("defaults steps to the distilled 8, floors them at 4, and sends another count unchanged", async () => {
     const context = await openImage();
     await openAdvanced();
     const steps = container.querySelector("#su-image-steps");
     expect(steps.getAttribute("placeholder")).toBe("8");
-    expect(steps.getAttribute("min")).toBe("1");
+    expect(steps.getAttribute("min"), "the 4-step floor from the step sweep (sc-25909)").toBe("4");
 
     await act(async () => setTextarea(container.querySelector("#su-image-prompt"), "a lighthouse"));
     await act(async () => setInput(steps, "20"));

@@ -184,7 +184,7 @@ describe("ImageStudio with Qwen Image 2.1 Turbo (sc-25908)", () => {
     await click(document.body.querySelector(".advanced-section-toggle"));
     const steps = field(container, "Steps");
     expect(steps.getAttribute("placeholder")).toBe("8");
-    expect(steps.getAttribute("min")).toBe("1");
+    expect(steps.getAttribute("min"), "the 4-step floor from the step sweep (sc-25909)").toBe("4");
     await typePrompt("a lighthouse");
     await act(async () => setInput(steps, "20"));
     await click(generateButton());
