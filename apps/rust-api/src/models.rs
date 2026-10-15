@@ -7060,6 +7060,177 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-26234 (epic sc-26233): FLUX 3 Image Klein is ONE package — the DiT, the autoencoder AND
+    /// the Qwen3-VL text encoder all live under the one pinned `black-forest-labs/flux-3-image-klein`
+    /// root (`gen_core::flux3::GenerationResources` reads them from there), so the entry has exactly
+    /// one download and NO co-requisite component (the inverse of Iris-3B, whose encoder is a
+    /// separate `text_encoder` component). Install state therefore gates on the bundled
+    /// `text_encoder/` files of the SAME snapshot: the DiT + autoencoder alone is a repairable
+    /// partial install, never an installed generator.
+    #[test]
+    fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_component() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path();
+        let model = builtin_models_entry("flux3_klein");
+
+        let downloads = model
+            .get("downloads")
+            .and_then(Value::as_array)
+            .expect("flux3_klein declares downloads");
+        assert_eq!(downloads.len(), 1, "one package, one download");
+        assert!(
+            model_co_requisite_downloads(&model).is_empty(),
+            "the text encoder is bundled in the package, not a co-requisite component"
+        );
+        assert!(
+            model.get("component").is_none(),
+            "flux3_klein is a generator, not an installable component"
+        );
+        let revision = downloads[0]
+            .get("revision")
+            .and_then(Value::as_str)
+            .unwrap();
+        assert_eq!(revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
+
+        let context = model_download_context(&model).unwrap().unwrap();
+        assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein");
+        assert_eq!(context.files, string_array_field(&downloads[0], "files"));
+        for required in [
+            "config.json",
+            "model.safetensors",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/model.safetensors.index.json",
+        ] {
+            assert!(
+                context.files.iter().any(|file| file == required),
+                "{required} is fetched with the package"
+            );
+        }
+        assert!(
+            context
+                .files
+                .iter()
+                .all(|file| !file.starts_with("variants/")),
+            "quantized variants are not part of the S1 install (sc-26241 owns tiers)"
+        );
+
+        let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+            .unwrap()
+            .join("snapshots")
+            .join(revision);
+        let (encoder, root): (Vec<&String>, Vec<&String>) = context
+            .files
+            .iter()
+            .partition(|file| file.starts_with("text_encoder/"));
+        assert!(!encoder.is_empty() && !root.is_empty());
+        let seed = |files: &[&String]| {
+            for file in files {
+                let path = snapshot.join(seeded_file_path(file));
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"weights").unwrap();
+            }
+        };
+
+        seed(&root);
+        let partial = install_state_for(Some(context.clone()), &model, data_dir);
+        assert!(
+            !partial.installed,
+            "DiT + autoencoder without the bundled text encoder is not installed"
+        );
+        assert!(
+            partial.cache_incomplete,
+            "a missing bundled encoder is a repairable partial install"
+        );
+
+        seed(&encoder);
+        // The shard index is validated, so it must name the shard the glob seeded.
+        let shard = seeded_file_path("model-*.safetensors");
+        std::fs::write(
+            snapshot.join("text_encoder/model.safetensors.index.json"),
+            serde_json::to_vec(&serde_json::json!({ "weight_map": { "w": shard } })).unwrap(),
+        )
+        .unwrap();
+        let installed = install_state_for(Some(context), &model, data_dir);
+        assert!(
+            installed.installed,
+            "the whole package is installed: incomplete={} missing={:?} path={:?}",
+            installed.cache_incomplete, installed.missing_required_files, installed.installed_path
+        );
+        assert!(
+            installed.missing_required_files.is_empty(),
+            "{:?}",
+            installed.missing_required_files
+        );
+    }
+
+    /// sc-26234: the package is GATED upstream (FLUX Kommunity License), pulled directly from Black
+    /// Forest Labs with no SceneWorks re-host, so the catalog projection must carry `gated: true`
+    /// and the `huggingface.co` credential host the Models screen keys its "add a Hugging Face
+    /// token" / "request access" affordances on — and the stored-HF-token download path with it.
+    #[test]
+    fn flux3_klein_is_gated_behind_a_huggingface_credential() {
+        let model = builtin_models_entry("flux3_klein");
+        let mut object = model.as_object().unwrap().clone();
+        apply_gating_fields(&mut object);
+        assert_eq!(object.get("gated").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            object.get("credentialHost").and_then(Value::as_str),
+            Some("huggingface.co")
+        );
+        assert!(
+            !model_requires_license_acknowledgment(&model),
+            "a gated repo is refused upstream without a token; it needs no acknowledgment gate"
+        );
+        assert_eq!(
+            derive_credential_host(&object).as_deref(),
+            Some("huggingface.co"),
+            "the download itself resolves to the same Hugging Face credential"
+        );
+    }
+
+    /// sc-26234: unlike Iris-3B, FLUX 3 Image Klein has NO Candle lane at this pin (the Candle twin
+    /// is sc-26235), so its entry is labelled `macOnly`. For an IMAGE entry that label is the gate —
+    /// the web's `modelEligibility` hides a `macOnly` model off-Mac, and the candle router has no
+    /// claim for `flux3_klein` — rather than a catalog withdrawal (only video products are withdrawn,
+    /// `video_model_withdrawn_on_platform`). So on Windows and Linux the label must SURVIVE the
+    /// platform projection intact, alongside the one package download, for that gate to fire.
+    #[test]
+    fn flux3_klein_is_mac_only_and_keeps_that_label_on_the_candle_platforms() {
+        let _env = isolate_hf_cache();
+        let base = builtin_models_entry("flux3_klein");
+        assert_eq!(
+            base.get("macOnly").and_then(Value::as_bool),
+            Some(true),
+            "flux3_klein has no Candle lane at this pin, so it must be labelled macOS-only"
+        );
+        for os in ["windows", "linux"] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut projected = vec![base.clone()];
+            retain_models_for_os(&mut projected, os, temp.path()).unwrap();
+            assert_eq!(projected.len(), 1, "{os}: an image entry is not withdrawn");
+            let mut model = projected.remove(0);
+            assert_eq!(
+                model.get("macOnly").and_then(Value::as_bool),
+                Some(true),
+                "{os}: the macOnly gate reaches the client"
+            );
+            assert!(
+                !video_model_withdrawn_on_platform("flux3_klein", &model, os),
+                "{os}"
+            );
+            retain_downloads_for_os(&mut model, os);
+            assert!(
+                model_co_requisite_downloads(&model).is_empty(),
+                "{os}: still no component"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein", "{os}");
+        }
+    }
+
     /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
     /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
     /// only when all three are present. Same on every platform (both lanes serve it).
