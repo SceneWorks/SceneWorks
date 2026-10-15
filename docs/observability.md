@@ -273,7 +273,8 @@ native prompt batch).
   (`{actualBytes, pricedBytes}`) is non-null when the engine shed a cached selection because the
   real prefix exceeded the priced bound; the same render also carries the
   `prefix_kv_cache_shed_over_priced_bound` warning in `generationWarnings`, which the completion
-  message names.
+  message names. The record is worker-owned: a `prefixKvCache` key in a request's `advanced` block
+  (a replayed recipe, a hand-built payload) is dropped, so only an image's own report writes one.
 * `prefix_kv_cache_selection_dropped` (warn) means an admitted selection reached a provider whose
   declaration does not accept it; the request ran prefill (less memory than was admitted).
 

@@ -296,6 +296,52 @@ const seededFallbackModels = [
     },
   },
   {
+    // Qwen Image 2.1 Turbo (epic 25899) — the distilled few-step sibling of `qwen_image_2_1`. The
+    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (1), the
+    // default step count (8) and the prompt guide differ. Kept in step with its manifest entry for
+    // the same reason as the base seed above: every `limits` key drives a pre-catalog control.
+    id: "qwen_image_2_1_turbo",
+    name: "Qwen Image 2.1 Turbo",
+    type: "image",
+    capabilities: ["text_to_image", "image_to_image", "edit_image"],
+    supportsAlphaOutput: true,
+    limits: {
+      resolutions: [
+        "2048x2048",
+        "2400x1792",
+        "1792x2400",
+        "2528x1696",
+        "1696x2528",
+        "2752x1536",
+        "1536x2752",
+      ],
+      count: [1, 2, 4, 8],
+      minDimension: 32,
+      maxDimension: 2752,
+      requiresDimensionsMultipleOf: 32,
+      maxReferenceAssets: 10,
+      hardMinSteps: 1,
+      samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
+      schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
+    },
+    defaults: {
+      resolution: "2048x2048",
+      steps: 8,
+      guidanceScale: 1.0,
+      count: 1,
+      sampler: "default",
+      scheduler: "default",
+    },
+    ui: {
+      description: "Qwen-Image 2.1 Turbo few-step text-to-image and reference editing (research licence).",
+      multiReference: true,
+      promptGuide: {
+        title: "Qwen Image 2.1 Turbo Prompt Guide",
+        path: "/prompt-guides/qwen-image-2-1-turbo.md",
+      },
+    },
+  },
+  {
     id: "z_image_edit",
     // Which generation AXES this engine has (sc-15299) — mirrored from the manifest `image`
     // sub-block so the pre-catalog seed hides the same dead controls the live catalog does.

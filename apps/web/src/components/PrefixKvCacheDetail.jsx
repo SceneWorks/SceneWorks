@@ -4,9 +4,10 @@ import { formatBytes } from "../formatting.js";
 // Which prompt path a Qwen-Image 2.1 render ran (sc-25908, epic 25899 E6).
 //
 // A provider that declares the prefix KV cache (`qwen_image_2_1`, `qwen_image_2_1_turbo`) is
-// priced per request: the admission runs its memory ladder cached-first and sheds the cache
-// before it would refuse, and the engine itself sheds a cached selection whose real prefix
-// outgrows the priced bound. The job result carries one record per written image
+// priced per request: the admission runs its memory ladder with the cache shed (exactly as it
+// would with no cache), then adds the cache only if that SAME rung still fits with it — the cache
+// never changes which rung runs and never causes a refusal — and the engine itself sheds a cached
+// selection whose real prefix outgrows the priced bound. The job result carries one record per written image
 // (`result.prefixKvCache`, the worker's `execution_planner::prefix_kv_cache_record`):
 // `{selected, pricedBytes, path, cacheBytes, overflow: {actualBytes, pricedBytes} | null}` —
 // `selected` is what the admission chose, `path` what the render REPORTS it ran.

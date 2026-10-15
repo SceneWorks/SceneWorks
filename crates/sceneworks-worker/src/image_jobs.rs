@@ -335,10 +335,10 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 
 /// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
 ///
-/// `qwen_image_2_1` — the one route that declares an envelope — is priced off the EXACT ordered
-/// list its lane renders ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an
-/// ORDINARY reference to this engine — it has no mask tensor), the plural list and the singular
-/// reference, deduped by asset id. Every entry is one reference block of the joint attention
+/// The Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — the routes that declare an
+/// envelope — is priced off the EXACT ordered list its lane renders
+/// ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an ORDINARY reference to this
+/// engine — it has no mask tensor), the plural list and the singular reference, deduped by asset id. Every entry is one reference block of the joint attention
 /// sequence, so counting anything else prices a different request than the one that runs: a
 /// `max` over the carriers priced source + mask + 8 references as 8.
 ///
@@ -3480,6 +3480,9 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
+    // reach the asset or the job result's `prefixKvCache` summary.
+    raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
     raw.insert("realModelInference".to_owned(), Value::Bool(false));
     raw
 }

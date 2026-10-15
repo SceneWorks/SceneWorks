@@ -14,7 +14,8 @@
 //! (inference sc-24111, PR #1009) turns on:
 //!
 //! * [`DESCRIPTOR_ALPHA_CAPABILITY`] — `Capabilities::supports_alpha_output`, false by default and
-//!   true only on `qwen_image_2_1`, on both backends.
+//!   true only on the Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`), on both
+//!   backends.
 //! * [`REQUEST_OUTPUT_CHANNELS`] — `GenerationRequest::output_channels`, a
 //!   `gen_core::OutputChannels { Rgb (default), Rgba }`. It is an ENUM, not a channel count: the
 //!   default is byte-identical to every pre-S4 render.
