@@ -109,8 +109,9 @@ and the ten-image limit counts distinct images.
 | Combine subjects | Each subject, in order | `Place the person from image 1 into the kitchen in image 2.` |
 | Keep an identity | One or more shots of them | `Keep the face and hair from image 1 exactly.` |
 
-References are scaled to about 1024 px and re-encoded on every step, so ten references cost
-noticeably more than two. Attach what the instruction actually refers to.
+References are scaled to about 1024 px. On the prefill path they are re-encoded on every step;
+when the prompt cache runs they are encoded once (see *Prompt cache*). Either way ten references
+cost noticeably more than two, so attach what the instruction actually refers to.
 
 ## Transparent backgrounds
 

@@ -807,6 +807,21 @@ SCENEWORKS_QWEN_IMAGE_2_1_BF16_REPOSITORY=Qwen/Qwen-Image-2.1       # fixed; val
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_REVISION=<exact artifact revision>
 SCENEWORKS_QWEN_IMAGE_2_1_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
 
+# BOTH adapters — qwen_image_2_1_turbo (sc-25907, epic 25899). The distilled checkpoint is base's
+# split-repo shape over its OWN two repositories and its OWN env families, split from base's the way
+# Lens-Turbo is split from Lens, so a Turbo plan can never be satisfied by base weights (adapter
+# `QWEN_IMAGE_2_1_TURBO_FAMILY` / `QWEN_IMAGE_2_1_TURBO_BF16_FAMILY` in `bin/mlx.rs`,
+# `qwen_image_2_1_turbo_five_rung_family` in `bin/candle.rs`). q8/q4 are the `<tier>/` subdirs of the
+# SceneWorks re-host, NOT YET PUBLISHED (the catalog rows are `pendingArtifact`; the epic's terminal
+# story publishes it), so only the bf16 family can bind today; bf16 IS the upstream
+# `Qwen/Qwen-Image-2.1-Turbo` snapshot at its ROOT.
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY=SceneWorks/qwen-image-2-1-turbo-mlx  # fixed; validated against QWEN_IMAGE_2_1_TURBO_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # q4 | q8 ONLY — bf16 is the family below
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY=Qwen/Qwen-Image-2.1-Turbo       # fixed; validated against QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION=<exact artifact revision>
+SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT=/abs/path/.../snapshots/<rev>       # the snapshot ROOT — no tier subdir
+
 # BOTH adapters — the three Iris-3B TASK routes (sc-25690): generation (iris_3b), monocular depth
 # (iris_3b_depth) and restoration (iris_3b_restore). Three fine-tunes in ONE upstream repository at
 # one revision, never re-hosted, bf16 only (no route quantizes, so there is exactly one cell per

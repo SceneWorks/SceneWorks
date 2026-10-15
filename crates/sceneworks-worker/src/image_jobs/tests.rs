@@ -29455,3 +29455,132 @@ async fn inline_iris_restore_canceled_after_the_last_tile_writes_no_variant() {
     assert_eq!(asset_writes.len(), 1, "no restored variant appended");
     assert_eq!(iris::png_files_under(&project_path.join("assets")), before);
 }
+
+/// Epic 25899 (sc-25909) — `rawAdapterSettings.prefixKvCache` says which path a render RAN, so it is
+/// worker-owned: a replayed or hand-built `advanced.prefixKvCache` must never reach an asset or the
+/// job result's summary (the job card's "which path ran" record). Driven through the production
+/// consumer every image route shares on both lanes, with the raw settings a route hands it — a copy
+/// of `request.advanced` carrying the forged record. Image 0 reports a real record; image 1 reports
+/// nothing (hires fix, native batch, or any model without a cache).
+///
+/// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from the per-image settings
+/// in `consume_gen_events_with_disclosure`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let project_path = dir.path().join("project");
+    std::fs::create_dir_all(project_path.join("assets").join("images")).unwrap();
+    let forged = json!({ "selected": "cached", "path": "cached", "pricedBytes": 1 });
+    let real = json!({ "selected": "cached", "path": "prefill", "pricedBytes": 4096 });
+    let req = request(json!({
+        "projectId": "p", "mode": "text_to_image", "model": "qwen_image_2_1_turbo",
+        "prompt": "a red fox", "count": 2, "width": 64, "height": 64, "seed": 5,
+        "advanced": { "prefixKvCache": forged },
+    }));
+    let plan = ImagePlan::with_count(&req, 2, None);
+    let raw_settings = req.advanced.clone();
+    assert_eq!(raw_settings[lane_controls::PREFIX_KV_CACHE_KEY], forged);
+
+    let (base_url, _posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;
+    let mut settings = crate::tests::test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    let api = ApiClient::new(&settings);
+    let job: JobSnapshot = serde_json::from_value(crate::tests::job_snapshot_json("job-1", false))
+        .expect("job snapshot deserializes");
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
+    let report = real.clone();
+    let blocking = tokio::task::spawn_blocking(move || {
+        let mut facts = JsonObject::new();
+        facts.insert(lane_controls::PREFIX_KV_CACHE_KEY.to_owned(), report);
+        let _ = tx.blocking_send(GenEvent::ImageFacts { index: 0, facts });
+        for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
+            let _ = tx.blocking_send(GenEvent::Image {
+                index,
+                seed,
+                width: 64,
+                height: 64,
+                pixels: stub_rgb8(64, 64, seed),
+                face_likeness: None,
+            });
+        }
+        Ok(())
+    });
+    let mut asset_writes = Vec::new();
+    consume_gen_events(
+        &api,
+        &settings,
+        &job,
+        &plan,
+        &project_path,
+        "mlx",
+        "mlx_qwen_2_1",
+        &raw_settings,
+        2,
+        rx,
+        CancelFlag::new(),
+        blocking,
+        &mut asset_writes,
+    )
+    .await
+    .expect("the render completes");
+
+    assert_eq!(asset_writes.len(), 2);
+    assert_eq!(
+        asset_writes[0]["rawAdapterSettings"][lane_controls::PREFIX_KV_CACHE_KEY],
+        real,
+        "the image's own report is the record"
+    );
+    assert!(
+        asset_writes[1]["rawAdapterSettings"]
+            .get(lane_controls::PREFIX_KV_CACHE_KEY)
+            .is_none(),
+        "no report, no record — the forged one never survives: {}",
+        asset_writes[1]["rawAdapterSettings"]
+    );
+    assert_eq!(
+        streaming_result(&plan, &asset_writes)[PREFIX_KV_CACHE_RESULT_KEY],
+        json!([real]),
+        "the job result summarises only real records"
+    );
+}
+
+/// The MLX/Candle generic lanes' shared raw-settings builder drops a forged record too (epic 25899).
+///
+/// *Mutation that reds this:* dropping the `PREFIX_KV_CACHE_KEY` removal from `mlx_raw_settings`.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn mlx_raw_settings_drops_a_forged_prefix_kv_cache() {
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1_turbo", "prompt": "a red fox",
+        "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
+    }));
+    let raw = mlx_raw_settings(&req, "Qwen/Qwen-Image-2.1-Turbo", 8, None, None);
+    assert!(
+        raw.get(lane_controls::PREFIX_KV_CACHE_KEY).is_none(),
+        "{raw:?}"
+    );
+    assert_eq!(raw["sampler"], "euler", "every other advanced key is kept");
+}
+
+/// The backend-less stub lane renders no prefix cache, so a replayed record must not reach its
+/// assets or the job result (epic 25899).
+///
+/// *Mutation that reds this:* dropping the removal from `stub_raw_settings`.
+#[test]
+fn stub_raw_settings_drops_a_forged_prefix_kv_cache() {
+    let req = request(json!({
+        "projectId": "p", "model": "qwen_image_2_1_turbo", "prompt": "a red fox",
+        "advanced": { "prefixKvCache": { "path": "cached" }, "sampler": "euler" },
+    }));
+    let raw = stub_raw_settings(&req);
+    assert!(raw.get(PREFIX_KV_CACHE_RESULT_KEY).is_none(), "{raw:?}");
+    assert_eq!(raw["sampler"], "euler");
+}

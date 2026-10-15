@@ -5394,6 +5394,8 @@ fn mlx_raw_settings(
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
+    // Worker-owned too (epic 25899): only the image's own render report adds the record back.
+    raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -15176,9 +15178,12 @@ async fn consume_gen_events_with_disclosure(
                     );
                 }
                 // Worker-owned like the keys above: a replayed `advanced` block can never forge
-                // them, and only this image's own reported facts add them back (sc-25681).
+                // them, and only this image's own reported facts add them back (sc-25681). The
+                // prefix-KV-cache record (epic 25899) is the same: it says which path RAN, so only
+                // this image's own report may carry it onto the asset and the job result.
                 image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
                 image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
+                image_raw_settings.remove(lane_controls::PREFIX_KV_CACHE_KEY);
                 if let Some(facts) = pending_image_facts.remove(&index) {
                     image_raw_settings.extend(facts);
                 }
