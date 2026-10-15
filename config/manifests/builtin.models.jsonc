@@ -14807,15 +14807,15 @@
       // (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. True-CFG text-to-image (20 steps
       // / guidance 4.5). `adapter` is the asset stamp (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-1.6B is distributed under the NVIDIA Open Model License /
-      // NSCLv1 (research & evaluation, non-commercial). On macOS the re-hosted
-      // `SceneWorks/Sana_1600M_1024px_mlx` mirror carries the upstream LICENSE + NOTICE + attribution
-      // (the Krea/Ideogram re-host precedent). Off-Mac the candle lane pulls the ORIGINAL public NVIDIA
-      // repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE
-      // documents the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA transformer + DC-AE VAE are Apache-2.0 — NVIDIA changed the NVlabs/Sana
+      // code-base license to Apache 2.0 on 2025-01-11, and `Efficient-Large-Model/Sana_1600M_1024px`
+      // (and its `_diffusers` snapshot, whose LICENSE is the Apache 2.0 text) is tagged apache-2.0. The
+      // bundled gemma-2-2b-it text encoder is under Google's Gemma Terms of Use + Prohibited Use Policy
+      // (upstream google/gemma-2-2b-it is gated). The earlier "NVIDIA Open Model License / NSCLv1,
+      // non-commercial" classification is superseded, so `nonCommercial` is false. On macOS the weights
+      // come from the re-hosted `SceneWorks/Sana_1600M_1024px_mlx` mirror; off-Mac the candle lane pulls
+      // the ORIGINAL public NVIDIA repo `Efficient-Large-Model/Sana_1600M_1024px_diffusers` (un-gated —
+      // `gated: false` on HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA 1600M",
       "family": "sana",
@@ -14823,7 +14823,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8489/sc-8513, epic 8506): per-tier
@@ -14832,13 +14832,13 @@
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — `gemma-2-2b-it.safetensors` packed q4/q8 else dense + `tokenizer.json`, sourced
         // from the SceneWorks/gemma-2-2b-it mirror so the TE weights are NOT duplicated). Un-gated
-        // (the mirror carries the NVIDIA non-commercial NOTICE). mlx-gen #653 packs the transformer +
+        // (licensing: see the LICENSE comment above). mlx-gen #653 packs the transformer +
         // Gemma-2 TE offline and packed-detects on load (NO install-time quantize). This is the
         // shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured on-disk.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -14849,7 +14849,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -14859,7 +14859,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-          "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+          "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -14874,8 +14874,8 @@
           // `tokenizer/`) directly and `resolve_component_files` tolerates the repo's fp16/fp32 +
           // single/sharded duplication, so NO curated allow-list is needed — the whole snapshot loads
           // dense bf16 (there is no packed q4/q8 tier off-Mac; the worker resolves this repo's snapshot
-          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open
-          // Model License LICENSE.txt. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
+          // ROOT, never a tier subdir). Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (fp16 + fp32 duplication).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_1600M_1024px_diffusers",
           "revision": "ac0da2ff55fbe434795be0dce883042e4d49e2fc",
@@ -14960,7 +14960,7 @@
         // (`model_supports_img2img` reads `ui.img2img`) — no per-model worker routing. Strength 0.5.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA 1600M — an efficient Linear-DiT image model, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). Its 1.6B linear-attention transformer, deep-compression 32× DC-AE, and Gemma 2 instruction text encoder support text-to-image plus reference-guided image-to-image with true classifier-free guidance and negative prompts. Runs ~20 steps at guidance 4.5 (flow-match Euler, shift 3.0). Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -14995,15 +14995,16 @@
       // tables (`MLX_ROUTED_MODELS` / `CANDLE_ROUTED_MODELS`), not this flag. `adapter` is the asset stamp
       // (mirrors mlx_<family>).
       //
-      // NVIDIA non-commercial: SANA-Sprint is distributed under the NVIDIA Open Model License / NSCLv1
-      // (research & evaluation, non-commercial). On macOS the re-hosted `SceneWorks/Sana_Sprint_1.6B_1024px_mlx`
-      // mirror carries the upstream LICENSE + NOTICE + attribution (the Krea/Ideogram re-host precedent).
-      // Off-Mac the candle lane pulls the ORIGINAL public NVIDIA repo
-      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on HF), which
-      // ships the upstream LICENSE.txt (the NVIDIA Open Model License) alongside the weights; the bundled
-      // gemma-2-2b-it text encoder remains under the Gemma Terms of Use. `candle-gen-sana`'s NOTICE documents
-      // the same. SceneWorks's overall non-commercial posture covers this; generations are for
-      // non-commercial / research use only.
+      // LICENSE: the SANA-Sprint transformer + DC-AE VAE are Apache-2.0 — the
+      // `Efficient-Large-Model/Sana_Sprint_1.6B_1024px` model card states "released under the Apache
+      // License 2.0" (tag license:apache-2.0; the `_diffusers` snapshot's LICENSE is the Apache 2.0 text),
+      // and NVlabs/Sana moved to Apache 2.0 on 2025-01-11. The bundled gemma-2-2b-it text encoder is under
+      // Google's Gemma Terms of Use + Prohibited Use Policy (upstream google/gemma-2-2b-it is gated). The
+      // earlier "NVIDIA Open Model License / NSCLv1, non-commercial" classification is superseded, so
+      // `nonCommercial` is false. On macOS the weights come from the re-hosted
+      // `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` mirror; off-Mac the candle lane pulls the ORIGINAL public
+      // NVIDIA repo `Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers` (un-gated — `gated: false` on
+      // HF). The About → Licenses `sana` entry carries both notices.
       "autoDownload": false,
       "name": "SANA-Sprint 1.6B",
       "family": "sana",
@@ -15011,7 +15012,7 @@
       "adapter": "mlx_sana",
       "capabilities": ["text_to_image", "image_to_image"],
       "macOnly": false,
-      "nonCommercial": true,
+      "nonCommercial": false,
       "gated": false,
       "downloads": [
         // SceneWorks pre-built MLX quant-matrix turnkey (sc-8490/sc-8513, epic 8506): per-tier subdirs
@@ -15019,13 +15020,13 @@
         // `transformer/` (the Sprint Linear-DiT trunk, packed q4/q8 else dense bf16), `vae/` (the 32×
         // DC-AE f32 decoder, dense in EVERY tier), and `text_encoder/` (the gemma-2-2b-it CHI caption
         // encoder — packed q4/q8 else dense + `tokenizer.json`, from the SceneWorks/gemma-2-2b-it
-        // mirror, NOT duplicated). Un-gated (NVIDIA non-commercial NOTICE). mlx-gen #653 packs the
+        // mirror, NOT duplicated). Un-gated (licensing: see the LICENSE comment above). mlx-gen #653 packs the
         // transformer + Gemma-2 TE offline and packed-detects on load (no install-time quantize). This
         // is the shared group-64 affine tier, NOT the (unported) 2-bit SANA quant. Sizes measured.
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q4",
           "default": true,
           "files": ["q4/*"],
@@ -15036,7 +15037,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "q8",
           "files": ["q8/*"],
           "platforms": ["macos"],
@@ -15046,7 +15047,7 @@
         {
           "provider": "huggingface",
           "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-          "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+          "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
           "variant": "bf16",
           "files": ["bf16/*"],
           "platforms": ["macos"],
@@ -15062,8 +15063,8 @@
           // `resolve_component_files` tolerates the repo's fp16/fp32 + single/sharded duplication, so NO
           // curated allow-list is needed — the whole snapshot loads dense bf16 (there is no packed q4/q8
           // tier off-Mac; the worker resolves this repo's snapshot ROOT, never a tier subdir). CFG-free
-          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream NVIDIA Open Model
-          // License LICENSE.txt. Size is the whole-repo on-disk footprint (single-precision — unlike the
+          // 1–4 step SCM/TrigFlow. Un-gated on HF (`gated: false`); ships the upstream Apache 2.0
+          // LICENSE. Size is the whole-repo on-disk footprint (single-precision — unlike the
           // base repo the Sprint diffusers tree ships no fp16/fp32 duplication, so it is the smaller ~9.7GB).
           "provider": "huggingface",
           "repo": "Efficient-Large-Model/Sana_Sprint_1.6B_1024px_diffusers",
@@ -15140,7 +15141,7 @@
         // few-step, so the strength window is narrower than base SANA — validate the band on-device.
         "img2img": true,
         "img2imgStrength": { "label": "Reference strength", "default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05 },
-        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. Distributed under the NVIDIA Open Model License (non-commercial): generations are for non-commercial / research use only. The SceneWorks mirror is un-gated and carries the upstream license + notice.",
+        "description": "NVIDIA SANA-Sprint 1.6B — the few-step SANA distillation, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same 1.6B linear-attention transformer, 32× DC-AE, and Gemma 2 instruction text encoder as base SANA support text-to-image plus reference-guided image-to-image. Its CFG-free SCM/TrigFlow sampler and guidance-embedding trunk generate a 1024×1024 image in about two steps with no negative prompt. Apple Silicon offers pre-packed q4 (default), q8, and bf16 tiers; Candle uses the original dense snapshot. The SANA transformer and VAE are licensed by NVIDIA under Apache-2.0; the bundled Gemma 2 text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.",
         "recommendedFor": ["text_to_image", "image_to_image"],
         "promptGuide": {
           "title": "SANA Prompt Guide",
@@ -24130,8 +24131,8 @@
     //
     // ⚠️ NOT SHIPPED UPSTREAM (do not imply otherwise in copy — sc-17162): `H3-Context-IR` (hosted
     // prompt refinement, so prompt adherence differs from the Hailuo API), `H3-Regenerate-2K` (so
-    // "up to 2K" is NOT reachable from these weights), and the sparse-attention inference path
-    // (so the open weights run DENSE attention, which is why the cost table above looks like that).
+    // "up to 2K" is NOT reachable from these weights). Dense attention remains the default and
+    // the basis of the cost table above; optional native Veda uses its managed predictor.
     //
     // ⚠️ NO IMAGE LANE. `min_duration = 5.0` is hardcoded upstream, so `T = 1` does not render at
     // all. The epic's image-lane premise ("T=1 collapses ~31k tokens to ~1k") has no basis;
@@ -24176,6 +24177,21 @@
       "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
       "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
+        // sc-25773 — optional learned attention predictor; dense H3 stays usable without it.
+        {
+          "provider": "huggingface",
+          "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+          "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+          "files": ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"],
+          "expectedSizeBytes": 275415648,
+          "expectedSha256": "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a",
+          "estimatedSizeBytes": 275415648,
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "veda_predictor",
+          "platforms": ["macos", "windows", "linux"]
+        },
+
         // Quant matrix (sc-17150, epic 8506 shape): each tier is a SEPARATE user-selectable
         // artifact tagged with a `variant`; q4 (default) installs when no tier is chosen. Sizes are
         // the EXACT hosted directory bytes measured post-upload (sc-17150 activity 19106); the six
@@ -24939,8 +24955,8 @@
         //      `CANVAS_MAX_PIXELS` and every advertised resolution's long edge to the registered
         //      descriptor's `max_size`. A manifest that got ahead of the engine, or a pin that
         //      moved behind the manifest, is red there rather than a job-time reject.
-        //   2. Dense attention, because the sparse-attention inference path is unreleased — which
-        //      is what makes the cost table above look like that. It is NOT what sets the 14.38 s
+        //   2. Dense attention by default; optional Veda stages the managed learned predictor.
+        //      The dense cost table does not set the 14.38 s
         //      ceiling: that comes from the checkpoint's own 5–15 s clamp meeting the `17n + 5`
         //      lattice, which sparse attention does not touch. Do not conflate the two in copy.
         //   3. 15 s is REFUSED, not shortened. `limits.hardMaxDuration` is 14.375 and the next
@@ -24951,7 +24967,7 @@
         //      not render at all.
         // The `<d>` dialogue markers (the fourth withheld surface) are a PROMPTING detail and live
         // in the prompt guide, which is the only place a user would copy that syntax from.
-        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Sparse-attention inference is also unreleased, so attention runs dense — the shortest clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
+        "description": "MiniMax-H3 (Hailuo 3.0) generates video and synchronized stereo audio together in one pass — the clip arrives with its soundtrack already muxed, not dubbed on afterwards. Text-to-video plus first and/or last frame conditioning; there is no still-image mode, because the checkpoint refuses anything shorter than about five seconds. Clips come in fourteen fixed lengths between 5.17s and 14.38s at 24fps and nothing in between renders — including the 15s MiniMax's own documentation advertises, which is refused outright rather than quietly shortened to 14.38s. This is the open-weights model, not the hosted Hailuo product: the prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are not released, so prompt adherence differs from the API and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render, while the whole length range stays comfortable at 576x320. There is no guidance scale and no negative prompt — the model has neither axis, so those controls are hidden rather than missing. It renders through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux; the measured q4, q8, and bf16 tiers require roughly 42 GB, 77 GB, and 69 GB of free VRAM respectively after the safety reserve.",
         "recommendedFor": ["text_to_video", "image_to_video", "first_last_frame"],
         "durationHint": "Fourteen clip lengths only, 5.17s to 14.38s at 24fps — the frame lattice is 17n+5, so nothing in between renders, and 15s is refused rather than shortened to 14.38s. Cost is driven by CANVAS far more than by length: 5.17s at 576x320 is ~14 minutes and the whole 14.38s range is comfortable there, while 5.17s at the default 1344x768 is already ~2 hours. Pick the small canvas first, then the length.",
         "promptGuide": {
@@ -25010,6 +25026,21 @@
       "licenseUrl": "https://huggingface.co/MiniMaxAI/MiniMax-H3",
       "licenseNotice": "MiniMax-H3's weights, and the video and audio they produce, are governed by the MiniMax H3 Community License Agreement — not by SceneWorks' own AGPL-3.0 licence. That agreement grants a NON-TRANSFERABLE licence (§II) and defines a \"Licensee\" as whoever uses the model (§I.9), so it binds you directly and SceneWorks' authorization from MiniMax does not stand in for yours. Four of its terms decide whether you may use this model at all. (1) APPLICABLE TERRITORY (§I.3, §I.5, §V.4): the agreement's default Applicable Territory is worldwide excluding the European Union, the United Kingdom, the Republic of Korea, and the United States of America. Separately, MiniMax has confirmed in writing that it authorizes SceneWorks to use MiniMax H3 and MiniMax H3 Works, conditioned on SceneWorks' continued compliance with the commitments in its request; which provision of the agreement that confirmation is given under is not stated here. Questions about your own use go to MiniMax at api@minimax.io (§IV.1). (2) ACCEPTABLE USE POLICY (§V.1 and Exhibit A): twenty prohibited uses, of which item 12 requires you to clearly and prominently disclose that content is machine-generated whenever you publish it to a public environment — SceneWorks does not write that disclosure into your files, so making it is yours to do. (3) ADDITIONAL COMMERCIAL TERMS (§IV.1): separate prior written authorization from MiniMax is required if your commercial products and services generate more than 20 million US dollars in yearly revenue. (4) NO IMPROVING OTHER AI MODELS (§V.3): you may not use the Works or any of their Outputs or results to improve any other artificial intelligence model, other than MiniMax H3 or its Model Derivatives. SceneWorks ships a LoRA trainer, dataset captioning and a training studio, so this is the restriction the product's own features are most likely to reach — training a different model on MiniMax-H3 renders is what §V.3 forbids. Read the full text under About → Licenses before downloading.",
       "downloads": [
+        // sc-25773 — optional learned attention predictor; dense H3 stays usable without it.
+        {
+          "provider": "huggingface",
+          "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+          "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+          "files": ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"],
+          "expectedSizeBytes": 275415648,
+          "expectedSha256": "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a",
+          "estimatedSizeBytes": 275415648,
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "veda_predictor",
+          "platforms": ["macos", "windows", "linux"]
+        },
+
         {
           "provider": "huggingface",
           "repo": "SceneWorks/minimax-h3-mlx",
@@ -25333,7 +25364,7 @@
         // reference. The two entries are separate model cards and a user can install THIS one
         // without ever reading that one's, so "see the other entry" would leave the withheld
         // components undisclosed on the surface where the decision is actually made.
-        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
+        "description": "The reference-conditioned half of MiniMax-H3: give it up to 9 images, 3 video clips and 3 audio clips (12 files in total) and it renders a new clip — with synchronized stereo audio — that carries those subjects, motions and voices. It uses a second checkpoint from the same family, so installing it adds the reference DiT alongside whatever text-to-video tiers you already have; the text encoder and both VAEs are shared and download only once. It runs through native MLX on Apple Silicon and Candle/CUDA on Windows and Linux. Same open-weights caveats as MiniMax-H3, and they are not small: the hosted prompt-understanding front end (H3-Context-IR) and the 2K in-context upscaler (H3-Regenerate-2K) are unreleased, so prompt adherence differs from the Hailuo API and 2K is not reachable from these weights; attention runs dense by default. Optional Veda sparse attention uses the managed predictor and falls back to dense when it cannot run; the shortest dense clip at the default 1344x768 canvas is about a two-hour render. There is no guidance scale and no negative prompt. Clips come in the same fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and there is no still-image mode.",
         "recommendedFor": ["reference_to_video"],
         "durationHint": "Same fourteen clip lengths as MiniMax-H3, 5.17s to 14.38s at 24fps — nothing in between renders and 15s is refused rather than shortened to 14.38s — and the same canvas-dominated cost, so start at 576x320.",
         "promptGuide": {

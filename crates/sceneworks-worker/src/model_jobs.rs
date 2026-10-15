@@ -75,6 +75,8 @@ pub(crate) async fn run_model_download_job(
             return Ok(());
         }
     };
+    let managed_identity = sceneworks_core::managed_file::authoritative_job_identity(&job.payload)
+        .map_err(WorkerError::InvalidPayload)?;
     let files = payload_string_array(&job.payload, "files");
     let revision = optional_payload_string(&job.payload, "revision").unwrap_or("main");
     let fresh_download = optional_payload_string(&job.payload, "downloadAction") == Some("fresh");
@@ -134,8 +136,11 @@ pub(crate) async fn run_model_download_job(
             "Unable to resolve Hugging Face cache path for {repo}."
         ))
     })?;
-    let snapshot =
+    let mut snapshot =
         HuggingFaceSnapshot::resolve(http_client, settings, repo, revision, &files).await?;
+    if let Some(identity) = managed_identity {
+        snapshot.enforce_managed_identity(identity)?;
+    }
     // A download that resolves to ZERO files is not a success: the repo/revision has nothing under
     // the requested filter — e.g. a quant tier whose weights aren't uploaded yet (sc-8513 rollout).
     // Failing here, instead of downloading nothing and still writing a completion marker, surfaces a
@@ -2669,6 +2674,11 @@ pub(crate) fn resolve_optional_component(
             // twin of the `resolve_co_requisites` guard above; a `..`/absolute entry yields `None`
             // (component simply not staged), never an out-of-snapshot host file.
             let path = safe_join(&snapshot, file).ok()?;
+            match sceneworks_core::managed_file::ManagedFileIdentity::from_download(download) {
+                Ok(Some(identity)) if identity.verify(&path).is_err() => return None,
+                Err(_) => return None,
+                _ => {}
+            }
             path.is_file()
                 .then_some(gen_core::WeightsSource::File(path))
         }
@@ -7336,6 +7346,33 @@ mod co_requisite_tests {
             ),
             other => panic!("an installed sft_cover resolves to a Dir, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn optional_predictor_load_rejects_same_size_wrong_digest_and_ignores_main() {
+        use sha2::{Digest, Sha256};
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let settings = settings_at(data.path().into());
+        let repo = "test/predictor";
+        let revision = "a".repeat(40);
+        let file = "predictor.safetensors";
+        let row = json!({"repo": repo, "revision": revision, "files": [file],
+            "coRequisite": true, "required": "soft", "componentId": "veda_predictor",
+            "expectedSizeBytes": 4, "expectedSha256": format!("{:x}", Sha256::digest(b"good"))});
+        let manifest = json!({"downloads":[row]});
+        assert!(resolve_optional_component(&manifest, "veda_predictor", &settings).is_none());
+        let path = stage_snapshot_file(data.path(), repo, &revision, file);
+        std::fs::write(&path, b"good").unwrap();
+        assert!(
+            matches!(resolve_optional_component(&manifest,"veda_predictor",&settings),Some(gen_core::WeightsSource::File(p)) if p == path)
+        );
+        std::fs::write(&path, b"evil").unwrap();
+        assert!(resolve_optional_component(&manifest, "veda_predictor", &settings).is_none());
+        std::fs::remove_file(&path).unwrap();
+        let main = stage_snapshot_file(data.path(), repo, &"b".repeat(40), file);
+        std::fs::write(main, b"good").unwrap();
+        assert!(resolve_optional_component(&manifest, "veda_predictor", &settings).is_none());
     }
 
     /// Soft co-requisites are install companions for request-specific features. Even when their

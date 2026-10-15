@@ -1,0 +1,25 @@
+Google Gemma — Terms of Use
+===========================
+
+The SANA and SANA-Sprint bundles SceneWorks downloads (SceneWorks/Sana_1600M_1024px_mlx,
+SceneWorks/Sana_Sprint_1.6B_1024px_mlx, and the upstream Efficient-Large-Model
+diffusers snapshots used by the candle backend) include a gemma-2-2b-it text
+encoder (from google/gemma-2-2b-it, via the SceneWorks/gemma-2-2b-it mirror). The
+Gemma weights are governed by Google's Gemma Terms of Use, NOT the Apache License
+2.0 that covers the SANA transformer and VAE, and NOT a permissive open-source
+license. Upstream, google/gemma-2-2b-it is gated behind acceptance of these terms.
+
+Your use of the Gemma component is subject to:
+
+  - Gemma Terms of Use:          https://ai.google.dev/gemma/terms
+  - Gemma Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
+
+Key obligations carried over from those terms:
+  - The Gemma Terms and Prohibited Use Policy travel with the model weights
+    and any distribution or derivative of them.
+  - You must comply with the Prohibited Use Policy.
+  - "Gemma" attribution and the notice "Gemma is provided under and subject to
+    the Gemma Terms of Use found at ai.google.dev/gemma/terms" must be retained.
+
+Gemma is provided by Google. The authoritative and complete terms are the
+documents linked above; this notice summarizes them and does not replace them.

@@ -2835,11 +2835,9 @@ export function App() {
     return asset?.generationSet?.recipe ?? asset?.recipe ?? null;
   }
 
-  // THE prefill path into Image Studio (sc-15951). Every caller that wants the studio's form
-  // populated from a recorded recipe goes through here — the viewer's "Use this recipe" below,
-  // and the dropped-image "Use this workflow" — so there is one launch shape, one hydration
-  // race guard, and one injection effect on the other side (`screens/ImageStudio.jsx`). A second
-  // parallel prefill would drift from this one the first time the recipe shape changed.
+  // Shared-workflow prefill (sc-15951) lands in the studio named by the envelope kind. Keep the
+  // hydration race guard and launch shape shared so a video envelope reaches Video Studio's
+  // existing recipe effect instead of silently loading its controls into Image Studio.
   //
   // `assetId` / `sourceAssetId` are null for a launch with no asset behind it, which is exactly
   // the dropped-file case: the studio's edit branch then leaves its source picker empty rather
@@ -2851,6 +2849,7 @@ export function App() {
   // pretend worked.
   async function launchImageRecipe({
     recipe,
+    view = "Image",
     replaySeed = null,
     assetId = null,
     sourceAssetId = null,
@@ -2859,7 +2858,7 @@ export function App() {
       return { ok: false, reason: "no-recipe" };
     }
     // The Simple shell renders its OWN studios and consumes no `studioLaunch`, so from in there
-    // `setActiveView("Image")` alone points the workspace at a screen nobody is looking at: the
+    // `setActiveView(targetView)` alone points the workspace at a screen nobody is looking at: the
     // panel dismisses, nothing visible happens, and the launch sits queued to fire unprompted the
     // next time the user opens the Advanced studio. Flip the shell the way `SimpleShell`'s own
     // `openInAdvanced` does — and refuse for the same reason it does when the viewport has Simple
@@ -2875,14 +2874,14 @@ export function App() {
       setUiModeOverride(ADVANCED_MODE);
     }
     const projectId = activeProjectRef.current?.id;
-    setActiveView("Image");
-    const hydration = await stableHydrateLaunchDomains("Image", projectId);
+    setActiveView(view);
+    const hydration = await stableHydrateLaunchDomains(view, projectId);
     if (hydration?.ok !== true || activeProjectRef.current?.id !== projectId) {
       return { ok: false, reason: "raced" };
     }
     setStudioLaunch({
       id: crypto.randomUUID(),
-      view: "Image",
+      view,
       assetId,
       sourceAssetId,
       recipe,
@@ -3261,7 +3260,7 @@ export function App() {
   // canvas, DatasetAddDialog, DocumentStudio, PoseLibraryScreen) each preventDefault() as the
   // event bubbles through them, so their drops never reach either behaviour.
   //
-  // `launchRecipe` is `launchImageRecipe`, the same seam the viewer's "Use this recipe" uses.
+  // The envelope kind selects Image or Video; both use the studio's ordinary recipe injection.
   // `importAsset` is the ordinary upload path, which is what records `extra.importedWorkflow`
   // on the asset (sc-15949).
   // The images the panel's input pickers may offer (sc-15952). The same filter Image Studio's own

@@ -125,18 +125,11 @@ pub(crate) async fn resolve_reference_audio_conditioning(
             asset_id,
             project_path,
         )?;
-        // Sanitize the job id before it becomes a path component (F-111), and index the directory
-        // so three concurrent references in one job never share one — the same shape the reference
-        // clip scratch dirs use.
-        let work_dir = std::env::temp_dir().join(format!(
-            "sw-reference-audio-{}-{index}",
-            safe_download_dir(&job.id)
-        ));
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
-        tokio::fs::create_dir_all(&work_dir).await?;
-        // Split so the scratch directory is dropped on EVERY exit, refusals included.
-        let decoded = decode_reference_audio(api, settings, job, &path, &work_dir).await;
-        let _ = tokio::fs::remove_dir_all(&work_dir).await;
+        let work_dir = reference_audio_scratch_dir(&job.id, index)?;
+        // Split so the scratch directory is dropped on EVERY exit, refusals included (the
+        // `TempDir` guard also removes it on an early return or unwind).
+        let decoded = decode_reference_audio(api, settings, job, &path, work_dir.path()).await;
+        let _ = work_dir.close();
         let audio = decoded?;
         // The engine reserves rows for exactly [`REFERENCE_AUDIO_CHANNELS`] channels and only
         // discovers a mismatch inside the denoise loop — after the full model load, which is how
@@ -159,6 +152,23 @@ pub(crate) async fn resolve_reference_audio_conditioning(
         });
     }
     Ok(conditioning)
+}
+
+/// A fresh, uniquely named scratch directory for one reference's decode.
+///
+/// The name carries the sanitized job id (F-111) and the reference index for legibility, but a
+/// random suffix makes it UNIQUE: a deterministic `sw-reference-audio-<job>-<index>` that was
+/// removed-then-recreated let any second process resolving the same job id on the same host (two
+/// CI runners sharing `%TEMP%`, or a re-dispatched job while the first worker is still alive)
+/// delete this one's directory mid-transcode, surfacing as `NotFound` reading `reference.wav`
+/// (sc-25777, Windows `candle-worker`).
+fn reference_audio_scratch_dir(job_id: &str, index: usize) -> std::io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix(&format!(
+            "sw-reference-audio-{}-{index}-",
+            safe_download_dir(job_id)
+        ))
+        .tempdir()
 }
 
 /// Decode one reference asset into the engine's [`gen_core::AudioTrack`], normalized onto
@@ -427,6 +437,38 @@ fn mean_downmix_filter(n: u16) -> String {
 #[cfg(test)]
 mod bounded_decode_tests {
     use super::*;
+
+    /// sc-25777: two resolutions of the SAME job id + index (a second process on the same host)
+    /// must get distinct scratch dirs, and releasing one must not touch the other's work.
+    #[test]
+    fn reference_audio_scratch_dirs_never_collide_for_one_job_id() {
+        let first = reference_audio_scratch_dir("../job shared", 0).expect("first creates");
+        let second = reference_audio_scratch_dir("../job shared", 0).expect("second creates");
+        assert_ne!(first.path(), second.path());
+        for dir in [&first, &second] {
+            // The hostile id is sanitized (F-111): the dir sits directly under the temp root.
+            assert_eq!(dir.path().parent(), Some(std::env::temp_dir().as_path()));
+            let name = dir
+                .path()
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            assert!(name.starts_with("sw-reference-audio-"), "{name}");
+        }
+        let wav = first.path().join("reference.wav");
+        std::fs::write(&wav, b"RIFF").expect("work file writes");
+        let second_path = second.path().to_path_buf();
+        second.close().expect("second releases");
+        assert!(!second_path.exists());
+        assert!(
+            wav.exists(),
+            "releasing one scratch dir removed the other's work"
+        );
+        let first_path = first.path().to_path_buf();
+        drop(first);
+        assert!(!first_path.exists(), "the guard removes its own directory");
+    }
 
     #[test]
     fn compressed_transcription_decode_crops_and_caps_output_before_file_open() {

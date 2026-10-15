@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:157723f7379f6b271b51aba0ede5dd328073cc4b019a0e4947d712286cf5c7b8",
+    "sceneWorksRevision": "source-tree:f0d9e3e47300bca180027a06d87c9fbf3f5b48a87377392ea7018f5fc7bda195",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "f9c9e885bd320f91df1311e6ae30add95fb7236a5f2deef12653d8bb43831af8"
+        "sha256": "fe13b54c10d5aa0da0fc8534373470084d805728dff61717ab59d71b2a57ee66"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -29,7 +29,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "366f8a17f30527e3e196ca4800b60087739041a2bc4e2b5203c0cfc076f7192a"
+        "sha256": "183e98324c9be9288a40916c39a38249159e5343f3553691bca9af19799f07b7"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a78f690527ef3237c8c62f7d4e3adfbc4cbd576ee2d66c0c6d8f59155bc049d3"
+        "sha256": "c2be464784aa1bc4e6351b791a6a5c165e558818cd3802949584de99b089570b"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,11 +81,11 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "674254f50808bc0a2da33ca86ef9512bf083a2935065b9070a62f8ddfe418e88"
+        "sha256": "da1e8ef64d928c381e4dd56d9d28fe1889cbfc95cabf511d7bcd90fd9942bd60"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "0f09f3cbe35516346b0353a61b662f73fd6b3e1b080da6fcb439cf208721a2de"
+        "sha256": "84a884f1ee95359d8de99f4853ab5c8a796f1423da9f79ae2b82987b55dca576"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -177,7 +177,7 @@
     "anchors": 258,
     "analyticOnlyCells": 99,
     "anchoredCells": 3986,
-    "staleAnchors": 252,
+    "staleAnchors": 258,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -7490,7 +7490,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-bf16-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -7508,7 +7508,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q4-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -7526,7 +7526,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q8-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -7544,7 +7544,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -7562,7 +7562,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q4-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -7580,7 +7580,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q8-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 18
     },
@@ -146047,7 +146047,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146099,7 +146099,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146151,7 +146151,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146216,7 +146216,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146268,7 +146268,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146320,7 +146320,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146385,7 +146385,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146437,7 +146437,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146489,7 +146489,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146554,7 +146554,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146606,7 +146606,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146658,7 +146658,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146723,7 +146723,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146775,7 +146775,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146827,7 +146827,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146892,7 +146892,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146944,7 +146944,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -146996,7 +146996,7 @@
         "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147061,7 +147061,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147113,7 +147113,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147165,7 +147165,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147230,7 +147230,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147282,7 +147282,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147334,7 +147334,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147399,7 +147399,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147451,7 +147451,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147503,7 +147503,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147568,7 +147568,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147620,7 +147620,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147672,7 +147672,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147737,7 +147737,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147789,7 +147789,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147841,7 +147841,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147906,7 +147906,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -147958,7 +147958,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148010,7 +148010,7 @@
         "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148075,7 +148075,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148127,7 +148127,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148179,7 +148179,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148244,7 +148244,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148296,7 +148296,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148348,7 +148348,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148413,7 +148413,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148465,7 +148465,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148517,7 +148517,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148582,7 +148582,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148634,7 +148634,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148686,7 +148686,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148751,7 +148751,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148803,7 +148803,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148855,7 +148855,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148920,7 +148920,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -148972,7 +148972,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149024,7 +149024,7 @@
         "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149089,7 +149089,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149141,7 +149141,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149197,7 +149197,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149262,7 +149262,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149314,7 +149314,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149370,7 +149370,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149435,7 +149435,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149487,7 +149487,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149543,7 +149543,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149608,7 +149608,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149660,7 +149660,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149716,7 +149716,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149781,7 +149781,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149833,7 +149833,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149889,7 +149889,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -149954,7 +149954,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150006,7 +150006,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150062,7 +150062,7 @@
         "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
         "tier": "bf16",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150127,7 +150127,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150179,7 +150179,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150235,7 +150235,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150300,7 +150300,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150352,7 +150352,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150408,7 +150408,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150473,7 +150473,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150525,7 +150525,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150581,7 +150581,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150646,7 +150646,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150698,7 +150698,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150754,7 +150754,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150819,7 +150819,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150871,7 +150871,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150927,7 +150927,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -150992,7 +150992,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151044,7 +151044,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151100,7 +151100,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
         "tier": "q4",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151165,7 +151165,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151217,7 +151217,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151273,7 +151273,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151338,7 +151338,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151390,7 +151390,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151446,7 +151446,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151511,7 +151511,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151563,7 +151563,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151619,7 +151619,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151684,7 +151684,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151736,7 +151736,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151792,7 +151792,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151857,7 +151857,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151909,7 +151909,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -151965,7 +151965,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -152030,7 +152030,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -152082,7 +152082,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -152138,7 +152138,7 @@
         "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
         "tier": "q8",
         "source": "config/memory-anchors.json#qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },

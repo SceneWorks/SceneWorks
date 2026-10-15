@@ -17,10 +17,10 @@
 // runtime smokes, the pytest e2e/parity harnesses, and on macOS the Dockerized neither build.
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const isMac = process.platform === "darwin";
@@ -34,6 +34,89 @@ const CAPABILITIES = /^config\/engine-capabilities\//;
 const PYTEST = /^(tests\/|config\/|scripts\/.*\.py$)/;
 // The node suite reads manifests, generated docs, workflows and schemas as well as scripts.
 const NODE = /^(scripts\/|config\/|docs\/generated\/|packages\/|\.github\/|package(-lock)?\.json$)/;
+
+// The node suite also READS files outside NODE: the memory-matrix generator fingerprints Rust
+// route/admission sources (`SOURCE_PATHS`) into the checked-in docs/generated/memory-matrix.*, the
+// stale-lane report and closure/anchor tooling read the Cargo pin and the memory-adapter bins, and
+// guard tests parse worker modules. An edit to one of those can red CI's parity-scaffold lane with
+// no NODE file in the diff. Rather than mirror those lists here, derive them from the suite's own
+// source text: every string literal in a node-suite test file, or in a local module it imports
+// (transitively), that names an existing repo file is a file that test can read. A changed file
+// outside NODE then selects exactly the test files that name it, run in their `npm run check`
+// segment so the serial segment stays serial. A path a test only builds at runtime (a template or
+// a `path.join` of fragments) is not seen; the generators' source lists are literal maps, so a new
+// `SOURCE_PATHS` entry is covered with no change here.
+const LITERAL = /(["'`])((?:\.{1,2}\/)*[A-Za-z0-9_@-][A-Za-z0-9_.@\/-]*)\1/g;
+const IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\bimport\s+)(["'])(\.{1,2}\/[^"']+\.mjs)\1/g;
+
+function isRepoFile(relative, root) {
+  if (relative.startsWith("..") || path.isAbsolute(relative)) return false;
+  try {
+    return statSync(path.join(root, relative)).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/** Repo-relative files named by a string literal in `file` (relative to the root or to `file`). */
+function namedFiles(file, body, root) {
+  const named = new Set();
+  for (const [, , literal] of body.matchAll(LITERAL)) {
+    const candidates = [literal.replace(/^(\.\/)+/, "")];
+    if (literal.startsWith(".")) candidates.push(path.relative(root, path.resolve(root, path.dirname(file), literal)));
+    for (const candidate of candidates) {
+      const normalized = candidate.split(path.sep).join("/");
+      if (isRepoFile(normalized, root)) named.add(normalized);
+    }
+  }
+  return named;
+}
+
+/** `npm run check` as its `&&` segments, each the ordered list of test files one `node --test` runs. */
+export function nodeSuiteSegments(root = repoRoot) {
+  const script = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8")).scripts.check;
+  return script
+    .split("&&")
+    .map((segment) => segment.trim().split(/\s+/))
+    .filter((tokens) => tokens[0] === "node" && tokens[1] === "--test")
+    .map((tokens) => tokens.filter((token) => token.endsWith(".test.mjs")));
+}
+
+/** Map each node-suite test file to every repo file it, or a local module it imports, names. */
+export function nodeSuiteReads(root = repoRoot) {
+  const cache = new Map();
+  const closure = (file, seen) => {
+    if (seen.has(file)) return;
+    seen.add(file);
+    let body;
+    try {
+      body = readFileSync(path.join(root, file), "utf8");
+    } catch {
+      return;
+    }
+    if (!cache.has(file)) cache.set(file, namedFiles(file, body, root));
+    for (const [, , specifier] of body.matchAll(IMPORT)) {
+      closure(path.relative(root, path.resolve(root, path.dirname(file), specifier)).split(path.sep).join("/"), seen);
+    }
+  };
+  const reads = new Map();
+  for (const testFile of nodeSuiteSegments(root).flat()) {
+    const seen = new Set();
+    closure(testFile, seen);
+    reads.set(testFile, new Set([...seen].flatMap((module) => [...(cache.get(module) ?? [])])));
+  }
+  return reads;
+}
+
+/** Per `npm run check` segment, the test files that read one of `files` (files outside NODE only). */
+export function nodeTestsReading(files, root = repoRoot) {
+  const outside = files.filter((file) => !NODE.test(file));
+  if (outside.length === 0) return [];
+  const reads = nodeSuiteReads(root);
+  return nodeSuiteSegments(root)
+    .map((segment) => segment.filter((testFile) => outside.some((file) => reads.get(testFile)?.has(file))))
+    .filter((segment) => segment.length > 0);
+}
 
 // The parity-scaffold job points this at a checkout holding the pinned starvector contract commit;
 // locally, any inference clone that contains it works. Without it three tests fail on a stale path.
@@ -130,7 +213,7 @@ function run(command, env = {}) {
   return res.error ? 1 : res.status;
 }
 
-function selectSteps(files, all) {
+export function selectSteps(files, all, root = repoRoot) {
   const touches = (pattern) => all || files.some((file) => pattern.test(file));
   const steps = [];
   if (touches(RUST)) {
@@ -166,6 +249,15 @@ function selectSteps(files, all) {
     // Several suites are wall-clock sensitive (watchdog ceilings, port races) and flake under the
     // parallel runner on a loaded Mac, so one re-run is allowed and reported as such.
     steps.push({ name: "scaffold node suite (npm run check)", command: ["npm", "run", "check"], env: nodeSuiteEnv(), retry: true });
+  } else {
+    for (const segment of nodeTestsReading(files, root)) {
+      steps.push({
+        name: `node-suite tests reading changed non-scaffold sources (${segment.join(", ")})`,
+        command: ["node", "--test", ...segment],
+        env: nodeSuiteEnv(),
+        retry: true,
+      });
+    }
   }
   if (touches(PYTEST)) {
     steps.push({ name: "worker pytest (not e2e, not parity)", fn: workerPytest });
@@ -226,4 +318,4 @@ function main() {
   return passed ? 0 : 1;
 }
 
-process.exit(main());
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) process.exit(main());

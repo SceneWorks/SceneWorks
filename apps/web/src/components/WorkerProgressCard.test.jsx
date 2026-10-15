@@ -1419,3 +1419,21 @@ describe("WorkerProgressCard audio track badge (sc-19577)", () => {
     expect(api.container.querySelector(".audio-track-badge")).not.toBeNull();
   });
 });
+
+describe("Veda job result observations", () => {
+  it("reads the actual assetWrites result carrier and ignores requested sparse status alone", () => {
+    const job = { id: "h3-job", type: "video_generate", status: "completed", payload: {
+      model: "minimax_h3", advanced: { veda: { enabled: true } },
+    }, result: { assetWrites: [{ rawAdapterSettings: {
+      veda: { enabled: true }, vedaExecution: { effective: "dense", totalAttentionFraction: 1,
+        fallbackReason: "managed predictor is missing" },
+    } }] } };
+    const rendered = render(<WorkerProgressCard job={job} />, makeContext([]));
+    expect(rendered.container.textContent).toContain("Observed attention: Dense");
+    expect(rendered.container.textContent).toContain("managed predictor is missing");
+    rendered.cleanup();
+    const later = render(<WorkerProgressCard job={{ ...job, id: "later-job", result: {} }} />, makeContext([]));
+    expect(later.container.textContent).not.toContain("Observed attention");
+    later.cleanup();
+  });
+});

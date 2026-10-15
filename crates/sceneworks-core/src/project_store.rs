@@ -11343,6 +11343,44 @@ mod tests {
         assert_eq!(asset["lineage"]["parents"], json!(["asset-video"]));
     }
 
+    #[test]
+    fn video_sidecar_persists_observed_veda_separately_from_replay_controls() {
+        let controls = json!({"enabled":true,"generated":"90%","reference":"12",
+            "fullAttentionLayers":[0],"fullAttentionSteps":[1]});
+        for outcome in [
+            json!({"effective":"sparse","kernel":"actual-native-kernel","plan":"trained",
+                "planMatch":"exact","totalAttentionFraction":0.2}),
+            json!({"effective":"dense","totalAttentionFraction":1.0,
+                "fallbackReason":"actual-device self-test failed"}),
+        ] {
+            let fact = json!({"type":"video","assetId":"asset-1", "mediaPath":"assets/videos/h3.mp4",
+                "mimeType":"video/mp4","width":1280,"height":720,"fps":25,"duration":6.0,
+                "model":"minimax_h3", "rawAdapterSettings":{"veda":controls,"vedaExecution":outcome}});
+            let sidecar = build_generated_asset_sidecar("project-1", "job-1", "genset-1", &fact);
+            let persisted: Value =
+                serde_json::from_str(&serde_json::to_string(&sidecar).unwrap()).unwrap();
+            assert_eq!(persisted["recipe"]["rawAdapterSettings"]["veda"], controls);
+            assert_eq!(
+                persisted["recipe"]["rawAdapterSettings"]["vedaExecution"],
+                outcome
+            );
+            assert!(persisted["recipe"]["normalizedSettings"]
+                .get("vedaExecution")
+                .is_none());
+        }
+        let old = build_generated_asset_sidecar(
+            "project-1",
+            "job-2",
+            "genset-2",
+            &json!({
+                "type":"video","assetId":"asset-2","mimeType":"video/mp4","rawAdapterSettings":{}
+            }),
+        );
+        assert!(old["recipe"]["rawAdapterSettings"]
+            .get("vedaExecution")
+            .is_none());
+    }
+
     /// sc-12371: `asset.file` MEASURES the clip; `recipe.normalizedSettings` REPLAYS the ask. The
     /// same fact feeds both and they must not be given the same number.
     ///

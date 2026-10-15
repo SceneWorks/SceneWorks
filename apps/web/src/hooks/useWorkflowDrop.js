@@ -16,14 +16,13 @@ import {
   WORKFLOW_STATUS_WORKFLOW,
 } from "../workflowShare.js";
 
-// "Someone sent you an image, you drag it onto SceneWorks, you are in Image Studio with their
-// settings loaded" (sc-15951, epic 15945) — and its twin, "that image is already in your library
-// and you want its recipe back" (sc-15952).
+// "Someone sent you a workflow, you drag it onto SceneWorks, you are in its destination studio
+// with their settings loaded" (sc-15951, epic 15945) — and its twin, "that asset is already in your
+// library and you want its recipe back" (sc-15952).
 //
 // Owns the state behind the offer panel: the round trip that produces a workflow plus a resolution
-// report, the panel it opens, and what the panel can do with it. The drop ROUTING is
-// `useDropNavigationGuard`; the prefill is App's `launchImageRecipe`, which is the same seam the
-// viewer's "Use this recipe" goes through.
+// report, the panel it opens, and what the panel can do with it. The envelope kind chooses the
+// destination studio at launch; the drop routing remains `useDropNavigationGuard`.
 //
 // # Two ways in, one offer
 //
@@ -553,6 +552,7 @@ export function useWorkflowDrop({
     });
     const outcome = await launchRecipe({
       recipe,
+      view: current.share.sceneworksWorkflow === "video" ? "Video" : undefined,
       replaySeed: workflowReplaySeed(current.share),
       // `assetId` stays null even when the offer came from an imported asset. That asset is the
       // recipe's OUTPUT, and `ImageStudio` reads `launchRequest.assetId` as the edit SOURCE — so

@@ -1,3 +1,4 @@
+import { AssetVedaOutcome, VedaOutcome } from "./VedaOutcome.jsx";
 import React, { useEffect, useMemo, useState } from "react";
 import { actionStatuses, terminalStatuses } from "../jobTypes.js";
 import { formatSeconds, liveElapsedSeconds, percent } from "../formatting.js";
@@ -938,6 +939,11 @@ export function WorkerProgressCard({
           <button className="secondary-action" onClick={() => onOpenQueue(job)} type="button">View in Queue</button>
         ) : null}
       </div>
+      {thumbnailAssets?.[0]?.recipe?.rawAdapterSettings?.vedaExecution ? (
+        <AssetVedaOutcome asset={thumbnailAssets[0]} />
+      ) : (
+        <VedaOutcome raw={job?.result?.assetWrites?.[0]?.rawAdapterSettings} />
+      )}
       <ThumbnailsRegion
         variant={thumbnailsVariant}
         finalAssets={thumbnailAssets}

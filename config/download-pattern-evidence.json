@@ -1444,14 +1444,16 @@
       ]
     },
     {
-      "key": "SceneWorks/Sana_1600M_1024px_mlx@ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+      "key": "SceneWorks/Sana_1600M_1024px_mlx@bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
       "repo": "SceneWorks/Sana_1600M_1024px_mlx",
-      "revision": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
-      "resolvedSha": "ac421696dd6eb0b41f446f4c45a53ccc057d82a1",
+      "revision": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
+      "resolvedSha": "bdd56dbfe97c2d77dde7d6696e8eaf7ebe91f5b2",
       "servedRepo": "SceneWorks/Sana_1600M_1024px_mlx",
       "gated": false,
       "files": [
         ".gitattributes",
+        "GEMMA_PROHIBITED_USE_POLICY.md",
+        "GEMMA_TERMS_OF_USE",
         "LICENSE",
         "NOTICE",
         "README.md",
@@ -1474,14 +1476,16 @@
       ]
     },
     {
-      "key": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx@0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+      "key": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx@225fde6c092706aa603937e26b93a75c1dde0324",
       "repo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
-      "revision": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
-      "resolvedSha": "0b0d18484cac2fb515e76d25a09a5911ae4ab58e",
+      "revision": "225fde6c092706aa603937e26b93a75c1dde0324",
+      "resolvedSha": "225fde6c092706aa603937e26b93a75c1dde0324",
       "servedRepo": "SceneWorks/Sana_Sprint_1.6B_1024px_mlx",
       "gated": false,
       "files": [
         ".gitattributes",
+        "GEMMA_PROHIBITED_USE_POLICY.md",
+        "GEMMA_TERMS_OF_USE",
         "LICENSE",
         "NOTICE",
         "README.md",
@@ -5620,6 +5624,30 @@
         "ltx-2.3-22b-distilled-lora-1.1_rank72_energy.safetensors",
         "ltx-2.3-22b-distilled-lora-1.1_rank96_energy.safetensors",
         "ltx-2.3-22b-distilled-lora-fro90_ceil72.safetensors"
+      ]
+    },
+    {
+      "key": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview@9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "repo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+      "revision": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "resolvedSha": "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd",
+      "servedRepo": "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview",
+      "gated": false,
+      "files": [
+        ".gitattributes",
+        "AGENTS.md",
+        "LICENSE",
+        "README.md",
+        "config.json",
+        "media/cmp_01_hf_test_21.mp4",
+        "media/cmp_03_hf_test_3.mp4",
+        "media/cmp_04_hf_test_176.mp4",
+        "media/cmp_06_hf_test_104.mp4",
+        "media/only_hf_test_148.mp4",
+        "media/only_hf_test_182.mp4",
+        "media/only_hf_test_190.mp4",
+        "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors",
+        "miowtion-logo.svg"
       ]
     },
     {

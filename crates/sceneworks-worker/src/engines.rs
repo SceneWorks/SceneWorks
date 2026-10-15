@@ -712,7 +712,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 5.0,
         adapter_label: "mlx_sd3",
     },
-    // SANA 1600M 1024px (epic 8485 / sc-8489) — native MLX, NVIDIA non-commercial. NVIDIA's efficient
+    // SANA 1600M 1024px (epic 8485 / sc-8489) — native MLX, Apache-2.0 (SANA) + Gemma Terms of Use (text encoder). NVIDIA's efficient
     // Linear-DiT (ReLU linear-attn + Mix-FFN + NoPE) 1.6B trunk + a gemma-2-2b-it CHI caption encoder +
     // the 32× DC-AE (f32) decoder. True-CFG text-to-image: 20 steps / guidance 4.5 + negative prompt
     // (the `sana_1600m` descriptor advertises supports_guidance + supports_negative + supports_true_cfg).
@@ -740,8 +740,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // Loads the un-gated `SceneWorks/Sana_Sprint_1.6B_1024px_mlx` MLX snapshot (same transformer/ vae/
     // text_encoder/ layout as base SANA; the text_encoder/ bundles the SceneWorks/gemma-2-2b-it TE so it is
     // NOT duplicated). Quant matrix (sc-8490/sc-8513): pre-packed q4/q8/bf16 tiers, packed-detected on
-    // load. 32× DC-AE divisor → width/height multiples of 32. NVIDIA non-commercial (NSCLv1) — the
-    // re-host carries the upstream LICENSE + NOTICE.
+    // load. 32× DC-AE divisor → width/height multiples of 32. Apache-2.0 (NVIDIA relicensed 2026-07-31)
+    // + Gemma Terms of Use for the text encoder — the re-host carries LICENSE, NOTICE and the Gemma terms.
     ModelRow {
         sceneworks_id: "sana_sprint_1600m",
         engine_id: "sana_sprint_1600m",

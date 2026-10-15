@@ -1140,7 +1140,9 @@ test("upstream pip child reports byte progress while suppressing secret-like std
     setTimeout(() => process.stdout.write(' of 10\\n'), 30);
     setTimeout(() => process.stdout.write('Progress 10 of 10\\nInstalling collected packages: fixture\\n'), 80);
     setTimeout(() => process.exit(0), 140);`;
-  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 3000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 2500 });
+  // The no-progress window opens at spawn, so a short one measured how long a loaded runner took
+  // to start Node. Neither bound is the property here; both are hang backstops.
+  await runUpstreamPip(process.execPath, ["-e", script], { timeout: 60_000, maxBuffer: 4096 }, { emit: line => events.push(JSON.parse(line)), heartbeatMs: 20, noProgressMs: 60_000 });
   assert.ok(events.some(event => event.last_progress?.bytes === 1));
   assert.equal(events.at(-1).event, "completed");
   assert.equal(events.at(-1).last_transfer.bytes, 10);
@@ -1158,13 +1160,23 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
       ["unsupported", "Unrecognized progress FIXTURE_PRIVATE\n", "no_observable_download_progress"],
     ]) {
       const pidPath = path.join(root, name), events = [];
+      let settled = false;
+      // Advance the stall clock until the run ends, not once. Under the full parallel suite a run
+      // held its child for the whole real 10 s deadline and failed as `process_exit`: the single
+      // tick never produced the stall stop. Ticking until the outcome is emitted guarantees it; the
+      // outcome is assembled only after the pipe drains, and `stopReason` is set once.
+      const advance = () => {
+        if (settled) return;
+        t.mock.timers.tick(630);
+        setTimeout(advance, 25);
+      };
       const ready = "Downloading https://download.pytorch.org/fixture.whl\n";
       const code = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid)); process.stdout.write(${JSON.stringify(ready + output)}); setInterval(() => {}, 20);`;
       await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", code], { timeout: 10000, maxBuffer: 16384 }, {
         emit: line => {
           const event = JSON.parse(line); events.push(event);
-          // Wait for the same output chunk's byte counters to be consumed first.
-          if (event.event === "download_started") setImmediate(() => t.mock.timers.tick(630));
+          if (event.event === "failed" || event.event === "completed") settled = true;
+          if (event.event === "download_started") setImmediate(advance);
         },
         heartbeatMs: 30, noProgressMs: 600,
       }), new RegExp(reason));

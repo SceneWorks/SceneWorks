@@ -143,17 +143,16 @@ all = "warn"
 #
 # Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
 # candle-llm. Cargo ignores dependency-workspace patches, so both root patches must resolve from
-# the same inference revision as the direct crates. The bump script moves every rev and the lock
-# guard refuses a missing, upstream, or skewed resolution.
+# the same inference revision as the direct crates. The bump script moves every patched rev and
+# the lock guard refuses a missing, upstream, or skewed resolution.
 #
-# Candle-metal-kernels joined at epic 25899 (sc-25907): inference vendors it (upstream 1e6aa85e
-# plus the rank > 4 strided-reduce indexing fix, candle #3873; see its VENDORED.md) and its own
-# workspace patch does not reach a SceneWorks build, so the Metal kernels Candle-on-Mac links
-# are the fixed ones only through this entry.
+# candle-metal-kernels is vendored for the upstream rank > 4 strided-reduce out-of-bounds fix
+# (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
+# Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

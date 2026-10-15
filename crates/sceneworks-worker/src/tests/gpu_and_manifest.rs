@@ -2175,15 +2175,18 @@ fn sana_manifest_entry_gates_correctly() {
         entry.get("loraCompatibility").is_none(),
         "sana must not advertise loraCompatibility"
     );
-    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    // Licence notice surfaced in the UI description: Apache-2.0 for the SANA weights (NVIDIA
+    // relicensed them 2026-07-31) plus the Gemma Terms of Use for the bundled text encoder.
     let desc = entry
         .get("ui")
         .and_then(|u| u.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
-        "sana UI description carries the NVIDIA non-commercial notice"
+        desc.contains("Apache-2.0")
+            && desc.contains("Gemma Terms of Use")
+            && !desc.to_lowercase().contains("non-commercial"),
+        "sana UI description carries the Apache-2.0 + Gemma Terms of Use notice"
     );
 }
 
@@ -2289,15 +2292,18 @@ fn sana_sprint_manifest_entry_gates_correctly() {
         entry.get("loraCompatibility").is_none(),
         "sana-sprint must not advertise loraCompatibility"
     );
-    // NVIDIA non-commercial notice surfaced in the UI description (the gated-with-notice carrier).
+    // Licence notice surfaced in the UI description: Apache-2.0 for the SANA weights (NVIDIA
+    // relicensed them 2026-07-31) plus the Gemma Terms of Use for the bundled text encoder.
     let desc = entry
         .get("ui")
         .and_then(|u| u.get("description"))
         .and_then(Value::as_str)
         .unwrap_or("");
     assert!(
-        desc.contains("NVIDIA") && desc.to_lowercase().contains("non-commercial"),
-        "sana-sprint UI description carries the NVIDIA non-commercial notice"
+        desc.contains("Apache-2.0")
+            && desc.contains("Gemma Terms of Use")
+            && !desc.to_lowercase().contains("non-commercial"),
+        "sana-sprint UI description carries the Apache-2.0 + Gemma Terms of Use notice"
     );
 }
 

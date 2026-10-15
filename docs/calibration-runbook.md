@@ -941,7 +941,11 @@ SCENEWORKS_FLUX2_ROOT=/abs/path/.../snapshots/<rev>/<tier>   # q4 | q8 — tier 
 # across the probes, `footprint` on a 38 GB process received 0.31 s of budget and `bernini:q4:mlx`
 # was SIGKILLed 56.8 minutes in, at 87% memory free, by three unlucky ticks inside 1.2 s; with the
 # census still on 1 s, `bernini:q8:mlx` was SIGKILLed 85 minutes in at a steady 52 GB by a single
-# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`).
+# `ps` that took longer than a second (`monitor_failure:TimeoutExpired`). Every catalog capture
+# also runs under `--require-completion-handshake` (sc-26246): the harness asks the guard for a
+# final sample and exits only once it is committed, on failure too. Without it, a capture whose
+# root exited between the census and the footprint sample was a `RootTelemetryLost` hard stop
+# that discarded a finished render as `capture_failed`.
 SCENEWORKS_LTX_REPOSITORY=SceneWorks/ltx-2.3-mlx             # fixed; validated against LTX_REPOSITORY
 SCENEWORKS_LTX_REVISION=<exact artifact revision>
 SCENEWORKS_LTX_ROOT=/abs/path/.../snapshots/<rev>/<tier>     # bf16 | q4 | q8, derived from the plan target

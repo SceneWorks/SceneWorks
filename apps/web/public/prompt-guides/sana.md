@@ -4,7 +4,7 @@
 
 Fast, efficient 1024×1024 text-to-image and reference-guided image-to-image. SANA 1600M is NVIDIA's Linear-DiT model — a 1.6B linear-attention transformer paired with a deep-compression 32× DC-AE autoencoder and a Gemma-2 instruction text encoder. It uses **real classifier-free guidance** (positive *and* negative prompt) and renders quickly with a comfortably small memory footprint.
 
-Distributed under the NVIDIA Open Model License (non-commercial / research use only).
+The SANA transformer and VAE are licensed by NVIDIA under the Apache License 2.0; the bundled gemma-2-2b-it text encoder is governed by Google's Gemma Terms of Use and Prohibited Use Policy.
 
 ## Prompt Shape
 

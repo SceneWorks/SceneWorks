@@ -135,10 +135,10 @@ export function WorkflowDropPanel({
   return (
     <Modal className="workflow-drop-modal" labelledBy="workflow-drop-title" onClose={onDismiss}>
       <h2 className="workflow-drop-title" id="workflow-drop-title">
-        {fromLibrary ? "The recipe in this image" : "Workflow found"}
+        {fromLibrary ? "Workflow recipe" : "Workflow found"}
       </h2>
       <p className="workflow-drop-lede">
-        This image carries the recipe that made it
+        This workflow carries a recipe
         {producer.name ? ` (written by ${producer.name}${producer.version ? ` ${producer.version}` : ""})` : ""}.
       </p>
 
@@ -225,14 +225,12 @@ export function WorkflowDropPanel({
           asks for one and says so rather than quietly reproducing the batch. */}
       {Number.isFinite(batchCount) && batchCount > 1 ? (
         <p className="workflow-drop-note">
-          This image was one of a batch of {batchCount}. Only its own seed travelled, so the studio
-          is set to make a single image.
+          Only one of the {batchCount} outputs is replayed.
         </p>
       ) : null}
       {modelUnresolved ? (
         <p className="workflow-drop-note warn">
-          The model is not prefilled, so Image Studio keeps the model it is already on. Nothing
-          here substitutes one for the model this image names.
+          The model did not resolve; the current selection stays.
         </p>
       ) : null}
 

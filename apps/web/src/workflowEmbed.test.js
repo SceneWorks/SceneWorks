@@ -166,6 +166,7 @@ describe("the two lists a user acts on (sc-15953)", () => {
     }
     expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.poses");
     expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.decoder");
+    expect(WORKFLOW_FIELDS_IN_FILE.map(([key]) => key)).toContain("advanced.veda");
     expect(WORKFLOW_FIELDS_NOT_IN_FILE.map(([key]) => key)).toContain("advanced.quantTier");
   });
 

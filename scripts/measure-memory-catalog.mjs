@@ -3634,7 +3634,8 @@ export function watchdogCeilings({ memoryBytes }) {
  * The footprint hard stop every Darwin capture runs under: `scripts/memory-calibration-watchdog.py`
  * wrapped around the harness, the same guard `scripts/run-ltx-safety-canary.mjs` puts around its
  * contained runs, minus the nonce-authenticated child attestation and provider-phase channel that
- * only the frozen canary profiles speak. Without those the guard still does the one thing the
+ * only the frozen canary profiles speak — but WITH the completion handshake, so the capture exits
+ * only after the guard's final sample (sc-26246). Without those the guard still does the one thing the
  * SC-18946 incident needed: it samples the guarded group's kernel `phys_footprint` every quarter
  * second and terminates the whole group the instant it reaches the ceiling, before the host
  * watchdog can panic.
@@ -3674,6 +3675,11 @@ export function watchdogGuard({ hardware, eventFile, budgetMinutes }) {
     "--telemetry-timeout", "10",
     "--term-grace", "1",
     "--event-file", eventFile,
+    // sc-26246: without it, a capture whose root exited between the guard's census and its
+    // footprint sample was a `RootTelemetryLost` hard stop, and a finished render was discarded as
+    // `capture_failed`. The harness now asks for a final sample and exits only once it is
+    // committed, so the guard never has to excuse a missing root.
+    "--require-completion-handshake",
   ];
 }
 

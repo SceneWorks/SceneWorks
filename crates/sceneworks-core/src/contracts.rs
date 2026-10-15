@@ -1123,6 +1123,9 @@ pub struct JobSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationMetrics {
+    /// Provider-owned post-generation H3 attention observations; absent on historical/unadopted jobs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veda_execution: Option<Value>,
     // --- resolved effective settings ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -1868,6 +1871,11 @@ pub struct ModelDownload {
     /// through the contract type rather than the `extra` bag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component_id: Option<String>,
+    /// Exact identity of a pinned single-file artifact, enforced beyond HF metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_size_bytes: Option<u64>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

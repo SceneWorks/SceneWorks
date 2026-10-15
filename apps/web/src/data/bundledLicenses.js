@@ -97,7 +97,8 @@ import lensMIT from "../../../desktop/licenses/lens/MIT.txt?url&no-inline";
 import qwenImageApache20 from "../../../desktop/licenses/qwen-image/Apache-2.0.txt?url&no-inline";
 import qwenImage21ResearchLicense from "../../../desktop/licenses/qwen-image-2-1/Qwen-RESEARCH-LICENSE-AGREEMENT.txt?url&no-inline";
 import realvisxlCreativeMLOpenRAILM from "../../../desktop/licenses/realvisxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
-import sanaNVIDIAOpenModelLicense from "../../../desktop/licenses/sana/NVIDIA-Open-Model-License.txt?url&no-inline";
+import sanaApacheLicense from "../../../desktop/licenses/sana/Apache-2.0.txt?url&no-inline";
+import sanaGemma from "../../../desktop/licenses/sana/Gemma-Terms.txt?url&no-inline";
 import sd35StabilityAICommunityLicense from "../../../desktop/licenses/sd3.5/Stability-AI-Community-License.txt?url&no-inline";
 import sdxlCreativeMLOpenRAILM from "../../../desktop/licenses/sdxl/CreativeML-Open-RAIL++-M.txt?url&no-inline";
 import sensenovaU1Apache20 from "../../../desktop/licenses/sensenova-u1/Apache-2.0.txt?url&no-inline";
@@ -235,7 +236,8 @@ const DOCUMENT_URL = {
   "qwen-image-apache": qwenImageApache20,
   "qwen-image-2-1-research": qwenImage21ResearchLicense,
   "realvisxl-creativeml-open-rail-m": realvisxlCreativeMLOpenRAILM,
-  "sana-nvidia-open-model-license": sanaNVIDIAOpenModelLicense,
+  "sana-apache-2.0": sanaApacheLicense,
+  "sana-gemma": sanaGemma,
   "sd3.5-stability-ai-community-license": sd35StabilityAICommunityLicense,
   "sdxl-creativeml-open-rail-m": sdxlCreativeMLOpenRAILM,
   "sensenova-u1-apache": sensenovaU1Apache20,

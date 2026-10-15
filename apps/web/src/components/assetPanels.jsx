@@ -1,3 +1,4 @@
+import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
 import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
@@ -631,6 +632,7 @@ export function AssetDetail({
         <button className="preview-button" onClick={() => onPreview(asset)} type="button">
           <AssetMedia asset={asset} />
           <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
         </button>
       )}
       <h3>{asset.displayName}</h3>
@@ -729,6 +731,7 @@ export function AssetCard({ asset, deleteAsset, purgeAsset, onPreview, updateAss
         <AssetMedia asset={asset} />
         <LikenessBadge asset={asset} />
         <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
       </button>
       <div className="review-actions">
         <AssetStatusActions
@@ -1297,6 +1300,7 @@ function FullscreenPreviewComponent({
           )}
           <LikenessBadge asset={asset} />
           <AudioTrackBadge asset={asset} />
+          <AssetVedaOutcome asset={asset} />
           <button
             aria-label="Next asset"
             className="preview-nav-button next"

@@ -4844,3 +4844,33 @@ def test_qwen_image_2_1_turbo_description_claims_only_the_evidenced_backends():
     assert "run on both backends" not in description
     assert "bf16 runs on both backends" in description
     assert "Q8 and Q4 tiers are verified on Apple Silicon (MLX)" in description
+
+
+def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
+    models = {model["id"]: model for model in _load_builtin_models_manifest()["models"]}
+    for model_id in ("minimax_h3", "minimax_h3_ref"):
+        rows = [row for row in models[model_id]["downloads"] if row.get("componentId") == "veda_predictor"]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["repo"] == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+        assert row["revision"] == "9a1fd3a41b4a754a7886e64e82edbddf599fd1bd"
+        assert row["files"] == ["minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors"]
+        assert row["expectedSizeBytes"] == 275415648
+        assert row["expectedSha256"] == "2a8d8845c5342756a2781e8e69563940e4bb573c9a40ebb534915ff8fd76573a"
+        assert row["coRequisite"] is True and row["required"] == "soft"
+        assert set(row["platforms"]) == {"macos", "windows", "linux"}
+
+
+def test_managed_file_schema_rejects_partial_or_unpinned_identity():
+    schema = json.loads(SCHEMA_PATH.read_text())
+    manifest = _load_builtin_models_manifest()
+    model = next(model for model in manifest["models"] if model["id"] == "minimax_h3")
+    index = next(index for index, row in enumerate(model["downloads"]) if row.get("componentId") == "veda_predictor")
+    for key, value in (("expectedSha256", "wrong"), ("expectedSizeBytes", 0), ("revision", "main"), ("files", ["*.safetensors"])):
+        invalid = copy.deepcopy(manifest)
+        next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key] = value
+        assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key
+    for key in ("expectedSha256", "expectedSizeBytes", "revision"):
+        invalid = copy.deepcopy(manifest)
+        del next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key]
+        assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key

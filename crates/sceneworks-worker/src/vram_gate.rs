@@ -2757,12 +2757,31 @@ pub(crate) fn wan_video_fit_error_with_adapter_bytes(
 /// real-weight whole-render peak measured at the shipped 1344x768 geometry; admitting without the
 /// exact tier row (or without a live free-VRAM reading) would make the catalog flip an unproved OOM
 /// path. User LoRA bytes are independently resident and are charged above that baseline.
+#[cfg(test)]
 pub(crate) fn minimax_h3_fit_error(
     manifest_entry: &JsonObject,
     tier_key: &str,
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
+) -> Option<WorkerError> {
+    minimax_h3_fit_error_with_sparse(
+        manifest_entry,
+        tier_key,
+        adapter_bytes,
+        gpu_id,
+        budget,
+        None,
+    )
+}
+
+pub(crate) fn minimax_h3_fit_error_with_sparse(
+    manifest_entry: &JsonObject,
+    tier_key: &str,
+    adapter_bytes: u64,
+    gpu_id: &str,
+    budget: Option<VramBudget>,
+    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
 ) -> Option<WorkerError> {
     const MEASURED_PIXELS: u64 = 1_032_192;
     let candle = manifest_entry.get("candle");
@@ -2794,11 +2813,21 @@ pub(crate) fn minimax_h3_fit_error(
                 .to_owned(),
         ));
     };
-    let needed_gb = peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB;
+    // This catalog row remains the dense baseline; sparse has its own explicit additional
+    // requirement including predictor loading, retained state and forced dense fallback.
+    let needed_gb = crate::video_admission::veda_cold_peak_gb(
+        peak_gb + HEADROOM_GB + adapter_bytes as f64 / BYTES_PER_GIB,
+        sparse,
+    );
+    let sparse_reason = if sparse.is_some() {
+        " plus the Veda predictor/workspace and safe dense fallback"
+    } else {
+        ""
+    };
     (budget.free_gb + f64::EPSILON < needed_gb).then(|| {
         WorkerError::InvalidPayload(format!(
             "MiniMax-H3 needs ~{needed} GB of free GPU VRAM for its measured {tier_key} render \
-             peak plus CUDA reserve, but GPU {gpu_id} has ~{available} GB available. Select a \
+             peak plus CUDA reserve{sparse_reason}, but GPU {gpu_id} has ~{available} GB available. Select a \
              smaller quant tier or use a GPU with more free VRAM.",
             needed = needed_gb.ceil() as u64,
             available = budget.free_gb.round() as u64,
@@ -7077,6 +7106,50 @@ mod tests {
             fit_decision(predicted_peak_gb(&small, "q4"), Some(capped)),
             FitDecision::Fits
         );
+    }
+
+    #[test]
+    fn minimax_h3_sparse_cold_admission_does_not_borrow_dense_peak() {
+        let manifest = obj(
+            json!({"candle":{"measured":true,"vramMeasuredPixels":1_032_192,
+            "vramGbByTier":{"q4":40.068}}}),
+        );
+        let req = gen_core::GenerationRequest {
+            width: 576,
+            height: 320,
+            frames: Some(124),
+            veda: Some(gen_core::VedaRequest {
+                enabled: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let bound =
+            gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+                .unwrap()
+                .unwrap();
+        let budget = Some(VramBudget {
+            free_gb: 42.068,
+            total_gb: 96.,
+        });
+        assert!(minimax_h3_fit_error(&manifest, "q4", 0, "0", budget).is_none());
+        assert!(
+            minimax_h3_fit_error_with_sparse(&manifest, "q4", 0, "0", budget, Some(&bound))
+                .is_some()
+        );
+        let needed = 42.068 + bound.total_bytes as f64 / BYTES_PER_GIB;
+        assert!(minimax_h3_fit_error_with_sparse(
+            &manifest,
+            "q4",
+            0,
+            "0",
+            Some(VramBudget {
+                free_gb: needed,
+                total_gb: 96.
+            }),
+            Some(&bound)
+        )
+        .is_none());
     }
 
     #[test]

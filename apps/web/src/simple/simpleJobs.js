@@ -302,6 +302,7 @@ export function buildSimpleVideoRequest({
   duration,
   styleId,
   sourceAssetId,
+  lastFrameAssetId,
   // Already-serialized picker selections (epic 15404) — `serializeLora(lora, { weight })`,
   // the same entries VideoStudio posts.
   loras = [],
@@ -334,7 +335,7 @@ export function buildSimpleVideoRequest({
     characterId: null,
     characterLookId: null,
     sourceAssetId: mode === "image_to_video" ? sourceAssetId || null : null,
-    lastFrameAssetId: null,
+    lastFrameAssetId: model === "minimax_h3" && mode === "image_to_video" ? lastFrameAssetId || null : null,
     sourceClipAssetId: null,
     sourceClipAssetIds: [],
     bridgeRightClipAssetId: null,

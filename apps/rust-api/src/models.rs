@@ -1497,6 +1497,13 @@ fn build_model_download_job_payload(
     );
     job_payload.insert("repo".to_owned(), Value::String(repo.clone()));
     job_payload.insert("files".to_owned(), json!(files));
+    if let Some(identity) =
+        sceneworks_core::managed_file::ManagedFileIdentity::from_download(download)
+            .map_err(ApiError::bad_request)?
+    {
+        identity.stamp(&mut job_payload);
+    }
+
     // Forward an explicit pinned `revision` (sc-13541) so the worker fetches the exact commit SHA the
     // runtime resolver reads, not `main`. The worker defaults to `main` when this is absent, so
     // omitting `revision` on an entry keeps its behavior unchanged. Required for companion weights a
@@ -1548,6 +1555,11 @@ fn build_model_download_job_payload(
                 .to_string(),
         ),
     );
+    if let Some(identity) = sceneworks_core::managed_file::authoritative_job_identity(&job_payload)
+        .map_err(ApiError::bad_request)?
+    {
+        identity.stamp(&mut job_payload);
+    }
     Ok(job_payload)
 }
 
@@ -7836,6 +7848,28 @@ fn co_requisite_cache_health(
     data_dir: &FsPath,
     download: &Value,
 ) -> Option<HuggingFaceCacheHealth> {
+    match sceneworks_core::managed_file::ManagedFileIdentity::from_download(download) {
+        Ok(Some(identity)) => {
+            let resolver = sceneworks_core::model_artifacts::ModelArtifactResolver::new(
+                sceneworks_core::hf_home::model_source_library(data_dir),
+            );
+            let valid = resolver
+                .discover_source_snapshot(&identity.repo, Some(&identity.revision))
+                .map(|(_, snapshot)| snapshot.join(&identity.file))
+                .is_ok_and(|path| identity.verify(&path).is_ok());
+            return Some(if valid {
+                HuggingFaceCacheHealth::installed()
+            } else {
+                HuggingFaceCacheHealth::missing(vec![identity.file])
+            });
+        }
+        Err(_) => {
+            return Some(HuggingFaceCacheHealth::missing(string_array_field(
+                download, "files",
+            )))
+        }
+        Ok(None) => {}
+    }
     let repo = download.get("repo").and_then(Value::as_str)?;
     let files = string_array_field(download, "files");
     let exact_rename = download
@@ -11827,6 +11861,41 @@ mod variant_install_tests {
     }
 
     #[test]
+    fn managed_optional_predictor_missing_or_corrupt_keeps_dense_installed_and_repairable() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().unwrap();
+        let repo = "SceneWorks/matrix";
+        let mut model = quant_matrix_model(repo);
+        let row = json!({"provider":"huggingface","repo":"test/predictor","revision":"a".repeat(40),
+            "files":["predictor.safetensors"],"expectedSizeBytes":4,
+            "expectedSha256":"770e607624d689265ca6c44884d0807d9b054d23c473c106c72be9de08b7376c", "coRequisite":true,"required":"soft"});
+        model["downloads"].as_array_mut().unwrap().push(row.clone());
+        seed_cache(data.path(), repo, &["q4/model.safetensors"]);
+        let state =
+            || install_state_for(model_download_context(&model).unwrap(), &model, data.path());
+        assert!(state().installed && state().update_available);
+        let path = huggingface_repo_cache_path(data.path(), "test/predictor")
+            .unwrap()
+            .join("snapshots")
+            .join("a".repeat(40))
+            .join("predictor.safetensors");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"good").unwrap();
+        assert!(
+            co_requisite_cache_health(data.path(), &row)
+                .unwrap()
+                .installed
+        );
+        std::fs::write(&path, b"evil").unwrap();
+        assert!(
+            !co_requisite_cache_health(data.path(), &row)
+                .unwrap()
+                .installed
+        );
+        assert!(state().installed && state().update_available);
+    }
+
+    #[test]
     fn optional_tier_dependencies_do_not_block_an_installed_primary() {
         let _env = isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
@@ -15115,6 +15184,61 @@ mod model_import_source_tests {
                 serde_json::from_str::<ModelImportRequest>(body).is_err(),
                 "{body} must be refused"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod managed_predictor_queue_tests {
+    use super::*;
+    #[test]
+    fn both_h3_rows_queue_authoritative_exact_soft_predictor_identity() {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .unwrap()
+            .1;
+        let catalog: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let pin = sceneworks_core::managed_file::builtin_identities()
+            .unwrap()
+            .first()
+            .unwrap();
+        for id in ["minimax_h3", "minimax_h3_ref"] {
+            let model = catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|m| m["id"] == id)
+                .unwrap();
+            let row = model["downloads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["componentId"] == "veda_predictor")
+                .unwrap();
+            assert_eq!(row["required"], "soft");
+            let payload = build_model_download_job_payload(
+                model,
+                id,
+                row,
+                None,
+                false,
+                true,
+                FsPath::new("/data"),
+            )
+            .unwrap();
+            assert_eq!(payload["expectedSha256"], pin.sha256);
+            assert_eq!(payload["expectedSizeBytes"], pin.bytes);
+            assert_eq!(payload["revision"], pin.revision);
+            assert_eq!(payload["files"], json!([pin.file]));
+            assert_eq!(
+                sceneworks_core::managed_file::authoritative_job_identity(&payload).unwrap(),
+                Some(pin)
+            );
+            let mut conflict = payload;
+            conflict.insert("expectedSha256".into(), json!("0".repeat(64)));
+            assert!(sceneworks_core::managed_file::authoritative_job_identity(&conflict).is_err());
         }
     }
 }

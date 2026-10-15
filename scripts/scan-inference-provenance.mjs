@@ -130,6 +130,12 @@ const SPECIAL_AREAS = new Map([
   ["crates/audio/candle-audio-acestep/src/vae.rs", "diffusers-source"],
   ["crates/contracts/gen-core/src/sampling/solvers.rs", "comfy-kdiffusion-solvers"],
   ["crates/contracts/gen-core/src/sampling/cfgpp.rs", "cfgpp-formula"],
+  // The Veda block-sparse attention ports (epic 25140) carry Veda-on-ComfyUI / SageAttention / LLVM
+  // partial-sort notices — distinct third-party source obligations disclosed by the
+  // `veda-sparse-source` area, not folded into the gen-core / mlx-gen-minimax-h3 architecture
+  // prefixes. Only the marker-bearing files reach the inventory; the area lists the rest too.
+  ["crates/contracts/gen-core/src/veda/topk.rs", "veda-sparse-source"],
+  ["crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs", "veda-sparse-source"],
   // The Mage latent module transcribes Cephes (ndtri/erf/erfc) under BSD-3 — a distinct third-party
   // source obligation from the surrounding architecture port (sc-14432). Route it to its own
   // `cephes-source` area (component `cephes`) so the notice is attributed, not folded into the

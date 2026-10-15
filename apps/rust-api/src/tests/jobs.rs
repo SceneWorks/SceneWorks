@@ -16053,6 +16053,156 @@ async fn cross_selecting_a_minimax_h3_partition_lora_is_refused_by_the_video_job
     }
 }
 
+#[tokio::test]
+async fn h3_veda_api_preserves_complete_controls_and_refuses_malformed_or_incompatible_requests() {
+    let _hf_cache = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, project_id) = shipped_manifest_app(&temp).await;
+    // This test selects the shipped Turbo LoRA. Seed a small, structurally valid adapter at its
+    // immutable manifest source so the real installed-file and receipt/hash checks run without
+    // depending on whichever models happen to be cached on the machine running the test.
+    let builtin_path = temp.path().join("config/manifests/builtin.loras.jsonc");
+    let builtin: Value = serde_json::from_str(&strip_jsonc_comments(
+        &std::fs::read_to_string(&builtin_path).unwrap(),
+    ))
+    .unwrap();
+    let turbo = builtin["loras"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == "minimax_h3_turbo_8step")
+        .unwrap();
+    let source = &turbo["source"];
+    let (repo, revision, filename) = (
+        source["repo"].as_str().unwrap(),
+        source["revision"].as_str().unwrap(),
+        source["file"].as_str().unwrap(),
+    );
+    let data_dir = temp.path().join("data");
+    let snapshot = huggingface_repo_cache_path(&data_dir, repo)
+        .unwrap()
+        .join("snapshots")
+        .join(revision);
+    std::fs::create_dir_all(&snapshot).unwrap();
+    let turbo_file = snapshot.join(filename);
+    write_test_safetensors_with_keys(
+        &turbo_file,
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let metadata = std::fs::metadata(&turbo_file).unwrap();
+    let modified_nanos = metadata
+        .modified()
+        .unwrap()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        .to_string();
+    use sha2::Digest as _;
+    let sha256 = format!(
+        "{:x}",
+        sha2::Sha256::digest(std::fs::read(&turbo_file).unwrap())
+    );
+    let receipt_dir = data_dir
+        .join("loras")
+        .join(safe_download_dir("minimax_h3_turbo_8step"));
+    std::fs::create_dir_all(&receipt_dir).unwrap();
+    std::fs::write(
+        receipt_dir.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&json!({
+            "repo": repo,
+            "loraFileName": filename,
+            "loraFileBytes": metadata.len(),
+            "loraFileModifiedNanos": modified_nanos,
+            "loraFileSha256": sha256
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(temp.path().join("config/manifests/user.loras.jsonc"),
+        json!({"schemaVersion":1,"loras":[{"id":"user_style","name":"H3 style","family":"minimax-h3","triggerWords":[],"compatibility":{"families":["minimax-h3"]},"source":{"provider":"local","path":"loras/h3_style.safetensors"}}]}).to_string()).unwrap();
+    std::fs::create_dir_all(temp.path().join("data/loras")).unwrap();
+    write_test_safetensors_with_keys(
+        &temp.path().join("data/loras/h3_style.safetensors"),
+        &[
+            "transformer_blocks.0.attn.to_q.lora_A.default.weight".into(),
+            "transformer_blocks.0.attn.to_q.lora_B.default.weight".into(),
+        ],
+    );
+    let controls = json!({"enabled":true,"generated":"32","reference":"0%","fullAttentionLayers":"49,2–0","fullAttentionSteps":"0;7"});
+    let payload = json!({"projectId":project_id,"model":"minimax_h3","mode":"text_to_video","prompt":"a lighthouse","loras":[{"id":"minimax_h3_turbo_8step","weight":0.8},{"id":"user_style","weight":0.4}],"advanced":{"veda":controls}});
+    let (status, created) =
+        request(app.clone(), "POST", "/api/v1/video/jobs", payload.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{created}");
+    assert_eq!(created["payload"]["advanced"]["veda"], controls);
+    for (index, id) in ["minimax_h3_turbo_8step", "user_style"].iter().enumerate() {
+        assert_eq!(created["payload"]["loras"][index]["id"], *id);
+        assert_eq!(
+            created["payload"]["loras"][index]["weight"],
+            payload["loras"][index]["weight"]
+        );
+    }
+    let id = created["id"].as_str().unwrap();
+    for changes in [
+        json!({"model":"mochi_1"}),
+        json!({"advanced":{"veda":{"enabled":true,"generated":"0"}}}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{id}/duplicate"),
+            json!({"payloadChanges":changes}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    for wire in [
+        json!(null),
+        json!({"enabled":"true"}),
+        json!({"enabled":false,"generated":"100%"}),
+        json!({"enabled":true,"fullAttentionLayers":"50"}),
+        json!({"enabled":true,"fullAttentionSteps":"8"}),
+        json!({"enabled":true,"reference":"1.5"}),
+    ] {
+        let mut bad = payload.clone();
+        bad["advanced"]["veda"] = wire;
+        let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["detail"].as_str().unwrap().contains("advanced.veda"),
+            "{body}"
+        );
+    }
+    let mut incompatible = payload.clone();
+    incompatible["model"] = json!("mochi_1");
+    incompatible["loras"] = json!([]);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", incompatible).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("only supported"),
+        "{body}"
+    );
+    let mut overridden = payload.clone();
+    overridden["advanced"]["steps"] = json!(4);
+    let (status, body) = request(app.clone(), "POST", "/api/v1/video/jobs", overridden).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body["detail"].as_str().unwrap().contains("outside 0..4"),
+        "{body}"
+    );
+    let mut off = payload.clone();
+    off["advanced"] = json!({});
+    let (status, body) = request(app, "POST", "/api/v1/video/jobs", off).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert!(body["payload"]["advanced"].get("veda").is_none());
+}
+
 /// A real 2x2 PNG for routes that only need an importable raster.
 fn depth_source_png() -> Vec<u8> {
     let mut bytes = Vec::new();
@@ -16414,4 +16564,35 @@ async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
         detail.contains("qwen_image_2_1_turbo") && detail.contains("10"),
         "the refusal names the model and the cap: {detail}"
     );
+}
+
+#[test]
+fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_source() {
+    for (model, has_last, accepted) in [
+        ("minimax_h3", true, true),
+        ("minimax_h3", false, false),
+        ("minimax_h3_ref", true, false),
+        ("ltx_2_3", true, false),
+    ] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
+            "lastFrameAssetId": if has_last { Some("last") } else { None },
+        }))
+        .unwrap();
+        assert_eq!(
+            crate::validate_video_job(&payload).is_ok(),
+            accepted,
+            "{model}/{has_last}"
+        );
+    }
+}
+
+#[test]
+fn h3_empty_last_frame_is_not_a_keyframe_input() {
+    for id in ["", " "] {
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+            "projectId":"owned", "model":"minimax_h3", "mode":"image_to_video", "prompt":"A cyclist rides", "lastFrameAssetId":id,
+        })).unwrap();
+        assert!(crate::validate_video_job(&payload).is_err());
+    }
 }

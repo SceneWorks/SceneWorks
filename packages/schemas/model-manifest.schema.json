@@ -2137,6 +2137,13 @@
                   }
                 },
                 {
+                  "if": { "anyOf": [{ "required": ["expectedSha256"] }, { "required": ["expectedSizeBytes"] }] },
+                  "then": {
+                    "required": ["expectedSha256", "expectedSizeBytes", "revision", "files"],
+                    "properties": { "files": { "minItems": 1, "maxItems": 1, "items": { "type": "string", "pattern": "^[^*?]+$" } } }
+                  }
+                },
+                {
                   "$comment": "sc-14980: a subdir narrows WHICH directory of a coRequisite's snapshot is staged for its componentId, so like componentId it is valid ONLY on coRequisite: true entries.",
                   "if": { "required": ["subdir"] },
                   "then": {
@@ -2261,6 +2268,14 @@
                     "option": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
                     "default": { "type": "boolean" }
                   }
+                },
+                "expectedSizeBytes": {
+                  "type": "integer", "minimum": 1,
+                  "description": "Exact content length for a pinned single-file artifact, paired with expectedSha256."
+                },
+                "expectedSha256": {
+                  "type": "string", "pattern": "^[0-9a-f]{64}$",
+                  "description": "Authoritative SHA256 for the exact pinned single-file artifact; queue, transfer, cache and optional load enforce it."
                 },
                 "estimatedSizeBytes": {
                   "type": ["integer", "string"],

@@ -1065,7 +1065,7 @@ const seededFallbackModels = [
       // metadata stays in lockstep with the generated manifest. Condensed against the manifest's
       // prose, but it carries the same four load-bearing claims, and
       // `minimaxH3CatalogCopy.test.js` pins the mirror to the manifest claim-by-claim.
-      description: "MiniMax-H3 joint video + synchronized stereo audio, with first/last-frame conditioning. No guidance scale and no negative prompt. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      description: "MiniMax-H3 video + synchronized stereo audio; first/last-frame conditioning. No guidance scale or negative prompt. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
       durationHint: "Fourteen clip lengths only, 5.17s-14.38s at 24fps, and 15s is refused rather than shortened to 14.38s. Cost is canvas-driven — 5.17s at 576x320 is ~14 minutes, the same clip at 1344x768 is ~2 hours.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },
@@ -1095,7 +1095,7 @@ const seededFallbackModels = [
       attribution: "Powered by MiniMax H3",
       // sc-17162 — carried in full rather than by reference, same as the manifest entry: this is a
       // separate model card and a user can install it without ever opening the other one's.
-      description: "MiniMax-H3 reference-driven video: up to 9 images, 3 clips and 3 audio references (12 files total), with synchronized stereo audio. Open weights, not the hosted Hailuo product: H3-Context-IR and H3-Regenerate-2K are unreleased, so prompt adherence differs from the API and 2K is not reachable from these weights; sparse-attention inference is unreleased too, so attention runs dense and the shortest clip at 1344x768 is about a two-hour render. No guidance scale and no negative prompt. Fourteen fixed lengths between 5.17s and 14.38s — 15s is refused rather than shortened — and no still-image mode.",
+      description: "MiniMax-H3 reference video: up to 9 images, 3 clips and 3 audio references (12 total); synchronized stereo audio. Open weights: H3-Context-IR and H3-Regenerate-2K are unreleased; prompt adherence differs from Hailuo and 2K is not reachable from these weights. Attention runs dense by default. Optional Veda uses the managed predictor and falls back to dense when it cannot run. The shortest dense clip at 1344x768 is a two-hour render. No guidance scale or negative prompt. Fourteen lengths, 5.17s–14.38s; 15s is refused rather than shortened; no still-image mode.",
       durationHint: "Same fourteen clip lengths as MiniMax-H3, 5.17s-14.38s at 24fps, 15s is refused rather than shortened to 14.38s, and the same canvas-driven cost.",
       promptGuide: { title: "MiniMax-H3 Prompt Guide", path: "/prompt-guides/minimax-h3.md" },
     },

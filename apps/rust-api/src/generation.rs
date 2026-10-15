@@ -2431,6 +2431,9 @@ pub(crate) async fn create_video_job(
             }
         }
     }
+    sceneworks_core::video_request::VideoRequest::from_payload(&job_payload)
+        .h3_veda_settings()
+        .map_err(ApiError::bad_request)?;
     // The model's declared `limits.hardMinSteps` AND `limits.steps`, enforced at enqueue (sc-19426,
     // sc-19502 — one call, because `steps_limit_error` owns both). A FOURTH axis: the
     // three gates around it bound how long the clip is and how much conditioning media it carries,
