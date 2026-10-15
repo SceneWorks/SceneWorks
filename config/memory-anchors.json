@@ -7167,6 +7167,51 @@
       "overallAllocatorEnvelopeBytes": 30506221568
     },
     {
+      "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q8-candle-evidence.json",
+        "sha256": "144ab8b0a13398e229b00af71eb7b2bf28df1317f6f5f8d58a514311c91b5a35",
+        "recordId": "imc-fedbaa630ec38cbef226",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+        "loaderClosureDigest": "1375273fecabd5d5561a2dd8a4bf5bc68d82d2a009d759d39ce2039c4475b098"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13096714240,
+        "denoise": 17991467008,
+        "decode": 37320916992
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13096714240,
+        "denoise": 17991467008,
+        "decode": 37320916992
+      },
+      "overallAllocatorEnvelopeBytes": 37320916992
+    },
+    {
       "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
       "modelId": "qwen_image_edit_2511",
       "modelFamily": "qwen-image",
@@ -12592,17 +12637,6 @@
       "route": "qwen_image_2_1_turbo",
       "backend": "candle",
       "tier": "bf16",
-      "basis": "no_retained_evidence",
-      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
-      "evidence": null
-    },
-    {
-      "id": "analytic:qwen_image_2_1_turbo:candle:q8",
-      "modelId": "qwen_image_2_1_turbo",
-      "modelFamily": "qwen-image-2-1",
-      "route": "qwen_image_2_1_turbo",
-      "backend": "candle",
-      "tier": "q8",
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
