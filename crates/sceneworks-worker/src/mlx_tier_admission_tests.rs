@@ -90,6 +90,7 @@ fn inputs(width: u32, height: u32, count: u32) -> MlxRequestInputs {
         has_phases: false,
         conditioning_windows: None,
         negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 

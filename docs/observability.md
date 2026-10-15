@@ -251,15 +251,21 @@ the provider is handed.
 `prefixKvCache` is the fourth typed domain, and the only one chosen from the **budget** rather
 than from the declaration: a provider that declares it (`qwen_image_2_1`, `qwen_image_2_1_turbo`)
 is priced per request from its own derived surcharge (MLX: per tier — q8/q4 compute in f32, so
-their cache is twice bf16's; Candle: the build device's width), and the memory ladder is run
-**cached first, shed last** — every rung is tried with the cache before any rung without it.
+their cache is twice bf16's; Candle: the build device's width), and it is added **rung-for-rung**:
+the memory ladder first runs exactly as it did before the cache existed and picks the rung (tier,
+residency, decode policy), and the cache is taken only when that SAME rung also fits with the
+surcharge. The cache never moves a request to another rung, so every request keeps the rung and
+output path it had before; it is added only where it is free. It is not priced for a request whose
+admitted block is not handed to one render at that exact geometry and reference set (hires fix,
+native prompt batch).
 
 * `memory_strategy_request_selected` (MLX) carries `prefix_kv_cache` (`cached` / `prefill`, absent
   for a provider with no cache) and `prefix_kv_cache_priced_bytes`; on Candle the
   `image_memory_strategy_selected` payload carries `prefixKvCache: {selected, pricedBytes}`. A
   `cached` selection's `predicted_peak_bytes` already includes the surcharge.
-* A request that fits only with the cache shed runs `prefill` and is **not** refused; one that fits
-  neither is refused exactly as before the cache existed.
+* A request whose rung fits only with the cache shed runs `prefill` on that rung and is **not**
+  refused — even when the cache would fit on a lower rung; one that fits no rung is refused exactly
+  as before the cache existed.
 * Each image's provenance (`rawAdapterSettings.prefixKvCache`) and the job result
   (`result.prefixKvCache`, one record per written image, in order) record
   `{selected, pricedBytes, path, cacheBytes, overflow}`: what the admission chose and priced, and

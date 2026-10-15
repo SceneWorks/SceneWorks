@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
+    "inferenceRevision": "488bb762603b091b58ce218e18ddee07f16780fe",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -39,6 +39,7 @@
     "mage_flow_turbo": "mage_flow_turbo",
     "qwen_image": "qwen_image",
     "qwen_image_2_1": "qwen_image_2_1",
+    "qwen_image_2_1_turbo": "qwen_image_2_1_turbo",
     "qwen_image_edit": "qwen_image_edit",
     "qwen_image_edit_2509": "qwen_image_edit",
     "qwen_image_edit_2511": "qwen_image_edit",
@@ -442,6 +443,7 @@
       "mochi_1",
       "qwen_image",
       "qwen_image_2_1",
+      "qwen_image_2_1_turbo",
       "sana_1600m",
       "sana_sprint_1600m",
       "scail2_14b",
@@ -1619,6 +1621,48 @@
       },
       {
         "id": "qwen_image_2_1",
+        "family": "qwen-image-2-1",
+        "backend": "candle",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": true,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler",
+          "euler_ancestral",
+          "heun",
+          "dpmpp_2m",
+          "dpmpp_sde",
+          "uni_pc",
+          "lcm",
+          "ddim",
+          "er_sde",
+          "dpmpp_2m_sde"
+        ],
+        "schedulers": [
+          "normal",
+          "simple",
+          "karras",
+          "exponential",
+          "sgm_uniform",
+          "beta",
+          "ddim_uniform",
+          "beta57"
+        ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "qwen_image_2_1_turbo",
         "family": "qwen-image-2-1",
         "backend": "candle",
         "modality": "image",

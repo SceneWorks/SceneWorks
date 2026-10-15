@@ -151,9 +151,9 @@ all = "warn"
 # workspace patch does not reach a SceneWorks build, so the Metal kernels Candle-on-Mac links
 # are the fixed ones only through this entry.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "6e402df8f4fddcb5affde6e6955e170c1d99bff9" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6e402df8f4fddcb5affde6e6955e170c1d99bff9" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "6e402df8f4fddcb5affde6e6955e170c1d99bff9" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "488bb762603b091b58ce218e18ddee07f16780fe" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

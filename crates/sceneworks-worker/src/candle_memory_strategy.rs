@@ -1888,7 +1888,8 @@ fn memory_for_selection(
 
 /// [`evaluate_shared_image`] with the provider's prefix-KV-cache surcharge priced in (epic 25899):
 /// `prefix_kv_cache_surcharge` is `execution_planner::prefix_kv_cache_surcharge_bytes` for the
-/// request, and the ladder is run cached-first, shed-last (`execution_planner::plan_prefix_kv_cache`).
+/// request, and it is added rung-for-rung (`execution_planner::plan_prefix_kv_cache`): the shed
+/// ladder picks the rung exactly as before, and the cache is taken only when that rung also fits it.
 /// `None` is exactly [`evaluate_shared_image`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn evaluate_shared_image_priced(
@@ -2666,11 +2667,15 @@ fn evaluate_shared_image_inner_priced(
             || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
     };
     let reserve_charge = crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&pad_carrying);
-    // Epic 25899: the provider's prefix KV cache, priced per request and shed LAST — the ladder is
-    // run first with the cache surcharge on every candidate and, only if nothing fits cached, again
-    // at the shed demand (exactly the pre-cache admission). `None` runs the ladder once, unchanged.
-    let run_ladder = |extra_bytes: u64| -> Selection {
-        if extra_bytes == 0 {
+    // Epic 25899: the provider's prefix KV cache, added rung-for-rung. The ladder runs first at the
+    // shed demand — exactly the pre-cache admission, which picks the rung — and the cache is taken
+    // only if that SAME rung (`only_rung`) also fits with the surcharge on its peak, under the same
+    // budget and pad rule. The cache never moves a request to another rung. `None` runs the ladder
+    // once, unchanged.
+    let run_ladder = |extra_bytes: u64, only_rung: Option<MemorySelection>| -> Selection {
+        let on_rung =
+            |candidate: &&Candidate<'_>| only_rung.is_none_or(|rung| candidate.selection == rung);
+        if extra_bytes == 0 && only_rung.is_none() {
             return crate::memory_strategy::select_strategy_charging(
                 request_scope,
                 &contract,
@@ -2679,7 +2684,8 @@ fn evaluate_shared_image_inner_priced(
                 reserve_charge,
             );
         }
-        let surcharged = candidates
+        let kept = candidates.iter().filter(on_rung).collect::<Vec<_>>();
+        let surcharged = kept
             .iter()
             .map(|candidate| {
                 let mut evidence = candidate.evidence.clone();
@@ -2688,19 +2694,25 @@ fn evaluate_shared_image_inner_priced(
                 evidence
             })
             .collect::<Vec<_>>();
-        let surcharged_candidates = candidates
+        let surcharged_candidates = kept
             .iter()
             .zip(&surcharged)
             .map(|(candidate, evidence)| Candidate {
                 evidence,
-                ..*candidate
+                ..**candidate
             })
             .collect::<Vec<_>>();
-        // The resident live estimate is candidate 0 in both lists; the pad rule follows it.
-        let surcharged_resident = &surcharged[0];
+        // The pad rule follows each candidate from the original list: the resident live estimate
+        // and every estimate floor carry their pad.
+        let carries_pad = kept
+            .iter()
+            .map(|candidate| pad_carrying(candidate))
+            .collect::<Vec<_>>();
         let surcharged_pad_carrying = |candidate: &Candidate<'_>| {
-            std::ptr::eq(candidate.evidence, surcharged_resident)
-                || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
+            surcharged
+                .iter()
+                .position(|evidence| std::ptr::eq(candidate.evidence, evidence))
+                .is_some_and(|index| carries_pad[index])
         };
         crate::memory_strategy::select_strategy_charging(
             request_scope,
@@ -2712,8 +2724,19 @@ fn evaluate_shared_image_inner_priced(
     };
     let (selected, prefix_kv_cache) = crate::execution_planner::plan_prefix_kv_cache(
         prefix_kv_cache_surcharge,
-        run_ladder,
+        run_ladder(0, None),
         |selection| matches!(selection, Selection::Selected { .. }),
+        |shed, priced_bytes| {
+            let Selection::Selected {
+                selection: rung, ..
+            } = shed
+            else {
+                return None;
+            };
+            let cached = run_ladder(priced_bytes, Some(*rung));
+            matches!(&cached, Selection::Selected { selection, .. } if selection == rung)
+                .then_some(cached)
+        },
     );
     let prefix_kv_cache_extra = prefix_kv_cache.map_or(0, |plan| plan.admitted_surcharge_bytes());
     let Selection::Selected {
@@ -4063,6 +4086,158 @@ mod tests {
             assert!(candle["vramGbByTier"]["q4"] != candle["vramGbByTier"]["q8"]);
             assert!(candle["vramGbByTier"]["q8"] != candle["vramGbByTier"]["bf16"]);
         }
+    }
+
+    /// Epic 25899, through the Candle priced ladder (`evaluate_shared_image_inner_priced`): the
+    /// prefix KV cache is added rung-for-rung and never refuses an admissible request.
+    ///
+    /// The receipt-priced Chroma ladder (a 25 GiB resident receipt above an 18 GiB staged floor,
+    /// both pad-carrying) is admitted twice at every budget on a scan — once with no cache (`None`,
+    /// today's admission) and once with a 2 GiB surcharge — so each budget is graded against its own
+    /// shed twin:
+    ///
+    /// * at EVERY admitted budget the priced admission runs the shed twin's rung;
+    /// * (b) that rung also fits cached → `Cached` written onto the memory block (a Resident
+    ///   selection, which has no block, gets one), the context's peak and `predicted_peak_gb` the
+    ///   shed peak PLUS the surcharge, and the same unreserved pool (the pad rule follows the
+    ///   candidate into the surcharged pass);
+    /// * (a) it fits only shed → `Prefill` on it, identical to the no-cache admission — including
+    ///   on Resident at budgets where staged + cache fits (every budget at or above the lowest one
+    ///   the scan admitted `Cached` on staged);
+    /// * (c) fits neither → refused with the no-cache admission's own error.
+    ///
+    /// *Mutations that red this:* letting the cached pass pick any rung (the (a) budgets then run
+    /// staged `Cached`); skipping the cached attempt (no `Cached` band); charging the reserve to the
+    /// surcharged pad-carrying candidates (the pool assertion); dropping the surcharge from the
+    /// context or `predicted_peak_gb`; dropping `write_onto` on a Resident selection.
+    #[test]
+    fn candle_prefix_kv_cache_keeps_the_shed_rung_and_never_refuses_an_admissible_request() {
+        let identity = format!("{CHROMA_ADAPTER_OVERLAY_PREFIX}{}", "a".repeat(64));
+        let contract = chroma_probe_contract(Some(&identity), gib(2), gib(3));
+        let manifest = chroma_structural_manifest();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("sealed-chroma-q4")))
+            .with_resolved_route("chroma1_base");
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let surcharge = gib(2);
+        let evaluate = |free_gb: f64, surcharge: Option<u64>| {
+            let budget = Some(VramBudget {
+                free_gb,
+                total_gb: 96.0,
+            });
+            evaluate_shared_image_inner_priced(
+                "chroma1_base",
+                "chroma1_base",
+                &spec,
+                true,
+                &manifest,
+                "q4",
+                "text_to_image",
+                Some("lora"),
+                Some("lora"),
+                geometry,
+                false,
+                true,
+                false,
+                false,
+                budget,
+                reserve_for(budget),
+                crate::vram_gate::predicted_peak_gb(&manifest, "q4"),
+                gib(80),
+                MemoryCacheState::Cold,
+                None,
+                Some(contract.clone()),
+                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                None,
+                surcharge,
+            )
+        };
+        let mut lowest_staged_cached = f64::INFINITY;
+        let mut resident_prefill = Vec::new();
+        let (mut cached, mut refused) = (0, 0);
+        for step in 0..=400u32 {
+            let free_gb = 40.0 - f64::from(step) * 0.1;
+            match (evaluate(free_gb, None), evaluate(free_gb, Some(surcharge))) {
+                (Err(shed), Err(priced)) => {
+                    assert_eq!(priced.to_string(), shed.to_string(), "(c) at {free_gb}");
+                    refused += 1;
+                }
+                (Ok(None), Ok(None)) => refused += 1,
+                (Ok(Some(shed)), Ok(Some(priced))) => {
+                    assert_eq!(shed.prefix_kv_cache, None, "no surcharge, no plan");
+                    assert_eq!(
+                        priced.context.selection, shed.context.selection,
+                        "the cache never changes which rung a request runs on (at {free_gb})"
+                    );
+                    let plan = priced
+                        .prefix_kv_cache
+                        .expect("a priced request records its plan");
+                    assert_eq!(plan.priced_bytes, surcharge);
+                    let strategy = shed.context.selection.strategy;
+                    match plan.mode {
+                        gen_core::PrefixKvCacheMode::Cached => {
+                            assert_eq!(
+                                priced.memory.and_then(|memory| memory.prefix_kv_cache),
+                                Some(gen_core::PrefixKvCacheMode::Cached),
+                                "(b) the cached selection rides the memory block ({strategy:?})"
+                            );
+                            assert_eq!(
+                                priced.context.predicted_peak_bytes,
+                                shed.context.predicted_peak_bytes + surcharge,
+                                "(b) the context states the cached demand the admission approved"
+                            );
+                            assert!(
+                                (priced.predicted_peak_gb
+                                    - (shed.predicted_peak_gb + surcharge as f64 / BYTES_PER_GIB))
+                                    .abs()
+                                    < 1e-9,
+                                "(b) predicted_peak_gb carries the surcharge"
+                            );
+                            assert_eq!(
+                                priced.admitted.available_gb, shed.admitted.available_gb,
+                                "(b) a pad-carrying candidate stays on the unreserved pool when surcharged"
+                            );
+                            assert!(priced.admitted.needed_gb > shed.admitted.needed_gb);
+                            if strategy == MemoryStrategy::StagedResidency {
+                                lowest_staged_cached = lowest_staged_cached.min(free_gb);
+                            }
+                            cached += 1;
+                        }
+                        gen_core::PrefixKvCacheMode::Prefill => {
+                            assert_eq!(priced.memory, shed.memory, "prefill writes nothing");
+                            assert_eq!(priced.context, shed.context, "the no-cache admission");
+                            assert_eq!(priced.predicted_peak_gb, shed.predicted_peak_gb);
+                            assert_eq!(priced.admitted, shed.admitted);
+                            if strategy == MemoryStrategy::Resident {
+                                resident_prefill.push(free_gb);
+                            }
+                        }
+                    }
+                }
+                (shed, priced) => panic!(
+                    "pricing the cache changed admissibility at {free_gb}: shed admitted={}, \
+                     priced admitted={}",
+                    matches!(shed, Ok(Some(_))),
+                    matches!(priced, Ok(Some(_)))
+                ),
+            }
+        }
+        assert!(
+            cached > 0 && refused > 0,
+            "cached={cached} refused={refused}"
+        );
+        assert!(
+            resident_prefill
+                .iter()
+                .any(|free_gb| *free_gb >= lowest_staged_cached),
+            "(a) the scan must hold a budget where Resident runs Prefill although staged + cache \
+             fits: resident prefill at {resident_prefill:?}, lowest staged cached {lowest_staged_cached}"
+        );
     }
 
     #[test]

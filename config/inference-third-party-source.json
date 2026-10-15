@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory rescanned at inference main revision 6e402df8 (inference #1243, MLX activation checkpointing for Iris depth / restoration training, on top of c1f59420: inference #1242, the Candle Iris training-tape memory fix and activation checkpointing for Candle depth / restoration training, on top of 0b1a5a57: inference #1240, the Candle Iris memory-strategy contract, following #1238 Iris probe tooling, #1239 the MLX Iris memory-strategy contract and #1241 Iris parity cases, on top of 25231d15, the merge of inference #1232, the Iris-3B epic sc-25678 feature: the Candle provider, controls/adapters/previews, depth, restoration, MLX and Candle LoRA trainers, the depth and restoration task trainers, the curricula, REPA, activation-checkpointing, holdout, fp16 and distributed training, and the trainers' single sibling retirement of foreign or abandoned checkpoints into <stem>.checkpoints.prior, on top of inference main c1f5989e and the epic 2123 work): 769 provenance candidates and 110 production-Rust crate prefixes. The one candidate added since 25231d15 is candle-gen-qwen-image-2-1/src/training.rs, inside the existing Qwen Image 2.1 ported-source area. The mlx-gen-iris and candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component, and the gen-core iris degradation, restoration-training and training-contract modules (including the vendored upstream stage presets in iris/train/upstream) fall under the existing gen-core ported-source area. The four production crates crates/media/{candle-gen/candle-gen,mlx-gen/mlx-gen}-{perceptual,body} remain unclassified open advisory items for epic 2123's compliance pass. The vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change, the sc-25686 backprop patch that skips gradients for untracked operands, and the max_pool2d backward fix, all documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The mlx-rs fork pin is fe22998b (CPU conv padding-overhang fix), which adds no provenance candidate. The speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
-  "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
-  "auditDigest": "fc874c500a2906265b7562ab8668209a3c9d0e62bc27a98d37b7fce086c790a0",
+  "_comment": "Audit inventory rescanned at inference main revision 488bb762 (the merge of the Qwen-Image 2.1 Turbo epic 25899, inference #1258 and #1255: the Turbo engine id on both lanes, the prefix KV cache execution domain, and the vendored candle-metal-kernels, on top of inference main 5020ce344 and, before it, 6e402df8 (inference #1243, MLX activation checkpointing for Iris depth / restoration training) and the earlier Iris-3B and epic 2123 work): 772 provenance candidates and 111 production-Rust crate prefixes. The one crate prefix added since 6e402df8 is crates/media/candle-gen/vendor/candle-metal-kernels, upstream Hugging Face Candle candle-metal-kernels 0.10.2 at 1e6aa85e plus the unmodified candle #3873 rank-5+ strided-reduce fix, documented in its VENDORED.md and classified under the existing Hugging Face Candle About license component. The three candidates added since 6e402df8 (gen-core veda/topk.rs, mlx-gen-minimax-h3 veda/mod.rs and mlx-gen-qwen-image-2-1 memory_strategy.rs) fall inside existing ported-source areas. The mlx-gen-iris and candle-gen-iris crates are architecture reimplementations of speridlabs/iris-3b classified under the iris-3b About component, and the gen-core iris degradation, restoration-training and training-contract modules (including the vendored upstream stage presets in iris/train/upstream) fall under the existing gen-core ported-source area. The four production crates crates/media/{candle-gen/candle-gen,mlx-gen/mlx-gen}-{perceptual,body} remain unclassified open advisory items for epic 2123's compliance pass. The vendored candle-core crate is upstream Hugging Face Candle 0.10.2 with the exact upstream base, cherry-picks, and local CUDA quantized-padding change, the sc-25686 backprop patch that skips gradients for untracked operands, and the max_pool2d backward fix, all documented in its VENDORED.md; its source is classified under the existing Hugging Face Candle About license component. The mlx-rs fork pin is fe22998b (CPU conv padding-overhang fix), which adds no provenance candidate. The speculative benchmark baseline driver is a first-party testkit copy, classified separately from upstream model source. Historical YuE2 source and measurement records remain attributed to their own revisions. This mapping grants no model-weight redistribution. Other open compliance items remain advisory under sc-19751. Generated inventories and digests describe this exact source; this audit makes no measurement currency claim.",
+  "inferenceRevision": "488bb762603b091b58ce218e18ddee07f16780fe",
+  "auditDigest": "cc889718c67046ee4dbb2b97ae26b2ed0b51045de0b997f4f2dfb672e10d7409",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
+    "revision": "488bb762603b091b58ce218e18ddee07f16780fe",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 769,
-    "populationSha256": "a662108ae1bbc6fb4769cac2eb0322d270181798a83846036303bbf75d83edc3"
+    "matchedFiles": 772,
+    "populationSha256": "ea160bc4257da2c040c5af67c2c96bf04d375a1124bf5590beb3765a77f2ce2b"
   },
   "portedSourceAreas": [
     {
@@ -957,12 +957,18 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9",
+    "revision": "488bb762603b091b58ce218e18ddee07f16780fe",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 110,
-    "cratePopulationSha256": "8a5440c3b8504b13d2ea61380b47e52087962d80e48d5df07b18651c315910e3"
+    "cratePrefixes": 111,
+    "cratePopulationSha256": "99015076703c1fa369041bb4f1cd1390248a7007ea79331857e1bff8552f3f03"
   },
   "crateDispositions": [
+    {
+      "prefix": "crates/media/candle-gen/vendor/candle-metal-kernels",
+      "disposition": "upstream-content-existing-terms",
+      "component": "candle-transformers-source",
+      "evidence": "NOT first-party: this crate IS upstream Hugging Face Candle candle-metal-kernels 0.10.2 from https://github.com/huggingface/candle @ 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (the revision the vendored candle-core is taken from) with one upstream fix applied unmodified, 2395577a43cc704e486edf5389cb14ba97eba0f8 (candle #3873, the Metal rank-5+ strided-reduce indexing fix in src/metal_src/reduce.metal), as its VENDORED.md documents. Candle is licensed MIT OR Apache-2.0 and is already mapped in the About manifest under its Apache-2.0 terms by the candle-transformers-source component, which covers the vendored candle-core the same way. It carries no provenance-marker sentence, so it enters no ported-source area; it reaches SceneWorks builds only through the root Candle [patch] (epic 25899)."
+    },
     {
       "prefix": ".",
       "disposition": "first-party-original",

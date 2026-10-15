@@ -1785,12 +1785,8 @@ pub(crate) async fn create_training_job(
         .ok_or_else(|| {
             ApiError::bad_request(format!("Unknown training target: {}", payload.target_id))
         })?;
-    // sc-25907: a registry entry (a user target included) naming a base that is deliberately not
-    // trainable — the distilled Qwen-Image 2.1 Turbo — is refused by name, with what to do instead.
-    if let Some(reason) =
-        sceneworks_core::training::untrainable_base_model_reason(&target.base_model)
-    {
-        return Err(ApiError::bad_request(reason));
+    if let Some(error) = untrainable_target_base_error(target) {
+        return Err(error);
     }
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
@@ -3339,6 +3335,16 @@ pub(crate) fn training_base_model_installed(data_dir: &FsPath, target: &Training
         training_base_model_status(data_dir, target),
         TrainingBaseStatus::Ready
     )
+}
+
+/// sc-25907: the typed route's refusal for a registry target whose base is deliberately not
+/// trainable — the distilled Qwen-Image 2.1 Turbo — by name, with what to do instead; `None` for
+/// every trainable base. No built-in target names such a base and there is no user-target registry
+/// today, so this guards a mis-edited built-in or a future registry from queuing a Turbo run (the
+/// raw `/jobs` route has its own check, `jobs::raw_training_payload_base_error`).
+pub(crate) fn untrainable_target_base_error(target: &TrainingTarget) -> Option<ApiError> {
+    sceneworks_core::training::untrainable_base_model_reason(&target.base_model)
+        .map(ApiError::bad_request)
 }
 
 /// The refusal for a real run against a target whose base licence requires acceptance
