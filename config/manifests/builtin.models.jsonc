@@ -3997,11 +3997,12 @@
         "recommendedFor": ["text_to_image", "edit_image"],
         // Base's multi-reference editor surface; the picker's ceiling is `limits.maxReferenceAssets`.
         "multiReference": true,
-        // Base's prompt guide: the prompt format and the ordered-reference conventions are the same
-        // model's. The Turbo model card is cited beside it.
+        // Turbo's own guide (sc-25908): base's prompt format and ordered-reference conventions,
+        // plus what differs here — the 8-step distilled schedule, CFG-free defaults, no training
+        // base, pending q8/q4. It reaches the generic refiner as the selected model's guide.
         "promptGuide": {
-          "title": "Qwen Image 2.1 Prompt Guide",
-          "path": "/prompt-guides/qwen-image-2-1.md",
+          "title": "Qwen Image 2.1 Turbo Prompt Guide",
+          "path": "/prompt-guides/qwen-image-2-1-turbo.md",
           "sources": [
             { "label": "Qwen-Image-2.1-Turbo model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo" },
             { "label": "Qwen-Image-2.1 model card", "url": "https://huggingface.co/Qwen/Qwen-Image-2.1" },
