@@ -28670,6 +28670,55 @@ mod qwen_image_2_1_tiers {
         .is_err());
     }
 
+    /// sc-25909 — a v0.9.0 install (q4 at the superseded `1691de01…`, never at the republished pin)
+    /// still RENDERS after the upgrade: the resolver carries it to the current pin cache-only and
+    /// resolves the tier there, explicitly and as the unselected default. Before the migration this
+    /// answered "tier q4 is not installed" while the Model Manager showed the tier installed.
+    ///
+    /// *Mutation that reds this:* `qwen_image_2_1_declared_tier_dir` calling
+    /// `huggingface_pinned_snapshot_dir` directly again (no supersession step).
+    #[cfg(unix)]
+    #[test]
+    fn a_tier_installed_at_the_superseded_revision_resolves_after_the_pin_bump() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let entry = entry_after_upload();
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
+        assert_eq!(supersession.current_revision, REHOST_REVISION);
+        crate::model_jobs::stage_superseded_legacy_tier_for_test(
+            data.path(),
+            &supersession,
+            true,
+            &[(
+                "q4/transformer/config.json",
+                br#"{"quantization":{"bits":4,"group_size":64}}"#,
+            )],
+        );
+        assert!(
+            !tier_root(data.path(), REHOST_REPO, REHOST_REVISION, None).exists(),
+            "precondition: nothing at the current pin"
+        );
+
+        let q4 = tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q4"));
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, Some(4)),
+            Some((q4.clone(), "q4"))
+        );
+        assert_eq!(
+            resolved_with_tier(data.path(), &entry, None),
+            Some((q4.clone(), "q4"))
+        );
+        assert_eq!(
+            std::fs::read(q4.join("NOTICE")).expect("NOTICE carried"),
+            supersession.added[0].contents
+        );
+        assert!(
+            !tier_root(data.path(), REHOST_REPO, REHOST_REVISION, Some("q8")).exists(),
+            "the uninstalled q8 tier is not conjured"
+        );
+    }
+
     fn shipped_qwen_2_1_entry() -> serde_json::Map<String, Value> {
         let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS

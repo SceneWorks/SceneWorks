@@ -4416,12 +4416,25 @@ def test_qwen_image_2_1_published_tiers_carry_the_licence_record():
     """E7 (§3), pinned against the PUBLISHED artefacts: each re-host tier's `SHA256SUMS` lists the
     Agreement (`LICENSE`), the attribution `README.md`, the §3(b) change record `CHANGES.md`, and
     the three safetensors the tier ships — so "the licence travels in the bundle" is a fact about
-    the uploaded bytes, not about the converter's intent.
+    the uploaded bytes, not about the converter's intent. `SHA256SUMS` does not list the verbatim
+    attribution `NOTICE` (sc-25909 added it later), so its presence is pinned against the recorded
+    download evidence for the revision instead: the licence component and `licenseNotice` both
+    promise it.
 
     *Mutation that reds this:* deleting any of those lines from a vendored `SHA256SUMS` (the blob id
-    moves too), or vendoring a file that is not the one published at the revision.
+    moves too), vendoring a file that is not the one published at the revision, or dropping
+    `q8/NOTICE` / `q4/NOTICE` from the revision's download evidence.
     """
     import hashlib
+
+    evidence = json.loads((ROOT / "config/download-pattern-evidence.json").read_text())
+    rehost = next(
+        entry
+        for entry in evidence["repos"]
+        if entry["key"] == f"SceneWorks/qwen-image-2-1-mlx@{_QWEN_IMAGE_2_1_REHOST_REVISION}"
+    )
+    for tier in ("q8", "q4"):
+        assert f"{tier}/NOTICE" in rehost["files"], f"{tier}: the published tier ships no NOTICE"
 
     required = {
         "LICENSE",
@@ -4819,3 +4832,15 @@ def test_qwen_image_2_1_turbo_ui_states_the_schedule_semantics():
     assert "8 steps" in description
     assert "resample" in description
     assert "scheduler other than Default replaces it" in description
+
+
+def test_qwen_image_2_1_turbo_description_claims_only_the_evidenced_backends():
+    """Turbo's CUDA evidence is bf16-only; q8/q4 have been run on MLX alone. The description must
+    not claim every tier runs on both backends.
+
+    *Mutation that reds this:* restoring "install and run on both backends".
+    """
+    description = _qwen_image_2_1_turbo_entry()["ui"]["description"]
+    assert "run on both backends" not in description
+    assert "bf16 runs on both backends" in description
+    assert "Q8 and Q4 tiers are verified on Apple Silicon (MLX)" in description

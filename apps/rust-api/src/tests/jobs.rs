@@ -16376,6 +16376,16 @@ async fn qwen_image_2_1_turbo_image_jobs_are_gated_on_turbos_declared_limits() {
         StatusCode::BAD_REQUEST,
         "Turbo refuses 3 steps: {body}"
     );
+    // Refused by TURBO's own 4-step floor, not by base's (2) or a generic bound.
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("qwen_image_2_1_turbo"),
+        "names the Turbo model: {detail}"
+    );
+    assert!(
+        detail.contains("at least 4 sampling steps"),
+        "names Turbo's 4-step floor: {detail}"
+    );
     let (status, body) = enqueue("qwen_image_2_1", json!({ "advanced": { "steps": 1 } })).await;
     assert_eq!(
         status,

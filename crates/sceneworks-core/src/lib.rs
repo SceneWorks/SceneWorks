@@ -29,6 +29,7 @@ pub mod film_timeline;
 pub mod film_workspace;
 pub mod hf_home;
 pub mod hf_repo_renames;
+pub mod hf_revision_supersessions;
 pub mod ideogram_caption;
 pub mod image_request;
 pub mod image_restoration;

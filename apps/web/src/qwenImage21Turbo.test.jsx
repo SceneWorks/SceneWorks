@@ -161,6 +161,15 @@ describe("Model Manager with Qwen Image 2.1 Turbo (sc-25908)", () => {
       expect(input(label).disabled, `${label} is blocked until the licence is accepted`).toBe(true);
     }
     expect(container.querySelector(".model-gated-notice")?.textContent).toContain("Qwen-Image 2.1 Turbo");
+    // Before any click the panel preselects exactly the tier it SUGGESTS for this host — the
+    // highest-fidelity tier that fits (`suggestTier`), which on this 64 GB Mac is bf16 — not the
+    // catalog's `default: true` row (q4, what a variant-less download fetches). So the Q4 pick
+    // below is a real change of selection, and the queued variant proves it was honoured.
+    for (const label of ["bf16", "Q8", "Q4"]) {
+      const suggested = rowFor(label).classList.contains("suggested");
+      expect(suggested, `${label} is the host suggestion only if bf16`).toBe(label === "bf16");
+      expect(input(label).checked, `${label} preselected only if suggested`).toBe(suggested);
+    }
 
     const ack = container.querySelector(".model-license-ack input");
     expect(ack).toBeTruthy();

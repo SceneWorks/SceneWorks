@@ -3306,7 +3306,11 @@
         // `ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0`, which adds ONLY `q8/NOTICE` and `q4/NOTICE`
         // (148 B each — the verbatim §3 attribution notice as its own file, as the Turbo re-host
         // ships it); every other blob, `SHA256SUMS` included, is unchanged, and `SHA256SUMS` does
-        // not list NOTICE. The sc-24112 null-SHA placeholder and its `pendingArtifact`
+        // not list NOTICE. An install made at 1691de01… (v0.9.0) is carried to ef03535e… cache-only
+        // at load time — every carried entry relinked to its existing blob, NOTICE written from its
+        // declared bytes — by the exact declaration in `sceneworks_core::hf_revision_supersessions`,
+        // which pins that file list; the Model Manager reads the same declaration. The sc-24112
+        // null-SHA placeholder and its `pendingArtifact`
         // flag are gone together, which `test_pending_artifact_rows_and_placeholder_revisions_are_the_same_set`
         // keeps rigid (a null SHA without the flag, or the flag with a real SHA, fails the audit),
         // and `default` sits on q4, the lightest installable tier — the catalog convention
@@ -4008,7 +4012,7 @@
       },
       "ui": {
         "label": "Qwen Image 2.1 Turbo",
-        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. Three precision tiers — bf16, Q8 and Q4 — install and run on both backends. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
+        "description": "Qwen-Image 2.1 Turbo — the distilled, few-step sibling of Qwen Image 2.1, ported natively to MLX on Apple Silicon and Candle on NVIDIA CUDA (Windows/Linux). The same ~7.1B single-stream flow-matching transformer over a 64-channel latent with a ~7.6B Qwen3-VL language tower, distilled to render in 8 steps over the schedule saved with the weights; other step counts resample that saved curve, and picking a scheduler other than Default replaces it with that scheduler's own curve. It keeps everything the base model offers — seven aspect presets up to 2752 px, 1-10 ordered reference images for editing, transparent (RGBA) output, Qwen Image 2.1 LoRAs — with true classifier-free guidance off by default. Distributed under the Qwen RESEARCH LICENSE AGREEMENT: research and evaluation use only, with a separate commercial licence required from Alibaba. Three precision tiers — bf16, Q8 and Q4: bf16 runs on both backends, and the Q8 and Q4 tiers are verified on Apple Silicon (MLX); they have not yet been run on an NVIDIA card. The bf16 tier is downloaded from Qwen's own repository on first use; the Q8 and Q4 tiers are quantized derivatives re-hosted by SceneWorks, each carrying the licence, the attribution notice and a CHANGES.md record of what was changed.",
         "recommendedFor": ["text_to_image", "edit_image"],
         // Base's multi-reference editor surface; the picker's ceiling is `limits.maxReferenceAssets`.
         "multiReference": true,

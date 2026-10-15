@@ -2429,12 +2429,28 @@ fn qwen_image_2_1_declared_tier_dir(
     }
     let repo = download.get("repo").and_then(Value::as_str)?;
     let revision = download.get("revision").and_then(Value::as_str)?;
-    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
-    let subdir = download
+    let files: Vec<String> = download
         .get("files")
         .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    // An install made at a revision the pin has since SUPERSEDED (sc-25909: the q8/q4 re-host
+    // republished to add each tier's NOTICE) is carried forward cache-only before the exact lookup.
+    let root = crate::model_jobs::huggingface_pinned_tier_snapshot_dir(
+        &settings.data_dir,
+        repo,
+        revision,
+        &files,
+    )?;
+    let subdir = files
+        .first()
+        .map(String::as_str)
         .and_then(|pattern| pattern.split('/').next())
         // Confined to a single plain directory name. The value is a checked-in catalog string
         // rather than user input, but a glob is still a string a future edit could widen, and a
