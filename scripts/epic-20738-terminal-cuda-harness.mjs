@@ -189,9 +189,12 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // Qwen/Qwen3-VL-4B-Instruct), the three restoration TRAINING resources (timm/vgg16.tv_in1k,
 // vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup) and the REPA teacher (facebook/dinov2-base) join
 // main's 137 keys: 143 keys.
+// Epic 25899's terminal story (sc-25909) re-records base Qwen Image 2.1's re-host at its NOTICE
+// revision (ef03535e…) and adds the published Turbo re-host (SceneWorks/qwen-image-2-1-turbo-mlx
+// @9095dfbb…): 144 keys.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "543151303524d5cdd8c01cb3ab152a33f86c1c5609d0c2e9c24b569d0ec8e96b";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "c641cdf71447355fec167cc2af095eeb78f42bbbd897ea5c54b0d3fdec23ca5e";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 

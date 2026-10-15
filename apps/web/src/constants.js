@@ -297,7 +297,7 @@ const seededFallbackModels = [
   },
   {
     // Qwen Image 2.1 Turbo (epic 25899) — the distilled few-step sibling of `qwen_image_2_1`. The
-    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (1), the
+    // same pipeline, capabilities, alpha output and bucket ladder; only the step floor (4, from the sc-25909 step sweep), the
     // default step count (8) and the prompt guide differ. Kept in step with its manifest entry for
     // the same reason as the base seed above: every `limits` key drives a pre-catalog control.
     id: "qwen_image_2_1_turbo",
@@ -320,7 +320,7 @@ const seededFallbackModels = [
       maxDimension: 2752,
       requiresDimensionsMultipleOf: 32,
       maxReferenceAssets: 10,
-      hardMinSteps: 1,
+      hardMinSteps: 4,
       samplers: ["default", "euler", "euler_ancestral", "heun", "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_sde", "er_sde", "uni_pc", "lcm", "ddim"],
       schedulers: ["default", "normal", "simple", "karras", "exponential", "sgm_uniform", "beta", "ddim_uniform", "beta57"],
     },
