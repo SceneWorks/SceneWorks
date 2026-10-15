@@ -1285,6 +1285,17 @@ export const PROVIDER_FAMILIES = Object.freeze({
     tiers: { bf16: { env: "QWEN_IMAGE_2_1_BF16", repo: "Qwen/Qwen-Image-2.1", layout: "flat" } },
     requiredTensorComponents: ["text_encoder", "transformer", "vae"],
   },
+  // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): base's shape over the distilled checkpoint's OWN
+  // two repositories and env families, split the way `lens_turbo` is from `lens` — a Turbo plan
+  // satisfied by base weights would re-label base's peaks as Turbo's (E10). Its `q8`/`q4` re-host
+  // rows are still `pendingArtifact` (40-zero revision) until the epic's terminal story publishes
+  // them, so `resolveArtifactRoot` reports those cells as pending rather than probing a snapshot;
+  // the `bf16` upstream row is pinned and resolves like base's.
+  qwen_image_2_1_turbo: {
+    env: "QWEN_IMAGE_2_1_TURBO", repo: "SceneWorks/qwen-image-2-1-turbo-mlx", arms: ["mlx", "candle"],
+    tiers: { bf16: { env: "QWEN_IMAGE_2_1_TURBO_BF16", repo: "Qwen/Qwen-Image-2.1-Turbo", layout: "flat" } },
+    requiredTensorComponents: ["text_encoder", "transformer", "vae"],
+  },
   // The three Iris-3B TASK routes (sc-25690, epic 25678): generation (`iris_3b`), monocular depth
   // (`iris_3b_depth`) and restoration (`iris_3b_restore`). Three engine providers whose catalog ids
   // equal their engine ids, registered by `mlx-gen-iris` and `candle-gen-iris` alike, and three

@@ -6,7 +6,7 @@
 //
 // The pins live in crates/sceneworks-worker/Cargo.toml and
 // crates/sceneworks-memory-adapter/Cargo.toml. The root Cargo.toml additionally `[patch]`es
-// candle-kernels and (after M5) candle-core to the vendored copies inside the same inference
+// candle-kernels, candle-core and candle-metal-kernels to the vendored copies inside the same inference
 // revision. Those revs must move in lockstep with the direct crates. This
 // rewrites every `tag = "..."` / `rev = "..."` pin in those manifests and regenerates the lockfile.
 //
@@ -64,9 +64,12 @@ const INFERENCE_CRATES = [
   "mlx-gen",
   "candle-gen",
 ];
-// Resolved through the root [patch], not direct dependencies. Both vendored packages must move
-// with the inference pin and have their lock entries refreshed by Cargo.
-const PATCHED_CRATES = ["candle-core", "candle-kernels"];
+// Resolved through the root [patch], not direct dependencies. Every vendored package must move
+// with the inference pin and have its lock entry refreshed by Cargo. `candle-metal-kernels`
+// joined at epic 25899 (sc-25907): inference vendors it with the rank > 4 strided-reduce
+// indexing fix, and a dependency workspace's [patch] does not apply here, so without the root
+// entry SceneWorks' Metal builds would silently compile upstream's unfixed kernels.
+const PATCHED_CRATES = ["candle-core", "candle-kernels", "candle-metal-kernels"];
 // The worker stamps every catalog semantic analysis with the inference revision it was produced
 // under, and `semantic_provenance_matches_linked_inference_revision` asserts that constant equals
 // the Cargo pin. So it is PART of the pin, not a separate knob: a bump that leaves it behind is a
@@ -932,12 +935,17 @@ function selfTest() {
   const bothPatches = repin(
     `[patch."https://github.com/huggingface/candle"]\n` +
     `candle-core = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
-    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
+    `candle-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n` +
+    `candle-metal-kernels = { git = "${INFERENCE_GIT}", rev = "d68b8b45" }\n`, SHA);
   check("root Candle patches repin together", (() => {
     try { verifyCandlePatches(bothPatches, SHA); return true; } catch { return false; }
   })());
   check("a missing vendored core patch refuses a later pin", (() => {
     try { verifyCandlePatches(bothPatches.replace(/^candle-core.*\n/m, ""), SHA); return false; }
+    catch { return true; }
+  })());
+  check("a missing vendored metal-kernels patch refuses a later pin", (() => {
+    try { verifyCandlePatches(bothPatches.replace(/^candle-metal-kernels.*\n/m, ""), SHA); return false; }
     catch { return true; }
   })());
   check("a core patch in another TOML section cannot satisfy the root patch", (() => {

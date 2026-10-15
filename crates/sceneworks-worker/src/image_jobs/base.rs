@@ -2200,7 +2200,9 @@ pub(crate) fn resolve_weights_dir(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    // Both 2.1 ids (base and its distilled Turbo sibling, sc-25907) are split-repo tier families:
+    // the upstream snapshot is bf16 and the SceneWorks re-host carries q8/q4.
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         if let Some((tier_dir, _tier)) = qwen_image_2_1_tier_dir(settings, request)? {
             return Ok(Some(tier_dir));
         }
@@ -2365,7 +2367,7 @@ pub(crate) fn tier_key_for_resolved_dir(
 
 /// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SPLIT_REPO_TIER_MODELS: &[&str] = &["qwen_image_2_1"];
+const SPLIT_REPO_TIER_MODELS: &[&str] = sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
@@ -5636,6 +5638,71 @@ fn apply_candle_qwen_load_shape(
     )
 }
 
+/// The Candle shared lane's prefix-KV-cache surcharge for one request (epic 25899): priced from the
+/// LINKED provider's descriptor and pricing function, or `None` for every provider without a cache
+/// and for a request whose admitted block is not handed to ONE render at exactly this geometry and
+/// reference set (`single_pass == false`: hires fix, native prompt batch).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_prefix_kv_cache_surcharge(
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    negative_branch: bool,
+    single_pass: bool,
+) -> Option<u64> {
+    if !single_pass {
+        return None;
+    }
+    crate::inference_runtime::media_descriptor(engine_id).and_then(|descriptor| {
+        crate::execution_planner::prefix_kv_cache_surcharge_bytes(
+            engine_id,
+            &descriptor.capabilities.execution,
+            None,
+            width,
+            height,
+            reference_count,
+            negative_branch,
+        )
+    })
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_prefix_kv_cache_pricing_tests {
+    use super::*;
+
+    /// The production Candle pricing site, against the LINKED registry: a single-pass 2.1 request
+    /// is priced at exactly the provider's own `prefix_kv_cache_demand_bytes`, a multi-pass one and
+    /// a provider with no cache at nothing.
+    ///
+    /// *Mutations that red this:* returning `None` from the site (no surcharge for Turbo); dropping
+    /// the single-pass gate (the hires request is priced); passing another geometry, reference
+    /// count or branch flag through (the byte equality).
+    #[test]
+    fn the_candle_lane_prices_the_linked_turbo_cache_only_for_a_single_pass_request() {
+        let expected = runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+            1024, 768, 2, true,
+        );
+        for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, true),
+                Some(expected),
+                "{engine_id}"
+            );
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, false),
+                None,
+                "{engine_id}: a multi-pass request is priced no cache"
+            );
+        }
+        assert_eq!(
+            candle_prefix_kv_cache_surcharge("qwen_image", 1024, 768, 2, true, true),
+            None,
+            "a provider with no cache is priced nothing"
+        );
+    }
+}
+
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_image_load_shape_tests {
     use super::*;
@@ -7578,6 +7645,11 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
     /// the lane always has for providers that report none.
     pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
+    /// Where the render's `GenerationReport::prefix_kv_cache` — the prefix-KV-cache path that
+    /// actually RAN, its cache bytes and any shed-over-priced-bound overflow (epic 25899) — is
+    /// collected for the image's provenance and the job record. `None` discards it; a provider
+    /// with no cache reports none.
+    pub(crate) prefix_kv_cache: Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
@@ -7726,6 +7798,9 @@ fn render_on_surface(
     .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
+    }
+    if let Some(sink) = surface.prefix_kv_cache {
+        *sink.borrow_mut() = report.prefix_kv_cache;
     }
     let output = report
         .output
@@ -8069,6 +8144,7 @@ fn generate_one_with_hires_on_surface(
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls,
         warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
     // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -8127,6 +8203,7 @@ fn generate_one_with_hires_on_surface(
         output_channels: surface.output_channels,
         controls: surface.controls,
         warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
     // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -8850,15 +8927,17 @@ pub(crate) struct QwenImage21Reference {
 
 /// Is this the model whose edit route is ONE ordered conditioning list (sc-24110)?
 ///
-/// Deliberately a single id rather than a family predicate: the 2512-weights `qwen_image_edit*` ids
-/// are a different engine, a different latent space and a different edit contract, and they keep
-/// the `ImageRoute::QwenEdit` / `CandleImageRoute::QwenEdit` lanes they have always had.
+/// Deliberately the two 2.1 engine ids (base and Turbo, sc-25907 — one request contract) rather
+/// than a family predicate: the 2512-weights `qwen_image_edit*` ids are a different engine, a
+/// different latent space and a different edit contract, and they keep the `ImageRoute::QwenEdit`
+/// / `CandleImageRoute::QwenEdit` lanes they have always had.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
-    request.model == "qwen_image_2_1" && !qwen_image_2_1_reference_ids(request).is_empty()
+    sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model)
+        && !qwen_image_2_1_reference_ids(request).is_empty()
 }
 
 /// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
@@ -8892,7 +8971,7 @@ fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
     }
     let scalar = |value: &Option<String>| -> Option<String> {
@@ -9159,7 +9238,7 @@ fn guard_qwen_image_2_1_lane_slots(
     identity_init: Option<&(Image, f32)>,
     edit_mask: Option<&Image>,
 ) -> WorkerResult<()> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Ok(());
     }
     if edit_mask.is_some() {
@@ -10323,6 +10402,17 @@ async fn generate_stream_using(
                 engine_id, &spec, &request.prompt,
                 &request.negative_prompt,
             )),
+            // The prompt branches the engine will evaluate (epic 25899): a prefix-KV-cache provider
+            // holds one cache per branch, so its surcharge doubles under true CFG.
+            negative_branch: crate::execution_planner::evaluates_negative_branch(
+                negative_prompt.as_deref().unwrap_or_default(),
+                true_cfg,
+                guidance,
+            ),
+            // A hires refinement hands this block to a first pass at the base size with the caller's
+            // own references and re-resolved CFG, and a native prompt batch renders one prefix per
+            // prompt in one pass: the cache is priced for neither render.
+            prefix_kv_cache_eligible: hires_fix.is_none() && native_batch.is_none(),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -10581,6 +10671,7 @@ async fn generate_stream_using(
                             .process_limit_bytes
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -10610,6 +10701,7 @@ async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
@@ -10619,6 +10711,10 @@ async fn generate_stream_using(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                memory_evaluation.prefix_kv_cache,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
                         );
                         Ok((images, facts))
                     },
@@ -10645,6 +10741,8 @@ async fn generate_stream_using(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
+                    // ...and the prefix-KV-cache path its render reports (epic 25899).
+                    let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -10678,6 +10776,7 @@ async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: None,
                             },
                             &cancel,
@@ -10718,6 +10817,10 @@ async fn generate_stream_using(
                         &warnings.take(),
                         &adapter_identities,
                         &generator.adapter_apply_reports(),
+                        crate::execution_planner::prefix_kv_cache_record(
+                            memory_evaluation.prefix_kv_cache,
+                            prefix_kv_cache_report.take().as_ref(),
+                        ),
                     ) {
                         prompt_enhancement.send_image_facts(facts);
                     }
@@ -10782,6 +10885,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
         // for the same reason, and neither is derived from the other.
         "qwen_image_2_1" => "candle_qwen_2_1",
+        // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
+        "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -13324,7 +13429,25 @@ async fn generate_candle_stream_using(
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
-    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
+    // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
+    // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
+    // follows the build's production device width, not the tier.
+    let prefix_kv_cache_surcharge = candle_prefix_kv_cache_surcharge(
+        engine_id,
+        memory_width,
+        memory_height,
+        reference_count,
+        crate::execution_planner::evaluates_negative_branch(
+            negative_prompt.as_deref().unwrap_or_default(),
+            true_cfg,
+            guidance,
+        ),
+        // A hires refinement is a second, differently shaped pass, and a native prompt batch holds
+        // one prefix per prompt: the cache is priced for neither (the MLX lane's same rule,
+        // `MlxRequestInputs::prefix_kv_cache_eligible`).
+        hires_fix.is_none() && native_batch.is_none(),
+    );
+    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(
         engine_id,
         &request.model,
         &shared_contract_spec,
@@ -13361,6 +13484,7 @@ async fn generate_candle_stream_using(
         } else {
             gen_core::MemoryCacheState::Cold
         },
+        prefix_kv_cache_surcharge,
     )?;
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
@@ -13410,7 +13534,10 @@ async fn generate_candle_stream_using(
     // answer "did the receipt price this request?" — and that is exactly the question the executed
     // load policy has to agree with.
     let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
+    // What the admission decided about the prefix KV cache, recorded with each image (epic 25899).
+    let mut prefix_kv_cache_plan: Option<crate::execution_planner::PrefixKvCachePlan> = None;
     if let Some(evaluation) = shared_memory {
+        prefix_kv_cache_plan = evaluation.prefix_kv_cache;
         if receipt_priced_route {
             receipt_priced_selection = Some(evaluation.context.selection.strategy);
         } else {
@@ -14260,6 +14387,7 @@ async fn generate_candle_stream_using(
                     batch.images() as usize,
                     |preview, on_progress| {
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -14289,6 +14417,7 @@ async fn generate_candle_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
@@ -14298,6 +14427,10 @@ async fn generate_candle_stream_using(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                prefix_kv_cache_plan,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
                         );
                         Ok((images, facts))
                     },
@@ -14309,6 +14442,8 @@ async fn generate_candle_stream_using(
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                 let warnings = std::cell::RefCell::new(Vec::new());
+                // ...and the prefix-KV-cache path its render reports (epic 25899).
+                let prefix_kv_cache_report = std::cell::RefCell::new(None);
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires_on_surface(
                         generator,
@@ -14356,6 +14491,7 @@ async fn generate_candle_stream_using(
                             output_channels: rgba_output_channels,
                             controls: lane_controls,
                             warnings: Some(&warnings),
+                            prefix_kv_cache: Some(&prefix_kv_cache_report),
                             prompt_batch: None,
                         },
                         &cancel,
@@ -14394,6 +14530,10 @@ async fn generate_candle_stream_using(
                     &warnings.take(),
                     &adapter_identities,
                     &generator.adapter_apply_reports(),
+                    crate::execution_planner::prefix_kv_cache_record(
+                        prefix_kv_cache_plan,
+                        prefix_kv_cache_report.take().as_ref(),
+                    ),
                 ) {
                     prompt_enhancement.send_image_facts(facts);
                 }

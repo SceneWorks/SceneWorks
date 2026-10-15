@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "6e402df8f4fddcb5affde6e6955e170c1d99bff9";
+pub const INFERENCE_PIN: &str = "488bb762603b091b58ce218e18ddee07f16780fe";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one
@@ -205,6 +205,16 @@ pub const QWEN_IMAGE_2_1_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-mlx";
 /// The Qwen-Image 2.1 bf16 tier: the released upstream snapshot, loaded at its snapshot ROOT (no tier
 /// sub-directory), the same root the worker's `qwen_image_2_1_declared_tier_dir` resolves.
 pub const QWEN_IMAGE_2_1_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1";
+/// The distilled Qwen-Image 2.1 Turbo packed re-host (sc-25907, epic 25899): `q8/` and `q4/`
+/// subdirs laid out exactly as [`QWEN_IMAGE_2_1_REPOSITORY`]'s, but a DIFFERENT repository at a
+/// different revision, bound through its own `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` family the way
+/// [`LENS_TURBO_REPOSITORY`] is split from [`LENS_REPOSITORY`] — so a Turbo plan can never be
+/// satisfied by base weights. Not yet published (the catalog rows are `pendingArtifact`); the
+/// epic's terminal story publishes it before any Turbo capture can bind it.
+pub const QWEN_IMAGE_2_1_TURBO_REPOSITORY: &str = "SceneWorks/qwen-image-2-1-turbo-mlx";
+/// The Qwen-Image 2.1 Turbo bf16 tier: the upstream distilled snapshot at its ROOT, as
+/// [`QWEN_IMAGE_2_1_BF16_REPOSITORY`] is for base.
+pub const QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY: &str = "Qwen/Qwen-Image-2.1-Turbo";
 /// The ONE upstream repository all three Iris-3B task routes load from (sc-25690): the generation
 /// backbone at the snapshot ROOT, the depth export in [`IRIS_3B_DEPTH_SUBDIR`] and the restoration
 /// export in [`IRIS_3B_RESTORE_SUBDIR`]. Three separate fine-tunes at one revision, never re-hosted;

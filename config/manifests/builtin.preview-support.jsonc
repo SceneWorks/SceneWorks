@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9"
+      "inferenceRevision": "488bb762603b091b58ce218e18ddee07f16780fe"
     },
     "mlx": {
-      "inferenceRevision": "6e402df8f4fddcb5affde6e6955e170c1d99bff9"
+      "inferenceRevision": "488bb762603b091b58ce218e18ddee07f16780fe"
     }
   },
   "models": {
@@ -175,6 +175,10 @@
       "mlx": true
     },
     "qwen_image_2_1": {
+      "candle": false,
+      "mlx": false
+    },
+    "qwen_image_2_1_turbo": {
       "candle": false,
       "mlx": false
     },

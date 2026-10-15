@@ -1,31 +1,31 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a1131af90382398883f507011a953404a48c15e4b11be218976d3027254898ef",
+    "sceneWorksRevision": "source-tree:973db5115f477d2285d4683b97813c2774d643b8e79f8996ab611130dc6998df",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "1a3c2f23e1d8768468707195a34d80b070214e8652faf84a31f0902a9210c26d"
+        "sha256": "87d319806e91352da82d4895e4cd4d43d80d0a440c9f5b3e37179ebda66b27be"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "815b13d24269b9950f719d7208619c57c5bfb8a87d3ac6a74f4a1386e5d0e2aa"
+        "sha256": "a945142bf0e596a360544953aa02c02b97b21bba7d7f190623a105050bc0c83a"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "78bc6e5e64951b99dc77a8bc1bd7bc07759310f6cdc8a613cc8f9c9686d3d31e"
+        "sha256": "fdeead21c2612ca19ecf0d28644050f822bcf1236780c11f4badf0472d474a4c"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "cb7fd9fbde9359b2072841390782fbde78a48c1cb2c3ad142723ee2e12229a44"
+        "sha256": "13de49f17023e7a75d028cc99a322a920798b6f14a2d15e81ef1ab89c976f17a"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "03bf8ca91eb4849b1cdff5617d88d4d06ad8c1a7150d9905cf9e08cb24ca942a"
+        "sha256": "45ff2219df72f0bdbb0e3f8dcedee5bfca8025eb37e81dfb328708b9a987ac96"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "dbd1ce0393436eeeafc996987eee79d9bcbdcd428929caec4b9347770ef5efc4"
+        "sha256": "91aac5a3ee1461cb02961d34c266959850be55359b248973706a74ef03281b64"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "a42a686d801c0e6041ed19de9c421be7b046fa5c187bf7d3df7a3d80f7345424"
+        "sha256": "0a75757ca8cb64dc61cc7a510301466c3001131422c6278b41aa728899e15341"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "7fb84b3de018bbf231a7f62cf556d4acd679164e4947a0f8f5b2b9fbfdacc211"
+        "sha256": "34356c01aedcb5790335d5df2875b0ad24da2c5ea6a090e3cbb3676a79f4a160"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,11 +69,11 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "bbf1900891791174ceb4e0868a3b3b21de3ab0d55ac733596a114d36f3c2f9e8"
+        "sha256": "d8d5067cdc28a234ff54ca99ab54e5990b2001600e149307228b2dffc2ef939c"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "f250526b1b2128c83ad19b36341cd6287376134d727173bee1f6c4c3c4871318"
+        "sha256": "a78f690527ef3237c8c62f7d4e3adfbc4cbd576ee2d66c0c6d8f59155bc049d3"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -85,11 +85,11 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "a443ab8ad8e55f1fc7ad5db9194ff86118c2481d592c026c8e9a9e1c4230ff53"
+        "sha256": "0f09f3cbe35516346b0353a61b662f73fd6b3e1b080da6fcb439cf208721a2de"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "45c487a87ef1abd4f23ae213e56a268f45b61f558fce9b9b2d8d6659f3ca8c9e"
+        "sha256": "b3fe32de612c2522955e97881446757b3a9c5f53b31a42058a0bb123c8fc429e"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 66,
+    "catalogEntries": 67,
     "catalogEntriesByModality": {
-      "image": 55,
+      "image": 56,
       "video": 11
     },
-    "cells": 9590,
+    "cells": 9770,
     "publishedCells": 3878,
-    "elidedCells": 5712,
+    "elidedCells": 5892,
     "elidedByState": {
-      "Implemented": 1232,
-      "Missing": 4480
+      "Implemented": 1340,
+      "Missing": 4552
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 49,
-    "mlxStagedStaticCoverageDenominator": 55,
+    "mlxStagedStaticCoverage": 50,
+    "mlxStagedStaticCoverageDenominator": 56,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -175,9 +175,9 @@
       }
     ],
     "anchors": 252,
-    "analyticOnlyCells": 99,
+    "analyticOnlyCells": 105,
     "anchoredCells": 3878,
-    "staleAnchors": 250,
+    "staleAnchors": 252,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -3006,6 +3006,79 @@
       "owningModelStories": {
         "mlx": 24108,
         "candle": 24109
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "qwen_image_2_1_turbo",
+      "name": "Qwen Image 2.1 Turbo",
+      "modality": "image",
+      "familyGroup": 15511,
+      "family": "qwen-image-2-1",
+      "resolvedRoute": "qwen_image_2_1_turbo",
+      "resolvedRoutes": {
+        "mlx": "qwen_image_2_1_turbo",
+        "candle": "qwen_image_2_1_turbo"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 15511,
+        "candle": 15817
+      },
+      "owningModelStories": {
+        "mlx": 25900,
+        "candle": 25901
       },
       "axes": {
         "mlx": {
@@ -6041,7 +6114,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25690/iris-3b-bf16-candle-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 8
     },
@@ -6059,7 +6132,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-25690/iris-3b-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 6
     },
@@ -15960,6 +16033,126 @@
           "lora": 0,
           "none": 0
         }
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 0,
+      "states": {
+        "Missing": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
+      }
+    },
+    {
+      "modelId": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 18,
+      "published": 0,
+      "elided": 18,
+      "implemented": 18,
+      "states": {
+        "Implemented": 18
       }
     },
     {
@@ -88516,7 +88709,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88568,7 +88761,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88625,7 +88818,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88683,7 +88876,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88737,7 +88930,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88789,7 +88982,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88846,7 +89039,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88904,7 +89097,7 @@
         "id": "iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:candle:bf16:base:base:iris-3b-candle-derived-2026-10-12-v1:imc-8a22fa05fc612e4ab577",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -88956,7 +89149,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89013,7 +89206,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89071,7 +89264,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89123,7 +89316,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89180,7 +89373,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -89238,7 +89431,7 @@
         "id": "iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
         "tier": "bf16",
         "source": "config/memory-anchors.json#iris_3b:mlx:bf16:base:base:iris-3b-mlx-derived-2026-10-12-v1:imc-39c0f13c4788fcf08eb0",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -245327,6 +245520,7 @@
       "qwen_image_2_1:qwen_image_2_1:mlx:q8:text_to_image:none:resident",
       "qwen_image_2_1:qwen_image_2_1:mlx:q8:text_to_image:none:staged_residency"
     ],
+    "qwen_image_2_1_turbo": [],
     "qwen_image_edit_2511": [
       "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:identity:resident",
       "qwen_image_edit_2511:qwen_image_edit:candle:bf16:character_image:lora:bounded_attention",

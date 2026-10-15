@@ -9369,3 +9369,43 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
     assert_eq!(job.result.get("other"), Some(&json!(true)));
 }
+
+/// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered
+/// reference edit — is claimed by an MLX worker and by a Candle worker, through the store's real
+/// claim path, exactly as a base 2.1 job is.
+///
+/// *Mutation that reds this:* dropping `qwen_image_2_1_turbo` from `IMAGE_MODEL_CAPS` (both lanes
+/// stop claiming), from the MLX match arm (the MLX claim fails), or from the Candle
+/// `QwenImage21Edit` route (the conditioned Candle claim fails).
+#[test]
+fn qwen_image_2_1_turbo_image_jobs_are_claimed_by_the_mlx_and_the_candle_worker() {
+    let payloads = [
+        json!({ "model": "qwen_image_2_1_turbo", "prompt": "a lighthouse at dusk" }),
+        json!({
+            "model": "qwen_image_2_1_turbo",
+            "mode": "edit_image",
+            "prompt": "make the sky violet",
+            "sourceAssetId": "asset_source",
+            "referenceAssetIds": ["asset_source", "asset_style"]
+        }),
+    ];
+    for (index, payload) in payloads.iter().enumerate() {
+        for native in ["mlx", "candle"] {
+            let store = store(&format!("qwen-2-1-turbo-claim-{native}-{index}"));
+            let job = store
+                .create_job(image_job_with(payload.clone(), "auto"))
+                .expect("job creates");
+            let worker = format!("worker-{native}");
+            if native == "mlx" {
+                register_gpu_worker(&store, &worker, "mlx", image_caps());
+            } else {
+                register_candle_worker(&store, &worker);
+            }
+            let claimed = store
+                .claim_next_job(&worker)
+                .unwrap_or_else(|error| panic!("{worker} claim ok: {error:?}"))
+                .unwrap_or_else(|| panic!("{worker} must claim Turbo job {index}"));
+            assert_eq!(claimed.id, job.id, "{worker}/{index}");
+        }
+    }
+}

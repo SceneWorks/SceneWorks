@@ -1,4 +1,5 @@
-//! Structural guard for the vendored candle-core and multi-arch candle-kernels `[patch]` entries.
+//! Structural guard for the vendored candle-core, multi-arch candle-kernels and fixed
+//! candle-metal-kernels `[patch]` entries.
 //!
 //! candle-kernels compiles the GGUF quant/moe kernels into a static `libmoe.a` of SASS with a
 //! single `-gencode` derived from `CUDA_COMPUTE_CAP`. At the cap=80 packaging baseline that is an
@@ -10,8 +11,12 @@
 //! That patch only takes effect in the top-level workspace, and it already silently dropped out
 //! once (sc-13510: the candle-gen -> inference cutover rebuilt the workspace without it, and
 //! nothing failed). This test makes the loss loud: it asserts, from the committed `Cargo.lock`,
-//! that both packages resolve through the patches AND at the same inference revision as the
-//! worker's direct pins. It parses files only — no CUDA, no GPU — so every CI lane runs it.
+//! that every vendored package resolves through the patches AND at the same inference revision as
+//! the worker's direct pins.
+//!
+//! `candle-metal-kernels` joined at epic 25899 (sc-25907): inference vendors it with the rank > 4
+//! strided-reduce indexing fix (candle #3873), and — exactly like candle-kernels — the fix reaches a
+//! SceneWorks build only through the root patch. It parses files only — no CUDA, no GPU — so every CI lane runs it.
 //!
 //! If it fails after a pin bump: re-run `node scripts/bump-inference.mjs` (it rewrites the root
 //! [patch] rev in lockstep with crates/sceneworks-worker/Cargo.toml and refreshes the lock).
@@ -64,8 +69,12 @@ fn resolved_commit(source: &str) -> Option<&str> {
     source.split('#').nth(1)
 }
 
-/// Core check, separated from file I/O so the red paths below are testable: both Candle packages
-/// must resolve from the inference repo at the same commit as sceneworks-gen-core.
+/// The vendored Candle packages the root `[patch]` must resolve from the inference repo — the
+/// list `scripts/bump-inference.mjs` keeps as `PATCHED_CRATES`.
+const PATCHED_CRATES: [&str; 3] = ["candle-kernels", "candle-core", "candle-metal-kernels"];
+
+/// Core check, separated from file I/O so the red paths below are testable: every vendored Candle
+/// package must resolve from the inference repo at the same commit as sceneworks-gen-core.
 fn check_lock(lock: &str) -> Result<(), String> {
     let packages = parse_lock_packages(lock);
     let gen_core = packages
@@ -73,7 +82,7 @@ fn check_lock(lock: &str) -> Result<(), String> {
         .find(|(n, _)| n == "sceneworks-gen-core")
         .and_then(|(_, s)| s.as_deref())
         .ok_or("sceneworks-gen-core not found in Cargo.lock")?;
-    for crate_name in ["candle-kernels", "candle-core"] {
+    for crate_name in PATCHED_CRATES {
         let matches: Vec<&Option<String>> = packages
             .iter()
             .filter(|(name, _)| name == crate_name)
@@ -140,6 +149,11 @@ source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e
 
 [[package]]
 name = "candle-core"
+version = "0.10.2"
+source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
+
+[[package]]
+name = "candle-metal-kernels"
 version = "0.10.2"
 source = "git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd"
 
@@ -253,10 +267,10 @@ fn guard_rejects_candle_core_source_or_revision_skew() {
     assert!(check_lock(&skew).unwrap_err().contains("skews"));
 }
 
-// Retain the epic's duplicate-resolution mutant coverage for both vendored patches.
+// Retain the epic's duplicate-resolution mutant coverage for every vendored patch.
 #[test]
 fn guard_rejects_duplicate_patched_resolutions() {
-    for crate_name in ["candle-kernels", "candle-core"] {
+    for crate_name in PATCHED_CRATES {
         let lock = format!(
             "{GOOD_LOCK}\n[[package]]\nname = \"{crate_name}\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/huggingface/candle?rev=1e6aa85e#1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d\"\n"
         );
@@ -266,4 +280,36 @@ fn guard_rejects_duplicate_patched_resolutions() {
             "{error}"
         );
     }
+}
+
+/// sc-25907: the Metal kernels are held to the same rule — the patch dropped (upstream candle
+/// again, i.e. the unfixed strided-reduce kernels on every Candle-on-Mac build), missing, or left
+/// on an older inference revision than the direct pins all red.
+///
+/// *Mutation that reds this:* dropping `candle-metal-kernels` from `PATCHED_CRATES`.
+#[test]
+fn guard_rejects_an_unpatched_missing_or_skewed_candle_metal_kernels() {
+    let block = "name = \"candle-metal-kernels\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/SceneWorks/inference?rev=d68b8b45#d68b8b457d76e0472393f0d7bfe0e79ae68278dd";
+    assert!(
+        GOOD_LOCK.contains(block),
+        "precondition: the fixture carries the patched package"
+    );
+    let upstream = GOOD_LOCK.replacen(
+        block,
+        "name = \"candle-metal-kernels\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/huggingface/candle?rev=1e6aa85e#1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d",
+        1,
+    );
+    assert!(check_lock(&upstream)
+        .unwrap_err()
+        .contains("candle-metal-kernels resolves from upstream candle"));
+    let missing = GOOD_LOCK.replacen("name = \"candle-metal-kernels\"", "name = \"renamed\"", 1);
+    assert!(check_lock(&missing)
+        .unwrap_err()
+        .contains("exactly one candle-metal-kernels"));
+    let skew = GOOD_LOCK.replacen(
+        block,
+        "name = \"candle-metal-kernels\"\nversion = \"0.10.2\"\nsource = \"git+https://github.com/SceneWorks/inference?rev=d68b8b45#aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        1,
+    );
+    assert!(check_lock(&skew).unwrap_err().contains("skews"));
 }

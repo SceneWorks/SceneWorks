@@ -921,6 +921,13 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // this provider is published in the engine capability dumps, so it landed with the epic's
     // terminal pin bump and re-dump, sc-24163, rather than here — see `memory_route_registry`.)
     ModelCaps::new("qwen_image_2_1", true, true, false, false, true),
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the distilled checkpoint, registered by the SAME
+    // two provider crates under its own engine id `qwen_image_2_1_turbo` beside the base id. One
+    // descriptor under a second id — the same conditioning, the same `supported_quants: [Q4, Q8]`
+    // tier select on both lanes, the same LoRA/LoKr on dense and packed tiers — so its row is the
+    // base row's columns verbatim, for the base row's reasons above. No trainer is registered under
+    // this id, so it appears in no training-target list below.
+    ModelCaps::new("qwen_image_2_1_turbo", true, true, false, false, true),
     // Qwen-Image-Edit ids (sc-3397/3398): MLX edit siblings; candle serves them via the bespoke
     // `qwen_edit_candle_eligible` lane (NOT the txt2img gate), so they are NOT candle-routed txt2img ids.
     ModelCaps::new("qwen_image_edit", true, false, false, false, false),
@@ -2368,6 +2375,7 @@ mod tests {
         "flux_dev",
         "qwen_image",
         "qwen_image_2_1",
+        "qwen_image_2_1_turbo",
         "qwen_image_edit",
         "qwen_image_edit_2509",
         "qwen_image_edit_2511",
@@ -2438,6 +2446,8 @@ mod tests {
         // sc-24109: the native Candle/CUDA port of Qwen-Image 2.1. Its own id, right after the
         // 2512 row it shares nothing with.
         "qwen_image_2_1",
+        // sc-25907: its distilled Turbo sibling, registered by the same Candle crate.
+        "qwen_image_2_1_turbo",
         "lens",
         "lens_turbo",
         // sc-10996 (epic 6562): the candle Bernini still-image companion joins the routed set.
@@ -2496,6 +2506,8 @@ mod tests {
         "qwen_image",
         // sc-24158: the candle 2.1 provider applies LoRA/LoKr on dense AND packed tiers.
         "qwen_image_2_1",
+        // sc-25907: the same adapter path under the Turbo id.
+        "qwen_image_2_1_turbo",
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",

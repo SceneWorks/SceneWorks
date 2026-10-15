@@ -885,6 +885,25 @@
       ]
     },
     {
+      "id": "qwen-image-2-1-turbo",
+      "models": [
+        "qwen_image_2_1_turbo"
+      ],
+      "name": "Qwen-Image 2.1 Turbo",
+      "publisher": "Hangzhou Tongyi Laboratory Technology Co., Ltd.",
+      "license": "Qwen Research License Agreement",
+      "_nonCommercialComment": "Same agreement, and therefore the same flag, as the `qwen-image-2-1` component above — the LICENSE beside the pinned Turbo weights is byte-identical to base's (sha256 8dc973f0…). Mirrors the catalog entry's own `nonCommercial: true`.",
+      "nonCommercial": true,
+      "homepage": "https://huggingface.co/Qwen/Qwen-Image-2.1-Turbo",
+      "usage": "Distilled few-step text-to-image / editing model (sc-25907, epic 25899) — a SEPARATE checkpoint from the base `qwen-image-2-1` component above under the same agreement. The bf16 tier is the pinned upstream snapshot (Qwen/Qwen-Image-2.1-Turbo @fc13ba1986fcb905854dc8de2f52eee395f49b5b), downloaded directly into the user's own cache on first use; SceneWorks redistributes nothing there. The Q8 and Q4 tiers will be re-hosted by SceneWorks as quantized Derivatives at SceneWorks/qwen-image-2-1-turbo-mlx (subdirs q8/ and q4/; not yet published, so the catalog offers neither until they are), and §3 attaches to them: each derived bundle carries a copy of the Agreement (LICENSE), the §3(b) change record CHANGES.md, a SHA256SUMS manifest of every file the converter wrote, the upstream README and the verbatim attribution NOTICE. No tier is ever embedded in a SceneWorks build or installer — scripts/check-no-nc-weights.mjs keeps that fatal. The licence is NON-COMMERCIAL — §1(i) defines \"Non-Commercial\" as research or evaluation purposes only, and §2(b) requires a separate commercial licence from Alibaba (model-business@notice.qwencloud.com). It restricts the Materials, not their outputs. §4(b) additionally requires \"Built with Qwen\" or \"Improved using Qwen\" in the documentation of any AI model trained or fine-tuned on these weights that is then distributed.",
+      "documents": [
+        {
+          "label": "Qwen RESEARCH LICENSE AGREEMENT",
+          "key": "qwen-image-2-1-research"
+        }
+      ]
+    },
+    {
       "id": "qwen-image-2-1-pe",
       "models": [
         "qwen_image_2_1_pe_t2i",

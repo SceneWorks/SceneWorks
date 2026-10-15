@@ -1784,6 +1784,8 @@ fn checkpoint_plan_memory_inputs(request: &ImageRequest, engine_id: &str, spec: 
             engine_id, spec, &request.prompt,
             &request.negative_prompt,
         )),
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 

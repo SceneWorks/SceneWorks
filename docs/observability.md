@@ -238,11 +238,44 @@ report.
 
 Emitted at info level, once per generation, only when the planner actually selected a typed
 execution domain for the request — so it is absent for every provider that declares none.
-Fields: `engine`, and whichever of `graphEvalCadenceBlocks`, `ffnChunkRows`, `cfgBatching`
-were chosen. Selections come exclusively from the provider's own
+Fields: `engine`, and whichever of `graphEvalCadenceBlocks`, `ffnChunkRows`, `cfgBatching`,
+`prefixKvCache` were chosen. Selections come exclusively from the provider's own
 `Capabilities::execution` declaration, so a value here is always one the provider accepts;
 an unset domain means the provider's historical default. Absence of this event is the normal
-state, not a fault.
+state, not a fault. Every selection is re-applied after the provider's memory request scope
+configures the request (the scope replaces the memory block), so what this event names is what
+the provider is handed.
+
+### Prefix KV cache — selection and the path that ran (Rust worker, epic 25899)
+
+`prefixKvCache` is the fourth typed domain, and the only one chosen from the **budget** rather
+than from the declaration: a provider that declares it (`qwen_image_2_1`, `qwen_image_2_1_turbo`)
+is priced per request from its own derived surcharge (MLX: per tier — q8/q4 compute in f32, so
+their cache is twice bf16's; Candle: the build device's width), and it is added **rung-for-rung**:
+the memory ladder first runs exactly as it did before the cache existed and picks the rung (tier,
+residency, decode policy), and the cache is taken only when that SAME rung also fits with the
+surcharge. The cache never moves a request to another rung, so every request keeps the rung and
+output path it had before; it is added only where it is free. It is not priced for a request whose
+admitted block is not handed to one render at that exact geometry and reference set (hires fix,
+native prompt batch).
+
+* `memory_strategy_request_selected` (MLX) carries `prefix_kv_cache` (`cached` / `prefill`, absent
+  for a provider with no cache) and `prefix_kv_cache_priced_bytes`; on Candle the
+  `image_memory_strategy_selected` payload carries `prefixKvCache: {selected, pricedBytes}`. A
+  `cached` selection's `predicted_peak_bytes` already includes the surcharge.
+* A request whose rung fits only with the cache shed runs `prefill` on that rung and is **not**
+  refused — even when the cache would fit on a lower rung; one that fits no rung is refused exactly
+  as before the cache existed.
+* Each image's provenance (`rawAdapterSettings.prefixKvCache`) and the job result
+  (`result.prefixKvCache`, one record per written image, in order) record
+  `{selected, pricedBytes, path, cacheBytes, overflow}`: what the admission chose and priced, and
+  what the render REPORTS it ran (`GenerationReport::prefix_kv_cache`). `overflow`
+  (`{actualBytes, pricedBytes}`) is non-null when the engine shed a cached selection because the
+  real prefix exceeded the priced bound; the same render also carries the
+  `prefix_kv_cache_shed_over_priced_bound` warning in `generationWarnings`, which the completion
+  message names.
+* `prefix_kv_cache_selection_dropped` (warn) means an admitted selection reached a provider whose
+  declaration does not accept it; the request ran prefill (less memory than was admitted).
 
 ### API errors — `api_error` (API)
 

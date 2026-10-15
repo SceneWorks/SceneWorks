@@ -350,7 +350,7 @@ fn reference_image_count(request: &ImageRequest) -> u32 {
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
     }
     let plural = request
@@ -3417,7 +3417,7 @@ fn write_upscaled_asset(
 /// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
 /// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
-    json!({
+    let mut result = json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.image_count,
         "adapter": plan.adapter,
@@ -3427,7 +3427,35 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     })
     .as_object()
     .cloned()
-    .expect("json! object literal")
+    .expect("json! object literal");
+    let prefix_kv_cache = job_prefix_kv_cache_records(asset_writes);
+    if !prefix_kv_cache.is_empty() {
+        result.insert(
+            PREFIX_KV_CACHE_RESULT_KEY.to_owned(),
+            Value::Array(prefix_kv_cache),
+        );
+    }
+    result
+}
+
+/// The job result's prefix-KV-cache summary (epic 25899): each written image's
+/// `rawAdapterSettings.prefixKvCache` record — what the admission selected and priced, the path
+/// the render REPORTS it ran, its cache bytes and any shed-over-priced-bound overflow — in asset
+/// order, so a finished job says which path ran without opening an asset. Absent (not empty) for a
+/// job whose provider prices no cache.
+pub(crate) const PREFIX_KV_CACHE_RESULT_KEY: &str = "prefixKvCache";
+
+fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
+    asset_writes
+        .iter()
+        .filter_map(|write| {
+            write
+                .get("rawAdapterSettings")
+                .and_then(|settings| settings.get(PREFIX_KV_CACHE_RESULT_KEY))
+                .filter(|record| record.is_object())
+                .cloned()
+        })
+        .collect()
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle

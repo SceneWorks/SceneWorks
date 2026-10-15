@@ -162,6 +162,9 @@ string_enum! {
         // and licence are all different from 2512's — a shared stamp would make the two
         // indistinguishable on replay.
         QwenImage21 => "qwen_image_2_1",
+        // sc-25907: the distilled Turbo checkpoint stamps its own id for the same reason — its
+        // weights are not base's, so a replayed asset must say which of the two produced it.
+        QwenImage21Turbo => "qwen_image_2_1_turbo",
         LensTurbo => "lens_turbo",
         SenseNovaU1 => "sensenova_u1",
         FluxDiffusers => "flux_diffusers",

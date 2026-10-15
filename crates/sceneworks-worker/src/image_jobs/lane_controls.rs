@@ -24,6 +24,10 @@ pub(crate) const GENERATION_WARNINGS_KEY: &str = "generationWarnings";
 /// `rawAdapterSettings` key of the applied adapter stack of one image: identity (path, sha256,
 /// scale, kind) joined with the engine's own apply report (applied / skipped).
 pub(crate) const ADAPTER_APPLY_KEY: &str = "adapterApply";
+/// The per-image prefix-KV-cache record (epic 25899): `{selected, pricedBytes, path, cacheBytes,
+/// overflow}` — see `docs/observability.md`. The same key the job result summarises
+/// (`super::job_prefix_kv_cache_records`), so the two cannot drift.
+pub(crate) const PREFIX_KV_CACHE_KEY: &str = super::PREFIX_KV_CACHE_RESULT_KEY;
 
 /// The resolved request controls one generic-lane render carries onto its `GenerationRequest`.
 /// `Default` is "the engine's own" for every field — what every model that declares none sends.
@@ -271,8 +275,15 @@ pub(crate) fn image_facts(
     warnings: &[gen_core::GenerationWarning],
     identities: &[AdapterIdentity],
     reports: &[AdapterApplyReport],
+    prefix_kv_cache: Option<Value>,
 ) -> Option<JsonObject> {
     let mut facts = JsonObject::new();
+    // Epic 25899: what the admission selected for the provider's prefix KV cache and what the
+    // render reports it ran (`execution_planner::prefix_kv_cache_record`). Absent for every
+    // provider without a cache.
+    if let Some(record) = prefix_kv_cache {
+        facts.insert(PREFIX_KV_CACHE_KEY.to_owned(), record);
+    }
     if !warnings.is_empty() {
         facts.insert(
             GENERATION_WARNINGS_KEY.to_owned(),
@@ -564,7 +575,7 @@ mod tests {
             code: "caption_truncated".into(),
             message: "dropped 4 tokens".into(),
         }];
-        let facts = image_facts(&warnings, &identities, &reports).unwrap();
+        let facts = image_facts(&warnings, &identities, &reports, None).unwrap();
         assert_eq!(
             Value::Object(facts.clone()),
             json!({
@@ -577,7 +588,7 @@ mod tests {
                 ],
             })
         );
-        assert_eq!(image_facts(&[], &[], &reports), None);
+        assert_eq!(image_facts(&[], &[], &reports, None), None);
         let writes = vec![
             json!({ "rawAdapterSettings": Value::Object(facts.clone()) }),
             json!({ "rawAdapterSettings": Value::Object(facts) }),
@@ -586,6 +597,37 @@ mod tests {
         assert_eq!(
             job_warning_messages(&writes),
             vec!["dropped 4 tokens".to_owned()]
+        );
+    }
+
+    /// Epic 25899: the render's prefix-KV-cache record rides the image's provenance facts, and the
+    /// job result summarises exactly those records in asset order — so a finished job says which
+    /// path ran (and any overflow) without opening an asset, and a job with no cache says nothing.
+    ///
+    /// *Mutation that reds this:* dropping the `prefix_kv_cache` arm of `image_facts`, or reading
+    /// another key in `job_prefix_kv_cache_records`.
+    #[test]
+    fn the_prefix_kv_cache_record_reaches_the_image_facts_and_the_job_result() {
+        let cached = json!({ "selected": "cached", "pricedBytes": 10, "path": "cached",
+                             "cacheBytes": 8, "overflow": null });
+        let shed = json!({ "selected": "cached", "pricedBytes": 10, "path": "prefill",
+                           "cacheBytes": 0, "overflow": { "actualBytes": 12, "pricedBytes": 10 } });
+        let facts = |record: &Value| {
+            Value::Object(image_facts(&[], &[], &[], Some(record.clone())).expect("recorded"))
+        };
+        assert_eq!(facts(&cached)[PREFIX_KV_CACHE_KEY], cached);
+        let writes = vec![
+            json!({ "rawAdapterSettings": facts(&cached) }),
+            json!({ "rawAdapterSettings": {} }),
+            json!({ "rawAdapterSettings": facts(&shed) }),
+        ];
+        assert_eq!(
+            super::super::job_prefix_kv_cache_records(&writes),
+            vec![cached, shed]
+        );
+        assert!(
+            super::super::job_prefix_kv_cache_records(&[json!({ "rawAdapterSettings": {} })])
+                .is_empty()
         );
     }
 

@@ -812,10 +812,19 @@ test("persistent Qwen cache binding preserves existing snapshots and rejects unr
     await bindQwenPersistentCache({ ...env, ANCHORS_INPUT: "qwen_image_2_1:q4:mlx,qwen_image_2_1:bf16:mlx" });
     assert.equal(await readFile(path.join(snapshot, "preserve"), "utf8"), "immutable fixture");
     assert.equal(await readFile(githubEnv, "utf8"), `HF_CACHE_INPUT=${root}\nHF_CACHE_INPUT=${root}\n`);
+    // sc-25907: the distilled Turbo id shares the hub, alone or beside base, with its own anchors.
+    for (const accepted of [
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1_turbo:q8:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1 qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1:q4:mlx,qwen_image_2_1_turbo:bf16:mlx" },
+    ]) assert.equal(await bindQwenPersistentCache({ ...env, ...accepted }), root);
     for (const invalid of [
       { BACKEND: "candle" }, { MODELS_INPUT: "" }, { MODELS_INPUT: "qwen_image_2_1 flux" },
       { HF_CACHE_INPUT: "/Volumes/Models/huggingface/hub" }, { ANCHORS_INPUT: "flux:q4:mlx" },
       { ANCHORS_INPUT: "qwen_image_2_1:q4:candle" }, { HOME: "relative" },
+      // An anchor of a Qwen id the walk did not select is out of scope, in both directions.
+      { ANCHORS_INPUT: "qwen_image_2_1_turbo:q4:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1:q4:mlx" },
+      { MODELS_INPUT: "qwen_image_2_1_turbo", ANCHORS_INPUT: "qwen_image_2_1_turbo:q4:candle" },
     ]) await assert.rejects(() => bindQwenPersistentCache({ ...env, ...invalid }));
     const linkedHome = path.join(home, "linked-home");
     await mkdir(linkedHome);
@@ -3740,7 +3749,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     stripJsoncComments(await source("config/manifests/builtin.models.jsonc")),
   );
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
-  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 6\] = \[([\s\S]*?)\n\];/.exec(adapter);
+  const table = /const TURNKEY_CANDLE_MEMBERS: \[TurnkeyCandleMember; 7\] = \[([\s\S]*?)\n\];/.exec(adapter);
   assert.ok(table, "candle.rs must still declare TURNKEY_CANDLE_MEMBERS");
   const consts = new Map(
     [...adapter.matchAll(/\bconst ([A-Z0-9_]+_ID): &str = "([^"]+)";/g)].map(([, name, value]) => [name, value]),
@@ -3749,8 +3758,8 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     .map(([, name, flag]) => ({ providerId: consts.get(name), flag }));
   assert.deepEqual(
     members.map((member) => member.providerId),
-    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1"],
-    "the six turnkey members, in table order",
+    ["kolors", "ideogram_4", "ideogram_4_turbo", "lens", "lens_turbo", "qwen_image_2_1", "qwen_image_2_1_turbo"],
+    "the seven turnkey members, in table order",
   );
   for (const member of members) {
     const entry = manifest.models.find((model) => model.id === member.providerId);
@@ -3768,7 +3777,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
     );
   }
   // Stated as data too, so the loop cannot pass by every member answering the same way.
-  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true"]);
+  assert.deepEqual(members.map((member) => member.flag), ["true", "false", "false", "true", "true", "true", "true"]);
 
   // The table is only a declaration; this is the FOLD that consumes it. sc-22732 review: nothing
   // bound the flag to the produced `LoadSpec`, so an unconditional `spec.with_quant(quant)` left
@@ -3778,7 +3787,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // tests first RUN on the windows-candle lane — so the fold is ALSO read as source text here,
   // where it runs on the host that writes the arm and the mutation is killable before a push.
   const foldArm =
-    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*Some\(quant\),\s*\) => \{([\s\S]*?)\n        \}/
       .exec(adapter);
   assert.ok(foldArm, "candle.rs must still fold the turnkey tier quant in five_rung_load_spec");
   assert.match(
@@ -3789,7 +3798,7 @@ test("the Candle turnkey member table folds the tier quant per member, and never
   // bf16 carries no quant on any member: the `None` arm hands the spec through untouched.
   assert.match(
     adapter,
-    /\(\s*KOLORS_ID \| IDEOGRAM_ID \| IDEOGRAM_TURBO_ID \| LENS_ID \| LENS_TURBO_ID\s*\| QWEN_IMAGE_2_1_ID,\s*None,\s*\) => spec,/,
+    /\(\s*KOLORS_ID\s*\|\s*IDEOGRAM_ID\s*\|\s*IDEOGRAM_TURBO_ID\s*\|\s*LENS_ID\s*\|\s*LENS_TURBO_ID\s*\|\s*QWEN_IMAGE_2_1_ID\s*\|\s*QWEN_IMAGE_2_1_TURBO_ID,\s*None,\s*\) => spec,/,
     "the dense turnkey tier must bind no quant",
   );
   // The spec builder must be the pure function the Rust test can call — if the fold moves back

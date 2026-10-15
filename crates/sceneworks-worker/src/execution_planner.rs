@@ -14,10 +14,15 @@
 //!    what runs. `WarmPolicyProposal::requires_staged_residency` is the seam the planner reads.
 //!
 //! 2. **Typed execution-domain selection.** gen-core carries [`GraphEvalCadence`] / [`FfnChunk`] /
-//!    [`CfgBatching`] on [`GenerationMemory`], declared per provider through
+//!    [`CfgBatching`] / [`PrefixKvCacheMode`] on [`GenerationMemory`], declared per provider through
 //!    `Capabilities::execution` and refused fail-closed at `Capabilities::validate_request`.
 //!    [`select_execution_domains`] chooses values ONLY from what a provider declares, so the worker
-//!    can never trip that refusal.
+//!    can never trip that refusal. The prefix KV cache (epic 25899) is the one domain chosen from the
+//!    memory budget: the lane's admission prices it ([`prefix_kv_cache_surcharge_bytes`]) and adds
+//!    it rung-for-rung ([`plan_prefix_kv_cache`]): the shed admission picks the rung exactly as it
+//!    did before the cache existed, and the cache is taken only when that SAME rung also fits with
+//!    it, so the cache never changes which rung a request runs on. The selection is re-applied
+//!    after the provider's request scope ([`ExecutionDomainSelection::reapply_after_request_scope`]).
 //!
 //! ## Why the warm decision is shaped by memory monotonicity rather than by a cost model
 //!
@@ -81,7 +86,8 @@
 
 use gen_core::{
     CfgBatching, CfgBatchingDomain, ExecutionSurface, ExecutionValueDomain, FfnChunk,
-    GenerationMemory, GraphEvalCadence, LoadShape, LoadSpec, OffloadPolicy, WeightsSource,
+    GenerationMemory, GraphEvalCadence, LoadShape, LoadSpec, OffloadPolicy, PrefixKvCacheMode,
+    WeightsSource,
 };
 
 use crate::generator_cache::ExecutionPolicy;
@@ -675,17 +681,29 @@ fn log_warm_policy_decision(
 }
 
 /// The typed execution-domain values one request selects. Every field is `None` unless a provider's
-/// own declaration pins exactly one legal value.
+/// own declaration pins exactly one legal value — or, for the prefix KV cache, unless the memory
+/// admission priced the cache and admitted the request at the cached demand
+/// ([`plan_prefix_kv_cache`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ExecutionDomainSelection {
     pub(crate) graph_eval_cadence: Option<GraphEvalCadence>,
     pub(crate) ffn_chunk: Option<FfnChunk>,
     pub(crate) cfg_batching: Option<CfgBatching>,
+    /// The fourth domain (epic 25899): `Some(Cached)` ONLY when the request's memory admission
+    /// priced the provider's cache surcharge and admitted the request with it
+    /// ([`PrefixKvCachePlan`]). Never chosen from the declaration alone — a provider that declares
+    /// `Cached` still runs prefill unless something paid for the cache — and never `Some(Prefill)`
+    /// either, because the unset field already IS the prefill path (`PrefixKvCacheMode`'s docs), so
+    /// writing it would only manufacture a memory block that changes nothing.
+    pub(crate) prefix_kv_cache: Option<PrefixKvCacheMode>,
 }
 
 impl ExecutionDomainSelection {
     pub(crate) const fn is_empty(&self) -> bool {
-        self.graph_eval_cadence.is_none() && self.ffn_chunk.is_none() && self.cfg_batching.is_none()
+        self.graph_eval_cadence.is_none()
+            && self.ffn_chunk.is_none()
+            && self.cfg_batching.is_none()
+            && self.prefix_kv_cache.is_none()
     }
 
     /// Write the selection onto a request's memory block. A field left `None` is untouched, so a value
@@ -699,6 +717,39 @@ impl ExecutionDomainSelection {
         }
         if let Some(mode) = self.cfg_batching {
             memory.cfg_batching = Some(mode);
+        }
+        if let Some(mode) = self.prefix_kv_cache {
+            memory.prefix_kv_cache = Some(mode);
+        }
+    }
+
+    /// Re-apply the selection AFTER a memory request scope's `configure_request`.
+    ///
+    /// `MemoryRequestScope::configure_request` REPLACES `GenerationRequest::memory` with the block
+    /// for the admitted ladder selection — `None` on a `Resident` selection — so every value
+    /// [`plan_request_execution_domains`] wrote before it is gone by the time the provider reads
+    /// the request. For the prefix KV cache that is the documented trap: the render silently runs
+    /// prefill (gen-core `PrefixKvCacheMode`, "Write the selection after the request scope has
+    /// configured the request"). For the other three domains it was the same silent loss on every
+    /// scoped route (sc-25907 found it while wiring the fourth).
+    ///
+    /// The three numeric/batching domains keep [`plan_request_execution_domains`]'s rule — a no-op
+    /// on an absent block, which already means "provider default". The prefix cache creates the
+    /// block when the scope left none, because an admitted `Cached` selection has nowhere else to
+    /// live and dropping it would run the slower path the admission paid to avoid.
+    pub(crate) fn reapply_after_request_scope(self, request: &mut gen_core::GenerationRequest) {
+        let numeric = Self {
+            prefix_kv_cache: None,
+            ..self
+        };
+        if let Some(memory) = request.memory.as_mut() {
+            numeric.apply(memory);
+        }
+        if let Some(mode) = self.prefix_kv_cache {
+            request
+                .memory
+                .get_or_insert_with(GenerationMemory::default)
+                .prefix_kv_cache = Some(mode);
         }
     }
 }
@@ -735,6 +786,10 @@ fn single_declared_value(domain: &ExecutionValueDomain) -> Option<u32> {
 /// `Error::Unsupported` — can never fire on a plan this function produced. An undeclared or unmeasured
 /// domain yields `None`, which every provider resolves to its own historical constant, so a request
 /// that selects nothing renders byte-for-byte as it did before sc-18317.
+///
+/// The prefix KV cache is never selected HERE: its choice turns on the request's memory budget,
+/// which a declaration cannot see. [`plan_request_execution_domains`] takes it from the admission
+/// ([`PrefixKvCachePlan`]) instead.
 pub(crate) fn select_execution_domains(surface: &ExecutionSurface) -> ExecutionDomainSelection {
     ExecutionDomainSelection {
         graph_eval_cadence: single_declared_value(&surface.graph_eval_cadence_blocks)
@@ -745,6 +800,7 @@ pub(crate) fn select_execution_domains(surface: &ExecutionSurface) -> ExecutionD
             CfgBatchingDomain::Modes(modes) if modes.len() == 1 => modes.first().copied(),
             CfgBatchingDomain::Unsupported | CfgBatchingDomain::Modes(_) => None,
         },
+        prefix_kv_cache: None,
     }
 }
 
@@ -756,6 +812,14 @@ pub(crate) fn select_execution_domains(surface: &ExecutionSurface) -> ExecutionD
 /// exactly what an unset domain means, so manufacturing a block to carry a value equal to the default
 /// would change the `memory.is_some()` signal a provider may read as "the caller opted into
 /// request-scoped adaptation" while changing nothing about the render.
+///
+/// The prefix-KV-cache field is READ here rather than chosen: the memory admission writes
+/// `Some(Cached)` onto the block it hands the lane only when it admitted the cached demand
+/// ([`plan_prefix_kv_cache`]). It is carried into the returned selection so
+/// [`ExecutionDomainSelection::reapply_after_request_scope`] can restore it after the scope
+/// replaces the block. A value the provider's declaration does not accept is DROPPED (the request
+/// runs prefill, which holds less than the admitted cached demand) rather than forwarded into the
+/// provider's refusal — the same fail-closed-to-default rule as every other domain here.
 pub(crate) fn plan_request_execution_domains(
     generator: &dyn gen_core::Generator,
     request: &mut gen_core::GenerationRequest,
@@ -763,15 +827,216 @@ pub(crate) fn plan_request_execution_domains(
     let Some(memory) = request.memory.as_mut() else {
         return ExecutionDomainSelection::default();
     };
-    let selection = select_execution_domains(&generator.descriptor().capabilities.execution);
+    let surface = &generator.descriptor().capabilities.execution;
+    let mut selection = select_execution_domains(surface);
+    selection.prefix_kv_cache = match memory.prefix_kv_cache {
+        Some(mode) if surface.prefix_kv_cache.accepts(mode) => Some(mode),
+        Some(mode) => {
+            tracing::warn!(
+                event = "prefix_kv_cache_selection_dropped",
+                engine = generator.descriptor().id,
+                selected = mode.label(),
+                domain = %surface.prefix_kv_cache.describe(),
+                "dropped a prefix-KV-cache selection the provider does not declare; running prefill"
+            );
+            memory.prefix_kv_cache = None;
+            None
+        }
+        None => None,
+    };
     selection.apply(memory);
     selection
+}
+
+/// What one request's memory admission decided about the provider's prefix KV cache (epic 25899).
+///
+/// `priced_bytes` is the provider's own surcharge for this request — its pricing function over the
+/// request's geometry, reference count and prompt branches — and `mode` is the path the admission
+/// selected with it: [`PrefixKvCacheMode::Cached`] when the rung the shed admission chose also fits
+/// at the cached demand (`shed + priced_bytes`), [`PrefixKvCacheMode::Prefill`] when it fits only
+/// shed. Recorded beside what the render REPORTS it ran, which may differ: the engine sheds a
+/// cached selection whose real prefix exceeds the priced bound (`PrefixKvCacheReport::overflow`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrefixKvCachePlan {
+    pub(crate) mode: PrefixKvCacheMode,
+    pub(crate) priced_bytes: u64,
+}
+
+impl PrefixKvCachePlan {
+    /// The demand the admitted candidate was graded at on top of its shed peak: the surcharge for a
+    /// cached selection, nothing for a shed one. This is what a lane adds to the
+    /// `MemoryRunContext::predicted_peak_bytes` it hands the provider, so the context states the
+    /// demand the admission actually approved.
+    pub(crate) const fn admitted_surcharge_bytes(self) -> u64 {
+        match self.mode {
+            PrefixKvCacheMode::Cached => self.priced_bytes,
+            PrefixKvCacheMode::Prefill => 0,
+        }
+    }
+
+    /// Write an admitted cached selection onto the memory block the lane hands the provider. A shed
+    /// selection writes nothing: the unset field is the prefill path.
+    pub(crate) fn write_onto(self, memory: &mut GenerationMemory) {
+        if self.mode.is_cached() {
+            memory.prefix_kv_cache = Some(PrefixKvCacheMode::Cached);
+        }
+    }
+}
+
+/// Add the prefix KV cache to an admitted memory rung, rung-for-rung (epic 25899).
+///
+/// The cache must never change WHICH rung a request runs on: a lower rung (MLX bounded decode, a
+/// numerically different tiled decode; Candle staged residency, per-request reloads) changes the
+/// request's output path, and the cache is a speed-up, not a reason to take one. So the lane runs its
+/// ladder exactly as it did before the cache existed and hands that result in as `shed`; this
+/// function then asks `cached_on_the_same_rung(&shed, priced_bytes)` whether the SAME rung — same
+/// tier, residency and decode policy — also fits with `priced_bytes` added to its peak, under the
+/// same budget, margins and reserve charge the ladder applies. `admitted` says whether a ladder
+/// result admits the request.
+///
+/// * the shed rung also fits cached → `(cached result, Some(Cached))`;
+/// * it fits only shed → `(shed, Some(Prefill))` — the same rung, admitted, NOT refused;
+/// * the shed ladder refuses → `(shed, None)`: refused exactly as before the cache existed (a
+///   surcharge only ever raises demand, so there is nothing to try).
+///
+/// `surcharge = None` (a provider with no cache, or no pricing function for it) returns the shed
+/// result untouched and reports no plan.
+///
+/// On a ladder that IS a plain budget comparison the three outcomes are
+/// `PrefixKvCacheMode::select`'s (`plan_prefix_kv_cache_agrees_with_gen_core_select_on_a_plain_budget`);
+/// `select` itself is not called per candidate because it compares raw bytes with
+/// `MemoryBudget::fits`, which knows nothing of the per-candidate estimate margins and reserve
+/// charge the selector applies.
+pub(crate) fn plan_prefix_kv_cache<T>(
+    surcharge_bytes: Option<u64>,
+    shed: T,
+    admitted: impl Fn(&T) -> bool,
+    cached_on_the_same_rung: impl FnOnce(&T, u64) -> Option<T>,
+) -> (T, Option<PrefixKvCachePlan>) {
+    let Some(priced_bytes) = surcharge_bytes else {
+        return (shed, None);
+    };
+    if !admitted(&shed) {
+        return (shed, None);
+    }
+    match cached_on_the_same_rung(&shed, priced_bytes) {
+        Some(cached) => (
+            cached,
+            Some(PrefixKvCachePlan {
+                mode: PrefixKvCacheMode::Cached,
+                priced_bytes,
+            }),
+        ),
+        None => (
+            shed,
+            Some(PrefixKvCachePlan {
+                mode: PrefixKvCacheMode::Prefill,
+                priced_bytes,
+            }),
+        ),
+    }
+}
+
+/// The surcharge one request's prefix KV cache is priced at, from the LINKED provider's own pricing
+/// function — or `None` for every provider that has no cache, which leaves its admission untouched.
+///
+/// `tier_quant` is the tier being LOADED (the admission's `MemoryNumericTier::quant`): on MLX the
+/// packed tiers compute in f32, so their cache is twice the bf16 tier's. On Candle the width follows
+/// the build's production device, not the tier (`candle-gen-qwen-image-2-1`'s
+/// `prefix_kv_cache_demand_bytes`). `negative_branch` is a non-empty negative prompt under a CFG
+/// scale above 1.0 — the request evaluates a second prompt branch, which keeps its own cache.
+///
+/// Gated on the provider's declaration as well as its id, so a provider that stops declaring
+/// `Cached` stops being priced for it.
+#[allow(unused_variables)]
+pub(crate) fn prefix_kv_cache_surcharge_bytes(
+    engine_id: &str,
+    surface: &ExecutionSurface,
+    tier_quant: Option<gen_core::Quant>,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    negative_branch: bool,
+) -> Option<u64> {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(engine_id)
+        || !surface.prefix_kv_cache.accepts(PrefixKvCacheMode::Cached)
+    {
+        return None;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use runtime_macos::providers::qwen_image_2_1 as provider;
+        let tier = match tier_quant {
+            None => provider::quant::Tier::Bf16,
+            Some(gen_core::Quant::Q8) => provider::quant::Tier::Q8,
+            Some(gen_core::Quant::Q4) => provider::quant::Tier::Q4,
+            // No other tier is installable on this route; pricing one would be a guess.
+            Some(_) => return None,
+        };
+        Some(
+            provider::memory_strategy::derived::prefix_kv_cache_demand_bytes(
+                tier,
+                width,
+                height,
+                reference_count,
+                negative_branch,
+            ),
+        )
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        Some(
+            runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+                width,
+                height,
+                reference_count,
+                negative_branch,
+            ),
+        )
+    }
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    {
+        None
+    }
+}
+
+/// Whether a request evaluates the true-CFG NEGATIVE prompt branch, the input the prefix-KV-cache
+/// pricing doubles on: a non-empty negative prompt AND a CFG scale (true-CFG or guidance) above
+/// 1.0. Either alone runs one branch.
+pub(crate) fn evaluates_negative_branch(
+    negative_prompt: &str,
+    true_cfg: Option<f32>,
+    guidance: Option<f32>,
+) -> bool {
+    !negative_prompt.trim().is_empty() && true_cfg.or(guidance).is_some_and(|scale| scale > 1.0)
+}
+
+/// The job-record shape of one render's prefix-KV-cache outcome (`docs/observability.md`): what
+/// the admission SELECTED and priced, and what the render REPORTS it ran. Keys are camelCase JSON
+/// for the asset provenance and the job result.
+pub(crate) fn prefix_kv_cache_record(
+    plan: Option<PrefixKvCachePlan>,
+    report: Option<&gen_core::PrefixKvCacheReport>,
+) -> Option<serde_json::Value> {
+    if plan.is_none() && report.is_none() {
+        return None;
+    }
+    Some(serde_json::json!({
+        "selected": plan.map(|plan| plan.mode.label()),
+        "pricedBytes": plan.map(|plan| plan.priced_bytes),
+        "path": report.map(|report| report.path.label()),
+        "cacheBytes": report.map(|report| report.cache_bytes),
+        "overflow": report.and_then(|report| report.overflow).map(|overflow| serde_json::json!({
+            "actualBytes": overflow.actual_bytes,
+            "pricedBytes": overflow.priced_bytes,
+        })),
+    }))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gen_core::LoadShapeDeclarationResult;
+    use gen_core::{LoadShapeDeclarationResult, PrefixKvCacheDomain};
     use std::num::NonZeroU32;
 
     fn policy(offload: OffloadPolicy, shape: LoadShape) -> ExecutionPolicy {
@@ -1218,6 +1483,7 @@ mod tests {
                 NonZeroU32::new(512).expect("nonzero floor"),
             ),
             cfg_batching: CfgBatchingDomain::Unsupported,
+            prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1235,6 +1501,7 @@ mod tests {
                 CfgBatching::Batched,
                 CfgBatching::Sequential,
             ]),
+            prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1248,6 +1515,7 @@ mod tests {
             graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![4]),
             ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![2048]),
             cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+            prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
         };
         let selection = select_execution_domains(&surface);
         assert_eq!(
@@ -1265,6 +1533,7 @@ mod tests {
             graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![0]),
             ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![0]),
             cfg_batching: CfgBatchingDomain::Unsupported,
+            prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
         };
         assert_eq!(
             select_execution_domains(&surface),
@@ -1283,16 +1552,19 @@ mod tests {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![1]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![1]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Sequential]),
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![0]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![0]),
                 cfg_batching: CfgBatchingDomain::Unsupported,
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::ANY_POSITIVE,
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![64, 128]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
         ] {
             let selection = select_execution_domains(&surface);
@@ -1325,6 +1597,210 @@ mod tests {
             assert_eq!(peak_containment_rank(middle), 1);
         }
     }
+
+    /// Epic 25899: on a ladder that IS a plain budget comparison, the rung-for-rung planner answers
+    /// exactly what gen-core's `PrefixKvCacheMode::select` answers — cached when shed + cache fits,
+    /// prefill when only the shed demand fits, refuse when neither — at every boundary, including
+    /// the exact fits `MemoryBudget::fits` accepts.
+    ///
+    /// *Mutations that red this:* returning `Cached` without asking the same-rung check; reporting
+    /// `Prefill` for a refused request; dropping the shed result on a prefill admission.
+    #[test]
+    fn plan_prefix_kv_cache_agrees_with_gen_core_select_on_a_plain_budget() {
+        let shed = 1_000u64;
+        let cache = 300u64;
+        for total in [0, shed - 1, shed, shed + cache - 1, shed + cache, u64::MAX] {
+            let budget = gen_core::MemoryBudget {
+                total_bytes: total,
+                committed_bytes: 0,
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: 0,
+            };
+            let (admitted, plan) = plan_prefix_kv_cache(
+                Some(cache),
+                budget.fits(shed).then_some(shed),
+                Option::is_some,
+                |shed, extra| {
+                    let shed = shed.expect("only an admitted shed rung is re-graded");
+                    budget.fits(shed + extra).then_some(Some(shed + extra))
+                },
+            );
+            let expected = PrefixKvCacheMode::select(budget, shed, cache);
+            assert_eq!(plan.map(|plan| plan.mode), expected, "total={total}");
+            match expected {
+                Some(PrefixKvCacheMode::Cached) => assert_eq!(admitted, Some(shed + cache)),
+                Some(PrefixKvCacheMode::Prefill) => assert_eq!(admitted, Some(shed)),
+                None => assert_eq!(admitted, None, "refused exactly as without the cache"),
+            }
+            if let Some(plan) = plan {
+                assert_eq!(plan.priced_bytes, cache);
+            }
+        }
+        // No pricing function: the shed result untouched, no same-rung check, no plan.
+        let (admitted, plan) = plan_prefix_kv_cache(None, Some(shed), Option::is_some, |_, _| {
+            panic!("a provider with no cache is never re-graded")
+        });
+        assert_eq!((admitted, plan), (Some(shed), None));
+    }
+
+    /// The rung rule: the cached check is asked about the shed admission's OWN rung, and never
+    /// runs for a refused request.
+    ///
+    /// *Mutations that red this:* handing the check anything but the shed result; running it for a
+    /// refused request; skipping it (an admitted shed rung then never becomes `Cached`).
+    #[test]
+    fn plan_prefix_kv_cache_re_grades_only_the_shed_admissions_own_rung() {
+        let mut asked = Vec::new();
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), Some("staged"), Option::is_some, |shed, extra| {
+                asked.push((*shed, extra));
+                Some(Some("staged+cache"))
+            });
+        assert_eq!(
+            asked,
+            vec![(Some("staged"), 7)],
+            "the shed rung, at the surcharge"
+        );
+        assert_eq!(result, Some("staged+cache"));
+        assert_eq!(plan.map(|plan| plan.mode), Some(PrefixKvCacheMode::Cached));
+
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), Some("resident"), Option::is_some, |_, _| None);
+        assert_eq!(result, Some("resident"), "the same rung, shed");
+        assert_eq!(plan.map(|plan| plan.mode), Some(PrefixKvCacheMode::Prefill));
+
+        let (result, plan) =
+            plan_prefix_kv_cache(Some(7), None::<&str>, Option::is_some, |_, _| {
+                panic!("a refused request is never re-graded")
+            });
+        assert_eq!((result, plan), (None, None));
+    }
+
+    /// The re-application after a request scope: an admitted `Cached` survives a scope that
+    /// replaced the block with `None` (the block is created to hold it), while the three numeric
+    /// domains keep their no-op-on-absent rule and never manufacture a block.
+    #[test]
+    fn reapply_after_request_scope_restores_the_cache_without_manufacturing_other_domains() {
+        let selection = ExecutionDomainSelection {
+            cfg_batching: Some(CfgBatching::Batched),
+            prefix_kv_cache: Some(PrefixKvCacheMode::Cached),
+            ..ExecutionDomainSelection::default()
+        };
+        let mut request = gen_core::GenerationRequest::default();
+        selection.reapply_after_request_scope(&mut request);
+        let memory = request.memory.expect("the cached selection needs a block");
+        assert_eq!(memory.prefix_kv_cache, Some(PrefixKvCacheMode::Cached));
+        assert_eq!(
+            memory.cfg_batching, None,
+            "a numeric domain is not applied to a block the scope left absent"
+        );
+
+        let numeric_only = ExecutionDomainSelection {
+            cfg_batching: Some(CfgBatching::Batched),
+            ..ExecutionDomainSelection::default()
+        };
+        let mut request = gen_core::GenerationRequest::default();
+        numeric_only.reapply_after_request_scope(&mut request);
+        assert!(
+            request.memory.is_none(),
+            "no block is manufactured for a numeric domain"
+        );
+        let mut request = gen_core::GenerationRequest {
+            memory: Some(GenerationMemory::default()),
+            ..Default::default()
+        };
+        numeric_only.reapply_after_request_scope(&mut request);
+        assert_eq!(
+            request.memory.and_then(|memory| memory.cfg_batching),
+            Some(CfgBatching::Batched),
+            "a scope that kept a block gets the selection back (sc-25907 FIXED_EXTRA)"
+        );
+    }
+
+    /// The negative-branch input the cache pricing doubles on: a non-empty negative prompt AND a
+    /// scale above 1.0, either axis.
+    #[test]
+    fn the_negative_branch_needs_both_a_negative_prompt_and_a_live_scale() {
+        assert!(evaluates_negative_branch("blurry", Some(4.0), None));
+        assert!(evaluates_negative_branch("blurry", None, Some(2.5)));
+        assert!(!evaluates_negative_branch("blurry", Some(1.0), None));
+        assert!(!evaluates_negative_branch("   ", Some(4.0), None));
+        assert!(!evaluates_negative_branch("blurry", None, None));
+    }
+
+    /// Only the 2.1 ids are priced, only while the provider declares `Cached`, and on macOS the
+    /// figure is the linked MLX provider's own derivation for the tier being loaded (q8/q4 compute
+    /// in f32, so their cache is twice bf16's).
+    #[test]
+    fn prefix_kv_cache_surcharge_is_the_linked_providers_and_only_for_its_ids() {
+        let declared = ExecutionSurface {
+            prefix_kv_cache: PrefixKvCacheDomain::Modes(PrefixKvCacheMode::ALL.to_vec()),
+            ..ExecutionSurface::default()
+        };
+        let price = |engine: &str, surface: &ExecutionSurface, quant| {
+            prefix_kv_cache_surcharge_bytes(engine, surface, quant, 2048, 2048, 3, true)
+        };
+        assert_eq!(price("flux2_dev", &declared, None), None, "not a 2.1 id");
+        assert_eq!(
+            price("qwen_image_2_1_turbo", &ExecutionSurface::default(), None),
+            None,
+            "a provider that does not declare the cache is not priced for it"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            use runtime_macos::providers::qwen_image_2_1 as provider;
+            for (quant, tier) in [
+                (None, provider::quant::Tier::Bf16),
+                (Some(gen_core::Quant::Q8), provider::quant::Tier::Q8),
+                (Some(gen_core::Quant::Q4), provider::quant::Tier::Q4),
+            ] {
+                let expected = provider::memory_strategy::derived::prefix_kv_cache_demand_bytes(
+                    tier, 2048, 2048, 3, true,
+                );
+                for engine in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+                    assert_eq!(price(engine, &declared, quant), Some(expected), "{engine}");
+                }
+            }
+            assert!(
+                price("qwen_image_2_1", &declared, Some(gen_core::Quant::Q8)).unwrap()
+                    > price("qwen_image_2_1", &declared, None).unwrap(),
+                "a packed tier computes in f32, so its cache costs more than bf16's"
+            );
+        }
+    }
+
+    /// The job-record shape (`docs/observability.md`): what was selected and priced, what ran,
+    /// its bytes, and an overflow's two figures; nothing at all for a provider with no cache.
+    #[test]
+    fn prefix_kv_cache_record_carries_the_selection_the_path_and_the_overflow() {
+        assert_eq!(prefix_kv_cache_record(None, None), None);
+        let report = gen_core::PrefixKvCacheReport {
+            path: PrefixKvCacheMode::Prefill,
+            cache_bytes: 0,
+            overflow: Some(gen_core::PrefixKvCacheOverflow {
+                actual_bytes: 900,
+                priced_bytes: 800,
+            }),
+        };
+        let record = prefix_kv_cache_record(
+            Some(PrefixKvCachePlan {
+                mode: PrefixKvCacheMode::Cached,
+                priced_bytes: 800,
+            }),
+            Some(&report),
+        )
+        .expect("recorded");
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "selected": "cached",
+                "pricedBytes": 800,
+                "path": "prefill",
+                "cacheBytes": 0,
+                "overflow": { "actualBytes": 900, "pricedBytes": 800 },
+            })
+        );
+    }
 }
 
 /// Corpus-replay acceptance for the execution planner (sc-18317).
@@ -1337,12 +1813,20 @@ mod tests {
 #[cfg(test)]
 mod corpus_replay_tests {
     use super::*;
+    use gen_core::PrefixKvCacheDomain;
     use sceneworks_core::memory_calibration::load_packaged_bundle;
     use serde_json::Value;
 
-    /// The three execution-domain keys, in the spellings a calibration `parameters` block would use
-    /// if the corpus ever grew one.
-    const EXECUTION_DOMAIN_KEYS: [&str; 3] = ["graphEvalCadence", "ffnChunk", "cfgBatching"];
+    /// The four execution-domain keys, in the spellings a calibration `parameters` block would use
+    /// if the corpus ever grew one. `prefixKvCache` joined at epic 25899: the cache is priced from
+    /// the provider's derived surcharge, never from a calibration parameter, so a measured record
+    /// naming it would need the planner's pricing rule revisited first.
+    const EXECUTION_DOMAIN_KEYS: [&str; 4] = [
+        "graphEvalCadence",
+        "ffnChunk",
+        "cfgBatching",
+        "prefixKvCache",
+    ];
 
     fn shipped_manifest() -> Value {
         serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(include_str!(
@@ -1473,16 +1957,19 @@ mod corpus_replay_tests {
                 graph_eval_cadence_blocks: ExecutionValueDomain::ANY_POSITIVE,
                 ffn_chunk_rows: ExecutionValueDomain::ANY_POSITIVE,
                 cfg_batching: CfgBatchingDomain::Unsupported,
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Unsupported,
                 ffn_chunk_rows: ExecutionValueDomain::Unsupported,
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Batched]),
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
             ExecutionSurface {
                 graph_eval_cadence_blocks: ExecutionValueDomain::Candidates(vec![8]),
                 ffn_chunk_rows: ExecutionValueDomain::Candidates(vec![2048]),
                 cfg_batching: CfgBatchingDomain::Modes(vec![CfgBatching::Sequential]),
+                prefix_kv_cache: PrefixKvCacheDomain::Unsupported,
             },
         ];
         for (label, baseline) in decode_quality_request_memories() {

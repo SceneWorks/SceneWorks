@@ -633,6 +633,28 @@ const RULES: &[MemoryRouteRule] = &[
         requires_sequential_selection: false,
         legacy_shaping: false,
     },
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the same provider crates register the distilled
+    // checkpoint under its own id with the base contract's rungs, tiers, modes and load profiles —
+    // under Turbo's own calibration fingerprint, so no base record can answer for it. Same rule
+    // shape as the base rows above, for the same reasons.
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Mlx,
+        provider: "qwen_image_2_1_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: QWEN_IMAGE_2_1_MODES,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
+    MemoryRouteRule {
+        backend: MemoryRouteBackend::Candle,
+        provider: "qwen_image_2_1_turbo",
+        tiers: BF16_Q4_Q8,
+        modes: QWEN_IMAGE_2_1_MODES,
+        load_profiles: PLAIN_LORA,
+        requires_sequential_selection: false,
+        legacy_shaping: false,
+    },
     MemoryRouteRule {
         backend: MemoryRouteBackend::Mlx,
         provider: "qwen_image_edit",
@@ -1784,7 +1806,7 @@ fn expected_provider_mode(
         // SC-24114: Qwen-Image 2.1's provider implements ONE memory mode and prices the ordered
         // reference list inside it (0..=MAX_REFERENCE_IMAGES extra joint-sequence blocks).
         (
-            "qwen_image_2_1",
+            "qwen_image_2_1" | "qwen_image_2_1_turbo",
             MemoryRouteMode::TextToImage
             | MemoryRouteMode::EditImage
             | MemoryRouteMode::ImageToImage
@@ -10211,38 +10233,44 @@ mod tests {
     /// across the whole 0..=MAX_REFERENCE_IMAGES range, and nothing past it does.
     #[test]
     fn qwen_image_2_1_public_modes_map_onto_the_providers_one_memory_mode() {
-        for mode in QWEN_IMAGE_2_1_MODES {
-            for reference_count in 0..=QWEN_IMAGE_2_1_MAX_REFERENCES {
-                let context = MemoryRouteRequestContext {
-                    mode: *mode,
-                    reference_count,
-                    use_pid: false,
-                    has_phases: false,
-                };
-                assert_eq!(
-                    expected_provider_mode("qwen_image_2_1", context),
-                    "text_to_image",
-                    "{mode:?} with {reference_count} references"
-                );
+        // sc-25907: the distilled Turbo id carries the same request-owned declaration.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
+            .iter()
+            .copied()
+        {
+            for mode in QWEN_IMAGE_2_1_MODES {
+                for reference_count in 0..=QWEN_IMAGE_2_1_MAX_REFERENCES {
+                    let context = MemoryRouteRequestContext {
+                        mode: *mode,
+                        reference_count,
+                        use_pid: false,
+                        has_phases: false,
+                    };
+                    assert_eq!(
+                        expected_provider_mode(id, context),
+                        "text_to_image",
+                        "{mode:?} with {reference_count} references"
+                    );
+                }
             }
-        }
-        // Both lanes witness every public mode (the terminal campaign and the matrix key on them).
-        // Spelled out rather than read from `QWEN_IMAGE_2_1_MODES`, so narrowing that constant
-        // back to text-to-image reds here.
-        let witnesses = deferred_route_witnesses();
-        for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
-            for mode in &[
-                MemoryRouteMode::TextToImage,
-                MemoryRouteMode::EditImage,
-                MemoryRouteMode::ImageToImage,
-                MemoryRouteMode::CharacterImage,
-            ] {
-                assert!(
-                    witnesses.iter().any(|row| row.backend == backend
-                        && row.provider == "qwen_image_2_1"
-                        && row.mode == *mode),
-                    "{backend:?} must witness qwen_image_2_1 {mode:?}"
-                );
+            // Both lanes witness every public mode (the terminal campaign and the matrix key on them).
+            // Spelled out rather than read from `QWEN_IMAGE_2_1_MODES`, so narrowing that constant
+            // back to text-to-image reds here.
+            let witnesses = deferred_route_witnesses();
+            for backend in [MemoryRouteBackend::Mlx, MemoryRouteBackend::Candle] {
+                for mode in &[
+                    MemoryRouteMode::TextToImage,
+                    MemoryRouteMode::EditImage,
+                    MemoryRouteMode::ImageToImage,
+                    MemoryRouteMode::CharacterImage,
+                ] {
+                    assert!(
+                        witnesses.iter().any(|row| row.backend == backend
+                            && row.provider == id
+                            && row.mode == *mode),
+                        "{backend:?} must witness {id} {mode:?}"
+                    );
+                }
             }
         }
     }
@@ -10256,62 +10284,69 @@ mod tests {
     /// `NoRelevantDeclaration`), or dropping `edit_image` from their `modes` (→ `Refused`).
     #[test]
     fn shipped_qwen_image_2_1_candle_reference_requests_are_declared() {
-        let manifest = shipped_model("qwen_image_2_1");
-        for (mode, reference_count) in [
-            (MemoryRouteMode::TextToImage, 0),
-            (MemoryRouteMode::TextToImage, 1),
-            (MemoryRouteMode::EditImage, 1),
-            (MemoryRouteMode::EditImage, 10),
-            (MemoryRouteMode::ImageToImage, 1),
-            (MemoryRouteMode::CharacterImage, 3),
-        ] {
-            for tier in ["bf16", "q8", "q4"] {
-                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
-                    .with_resolved_route("qwen_image_2_1");
-                let declared = declared_candle_request_strategy_contract_with(
-                    "qwen_image_2_1",
-                    Some(tier),
+        // sc-25907: the distilled Turbo id carries the same request-owned declaration.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
+            .iter()
+            .copied()
+        {
+            let manifest = shipped_model(id);
+            for (mode, reference_count) in [
+                (MemoryRouteMode::TextToImage, 0),
+                (MemoryRouteMode::TextToImage, 1),
+                (MemoryRouteMode::EditImage, 1),
+                (MemoryRouteMode::EditImage, 10),
+                (MemoryRouteMode::ImageToImage, 1),
+                (MemoryRouteMode::CharacterImage, 3),
+            ] {
+                for tier in ["bf16", "q8", "q4"] {
+                    let spec =
+                        LoadSpec::new(WeightsSource::Dir(tier.into())).with_resolved_route(id);
+                    let declared = declared_candle_request_strategy_contract_with(
+                        id,
+                        Some(tier),
+                        &manifest,
+                        &spec,
+                        MemoryRouteRequestContext {
+                            mode,
+                            reference_count,
+                            use_pid: false,
+                            has_phases: false,
+                        },
+                        |_| Some(staged_contract(id)),
+                    );
+                    let provider_mode = match declared {
+                        DeclaredCandleStrategyContract::Applied { provider_mode, .. } => {
+                            provider_mode
+                        }
+                        DeclaredCandleStrategyContract::NoRelevantDeclaration => {
+                            panic!("{id} {tier} {mode:?} x{reference_count}: NoRelevantDeclaration")
+                        }
+                        DeclaredCandleStrategyContract::Refused => {
+                            panic!("{id} {tier} {mode:?} x{reference_count}: Refused")
+                        }
+                    };
+                    assert_eq!(provider_mode, "text_to_image");
+                }
+            }
+            // Past the provider's bound there is no declaration to apply.
+            let spec = LoadSpec::new(WeightsSource::Dir("q8".into())).with_resolved_route(id);
+            assert!(!matches!(
+                declared_candle_request_strategy_contract_with(
+                    id,
+                    Some("q8"),
                     &manifest,
                     &spec,
                     MemoryRouteRequestContext {
-                        mode,
-                        reference_count,
+                        mode: MemoryRouteMode::EditImage,
+                        reference_count: QWEN_IMAGE_2_1_MAX_REFERENCES + 1,
                         use_pid: false,
                         has_phases: false,
                     },
-                    |_| Some(staged_contract("qwen_image_2_1")),
-                );
-                let provider_mode = match declared {
-                    DeclaredCandleStrategyContract::Applied { provider_mode, .. } => provider_mode,
-                    DeclaredCandleStrategyContract::NoRelevantDeclaration => {
-                        panic!("{tier} {mode:?} x{reference_count}: NoRelevantDeclaration")
-                    }
-                    DeclaredCandleStrategyContract::Refused => {
-                        panic!("{tier} {mode:?} x{reference_count}: Refused")
-                    }
-                };
-                assert_eq!(provider_mode, "text_to_image");
-            }
+                    |_| Some(staged_contract(id)),
+                ),
+                DeclaredCandleStrategyContract::Applied { .. }
+            ));
         }
-        // Past the provider's bound there is no declaration to apply.
-        let spec =
-            LoadSpec::new(WeightsSource::Dir("q8".into())).with_resolved_route("qwen_image_2_1");
-        assert!(!matches!(
-            declared_candle_request_strategy_contract_with(
-                "qwen_image_2_1",
-                Some("q8"),
-                &manifest,
-                &spec,
-                MemoryRouteRequestContext {
-                    mode: MemoryRouteMode::EditImage,
-                    reference_count: QWEN_IMAGE_2_1_MAX_REFERENCES + 1,
-                    use_pid: false,
-                    has_phases: false,
-                },
-                |_| Some(staged_contract("qwen_image_2_1")),
-            ),
-            DeclaredCandleStrategyContract::Applied { .. }
-        ));
     }
 
     /// SC-24114: the restated reference bound is the linked provider's own.
@@ -10337,44 +10372,50 @@ mod tests {
     /// for every load), or removing `requestContexts` from an MLX row (→ `Refused`).
     #[test]
     fn shipped_qwen_image_2_1_mlx_declaration_is_request_owned_and_never_forces_staging() {
-        let manifest = shipped_model("qwen_image_2_1");
-        let rows = manifest["mlx"]["memoryStrategyContract"]["implementations"]
-            .as_array()
-            .expect("the MLX lane declares its contract");
-        assert!(!rows.is_empty());
-        assert!(
-            rows.iter().all(|row| row.get("requestContexts").is_some()),
-            "a non-legacy MLX lane reads a row without requestContexts as malformed"
-        );
-        for (mode, reference_count) in [
-            (MemoryRouteMode::TextToImage, 0),
-            (MemoryRouteMode::EditImage, 4),
-            (MemoryRouteMode::ImageToImage, 1),
-            (MemoryRouteMode::CharacterImage, 10),
-        ] {
-            for tier in ["bf16", "q8", "q4"] {
-                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
-                    .with_resolved_route("qwen_image_2_1");
-                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
-                    "qwen_image_2_1",
-                    Some(tier),
-                    Some(mode),
-                    &manifest,
-                    spec,
-                    MemoryRouteRequestContext {
-                        mode,
-                        reference_count,
-                        use_pid: false,
-                        has_phases: false,
-                    },
-                    |_| true,
-                );
-                assert_eq!(
-                    evaluated.load_shape_declaration_result,
-                    LoadShapeDeclarationResult::NotEvaluated,
-                    "{tier} {mode:?} x{reference_count}"
-                );
-                assert_eq!(evaluated.offload_policy, OffloadPolicy::Resident);
+        // sc-25907: the distilled Turbo id carries the same request-owned declaration.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
+            .iter()
+            .copied()
+        {
+            let manifest = shipped_model(id);
+            let rows = manifest["mlx"]["memoryStrategyContract"]["implementations"]
+                .as_array()
+                .expect("the MLX lane declares its contract");
+            assert!(!rows.is_empty());
+            assert!(
+                rows.iter().all(|row| row.get("requestContexts").is_some()),
+                "a non-legacy MLX lane reads a row without requestContexts as malformed"
+            );
+            for (mode, reference_count) in [
+                (MemoryRouteMode::TextToImage, 0),
+                (MemoryRouteMode::EditImage, 4),
+                (MemoryRouteMode::ImageToImage, 1),
+                (MemoryRouteMode::CharacterImage, 10),
+            ] {
+                for tier in ["bf16", "q8", "q4"] {
+                    let spec =
+                        LoadSpec::new(WeightsSource::Dir(tier.into())).with_resolved_route(id);
+                    let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                        id,
+                        Some(tier),
+                        Some(mode),
+                        &manifest,
+                        spec,
+                        MemoryRouteRequestContext {
+                            mode,
+                            reference_count,
+                            use_pid: false,
+                            has_phases: false,
+                        },
+                        |_| true,
+                    );
+                    assert_eq!(
+                        evaluated.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::NotEvaluated,
+                        "{id} {tier} {mode:?} x{reference_count}"
+                    );
+                    assert_eq!(evaluated.offload_policy, OffloadPolicy::Resident);
+                }
             }
         }
     }
@@ -10389,41 +10430,47 @@ mod tests {
     /// staged row for.
     #[test]
     fn shipped_qwen_image_2_1_mlx_declaration_passes_the_fit_gates_sequential_decision() {
-        let manifest = shipped_model("qwen_image_2_1");
-        for (mode, reference_count) in [
-            (MemoryRouteMode::TextToImage, 0),
-            (MemoryRouteMode::EditImage, 4),
-            (MemoryRouteMode::ImageToImage, 1),
-            (MemoryRouteMode::CharacterImage, 10),
-        ] {
-            for tier in ["bf16", "q8", "q4"] {
-                let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
-                    .with_resolved_route("qwen_image_2_1")
-                    .with_offload_policy(OffloadPolicy::Sequential);
-                let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
-                    "qwen_image_2_1",
-                    Some(tier),
-                    Some(mode),
-                    &manifest,
-                    spec,
-                    MemoryRouteRequestContext {
-                        mode,
-                        reference_count,
-                        use_pid: false,
-                        has_phases: false,
-                    },
-                    |_| false,
-                );
-                assert_ne!(
-                    evaluated.load_shape_declaration_result,
-                    LoadShapeDeclarationResult::Refused,
-                    "{tier} {mode:?} x{reference_count}"
-                );
-                assert_eq!(
-                    evaluated.offload_policy,
-                    OffloadPolicy::Sequential,
-                    "{tier} {mode:?} x{reference_count}"
-                );
+        // sc-25907: the distilled Turbo id carries the same request-owned declaration.
+        for id in sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS
+            .iter()
+            .copied()
+        {
+            let manifest = shipped_model(id);
+            for (mode, reference_count) in [
+                (MemoryRouteMode::TextToImage, 0),
+                (MemoryRouteMode::EditImage, 4),
+                (MemoryRouteMode::ImageToImage, 1),
+                (MemoryRouteMode::CharacterImage, 10),
+            ] {
+                for tier in ["bf16", "q8", "q4"] {
+                    let spec = LoadSpec::new(WeightsSource::Dir(tier.into()))
+                        .with_resolved_route(id)
+                        .with_offload_policy(OffloadPolicy::Sequential);
+                    let evaluated = evaluate_declared_mlx_load_shape_for_request_with(
+                        id,
+                        Some(tier),
+                        Some(mode),
+                        &manifest,
+                        spec,
+                        MemoryRouteRequestContext {
+                            mode,
+                            reference_count,
+                            use_pid: false,
+                            has_phases: false,
+                        },
+                        |_| false,
+                    );
+                    assert_ne!(
+                        evaluated.load_shape_declaration_result,
+                        LoadShapeDeclarationResult::Refused,
+                        "{id} {tier} {mode:?} x{reference_count}"
+                    );
+                    assert_eq!(
+                        evaluated.offload_policy,
+                        OffloadPolicy::Sequential,
+                        "{id} {tier} {mode:?} x{reference_count}"
+                    );
+                }
             }
         }
     }
