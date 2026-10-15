@@ -3536,6 +3536,7 @@ IMAGE_MODELS_WITHOUT_EITHER_AXIS = frozenset(
         "anima_turbo",
         "mage_flow_turbo",
         "mage_flow_edit_turbo",
+        "flux3_klein",  # flow map: no CFG at all (sc-26234)
     }
 )
 

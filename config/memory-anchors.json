@@ -12170,6 +12170,17 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux3_klein:mlx:default",
+      "modelId": "flux3_klein",
+      "modelFamily": "flux3",
+      "route": "flux3_klein",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:illustrious_xl_v1:mlx:bf16",
       "modelId": "illustrious_xl_v1",
       "modelFamily": "sdxl",

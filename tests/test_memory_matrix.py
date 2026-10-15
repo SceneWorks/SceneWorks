@@ -774,7 +774,14 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: the sc-25680 review round gives `iris_3b` a `candle` block (declared
+    Last moved: sc-26234 adds the MLX-only `flux3_klein` catalog entry (one untagged bf16
+    artifact, so a single tier; `text_to_image` only and no LoRA overlay, so ONE coordinate per
+    lane). It contributes exactly five NEW lanes and moves nothing else: `resident` [1,0,0];
+    `staged_residency` [1,0,0] because the descriptor advertises sequential offload and the engine
+    joined the fit gate's staged-residency sweep; the three bounded rungs [0,0,1] because the
+    provider's memory contract declares them `Missing` at this pin (sc-26241 owns the ladder).
+
+    Previously: the sc-25680 review round gives `iris_3b` a `candle` block (declared
     `minMemoryGb` + `sequentialPeakGb` floors, so the Candle fit gate has a prediction). Exactly two
     lanes move, each [0,0,2] -> [2,0,0]: `iris_3b:candle:resident` (a lane with a per-backend block
     is no longer the generator's "routed but untriaged" all-Missing slice) and
