@@ -76,6 +76,8 @@ def corpus():
     require(len(cases) == 24 and len({c['id'] for c in cases}) == 24, 'require 24 unique prompts')
     require(sorted(Counter(c['scenario'] for c in cases).values()) == [2] * 12, 'require 12 scenarios x2 prompts')
     require(len(value['seeds']) == 2 and len(set(value['seeds'])) == 2, 'require two distinct seeds')
+    layout_ids={f'{scenario}-{n}' for scenario in ('json_text','json_objects','layout_revision') for n in (1,2)}
+    require({c['id'] for c in cases if c.get('prompt_narrative_raw') and c.get('prompt_narrative_enhanced')}==layout_ids,'six reviewed incumbent narrative forms required')
     for case in cases:
         require(case['prompt_raw'] and case['prompt_enhanced'] and case['requirements'], 'missing corpus annotation')
         require(case['width'] % 16 == case['height'] % 16 == 0, 'canvas must be multiple of16')
@@ -83,6 +85,17 @@ def corpus():
             x1, y1, x2, y2 = box['box']
             require(0 <= x1 < x2 <= 1 and 0 <= y1 < y2 <= 1, 'invalid ground truth box')
     return value
+
+
+def prompt_contract(case,config_id):
+    """Reviewed forms of one common scene; no model-side rewrite or extra row."""
+    narrative=config_id in CONFIG_IDS[3:] and 'prompt_narrative_raw' in case
+    raw=case['prompt_narrative_raw'] if narrative else case['prompt_raw']
+    enhanced=case['prompt_narrative_enhanced'] if narrative else case['prompt_enhanced']
+    utf8=lambda text:hashlib.sha256(text.encode('utf-8')).hexdigest()
+    return dict(representation='narrative_layout' if narrative else ('moss_layout_json' if case.get('layout_spec') else 'original'),
+        raw=raw,enhanced=enhanced,raw_sha256=utf8(raw),enhanced_sha256=utf8(enhanced),
+        source_raw_sha256=utf8(case['prompt_raw']),source_enhanced_sha256=utf8(case['prompt_enhanced']))
 
 
 def template():
@@ -93,7 +106,7 @@ def template():
             precision='bf16+fp32-unmerged' if key == 'moss_dmd' else ('bf16' if key.startswith('moss') else 'q4'),
             steps=8 if key in ('moss_dmd', 'z_image_turbo') else (4 if key == 'flux2_klein_9b' else (40 if key == 'qwen_image_2_1' else 50)),
             guidance=3.0 if key in ('moss_base','moss_sft') else (0.0 if key in ('moss_dmd','z_image_turbo') else 1.0),
-            prompt_mode='raw', negative_prompt='', batch_size=1, snapshot=None,
+            prompt_mode='raw', prompt_contracts={case['id']:prompt_contract(case,key) for case in corpus()['cases']}, negative_prompt='', batch_size=1, snapshot=None,
             # Every local weight/config/tokenizer/code input is frozen by bytes.
             files=[], runtime_command=[sys.executable, str(ROOT / 'run.py')], settings={}, unavailable=None))
     return dict(schema_version=1, corpus=corpus(), configs=configs,
@@ -124,6 +137,7 @@ def validate_manifest(manifest,config_id=None):
     for config in manifest['configs']:
         require((config['repo'], config['revision']) == REVISIONS[config['id']], 'unexpected model revision')
         require(config['prompt_mode'] in ('raw','enhanced'), 'prompt_mode must be declared')
+        require(config['prompt_contracts']=={case['id']:prompt_contract(case,config['id']) for case in manifest['corpus']['cases']},'reviewed prompt representation or hash changed')
         expected=next(c for c in template()['configs'] if c['id']==config['id'])
         require(all(config[k]==expected[k] for k in ('steps','guidance','precision','batch_size','negative_prompt')), 'published model settings changed')
         if config['unavailable']:
@@ -194,11 +208,16 @@ def cells(manifest, phase='scored'):
     for config in manifest['configs']:
         for case in (entries[:1] if phase == 'calibration' else entries):
             for seed in (seeds[:1] if phase == 'calibration' else seeds):
+                contract=config['prompt_contracts'][case['id']]
                 yield dict(id=f"{phase}.{config['id']}.{case['id']}.{seed}", phase=phase,
                     config_id=config['id'], case_id=case['id'], scenario=case['scenario'], seed=seed,
                     width=case['width'],
                     height=case['height'],
-                    prompt=case['prompt_' + config['prompt_mode']], negative_prompt=config['negative_prompt'])
+                    prompt=contract[config['prompt_mode']], prompt_sha256=contract[config['prompt_mode']+'_sha256'],
+                    prompt_representation=contract['representation'], prompt_mode=config['prompt_mode'],
+                    prompt_raw_sha256=contract['raw_sha256'],prompt_enhanced_sha256=contract['enhanced_sha256'],
+                    source_raw_prompt_sha256=contract['source_raw_sha256'],source_enhanced_prompt_sha256=contract['source_enhanced_sha256'],
+                    negative_prompt=config['negative_prompt'])
 
 
 def parity_cells(manifest,phase='scored'):

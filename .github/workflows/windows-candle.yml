@@ -350,7 +350,7 @@ on:
 # per-listener Cargo cache across jobs -- see "Isolate Cargo dependency checkout")
 # and the three separate compile graphs, not the test filter.
 concurrency:
-  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: windows-candle-${{ github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry' && format('moss-telemetry-workflow-{0}', github.run_id) || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -1931,6 +1931,7 @@ jobs:
             ${{ env.MOSS_RECEIPTS }}/job-*.json
             ${{ env.MOSS_RECEIPTS }}/job-*.log
             ${{ env.MOSS_RECEIPTS }}/prepared.json
+            ${{ env.MOSS_RECEIPTS }}/reuse.json
             ${{ env.MOSS_RECEIPTS }}/requirements.lock
             ${{ env.MOSS_RECEIPTS }}/wheels.json
             ${{ env.MOSS_RECEIPTS }}/protocol.lock.json

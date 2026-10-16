@@ -22,6 +22,58 @@ PY
 
 After `prepare` completes, inspect `moss-control-<run>-<attempt>` and its `prepared.json`, `requirements.lock`, `wheels.json`, and `job-*.json/.log`. A failure includes an absolute persistent receipt/log path and next action; do not infer that missing credentials, tools or hardware were tested successfully. An interrupted preparation may resume the same campaign and verifies all retained files; a changed source/lock requires an explicitly reviewed new campaign. It never automatically retries.
 
+When only reviewed harness/corpus code changes before generation, prepare a new
+campaign without changing the previous campaign's harness. After the coordinator
+has confirmed the old preparation job is terminal and completed, use this
+explicit reuse control with `prepare`:
+
+```json
+{
+  "campaign": "sc-26322-reference-v2",
+  "deadline_utc": "<fresh UTC deadline within six hours>",
+  "reuse": {
+    "campaign": "sc-26322-reference-v1",
+    "prepared_sha256": "<old prepared.json file SHA256>",
+    "job": "38970962483-1",
+    "job_receipt_sha256": "<old job-38970962483-1-prepare.json file SHA256>"
+  }
+}
+```
+
+The old job receipt must report completed CPU preparation at the exact unchanged
+SceneWorks/inference pins; a failed/running/missing receipt is rejected. Both
+campaigns are fixed siblings under the evaluation root; arbitrary source paths
+and production caches are rejected. The control does not cancel, monitor or
+retry the old workflow. Review its terminal GitHub status before dispatching.
+Use the same prepare workflow invocation above, with these new control bytes.
+
+Reuse rehashes the old prepared closure and the same43 reviewed wheel hashes and
+URL-derived basenames (including Torch's `+cu128` local version). It seeds only
+selected model files, metadata and locked wheels by verified hardlink or copy;
+new refs, venv and harness remain independent. It installs the exact closure
+offline into the new venv and reruns actual imports. No second model download is
+needed. Copy fallback requires enough free bytes; another48GiB remains required
+for preparation/output headroom. `reuse.json` records every seed's bytes, hash
+and link/copy method, with its own SHA256 bound by new `prepared.json`.
+
+For native reuse, preparation rechecks the old clean exact source and inference
+lock, then runs the same `cargo build --release --locked -p sceneworks-rust-api
+--features backend-candle --bin sceneworks-rust-api` against the old owned
+`CARGO_HOME` and `CARGO_TARGET_DIR`, with `CARGO_NET_OFFLINE=true`. The resulting
+exe must have the old prepared SHA256. It is copied independently into the new
+campaign, so later Cargo writes cannot mutate the new binary through a hardlink.
+If adjacent DLLs are present, reuse stops for inspection or a reviewed fresh
+locked build; it never silently copies unrecorded dependency files.
+
+Both build paths capture actual `rustc -Vv`, `cargo -V`, `nvcc --version`,
+`CUDA_PATH`, PE import names from `dumpbin /DEPENDENTS`, and hashes/versions of
+safely resolved DLL candidates. Unknown/dynamically loaded dependencies remain
+explicit. This read-only identity is not a loader/GPU compatibility proof and
+Torch's CUDA12.8 build is not the native compiler/runtime version. This source
+starts the API for unrecognized arguments, so `--help` is not used as a CPU probe.
+The new host/driver/runtime freeze and measured conditions still govern cost
+comparisons. The old harness, refs and prepared receipt are never rewritten.
+
 Create `freeze-control.json` with exactly these fields, using the actual host GPU UUID from telemetry and a coordinator-issued lease identity:
 
 ```json

@@ -5373,6 +5373,10 @@ test("MOSS telemetry remains isolated and read-only alongside explicit bounded e
   const { names, defaults } = dispatchInputs(workflow);
   assert.ok(names.includes("moss_image_comparison_mode"));
   assert.equal(defaults.moss_image_comparison_mode, "off");
+  const topConcurrency = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
+  assert.ok(topConcurrency.includes("github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry' && format('moss-telemetry-workflow-{0}', github.run_id) || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 'epic-20738-terminal' || github.event_name == 'pull_request' && github.ref || github.sha"), "read-only telemetry at the same head must bypass execution workflow serialization; other modes retain the exact prior key");
+  assert.match(topConcurrency, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \}\}/);
+  assert.doesNotMatch(topConcurrency, /format\('windows-candle-moss-telemetry-/, "workflow key must differ from its own telemetry job key");
   const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison:\n"));
   assert.match(job, /github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry'/);
   assert.match(job, /group: \$\{\{ inputs.moss_image_comparison_mode == 'telemetry' && format\('windows-candle-moss-telemetry-\{0\}', github.run_id\) \|\| 'windows-candle-gpu-real-weights' \}\}/);

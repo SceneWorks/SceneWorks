@@ -1,8 +1,10 @@
 """Controlled CPU fixtures only: none of these files are campaign evidence."""
 from copy import deepcopy
+import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import struct
 import sys
@@ -46,6 +48,71 @@ def test_matrix_exact_coverage_and_separate_calibration():
     assert all(c['width']==first['width'] and c['height']==first['height'] for c in calibration)
     assert all(c['phase']=='scored' for c in scored)
     assert {c['config_id'] for c in scored}==set(ev.CONFIG_IDS)
+
+
+def test_model_prompt_forms_preserve_source_corpus_and_only_six_by_three_selected_inputs_change():
+    m=ev.template();source=deepcopy(m['corpus']);source.pop('prompt_representation_provenance')
+    narratives={c['id'] for c in source['cases'] if 'prompt_narrative_raw' in c}
+    assert narratives=={'json_text-1','json_text-2','json_objects-1','json_objects-2','layout_revision-1','layout_revision-2'}
+    for c in source['cases']:
+        c.pop('prompt_narrative_raw',None);c.pop('prompt_narrative_enhanced',None)
+    # Canonical corpus at8add90b163, before adding only the reviewed representations.
+    assert ev.digest(source)=='25ccd7df5b7b30a104efcf45511059f4eb35923fd79c9beec85c01bd960e50a3'
+    changed=set();rows=list(ev.cells(m));assert len(rows)==288
+    for row in rows:
+        case=next(c for c in m['corpus']['cases'] if c['id']==row['case_id'])
+        expected_changed=row['config_id'] in ev.CONFIG_IDS[3:] and case['id'] in narratives
+        assert (row['prompt']!=case['prompt_raw'])==expected_changed
+        assert (row['prompt_representation']=='narrative_layout')==expected_changed
+        assert row['prompt_sha256']==hashlib.sha256(row['prompt'].encode()).hexdigest()
+        assert row['source_raw_prompt_sha256']==hashlib.sha256(case['prompt_raw'].encode()).hexdigest()
+        assert (row['width'],row['height'])==(case['width'],case['height'])
+        assert row['seed'] in m['corpus']['seeds']
+        if expected_changed:changed.add((row['config_id'],row['case_id'],row['seed']))
+    assert len(changed)==6*3*2
+    for config in m['configs']:
+        config['prompt_mode']='enhanced'
+    for row in ev.cells(m):
+        case=next(c for c in m['corpus']['cases'] if c['id']==row['case_id'])
+        expected=case['prompt_narrative_enhanced'] if row['config_id'] in ev.CONFIG_IDS[3:] and case['id'] in narratives else case['prompt_enhanced']
+        assert row['prompt']==expected and row['prompt_mode']=='enhanced'
+    assert len(list(ev.cells(m,'calibration')))==6
+
+
+def test_frozen_prompt_representation_rejects_altered_bytes_or_hash(unavailable_run):
+    manifest,_,_=unavailable_run
+    for field in ('raw','raw_sha256','source_enhanced_sha256','representation'):
+        changed=deepcopy(manifest)
+        changed['configs'][3]['prompt_contracts']['json_text-1'][field]='altered'
+        with pytest.raises(ValueError,match='prompt representation or hash changed'):
+            ev.validate_manifest(changed)
+
+
+def test_reviewed_narrative_exact_bytes_literal_text_and_geometry_equivalent():
+    reviewed={
+      'json_text-1':'13ad6ddd8cd655adb9c0ce727b522964ba19ac2a814173ec85e7db5d916e95da',
+      'json_text-2':'9537f25e5604fc9d4f39a1f020ad298480b6338935c59749343835a05cd2e924',
+      'json_objects-1':'6cad2a9640e3b9503f7671b29fc9c039fcd0bc861bac23c460c15f8030c42380',
+      'json_objects-2':'12ecc668dfbd16cfbdbd8969684ae86339fca21876b7128ecf96b1b11532a7c5',
+      'layout_revision-1':'0b6e65d68307fe42fde465270d32a89fbafac336c320ece087c870420b1f5089',
+      'layout_revision-2':'fa88e4c05fd8c3c83e3bf8ddc3b03fa98fb25534bdae66740264587a73f7258c'}
+    for c in ev.corpus()['cases']:
+        if c['id'] not in reviewed:continue
+        prompt=c['prompt_narrative_raw']
+        assert hashlib.sha256(prompt.encode()).hexdigest()==reviewed[c['id']]
+        assert 'from the center of the canvas' in prompt and 'increasing downward' in prompt
+        assert c['prompt_narrative_enhanced']==prompt+' Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.'
+        assert re.findall('“([^”]+)”',prompt)==c['expected_text']
+        bounds=re.findall(r'horizontally from (-?\d+) to (-?\d+) and vertically from (-?\d+) to (-?\d+)',prompt)
+        assert len(bounds)==len(c['layout_spec']['items'])==2
+        for raw,item,box in zip(bounds,c['layout_spec']['items'],c['boxes']):
+            x1,x2,y1,y2=map(int,raw);assert [y1,x1,y2,x2]==item['bbox']
+            normalized=box['box'];pixels=[(normalized[0]-.5)*c['width'],(normalized[2]-.5)*c['width'],(normalized[1]-.5)*c['height'],(normalized[3]-.5)*c['height']]
+            assert max(abs(a-b) for a,b in zip((x1,x2,y1,y2),pixels))<=.5
+            if item['label']=='object':assert item['caption'].split('.')[0].lower() in prompt.lower()
+        if c['id']=='json_objects-1':assert 'plain grey background' in prompt
+        if c['id']=='json_objects-2':assert 'no extra objects' in prompt
+        if c['scenario']=='layout_revision':assert 'fresh generation, not an edit of a source image' in prompt
 
 
 def test_layout_uses_author_coordinates_and_has_independent_objective_boxes():

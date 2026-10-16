@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SC-26322 Windows preparation/freeze/calibration transport. Never runs scored cells.
+"""SC-26322 Windows transport with explicit post-calibration scored authorization.
 
 All artifacts persist outside the checkout. Control arrives as JSON in
 MOSS_CONTROL_JSON (not interpolated into a shell). See bootstrap.md.
@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from urllib.parse import unquote, urlparse
 import zipfile
 
 from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle,
@@ -78,9 +79,16 @@ def control(mode, raw, base=BASE):
     required = {'campaign', 'deadline_utc'}
     allowed = required | ({'ownership', 'gpu_uuid'} if mode == 'freeze' else
                           ({'protocol_sha256', 'lease', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization'} if mode == 'scored' else {'protocol_sha256', 'lease'}) if mode in ('calibration', 'scored') else set())
+    if mode=='prepare' and 'reuse' in value:allowed.add('reuse')
     require(set(value) == allowed, f'{mode} control fields must be exactly {sorted(allowed)}')
     require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}', value['campaign']), 'invalid campaign id')
     require(utc() < timestamp(value['deadline_utc']) <= utc() + dt.timedelta(hours=6), 'deadline must be in next six hours')
+    if mode=='prepare' and 'reuse' in value:
+        reuse=value['reuse']
+        require(set(reuse)=={'campaign','prepared_sha256','job','job_receipt_sha256'},'reuse requires exact source campaign/receipt/job bindings')
+        require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',reuse['campaign']) and reuse['campaign']!=value['campaign'],'reuse must name a different owned sibling campaign')
+        require(re.fullmatch(r'[0-9]+-[0-9]+',reuse['job']),'exact completed source job/attempt required')
+        require(all(re.fullmatch(r'[0-9a-f]{64}',reuse[k]) for k in ('prepared_sha256','job_receipt_sha256')),'exact source receipt digests required')
     root = base / value['campaign']
     # Refuse reparse points (including Windows directory junctions) before writes.
     physical(root)
@@ -256,7 +264,12 @@ def lock_wheels(root):
         manifest = read(root / 'wheels.json')
         require(manifest['primary'] == list(PACKAGES) and {item['sha256'] for item in manifest['files']} == expected, 'retained wheel closure is from another dependency resolution')
         require(manifest['requirements_sha256'] == digest(lock), 'wheel lock drift')
+        names = {unquote(urlparse(item['url']).path.rsplit('/', 1)[-1]): item['sha256'] for item in resolution['packages']}
+        require(len(manifest['files']) == len(names), 'retained wheel count drift')
+        require({item['name']:item['sha256'] for item in manifest['files']} == names, 'retained wheel filenames differ from reviewed URLs')
         for item in manifest['files']:
+            require(re.fullmatch(r'[A-Za-z0-9_.+!-]+\.whl',item['name']) is not None, 'wheel basename required')
+            physical(wheels / item['name'])
             require(digest(wheels / item['name']) == item['sha256'], 'wheel content drift')
         return
     wheels.mkdir(exist_ok=True)
@@ -285,15 +298,131 @@ def python(root):
     return root / 'venv' / 'Scripts' / 'python.exe'
 
 
+def seed_file(source,destination,sha256,*,link=True):
+    """Seed only immutable verified OWN inputs; never link new mutable refs or venvs."""
+    source,destination=Path(source),Path(destination)
+    physical(source);physical(destination)
+    require(source.is_file() and digest(source)==sha256,'reuse source bytes changed')
+    destination.parent.mkdir(parents=True,exist_ok=True)
+    if destination.exists():
+        require(link or not os.path.samefile(source,destination),'mutable source binary must be copied independently')
+        require(digest(destination)==sha256,'retained reuse destination bytes changed')
+        method='retained'
+    else:
+        temporary=destination.with_name(destination.name+'.seed-partial')
+        require(not temporary.exists() and not temporary.is_symlink(),'partial reuse seed requires explicit reconciliation')
+        try:
+            if not link:raise OSError('mutable source requires independent copy')
+            os.link(source,temporary);method='hardlink'
+        except OSError:
+            require(shutil.disk_usage(destination.parent).free >= source.stat().st_size+48*1024**3, 'insufficient space for verified seed copy plus48GiB headroom')
+            shutil.copyfile(source,temporary);method='copy'
+        require(digest(temporary)==sha256,'reuse seed byte mismatch')
+        temporary.replace(destination)
+    return dict(source=str(source.resolve()),destination=str(destination.resolve()),sha256=sha256,bytes=destination.stat().st_size,method=method)
+
+
+def verify_native_source(native_source):
+    require(run(['git','rev-parse','HEAD'],cwd=native_source).strip()==SOURCE,'native source mismatch')
+    require(not run(['git','status','--porcelain'],cwd=native_source).strip(),'native source checkout has local changes')
+    revisions=re.findall(r'git = "https://github.com/SceneWorks/inference", rev = "([0-9a-f]{40})"',(native_source/'Cargo.toml').read_text())
+    require(revisions and set(revisions)=={INFERENCE},'native inference pin mismatch')
+    locked=re.findall(r'source = "git\+https://github.com/SceneWorks/inference\?rev=([0-9a-f]{40})#([0-9a-f]{40})"',(native_source/'Cargo.lock').read_text())
+    require(locked and set(locked)=={(INFERENCE,INFERENCE)},'native locked inference mismatch')
+
+
+def native_env(root,offline=False):
+    return dict(os.environ,CARGO_HOME=str(root/'cargo-home'),CARGO_TARGET_DIR=str(root/'target'),
+        CARGO_NET_OFFLINE='true' if offline else 'false',CUDA_COMPUTE_CAP='120',RUSTC_WRAPPER='',
+        CARGO_BUILD_JOBS='4',CMAKE_BUILD_PARALLEL_LEVEL='4',MAX_JOBS='4')
+
+
+def native_identity(binary):
+    """Read-only compiler/import evidence; not proof of GPU/model compatibility."""
+    dependencies=run(['dumpbin','/DEPENDENTS',binary],timeout=60)
+    imports=sorted(set(re.findall(r'^\s*([A-Za-z0-9_.-]+\.dll)\s*$',dependencies,re.M|re.I)),key=str.casefold)
+    require(imports,'could not establish native PE dependency names')
+    adjacent={p.name.casefold():p for p in binary.parent.iterdir() if p.is_file() and p.suffix.casefold()=='.dll'}
+    required_adjacent=[str(adjacent[name.casefold()]) for name in imports if name.casefold() in adjacent]
+    resolved=[]
+    for name in imports:
+        system=Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32'/name
+        candidate=system if system.is_file() else Path(found) if (found:=shutil.which(name)) else None
+        item=dict(name=name,candidate_path=str(candidate) if candidate else None,sha256=None,file_version=None,loaded_proof=False)
+        if candidate:
+            physical(candidate)
+            item['sha256']=digest(candidate)
+            item['file_version']=run(['powershell','-NoProfile','-Command','(Get-Item -LiteralPath $env:MOSS_DLL_PATH).VersionInfo.FileVersion'],env=dict(os.environ,MOSS_DLL_PATH=str(candidate)),timeout=30).strip() or None
+        resolved.append(item)
+    return dict(rustc=run(['rustc','-Vv'],timeout=30).strip(),cargo=run(['cargo','-V'],timeout=30).strip(),
+        nvcc=run(['nvcc','--version'],timeout=30).strip(),cuda_path=os.environ.get('CUDA_PATH'),
+        dependency_names=imports,dependency_report_sha256=hashlib.sha256(dependencies.encode()).hexdigest(),
+        required_adjacent_dlls=required_adjacent,adjacent_dll_files=sorted(str(p) for p in adjacent.values()),dependency_candidates=resolved,
+        limitations='PE import candidates are not actual loaded DLL proof. Dynamic model dependencies and CUDA/driver compatibility require execution. --help is not a CPU probe: this source starts the API for unrecognized arguments.')
+
+
+def reuse_inputs(root,value):
+    reuse=value['reuse'];source=root.parent/reuse['campaign']
+    physical(source)
+    receipt=source/('job-'+reuse['job']+'-prepare.json')
+    physical(receipt);physical(source/'prepared.json')
+    require(receipt.is_file() and (source/'prepared.json').is_file(),'completed source receipts missing')
+    require(digest(receipt)==reuse['job_receipt_sha256'],'source job receipt changed')
+    job=read(receipt)
+    require(job['mode']=='prepare' and job['status']=='completed' and job['job']==reuse['job'] and Path(job['root']).resolve()==source.resolve(),'source preparation is not complete in the owned campaign')
+    require(job['sceneworks_source']==SOURCE and job['inference']==INFERENCE and job['accelerator_execution_requested'] is False,'source job identity or scope changed')
+    require(digest(source/'prepared.json')==reuse['prepared_sha256'],'source prepared receipt changed')
+    prep=prepared(source)
+    # Source preparation has ended before any old build/cache path is used.
+    require(Path(prep['binary']).resolve()==(source/'target'/'release'/'sceneworks-rust-api.exe').resolve(),'source binary outside owned build')
+    require((source/'requirements.lock').is_file() and (source/'wheels.json').is_file(),'source locked wheels missing')
+    physical(source/'requirements.lock');physical(source/'wheels.json')
+    lock_wheels(source)  # hash-only retained branch; no re-resolution/download
+    expected=dependency_resolution();require({f['sha256'] for f in read(source/'wheels.json')['files']}=={p['sha256'] for p in expected['packages']},'source dependency closure changed')
+    seeds=[]
+    for file in read(source/'wheels.json')['files']:
+        seeds.append(seed_file(source/'wheels'/file['name'],root/'wheels'/file['name'],file['sha256']))
+    for name in ('requirements.lock','wheels.json'):
+        seeds.append(seed_file(source/name,root/name,digest(source/name)))
+    for key,item in prep['staged'].items():
+        metadata=source/'metadata'/(key+'.json')
+        require(Path(item['metadata']).resolve()==metadata.resolve(),'source metadata outside owned campaign')
+        seeds.append(seed_file(metadata,root/'metadata'/(key+'.json'),item['metadata_sha256']))
+        for file in item['files']:
+            relative=Path(file['path']).relative_to(source)
+            seeds.append(seed_file(Path(file['path']),root/relative,file['sha256']))
+    record=dict(source_campaign=reuse['campaign'],source_root=str(source.resolve()),source_prepared_sha256=reuse['prepared_sha256'],source_job_receipt_sha256=reuse['job_receipt_sha256'],source_job=reuse['job'],seeds=seeds,downloaded_seed_bytes=0)
+    return source,prep,record
+
+
+def reuse_native(root,source,prep,record):
+    native_source=source/'native-source'
+    for path in (native_source,source/'cargo-home',source/'target',Path(prep['binary'])):physical(path)
+    verify_native_source(native_source)
+    env=native_env(source,offline=True)
+    command=['cargo','build','--release','--locked','-p','sceneworks-rust-api','--features','backend-candle','--bin','sceneworks-rust-api']
+    run(command,cwd=native_source,env=env,timeout=10800)
+    binary=Path(prep['binary'])
+    require(digest(binary)==prep['binary_sha256'],'locked old-cache build changed source binary; refuse reuse')
+    identity=native_identity(binary)
+    require(not identity['required_adjacent_dlls'] and not identity['adjacent_dll_files'],'native reuse has unrecorded adjacent DLLs; inspect dependencies or explicitly prepare a fresh locked build')
+    target=root/'target'/'release'/'sceneworks-rust-api.exe'
+    record['native']=dict(command=command,cwd=str(native_source),cargo_home=env['CARGO_HOME'],cargo_target_dir=env['CARGO_TARGET_DIR'],offline=True,source=SOURCE,inference=INFERENCE,binary=seed_file(binary,target,prep['binary_sha256'],link=False),identity=identity,
+        prior_toolchain=prep.get('native_build',{'status':'not captured by original source prepare'}))
+    return target,identity
+
+
 def prepare(root, value):
     require(sys.version_info[:2] == (3, 12), 'preparation requires Python3.12')
     require(not (root / 'prepared.json').exists(), 'already prepared; use freeze or explicitly choose a new campaign')
     root.mkdir(parents=True, exist_ok=True)
+    os.environ['CUDA_VISIBLE_DEVICES']=''
+    reuse=reuse_inputs(root,value) if value.get('reuse') else None
     metadata = {key: model_metadata(root, key)[0] for key in REPOS}
     selected_bytes = sum(item['size'] for key, data in metadata.items() for item in data['siblings'] if selected(key, item['rfilename']))
     # Count the exact six chosen snapshots; additional space covers wheels, source/build and outputs.
-    require(shutil.disk_usage(root).free >= selected_bytes + 48 * 1024**3,
-            f'need {selected_bytes + 48 * 1024**3} free bytes: selected artifacts plus48GiB build/wheel/output headroom')
+    required_bytes=(0 if reuse else selected_bytes)+48*1024**3
+    require(shutil.disk_usage(root).free>=required_bytes,f'need {required_bytes} free bytes after reuse seeding: selected artifacts plus48GiB build/wheel/output headroom')
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
     lock_wheels(root)
     if not python(root).exists():
@@ -314,27 +443,33 @@ def prepare(root, value):
                 require(digest(destination) == digest(source), 'harness changed during preparation; fresh campaign required')
             else:
                 shutil.copyfile(source, destination)
-    native_source = root / 'native-source'
-    if not native_source.exists():
-        run(['git', 'clone', '--filter=blob:none', '--no-checkout', 'https://github.com/SceneWorks/SceneWorks.git', native_source], timeout=600)
-    run(['git', 'fetch', 'origin', SOURCE], cwd=native_source, timeout=600)
-    run(['git', 'checkout', '--detach', SOURCE], cwd=native_source)
-    require(run(['git', 'rev-parse', 'HEAD'], cwd=native_source).strip() == SOURCE, 'native source mismatch')
-    require(not run(['git', 'status', '--porcelain'], cwd=native_source).strip(), 'native source checkout has local changes')
-    revisions = re.findall(r'git = "https://github.com/SceneWorks/inference", rev = "([0-9a-f]{40})"', (native_source / 'Cargo.toml').read_text())
-    require(revisions and set(revisions) == {INFERENCE}, 'native inference pin mismatch')
-    lock_sources = re.findall(r'source = "git\+https://github.com/SceneWorks/inference\?rev=([0-9a-f]{40})#([0-9a-f]{40})"', (native_source / 'Cargo.lock').read_text())
-    require(lock_sources and set(lock_sources) == {(INFERENCE, INFERENCE)}, 'native locked inference mismatch')
-    env = dict(os.environ, CARGO_HOME=str(root / 'cargo-home'), CARGO_TARGET_DIR=str(root / 'target'),
-               CARGO_NET_OFFLINE='false', CUDA_COMPUTE_CAP='120', RUSTC_WRAPPER='',
-               CARGO_BUILD_JOBS='4', CMAKE_BUILD_PARALLEL_LEVEL='4', MAX_JOBS='4')
-    run(['cargo', 'fetch', '--locked'], cwd=native_source, env=env, timeout=1800)
-    run(['cargo', 'build', '--release', '--locked', '-p', 'sceneworks-rust-api', '--features', 'backend-candle', '--bin', 'sceneworks-rust-api'], cwd=native_source, env=env, timeout=10800)
-    binary = root / 'target' / 'release' / 'sceneworks-rust-api.exe'
-    require(binary.is_file(), 'native build produced no binary')
+    if reuse:
+        binary,native_build=reuse_native(root,*reuse)
+        write(root/'reuse.json',reuse[2])
+    else:
+        native_source = root / 'native-source'
+        if not native_source.exists():
+            run(['git', 'clone', '--filter=blob:none', '--no-checkout', 'https://github.com/SceneWorks/SceneWorks.git', native_source], timeout=600)
+        run(['git', 'fetch', 'origin', SOURCE], cwd=native_source, timeout=600)
+        run(['git', 'checkout', '--detach', SOURCE], cwd=native_source)
+        require(run(['git', 'rev-parse', 'HEAD'], cwd=native_source).strip() == SOURCE, 'native source mismatch')
+        require(not run(['git', 'status', '--porcelain'], cwd=native_source).strip(), 'native source checkout has local changes')
+        revisions = re.findall(r'git = "https://github.com/SceneWorks/inference", rev = "([0-9a-f]{40})"', (native_source / 'Cargo.toml').read_text())
+        require(revisions and set(revisions) == {INFERENCE}, 'native inference pin mismatch')
+        lock_sources = re.findall(r'source = "git\+https://github.com/SceneWorks/inference\?rev=([0-9a-f]{40})#([0-9a-f]{40})"', (native_source / 'Cargo.lock').read_text())
+        require(lock_sources and set(lock_sources) == {(INFERENCE, INFERENCE)}, 'native locked inference mismatch')
+        env = dict(os.environ, CARGO_HOME=str(root / 'cargo-home'), CARGO_TARGET_DIR=str(root / 'target'),
+                   CARGO_NET_OFFLINE='false', CUDA_COMPUTE_CAP='120', RUSTC_WRAPPER='',
+                   CARGO_BUILD_JOBS='4', CMAKE_BUILD_PARALLEL_LEVEL='4', MAX_JOBS='4')
+        run(['cargo', 'fetch', '--locked'], cwd=native_source, env=env, timeout=1800)
+        run(['cargo', 'build', '--release', '--locked', '-p', 'sceneworks-rust-api', '--features', 'backend-candle', '--bin', 'sceneworks-rust-api'], cwd=native_source, env=env, timeout=10800)
+        binary = root / 'target' / 'release' / 'sceneworks-rust-api.exe'
+        require(binary.is_file(), 'native build produced no binary')
+        native_build=native_identity(binary)
     write(root / 'prepared.json', dict(staged=staged, runtime=runtime, installed=packages,
          requirements_sha256=digest(root / 'requirements.lock'), binary=str(binary), binary_sha256=digest(binary),
-         sceneworks_source=SOURCE, inference=INFERENCE,
+         sceneworks_source=SOURCE, inference=INFERENCE,native_build=native_build,
+         reuse=(dict(path=str(root/'reuse.json'),sha256=digest(root/'reuse.json'),source_prepared_sha256=reuse[2]['source_prepared_sha256']) if reuse else None),
          harness={p.name: digest(p) for p in harness.iterdir() if p.is_file()}, accelerator_allocation=False))
     print(f'Prepared {root}; next: review artifact/dependency receipts then freeze with ownership/device UUID.', flush=True)
 
@@ -344,6 +479,9 @@ def prepared(root):
     require(value['sceneworks_source'] == SOURCE and value['inference'] == INFERENCE, 'prepared source drift')
     require(digest(value['binary']) == value['binary_sha256'], 'native binary drift')
     require(digest(root / 'requirements.lock') == value['requirements_sha256'], 'dependency lock drift')
+    if value.get('reuse'):
+        receipt=root/'reuse.json';physical(receipt)
+        require(Path(value['reuse']['path']).resolve()==receipt.resolve() and digest(receipt)==value['reuse']['sha256'],'reuse provenance drift')
     verify_staged(root, value['staged'])
     for name, sha in value['harness'].items():
         require(digest(root / 'harness' / name) == sha, 'harness drift')
@@ -379,7 +517,7 @@ def freeze(root, value):
             config['settings'] = dict(binary=prep['binary'], binary_sha256=prep['binary_sha256'],
                 hub_cache=str(root / 'hub'), state_root=str(root / 'native-state'), port=17931 + index - 3,
                 worker_id='sc26322-' + config['id'], device_id=gpu['uuid'], job_timeout_seconds=manifest['ownership']['timeout_seconds'],
-                runtime_versions=dict(sceneworks_source=SOURCE, inference=INFERENCE))
+                runtime_versions=dict(sceneworks_source=SOURCE, inference=INFERENCE,native_build=prep.get('native_build',{'status':'not captured'})))
         config['files'] = evaluation.inventory(config)
     write(root / 'manifest.json', manifest)
     evaluation.freeze(root / 'manifest.json', root / 'protocol.lock.json')

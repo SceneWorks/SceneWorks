@@ -285,7 +285,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a minimal event graphic. Place the exact title “NIGHT MARKET” across the upper region, spanning horizontally from -430 to 430 and vertically from -430 to -256. Place the exact subtitle “SAT 18:00” across the lower region, spanning horizontally from -410 to 410 and vertically from 266 to 389.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a minimal event graphic. Place the exact title “NIGHT MARKET” across the upper region, spanning horizontally from -430 to 430 and vertically from -430 to -256. Place the exact subtitle “SAT 18:00” across the lower region, spanning horizontally from -410 to 410 and vertically from 266 to 389. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "json_text-2",
@@ -361,7 +363,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a minimal technology poster. Place the exact title “OPEN LAB” across the upper region, spanning horizontally from -430 to 430 and vertically from -430 to -256. Place the exact subtitle “BUILD TOGETHER” across the lower region, spanning horizontally from -410 to 410 and vertically from 266 to 389.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a minimal technology poster. Place the exact title “OPEN LAB” across the upper region, spanning horizontally from -430 to 430 and vertically from -430 to -256. Place the exact subtitle “BUILD TOGETHER” across the lower region, spanning horizontally from -410 to 410 and vertically from 266 to 389. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "json_objects-1",
@@ -433,7 +437,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a studio still life on a plain grey background. Place a red cube on the left, spanning horizontally from -645 to -184 and vertically from -256 to 256. Place a blue sphere on the right, spanning horizontally from 184 to 645 and vertically from -256 to 256.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a studio still life on a plain grey background. Place a red cube on the left, spanning horizontally from -645 to -184 and vertically from -256 to 256. Place a blue sphere on the right, spanning horizontally from 184 to 645 and vertically from -256 to 256. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "json_objects-2",
@@ -505,7 +511,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a flat vector scene. Place a yellow sun on the left, spanning horizontally from -645 to -184 and vertically from -256 to 256. Place a green tree on the right, spanning horizontally from 184 to 645 and vertically from -256 to 256. Include no extra objects.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Create a flat vector scene. Place a yellow sun on the left, spanning horizontally from -645 to -184 and vertically from -256 to 256. Place a green tree on the right, spanning horizontally from 184 to 645 and vertically from -256 to 256. Include no extra objects. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "layout_revision-1",
@@ -607,7 +615,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Generate a new music poster from this final revised specification. This is fresh generation, not an edit of a source image. Place the exact title “BLUE HOUR” across the lower region, spanning horizontally from -430 to 430 and vertically from 205 to 389. Place the exact subtitle “LIVE FRIDAY” across the upper region, spanning horizontally from -410 to 410 and vertically from -410 to -287.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Generate a new music poster from this final revised specification. This is fresh generation, not an edit of a source image. Place the exact title “BLUE HOUR” across the lower region, spanning horizontally from -430 to 430 and vertically from 205 to 389. Place the exact subtitle “LIVE FRIDAY” across the upper region, spanning horizontally from -410 to 410 and vertically from -410 to -287. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "layout_revision-2",
@@ -709,7 +719,9 @@
         ],
         "bbox_coord_space": "abs_centralized",
         "bbox_format": "yxyx"
-      }
+      },
+      "prompt_narrative_raw": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Generate a new product announcement from this final revised specification. This is fresh generation, not an edit of a source image. Place the exact title “FORM ONE” across the lower region, spanning horizontally from -430 to 430 and vertically from 205 to 389. Place the exact subtitle “COMING SOON” across the upper region, spanning horizontally from -410 to 410 and vertically from -410 to -287.",
+      "prompt_narrative_enhanced": "Positions are measured in pixels from the center of the canvas, with horizontal coordinates increasing to the right and vertical coordinates increasing downward; coordinate instructions are not visible image text. Generate a new product announcement from this final revised specification. This is fresh generation, not an edit of a source image. Place the exact title “FORM ONE” across the lower region, spanning horizontally from -430 to 430 and vertically from 205 to 389. Place the exact subtitle “COMING SOON” across the upper region, spanning horizontally from -410 to 410 and vertically from -410 to -287. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions."
     },
     {
       "id": "long_detail-1",
@@ -870,5 +882,18 @@
       ],
       "prior_layout_for_context_only": null
     }
-  ]
+  ],
+  "prompt_representation_provenance": {
+    "decision": "MOSS retains author layout JSON; all three incumbents receive reviewed equivalent narrative for exactly six layout cases. Other eighteen source prompts are unchanged. Numeric boxes remain instruction-following targets, not demonstrated incumbent capabilities.",
+    "reviewed_by": "codex reference_discovery; codex comparison_implementation",
+    "moss_schema": "https://github.com/OpenMOSS/MOSS-Image/blob/c1355e6b1986dfe8fba3c0455783a05899212342/USERGUIDE.md#layout-prompts-experimental",
+    "incumbent_guidance": [
+      "https://help.bfl.ai/articles/7592221790-how-do-i-generate-quickly-with-flux-2-klein",
+      "https://github.com/QwenLM/Qwen-Image-2.1/blob/ab96caa944157ca28a4f36b695c3047549f48f98/prompt_rewrite/prompts/system_prompt_t2i.txt",
+      "https://huggingface.co/spaces/Tongyi-MAI/Z-Image-Turbo/blob/768cb50d847cdbba97c89533ae976be69cf5a5b8/pe.py"
+    ],
+    "support_limit": "These sources document narrative/descriptive prompts, not the MOSS summary/items/abs_centralized/yxyx box semantics. No alternate outputs or automatic prompt enhancer are used.",
+    "accepted_proposal_sha256": "05c2b3071cd1d0b4a124bebe119017f6c7e169b8f9bab6493843ad9821e53111",
+    "geometry": "Preserves original integer centered pixel boxes; existing normalized scoring annotation rounding differs at most0.4pixel/edge. Numeric placement remains a target, not proven incumbent capability."
+  }
 }

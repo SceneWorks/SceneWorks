@@ -33,11 +33,19 @@ BF16 and mixed-precision candidate paths have different precision/runtime costs;
 retain those conditions and cannot establish architecture-only or model-intrinsic efficiency; this is screening
 of concrete product options under declared conditions.
 
-Layout prompts use the author's `summary/items`, `abs_centralized`, `yxyx`
-pixel schema, while objective annotations use normalized `xyxy` boxes.
-Revisions regenerate images from final specs; there is no source-image editing
-claim. DMD's training card describes compact scene graphs, a different prompt
-distribution from the official layout schema. Preserve that limitation.
+For the six JSON text/object/revised-layout cases, MOSS uses the author's
+`summary/items`, `abs_centralized`, `yxyx` pixel schema. The three incumbents
+receive the same reviewed narrative representations, retaining every literal
+string, object, integer box, coordinate frame and restriction. Their official
+guidance documents prose; it does not establish interpretation of the MOSS
+schema. Numeric placement remains a target pending measurement. The other
+eighteen source prompt forms are unchanged. Each configuration freezes both
+raw/enhanced representation bytes, their UTF-8 SHA256s and the original source
+prompt SHA256s; each cell records the selected form/hash. `corpus.json` records
+source guidance and the accepted proposal digest. Objective annotations retain
+normalized `xyxy` boxes (integer layout rounding differs by at most0.4pixel).
+Revisions regenerate final specs. DMD's author-linked demo claims the SFT layout
+forms are supported; transfer remains unvalidated until outputs are scored.
 
 ## Preparation and execution
 

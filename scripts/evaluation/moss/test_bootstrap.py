@@ -46,6 +46,152 @@ class BootstrapContracts(unittest.TestCase):
         with self.assertRaises(ValueError):
             b.control('prepare', self.request(command='calc.exe'), self.root)
 
+    def test_reuse_control_binds_owned_sibling_and_completed_job_digests(self):
+        reuse=dict(campaign='sc-26322-reference-v1',prepared_sha256='a'*64,job='123-1',job_receipt_sha256='b'*64)
+        b.control('prepare',self.request(reuse=reuse),self.root)
+        for update in (dict(campaign='../escape'),dict(campaign='sc-26322-contract'),dict(job='latest'),dict(prepared_sha256='HEAD'),dict(path='E:/production')):
+            with self.assertRaises(ValueError):
+                b.control('prepare',self.request(reuse={**reuse,**update}),self.root)
+
+    def test_seed_verified_bytes_copy_only_binary_and_tamper_refusal(self):
+        source=self.root/'immutable';source.write_bytes(b'owned fixture');sha=b.digest(source)
+        target=self.root/'new'/'blob'
+        receipt=b.seed_file(source,target,sha)
+        self.assertEqual(target.read_bytes(),source.read_bytes())
+        self.assertIn(receipt['method'],('hardlink','copy'))
+        binary=self.root/'new'/'binary'
+        self.assertEqual(b.seed_file(source,binary,sha,link=False)['method'],'copy')
+        self.assertNotEqual(binary.stat().st_ino,source.stat().st_ino)
+        binary.write_bytes(b'tampered')
+        with self.assertRaisesRegex(ValueError,'destination bytes'):
+            b.seed_file(source,binary,sha,link=False)
+        with self.assertRaisesRegex(ValueError,'source bytes'):
+            b.seed_file(source,self.root/'other','0'*64)
+
+    def test_seed_copy_reserves_build_and_output_headroom(self):
+        source=self.root/'source';source.write_bytes(b'fixture')
+        with patch.object(b.shutil,'disk_usage',return_value=types.SimpleNamespace(free=48*1024**3)):
+            with self.assertRaisesRegex(ValueError,'plus48GiB headroom'):
+                b.seed_file(source,self.root/'destination',b.digest(source),link=False)
+        self.assertFalse((self.root/'destination').exists())
+
+    def test_reuse_requires_actual_completed_receipt_before_any_seeding(self):
+        source=self.root/'sc-26322-old';source.mkdir();target=self.root/'sc-26322-new';target.mkdir()
+        job=dict(mode='prepare',status='failed',job='123-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,accelerator_execution_requested=False)
+        b.write(source/'prepared.json',{})
+        receipt=source/'job-123-1-prepare.json';b.write(receipt,job)
+        value=dict(reuse=dict(campaign=source.name,job='123-1',prepared_sha256=b.digest(source/'prepared.json'),job_receipt_sha256=b.digest(receipt)))
+        with patch.object(b,'seed_file') as seed:
+            with self.assertRaisesRegex(ValueError,'not complete'):b.reuse_inputs(target,value)
+            seed.assert_not_called()
+        value['reuse']['job_receipt_sha256']='0'*64
+        with self.assertRaisesRegex(ValueError,'receipt changed'):b.reuse_inputs(target,value)
+
+    def test_native_reuse_runs_same_offline_locked_build_then_copies_unchanged_binary(self):
+        source=self.root/'old';native=source/'native-source';native.mkdir(parents=True)
+        binary=source/'target'/'release'/'sceneworks-rust-api.exe';binary.parent.mkdir(parents=True);binary.write_bytes(b'PE fixture')
+        (source/'cargo-home').mkdir();new=self.root/'new';new.mkdir()
+        prep=dict(binary=str(binary),binary_sha256=b.digest(binary));record={}
+        identity=dict(required_adjacent_dlls=[],adjacent_dll_files=[])
+        with patch.object(b,'verify_native_source') as verify,patch.object(b,'native_identity',return_value=identity),patch.object(b,'run') as run:
+            target,_=b.reuse_native(new,source,prep,record)
+            verify.assert_called_once_with(native)
+            self.assertEqual(run.call_args.kwargs['cwd'],native)
+            env=run.call_args.kwargs['env']
+            self.assertEqual(env['CARGO_NET_OFFLINE'],'true')
+            self.assertEqual(env['CARGO_HOME'],str(source/'cargo-home'))
+            self.assertEqual(env['CARGO_TARGET_DIR'],str(source/'target'))
+            self.assertIn('--locked',run.call_args.args[0])
+            self.assertEqual(b.digest(target),prep['binary_sha256'])
+            self.assertEqual(record['native']['binary']['method'],'copy')
+            self.assertNotEqual(target.stat().st_ino,binary.stat().st_ino)
+        with patch.object(b,'verify_native_source'),patch.object(b,'run'),patch.object(b,'native_identity',return_value={**identity,'required_adjacent_dlls':['unreviewed.dll']}):
+            with self.assertRaisesRegex(ValueError,'adjacent DLLs'):b.reuse_native(new,source,prep,{})
+        def changed(*args,**kwargs):binary.write_bytes(b'changed build')
+        with patch.object(b,'verify_native_source'),patch.object(b,'run',side_effect=changed):
+            with self.assertRaisesRegex(ValueError,'changed source binary'):b.reuse_native(new,source,prep,{})
+
+    def test_native_source_pin_and_own_cache_physical_ancestors_required(self):
+        native=self.root/'native';native.mkdir()
+        with patch.object(b,'run',return_value='0'*40):
+            with self.assertRaisesRegex(ValueError,'source mismatch'):b.verify_native_source(native)
+        outside=self.root/'outside';outside.mkdir();source=self.root/'source';source.mkdir()
+        (source/'cargo-home').symlink_to(outside,target_is_directory=True)
+        with patch.object(b,'run') as run:
+            with self.assertRaisesRegex(ValueError,'reparse'):b.reuse_native(self.root/'new',source,dict(binary=str(source/'target'/'x')), {})
+            run.assert_not_called()
+
+    def test_retained_reviewed_torch_local_version_basename_and_path_rejection(self):
+        wheels=self.root/'wheels';wheels.mkdir();name='torch-2.9.1+cu128-cp312-cp312-win_amd64.whl'
+        (wheels/name).write_bytes(b'controlled wheel');sha=b.digest(wheels/name)
+        (self.root/'requirements.lock').write_text('fixture lock')
+        manifest=dict(primary=list(b.PACKAGES),requirements_sha256=b.digest(self.root/'requirements.lock'),files=[dict(name=name,sha256=sha)])
+        b.write(self.root/'wheels.json',manifest)
+        resolution=dict(packages=[dict(url='https://download.pytorch.org/whl/'+name.replace('+','%2B'),sha256=sha)])
+        with patch.object(b,'dependency_resolution',return_value=resolution),patch.object(b,'run') as run:
+            b.lock_wheels(self.root);run.assert_not_called()
+            for unsafe in ('../'+name,'/tmp/'+name,'nested/'+name,'C:\\'+name):
+                manifest['files'][0]['name']=unsafe
+                (self.root/'wheels.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError,'filenames'):b.lock_wheels(self.root)
+
+    def test_reuse_seeds_only_verified_inputs_with_fresh_refs_and_harness(self):
+        source=self.root/'sc-26322-old';source.mkdir();target=self.root/'sc-26322-new';target.mkdir()
+        staged={};payload=b'CPU fixture, no tensor data'
+        for key,(_,revision) in b.REPOS.items():
+            name=('transformer/' if key.startswith('moss_') else 'q4/')+'a.safetensors'
+            siblings=[dict(rfilename=name,size=len(payload),lfs={'sha256':hashlib.sha256(payload).hexdigest()})]
+            if key=='moss_sft':siblings.append(dict(rfilename='pipeline_moss_image.py',size=len(payload),lfs={'sha256':hashlib.sha256(payload).hexdigest()}))
+            b.write(source/'metadata'/(key+'.json'),dict(sha=revision,siblings=siblings))
+            with patch.object(b,'PIPELINE',hashlib.sha256(payload).hexdigest()),patch.object(b.urllib.request,'urlopen',side_effect=lambda *a,**k:io.BytesIO(payload)):staged[key]=b.stage(source,key)
+        wheels=source/'wheels';wheels.mkdir();wheel=wheels/'fixture-1-py3-none-any.whl';wheel.write_bytes(b'wheel fixture')
+        lock=source/'requirements.lock';lock.write_text('fixture==1 --hash=sha256:'+b.digest(wheel))
+        b.write(source/'wheels.json',dict(primary=list(b.PACKAGES),requirements_sha256=b.digest(lock),files=[dict(name=wheel.name,sha256=b.digest(wheel))]))
+        binary=source/'target'/'release'/'sceneworks-rust-api.exe';binary.parent.mkdir(parents=True);binary.write_bytes(b'exe fixture')
+        (source/'harness').mkdir();(source/'harness'/'evaluate.py').write_text('OLD HARNESS, MUST NOT BE REUSED')
+        prep=dict(sceneworks_source=b.SOURCE,inference=b.INFERENCE,binary=str(binary),binary_sha256=b.digest(binary),requirements_sha256=b.digest(lock),staged=staged,harness={'evaluate.py':b.digest(source/'harness'/'evaluate.py')})
+        b.write(source/'prepared.json',prep)
+        b.write(source/'job-123-1-prepare.json',dict(mode='prepare',status='completed',job='123-1',root=str(source),sceneworks_source=b.SOURCE,inference=b.INFERENCE,accelerator_execution_requested=False))
+        value=dict(reuse=dict(campaign=source.name,job='123-1',prepared_sha256=b.digest(source/'prepared.json'),job_receipt_sha256=b.digest(source/'job-123-1-prepare.json')))
+        old_prepared=(source/'prepared.json').read_bytes()
+        resolution=dict(packages=[dict(url='https://example.org/'+wheel.name,sha256=b.digest(wheel))])
+        with patch.object(b,'PIPELINE',hashlib.sha256(payload).hexdigest()),patch.object(b,'dependency_resolution',return_value=resolution),patch.object(b,'fetch_json',side_effect=AssertionError('network forbidden')),patch.object(b.urllib.request,'urlopen',side_effect=AssertionError('network forbidden')),patch.object(b,'run',side_effect=AssertionError('subprocess forbidden')):
+            _,_,record=b.reuse_inputs(target,value)
+            for key in b.REPOS:
+                row=b.stage(target,key)
+                old_ref=Path(staged[key]['snapshot']).parent.parent/'refs'/'main';new_ref=Path(row['snapshot']).parent.parent/'refs'/'main'
+                self.assertEqual(new_ref.read_bytes(),old_ref.read_bytes())
+                self.assertFalse(os.path.samefile(old_ref,new_ref))
+        self.assertFalse((target/'harness').exists())
+        self.assertFalse((target/'venv').exists())
+        self.assertEqual((source/'prepared.json').read_bytes(),old_prepared)
+        self.assertEqual((source/'harness'/'evaluate.py').read_text(),'OLD HARNESS, MUST NOT BE REUSED')
+        self.assertEqual(record['downloaded_seed_bytes'],0)
+        self.assertEqual(len(record['seeds']),1+2+6+7)
+
+    def test_native_identity_records_compiler_and_unknown_dlls_without_executing_binary(self):
+        binary=self.root/'app.exe';binary.write_bytes(b'fixture')
+        outputs={'dumpbin':'  KERNEL32.dll\n  unknown_model.dll\n','rustc':'rustc actual compiler','cargo':'cargo actual version','nvcc':'native CUDA compiler actual version'}
+        def run(args,**kwargs):return outputs[args[0]]
+        with patch.object(b,'run',side_effect=run) as commands,patch.object(b.shutil,'which',return_value=None),patch.dict(os.environ,{'SystemRoot':str(self.root/'no-system'),'CUDA_PATH':'native-cuda-path'}):
+            result=b.native_identity(binary)
+        self.assertEqual(result['rustc'],outputs['rustc'])
+        self.assertEqual(result['nvcc'],outputs['nvcc'])
+        self.assertEqual(result['cuda_path'],'native-cuda-path')
+        self.assertEqual(result['dependency_names'],['KERNEL32.dll','unknown_model.dll'])
+        self.assertTrue(all(c['candidate_path'] is None and c['loaded_proof'] is False for c in result['dependency_candidates']))
+        self.assertTrue(all(str(binary)!=str(c.args[0][0]) for c in commands.call_args_list))
+
+    def test_prepared_receipt_binds_reuse_ledger(self):
+        binary=self.root/'binary';binary.write_bytes(b'fixture');lock=self.root/'requirements.lock';lock.write_text('locked')
+        ledger=self.root/'reuse.json';b.write(ledger,dict(source_prepared_sha256='a'*64))
+        value=dict(sceneworks_source=b.SOURCE,inference=b.INFERENCE,binary=str(binary),binary_sha256=b.digest(binary),requirements_sha256=b.digest(lock),staged={},harness={},reuse=dict(path=str(ledger),sha256=b.digest(ledger)))
+        b.write(self.root/'prepared.json',value)
+        with patch.object(b,'verify_staged'):
+            b.prepared(self.root)
+            ledger.write_text('changed provenance')
+            with self.assertRaisesRegex(ValueError,'reuse provenance drift'):b.prepared(self.root)
+
     def test_expired_and_unbounded_deadlines_rejected(self):
         for deadline in (b.utc() - dt.timedelta(seconds=1), b.utc() + dt.timedelta(hours=7)):
             with self.assertRaises(ValueError):
