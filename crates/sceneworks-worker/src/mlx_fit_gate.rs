@@ -18115,6 +18115,22 @@ mod tests {
                         let decision = corrected
                             .prefix_kv_cache
                             .expect("a priced request records its plan");
+                        if shortfall_of(&shed.context.selection) > 0 {
+                            // (c) the cache is taken exactly when the corrected shed rung + the
+                            // surcharge fits: a seam that also carries the surcharge prices this
+                            // rung at exactly that figure (and never cheapens an earlier rung), so
+                            // its ladder lands on the same rung iff the cached pass does.
+                            let shed_plus_cache = select(committed, None, &|tile| {
+                                transient(tile).map(|bytes| bytes + surcharge)
+                            });
+                            assert_eq!(
+                                decision.mode == gen_core::PrefixKvCacheMode::Cached,
+                                matches!(&shed_plus_cache, MlxRequestAdmission::Admitted(rung)
+                                    if rung.context.selection == shed.context.selection),
+                                "cached iff the corrected shed rung + the cache fits (at \
+                                 {committed})"
+                            );
+                        }
                         match decision.mode {
                             gen_core::PrefixKvCacheMode::Cached => {
                                 assert_eq!(
