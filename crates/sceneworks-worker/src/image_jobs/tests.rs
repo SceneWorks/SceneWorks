@@ -264,15 +264,31 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
     let repo = "black-forest-labs/flux-3-image-klein-base";
     let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
     let stage = |repo: &str, revision: &str| {
-        let cache =
-            sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), repo).unwrap();
-        let snapshot = cache.join("snapshots").join(revision);
+        let library = sceneworks_core::hf_home::model_source_library(root.path());
+        let cache = library.repository_root(repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&cache)
+            .unwrap()
+            .join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         std::fs::write(
             snapshot.join("model.safetensors"),
             b"tiny source fixture, not model weights",
         )
         .unwrap();
+        std::fs::create_dir_all(snapshot.join("text_encoder")).unwrap();
+        for file in [
+            "config.json",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            std::fs::write(snapshot.join(file), b"{}").unwrap();
+        }
+        std::fs::write(snapshot.join("text_encoder/model.safetensors.index.json"), serde_json::to_vec(&json!({"weight_map":{"first":"model-00001-of-00002.safetensors","last":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
         std::fs::create_dir_all(cache.join("refs")).unwrap();
         std::fs::write(cache.join("refs/main"), revision).unwrap();
         snapshot
@@ -303,6 +319,22 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
     assert!(resolve().is_err());
     write_receipt(repo, revision, &expected);
     assert_eq!(resolve().unwrap(), expected.clone());
+    std::fs::remove_file(expected.join("ae.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("ae.safetensors"));
+    std::fs::write(expected.join("ae.safetensors"), b"{}").unwrap();
+    std::fs::remove_file(expected.join("text_encoder/model-00002-of-00002.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("model-00002-of-00002.safetensors"));
+    std::fs::write(
+        expected.join("text_encoder/model-00002-of-00002.safetensors"),
+        b"{}",
+    )
+    .unwrap();
     let wrong_override = root.path().join("models/another-checkpoint");
     std::fs::create_dir_all(&wrong_override).unwrap();
     assert!(resolve_pinned_native_package(

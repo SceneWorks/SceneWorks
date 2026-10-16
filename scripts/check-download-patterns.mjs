@@ -204,25 +204,9 @@ export const KNOWN_ZERO_MATCHES = [];
 //
 // sc-18923 paid both gated-LoRA debts, and sc-18926 paid the last redirect debt. New gated or
 // redirected catalog sources hard-fail unless a new live owner and explicit rationale are added
-// here. The one live entry is the FLUX 3 Image Klein package (sc-26234): the licence it ships under
-// (FLUX Kommunity v1.0) grants the weights per-recipient on acceptance at the source repo, so the
-// catalog entry is deliberately `gated: true` + `credentialHost` — the user accepts the licence and
-// supplies a Hugging Face token under Service credentials, exactly the path `ensure_model_snapshot`
-// takes on the Mac runner (`requires_auth = true`). Re-hosting it ungated is a licence decision the
-// epic (sc-26233) owns, not a debt this waiver hides; the gate reds the moment upstream un-gates
-// the repo or the entry moves, so the decision cannot go stale silently.
-export const KNOWN_REPO_CONDITIONS = [
-  {
-    kind: "evidence-gated",
-    repo: "black-forest-labs/flux-3-image-klein",
-    revision: "8454017f9ebaada30c998fccd9f67a80c7580f68",
-    story: "sc-26234",
-    reason:
-      "FLUX Kommunity License v1.0: the weights are granted per recipient on licence acceptance at the source repo; " +
-      "the catalog entry is gated + credentialHost by design (E5), and an ungated SceneWorks re-host is an " +
-      "epic-level licence decision (sc-26233), not a debt",
-  },
-];
+// here. Whole-repo downloads (files: []) make no selective pattern claim: FLUX 3 keeps its real
+// gated/credential declaration, but needs no pattern-evidence row or orphan selective waiver.
+export const KNOWN_REPO_CONDITIONS = [];
 
 const REPO_CONDITION_KINDS = new Set(["evidence-gated", "evidence-repo-id-mismatch"]);
 

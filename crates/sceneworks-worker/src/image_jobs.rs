@@ -530,6 +530,11 @@ fn resolve_pinned_native_package(
 ) -> WorkerResult<PathBuf> {
     let pinned = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(data_dir, repo, revision, Some(model), None)
         .ok_or_else(|| WorkerError::InvalidPayload(format!("{model} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized credential. Unpinned cache snapshots are not a fallback")))?;
+    crate::flux3_runtime_bundle_check(&pinned, model).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "{model} pinned package is incomplete or invalid: {error}"
+        ))
+    })?;
     if let Some(explicit) = explicit {
         if !explicit
             .canonicalize()

@@ -28,8 +28,9 @@ export function assertModel(model) {
   fact(model.gated === true && model.credentialHost === "huggingface.co" && /^https:\/\/huggingface\.co\/black-forest-labs\/flux-3-image-klein\/blob\/(main|8454017f9ebaada30c998fccd9f67a80c7580f68)\/LICENSE\.md$/.test(model.licenseUrl ?? ""), "frozen upstream FLUX Kommunity license and gated HF credential declaration required; no rehost");
   const downloads = model.downloads;
   fact(downloads?.length === 1 && downloads[0].provider === "huggingface" && downloads[0].repo === MODEL_REPO && downloads[0].revision === MODEL_REVISION, "one exact upstream pinned package required");
-  // Empty files means the whole repository. Otherwise every bundled component is mandatory.
-  fact(Array.isArray(downloads[0].files) && (downloads[0].files.length === 0 || REQUIRED_FILES.every((file) => downloads[0].files.includes(file))), "pinned DiT, AE, bundled text encoder and license files required");
+  // Fetch every file at the pinned authority. Required component/index/SHA validation below
+  // remains independent of this download policy; an allow-list must not under-fetch the package.
+  fact(Array.isArray(downloads[0].files) && downloads[0].files.length === 0, "whole pinned repository download required (files: []), not a selective allow-list");
 }
 export function assertDownload(job) {
   fact(job?.type === "model_download" && job.payload?.modelId === "flux3_klein" && job.payload.repo === MODEL_REPO && job.payload.revision === MODEL_REVISION, "ordinary download job must retain exact model/repository/revision identity");

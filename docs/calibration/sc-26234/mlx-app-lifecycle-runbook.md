@@ -58,8 +58,12 @@ these are safety bounds, not measured runtime estimates.
 Using the ordinary model-library relocation and model-download API, it installs
 (or re-verifies) the catalog's upstream package at revision
 `8454017f9ebaada30c998fccd9f67a80c7580f68` in the persistent task-owned
-`~/sceneworks-flux3-app-weights/hub`. It checks gated/license identity, the exact
-catalog snapshot path, DiT, AE, bundled Qwen3-VL encoder/config/tokenizer/shards,
+`~/sceneworks-flux3-app-weights/hub`. The catalog uses `files: []`: download the
+whole pinned repository, including extra configs, diffusers layout and variants
+(42 files / 43,317,649,602 declared bytes in the authenticated recursive HF tree).
+This disk/download total is not a resident-memory claim or support for additional
+quantization tiers. Runtime component integrity is checked independently: gated/license
+identity, the exact catalog snapshot path, DiT, AE, bundled Qwen3-VL encoder/config/tokenizer/shards,
 and LICENSE/NOTICE, retaining component byte counts and SHA-256 hashes. The
 ordinary downloader receives the runner login only in its environment. No
 provider-local download or fake install/completion/import substitutes for this.

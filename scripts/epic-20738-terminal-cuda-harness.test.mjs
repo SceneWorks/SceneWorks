@@ -208,11 +208,15 @@ test("frozen download profiles reject selected gated authorities, not unrelated 
   const expected = expectedArtifactFilesFromEvidence(checked, evidence);
   const selected = Object.values(checked.artifacts)[0];
   const selectedKey = `${selected.repository}@${selected.revision}`;
-  const flux3Key = "black-forest-labs/flux-3-image-klein@8454017f9ebaada30c998fccd9f67a80c7580f68";
-  assert.ok(evidence.repos.some((row) => row.key === flux3Key && row.gated === "auto"));
+  // An unrelated selective source may legitimately be gated even though this historical
+  // campaign consumes only ungated authorities. FLUX 3 itself is now whole-repo, not a row here.
+  const gatedRepo = "fixture/unrelated-gated-source", gatedRevision = "a".repeat(40);
+  const gatedKey = `${gatedRepo}@${gatedRevision}`;
+  evidence.repos.push({ key: gatedKey, repo: gatedRepo, revision: gatedRevision,
+    resolvedSha: gatedRevision, servedRepo: gatedRepo, gated: "auto", files: ["config.json"] });
   for (const gated of ["auto", "manual"]) {
     const unrelated = structuredClone(evidence);
-    unrelated.repos.find((row) => row.key === flux3Key).gated = gated;
+    unrelated.repos.find((row) => row.key === gatedKey).gated = gated;
     assert.deepEqual(expectedArtifactFilesFromEvidence(checked, unrelated), expected);
     const selectedMutation = structuredClone(evidence);
     selectedMutation.repos.find((row) => row.key === selectedKey).gated = gated;
@@ -221,7 +225,7 @@ test("frozen download profiles reject selected gated authorities, not unrelated 
   }
   for (const gated of [true, null, "unknown"]) {
     const malformed = structuredClone(evidence);
-    malformed.repos.find((row) => row.key === flux3Key).gated = gated;
+    malformed.repos.find((row) => row.key === gatedKey).gated = gated;
     assert.throws(() => expectedArtifactFilesFromEvidence(checked, malformed),
       /not an exact immutable file census/);
   }
@@ -239,13 +243,13 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
   // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), and the
   // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), and the relicensed SANA / SANA-Sprint
-  // mirror revisions (same 144 keys), then sc-26234's authenticated FLUX 3 package census
-  // (145 keys, independently checked against the pinned repository and encoder index). The Illustrious
+  // mirror revisions (same 144 keys). sc-26234's whole-repo FLUX 3 entry creates no selective
+  // evidence row; removing its orphan restores these exact historical evidence bytes. The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "b834e98e079011fb51d615f4a24075bd662354b5599772205f3d1f070e76f7e3");
+    "1c5fe4dbdefd112ea48b5b30a8d7a3af6b34c16b10ec6fe10b429df7bf15f920");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

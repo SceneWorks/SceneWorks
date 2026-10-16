@@ -5874,8 +5874,9 @@
       // autoencoder (`ae.safetensors`) and the Qwen3-VL-4B-Instruct text encoder (`text_encoder/`,
       // byte-identical to Qwen/Qwen3-VL-4B-Instruct @ ebb281ec — the same LFS sha256 of both
       // shards), and the engine reads all three from the package root
-      // (`gen_core::flux3::GenerationResources`): no separate component install. The quantized
-      // `variants/` (fp8r, nvfp4) and the gallery images are NOT fetched (sc-26241 owns tiers).
+      // (`gen_core::flux3::GenerationResources`): no separate component install. Download the WHOLE
+      // pinned repo, including variants, diffusers layout, configs, licenses and gallery assets.
+      // Fetching those files does not advertise unsupported quantized tiers (sc-26241 owns tiers).
       //
       // CONTROL SURFACE (E6) — exactly what the engine honours in S1: prompt, size on a 16-px grid
       // (64..=2048 here; the engine admits up to 4096), count <= 8 (rendered one after another from
@@ -5904,36 +5905,19 @@
       "capabilities": ["text_to_image"],
       "downloads": [
         // The upstream package, pulled directly from Black Forest Labs (GATED under the FLUX
-        // Kommunity License; no SceneWorks re-host). EXACT bytes of the listed files at the pinned
-        // revision: DiT 11,097,404,512 + autoencoder 336,211,292 + the two text-encoder shards
-        // 4,967,229,296 + 3,908,490,048 + the config / tokenizer / licence texts.
+        // Kommunity License; no SceneWorks re-host). Empty files means ALL 42 files at this exact
+        // revision. Authenticated recursive HF tree sums to 43,317,649,602 bytes, including fp8r /
+        // nvfp4 and diffusers copies. This is download/disk accounting, not a resident-memory claim.
         {
           "provider": "huggingface",
           "repo": "black-forest-labs/flux-3-image-klein",
           "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
           "default": true,
-          "files": [
-            "config.json",
-            "manifest.json",
-            "model.safetensors",
-            "ae.safetensors",
-            "LICENSE.md",
-            "NOTICE.md",
-            "text_encoder/config.json",
-            "text_encoder/generation_config.json",
-            "text_encoder/tokenizer.json",
-            "text_encoder/tokenizer_config.json",
-            "text_encoder/chat_template.json",
-            "text_encoder/model.safetensors.index.json",
-            "text_encoder/model-00001-of-00002.safetensors",
-            "text_encoder/model-00002-of-00002.safetensors"
-          ],
-          "estimatedSizeBytes": 20316471770,
-          "footprint": { "diskSizeBytes": 20316471770, "residentMemoryBytes": null, "peakMemoryBytes": null }
+          "files": [],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
         },
         {
-          // sc-26238: OPTIONAL separate VLM. Never required for bypass/plain generation and never
-          // folded into the image model's encoder bytes. Install via the utility entry below.
           "provider": "huggingface",
           "repo": "black-forest-labs/flux-3-image-klein-pup",
           "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
@@ -5985,7 +5969,7 @@
       "ui": {
         "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
-        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~20 GB gated download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
+        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); declared unmeasured resident floor ~32 GB at 1024 square.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",
