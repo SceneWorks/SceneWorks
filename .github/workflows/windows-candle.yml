@@ -160,11 +160,16 @@ on:
   workflow_dispatch:
     inputs:
       moss_image_comparison_mode:
-        description: "SC-26322 isolated reference evaluation transport: telemetry is read-only; calibration remains disabled pending frozen inputs"
+        description: "SC-26322 transport: read-only telemetry, CPU preparation/freeze, or reviewed six-output calibration"
         required: false
         type: choice
-        options: ["off", telemetry, calibration]
+        options: ["off", telemetry, prepare, freeze, calibration]
         default: "off"
+      moss_control_json:
+        description: "SC-26322 strict control JSON; campaign/deadline plus freeze ownership or calibration protocol hash and device UUID lease. No scored mode."
+        required: false
+        type: string
+        default: "{}"
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -1793,7 +1798,7 @@ jobs:
   # SC-26322: explicit read-only discovery transport on the existing registered workflow.
   # Shared listener identity never proves device ownership; telemetry is reviewed before a lease.
   moss-image-comparison:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'telemetry' || inputs.moss_image_comparison_mode == 'calibration') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry' }}
     concurrency:
       group: ${{ inputs.moss_image_comparison_mode == 'telemetry' && format('windows-candle-moss-telemetry-{0}', github.run_id) || 'windows-candle-gpu-real-weights' }}
       cancel-in-progress: false
@@ -1835,10 +1840,96 @@ jobs:
           # Metadata only: command lines and environment values can contain credentials.
           @(Get-Process Runner.Worker,python,python3,sceneworks-rust-api -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WorkingSet64,StartTime) | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'processes.json')
           Write-Host "Read-only telemetry saved: $out"
+      - name: Capture read-only process identity metadata
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          # Names, PIDs and creation times only, to resolve WDDM permission-hidden GPU owners.
+          @(Get-CimInstance Win32_Process | Select-Object ProcessId,Name,@{Name='CreatedUtc';Expression={if ($_.CreationDate) {$_.CreationDate.ToUniversalTime().ToString('o')} else {$null}}}) | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'process-identities.json')
       - name: Upload MOSS telemetry
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: moss-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/moss-telemetry-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
+
+  # Preparation never allocates CUDA. Calibration alone may execute the frozen six cells.
+  # Uses this registered workflow path at the story ref; a new workflow is not dispatchable yet.
+  moss-image-comparison-execution:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'prepare' || inputs.moss_image_comparison_mode == 'freeze' || inputs.moss_image_comparison_mode == 'calibration') }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 360
+    env:
+      MOSS_CONTROL_JSON: ${{ inputs.moss_control_json }}
+      MOSS_MODE: ${{ inputs.moss_image_comparison_mode }}
+      CUDA_COMPUTE_CAP: "120"
+      RUSTC_WRAPPER: ""
+    steps:
+      - name: Refuse mixed MOSS execution flags before checkout
+        shell: powershell
+        env:
+          PROVISION: ${{ inputs.provision_snapshot }}
+          FIVE_RUNG: ${{ inputs.run_five_rung_reference }}
+          LTX: ${{ inputs.run_ltx_eros_acceptance }}
+          EPIC_20738: ${{ inputs.run_epic_20738_terminal_cuda }}
+          YUE2: ${{ inputs.run_yue2_terminal_cuda }}
+          YUE2_ACCEPTANCE: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8: ${{ inputs.yue2_fp8_profile_only }}
+          IRIS: ${{ inputs.run_iris_worker_smoke }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($flag in @('PROVISION', 'FIVE_RUNG', 'LTX', 'EPIC_20738', 'YUE2', 'YUE2_ACCEPTANCE', 'YUE2_FP8', 'IRIS')) {
+            if ([Environment]::GetEnvironmentVariable($flag) -eq 'true') { throw "MOSS comparison cannot combine with $flag" }
+          }
+          if ($env:MOSS_MODE -notin @('prepare', 'freeze', 'calibration')) { throw 'Invalid MOSS execution mode' }
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - uses: ./.github/actions/prepare-rust-runner
+        if: ${{ inputs.moss_image_comparison_mode == 'prepare' }}
+      - name: Prepare pinned MOSS and native reference inputs without GPU allocation
+        if: ${{ inputs.moss_image_comparison_mode == 'prepare' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          python scripts\evaluation\moss\bootstrap.py prepare
+      - name: Freeze reviewed preparation and ownership
+        if: ${{ inputs.moss_image_comparison_mode == 'freeze' }}
+        shell: powershell
+        run: |
+          python scripts/evaluation/moss/bootstrap.py freeze
+          if ($LASTEXITCODE -ne 0) { throw 'MOSS freeze failed; inspect persistent receipts' }
+      - name: Execute at most six calibration outputs under device UUID lease
+        if: ${{ inputs.moss_image_comparison_mode == 'calibration' }}
+        shell: powershell
+        run: |
+          python scripts/evaluation/moss/bootstrap.py calibration
+          if ($LASTEXITCODE -ne 0) { throw 'MOSS calibration failed; no automatic retry' }
+      - name: Upload persistent MOSS control receipts
+        if: ${{ always() && env.MOSS_RECEIPTS != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: moss-control-${{ github.run_id }}-${{ github.run_attempt }}
+          # Exact persistent files remain on the host. Upload metadata only, never weights/wheels.
+          path: |
+            ${{ env.MOSS_RECEIPTS }}/job-*.json
+            ${{ env.MOSS_RECEIPTS }}/job-*.log
+            ${{ env.MOSS_RECEIPTS }}/prepared.json
+            ${{ env.MOSS_RECEIPTS }}/requirements.lock
+            ${{ env.MOSS_RECEIPTS }}/wheels.json
+            ${{ env.MOSS_RECEIPTS }}/protocol.lock.json
+            ${{ env.MOSS_RECEIPTS }}/calibration-estimate.json
+            ${{ env.MOSS_RECEIPTS }}/calibration/background-device.json
+            ${{ env.MOSS_RECEIPTS }}/calibration/receipts/*
+            ${{ env.MOSS_RECEIPTS }}/calibration/transport-*.log
           if-no-files-found: warn

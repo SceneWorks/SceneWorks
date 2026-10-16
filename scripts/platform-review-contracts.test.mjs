@@ -5368,13 +5368,13 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
 });
 
 
-test("MOSS telemetry is isolated, read-only, and calibration fails closed", async () => {
+test("MOSS telemetry remains isolated and read-only alongside explicit bounded execution", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const { names, defaults } = dispatchInputs(workflow);
   assert.ok(names.includes("moss_image_comparison_mode"));
   assert.equal(defaults.moss_image_comparison_mode, "off");
   const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison:\n"));
-  assert.match(job, /github.event_name == 'workflow_dispatch' && \(inputs.moss_image_comparison_mode == 'telemetry' \|\| inputs.moss_image_comparison_mode == 'calibration'\)/);
+  assert.match(job, /github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry'/);
   assert.match(job, /group: \$\{\{ inputs.moss_image_comparison_mode == 'telemetry' && format\('windows-candle-moss-telemetry-\{0\}', github.run_id\) \|\| 'windows-candle-gpu-real-weights' \}\}/);
   assert.doesNotMatch(job, /^ {6}group: windows-candle-gpu-real-weights$/m, "read-only telemetry must not evict a pending real-weight job");
   assert.match(job, /cancel-in-progress: false/);
@@ -5393,4 +5393,27 @@ test("MOSS telemetry is isolated, read-only, and calibration fails closed", asyn
   assert.match(job, /Get-Volume/);
   assert.doesNotMatch(job, /actions\/checkout|setup-python|prepare-rust-runner|cargo |pip |snapshot_download|Stop-Process|taskkill|CommandLine|nvidia-smi[^\n]*--gpu-reset/);
   assert.match(job, /if: always\(\)/);
+});
+
+
+test("MOSS execution uses existing registered path, fixed script, and pre-checkout exclusion", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison-execution:\n"));
+  assert.match(job, /group: windows-candle-gpu-real-weights/);
+  assert.match(job, /cancel-in-progress: false/);
+  assert.match(job, /MOSS_CONTROL_JSON: \$\{\{ inputs\.moss_control_json \}\}/);
+  for (const mode of ["prepare", "freeze", "calibration"]) {
+    assert.ok(job.includes(`python scripts/evaluation/moss/bootstrap.py ${mode}`) || job.includes(`python scripts\\evaluation\\moss\\bootstrap.py ${mode}`));
+  }
+  const refusal = job.indexOf("Refuse mixed MOSS execution flags before checkout");
+  assert.ok(refusal >= 0 && refusal < job.indexOf("uses: actions/checkout"));
+  for (const input of ["provision_snapshot", "run_five_rung_reference", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"]) {
+    assert.ok(job.includes(`inputs.${input}`), `reject mixed ${input}`);
+  }
+  for (const step of job.split(/^ {6}- /m).slice(1)) {
+    const body = step.split(/run: \|/)[1];
+    if (body) assert.doesNotMatch(body, /\$\{\{\s*inputs\./, "dispatch input must travel only through environment");
+  }
+  assert.doesNotMatch(job, /--phase scored|bootstrap.py scored/);
+  assert.match(job, /persist-credentials: false/);
 });
