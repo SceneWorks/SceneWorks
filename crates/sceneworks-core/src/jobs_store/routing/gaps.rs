@@ -993,6 +993,17 @@ pub(crate) fn classify_candle_image_gap(payload: &Map<String, Value>) -> Unsuppo
             ),
             Some("epic 5480"),
         ),
+        CandleImageRefusal::Flux3Surface => UnsupportedReason::new(
+            Some(model),
+            "distilled FLUX 3 request outside plain text-to-image",
+            &format!(
+                "FLUX 3 Image Klein serves plain text_to_image on both native backends. \
+                 References, boxes, controls, adapters, quantized checkpoints and hires fix are \
+                 not supported by this distilled route. Re-submit without those carriers and \
+                 select the pinned distilled checkpoint, rather than the base checkpoint.{also}"
+            ),
+            Some("sc-26235"),
+        ),
         CandleImageRefusal::IrisSurface => UnsupportedReason::new(
             Some(model),
             "Iris-3B request outside plain text-to-image",

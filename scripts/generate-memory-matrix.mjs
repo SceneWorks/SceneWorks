@@ -142,7 +142,7 @@ export const MODEL_STORIES = {
   // FLUX 3 Image Klein (epic 26233): the distilled text-to-image route ported to MLX by sc-26234
   // (S1). The Candle/CUDA key lands WITH that backend (sc-26235, S2), never ahead of it — the
   // entry is MLX-only until then, so a Candle cell cannot be attributed to a Metal-scoped story.
-  flux3_klein: { mlx: 26234 },
+  flux3_klein: { mlx: 26234, candle: 26235 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
