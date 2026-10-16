@@ -4,12 +4,23 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import struct
+import zlib
 import unittest
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('review', Path(__file__).with_name('review.py'))
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+
+
+def fixture_png(seed=0, metadata=False):
+    def chunk(kind, body):
+        return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body) & 0xffffffff)
+    chunks = [chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))]
+    if metadata: chunks.append(chunk(b'iTXt', b'workflow\x00\x00\x00\x00\x00generator identity private'))
+    chunks += [chunk(b'IDAT', zlib.compress(bytes([0, seed % 256, 17, 33]))), chunk(b'IEND', b'')]
+    return b'\x89PNG\r\n\x1a\n' + b''.join(chunks)
 
 
 class ReviewPackets(unittest.TestCase):
@@ -19,14 +30,14 @@ class ReviewPackets(unittest.TestCase):
         self.public = self.root / 'public'; self.private = self.root / 'private'; self.evidence = self.root / 'evidence'; self.evidence.mkdir()
         self.manifest = r.ev.template(); self.lock = self.root / 'lock.json'
         r.save_new(self.lock, r.ev.seal(self.manifest))
-        specs = {role: dict(identity=dict(reviewer=role + '-fresh-context', reviewer_kind='machine_assisted', model='synthetic-test-model', version='fixture-v1', tool_revision='test-only'), additional_instructions='CPU fixtures only.') for role in r.ROLES}
+        specs = {role: dict(identity=dict(reviewer=role + '-fresh-context', reviewer_kind='machine_assisted', model='synthetic-test-model', version='fixture-v1', tool_revision='test-only'), task_contexts=[role + '-fixture-task'], additional_instructions='CPU fixtures only.') for role in r.ROLES}
         spec_path = self.root / 'evaluators.json'; r.save_new(spec_path, specs)
         self.protocol_path = self.root / 'protocol.json'
         r.freeze(self.lock, self.run, spec_path, self.protocol_path)
         self.proto = r.load(self.protocol_path); self.protocol = r.ev.unseal(self.proto)
         self.results = {}
         for cell in r.ev.cells(self.manifest):
-            out = self.run / (cell['id'] + '.png'); out.write_bytes(b'not-real-media: CPU fixture ' + cell['id'].encode())
+            out = self.run / (cell['id'] + '.png'); out.write_bytes(fixture_png(seed=sum(cell['id'].encode()), metadata=True))
             self.results[cell['id']] = dict(cell=cell, status='ok', output=dict(path=out.name, sha256=r.ev.file_hash(out)), elapsed_seconds=1,
                 metrics=dict(cold_seconds=None, warm_seconds=1, latency_condition='resident_model', peak_gpu_bytes=10, gpu_memory_method='CPU fixture only', peak_host_rss_bytes=20, download_bytes=0))
         r.export_verified(self.proto, self.manifest, self.results, self.run, self.public, self.private)
@@ -75,6 +86,7 @@ class ReviewPackets(unittest.TestCase):
         annotations, judgments = self.translate()
         key = next(k for k in annotations if annotations[k]['text'])
         self.assertEqual(annotations[key]['text'][0], 'independently observed text')
+        self.assertNotEqual(annotations[key]['output_sha256'], annotations[key]['review_image_sha256'])
         self.assertEqual(judgments[0]['rubric'], {k: 3 for k in r.AXES})
         pairs, secret = r.legacy_pairs(self.proto, self.mapping, self.jp, self.results, self.public)
         path = self.private / 'legacy-pairs.json'; r.save_new(path, pairs); r.save_new(str(path) + '.private.json', secret)
@@ -146,6 +158,63 @@ class ReviewPackets(unittest.TestCase):
         r.merge_records('image_id', [one, two], self.root / 'merged.json')
         with self.assertRaisesRegex(ValueError, 'duplicate checkpoint'): r.merge_records('image_id', [one, one], self.root / 'duplicate.json')
 
+    def test_actual_contexts_cannot_cross_roles_or_change_frozen_identity(self):
+        raw, ratings, alignments = copy.deepcopy((self.raw, self.ratings, self.alignment))
+        for record in raw + ratings + alignments:
+            record['task_context'] = 'same-prompt-aware-context'
+        with self.assertRaisesRegex(ValueError, 'context reused across'): self.translate(raw=raw, ratings=ratings, alignments=alignments)
+        raw = copy.deepcopy(self.raw); raw[0]['task_context'] = 'undeclared-annotation-context'
+        with self.assertRaisesRegex(ValueError, 'not bound to frozen evaluator'): self.translate(raw=raw)
+        specs = r.load(self.root / 'evaluators.json')
+        specs['judge']['task_contexts'] = specs['annotator']['task_contexts']
+        altered = self.root / 'overlap-evaluators.json'; r.save_new(altered, specs)
+        with self.assertRaisesRegex(ValueError, 'context reused across'): r.freeze(self.lock, self.root / 'fresh-overlap-run', altered, self.root / 'overlap-freeze.json')
+
+    def test_orphan_scored_output_prevents_late_freeze(self):
+        outputs = self.run / 'outputs'; outputs.mkdir()
+        (outputs / 'scored.moss_base.english_signage-1.173.png').write_bytes(b'orphan CPU fixture')
+        with self.assertRaisesRegex(ValueError, 'orphan outputs'): r.freeze(self.lock, self.run, self.root / 'evaluators.json', self.root / 'orphan-freeze.json')
+
+    def test_checked_empty_run_cannot_authorize_another_completed_run(self):
+        other_run = self.root / 'empty-other-run'
+        protocol_path = self.root / 'wrong-run-protocol.json'
+        r.freeze(self.lock, other_run, self.root / 'evaluators.json', protocol_path)
+        wrong = r.load(protocol_path)
+        with self.assertRaisesRegex(ValueError, 'checked run root differs'): r.export_verified(wrong, self.manifest, self.results, self.run, self.root / 'wrong-public', self.root / 'wrong-private')
+        with self.assertRaisesRegex(ValueError, 'checked run root differs'): r.export(self.lock, self.run, protocol_path, self.root / 'wrong-public', self.root / 'wrong-private')
+        with self.assertRaisesRegex(ValueError, 'checked run root differs'): r.validate_translate(self.lock, self.run, protocol_path, self.public, self.private, self.root / 'not-opened', self.root / 'not-opened', self.root / 'not-opened', self.evidence, self.root / 'wrong-out')
+        bad = r.ev.unseal(self.mapping); bad['run_root'] = str(other_run)
+        with self.assertRaisesRegex(ValueError, 'mapping run root differs'): self.translate(mapping_doc=r.ev.seal(bad))
+
+    def test_pixel_decoder_agrees_across_all_png_row_filters(self):
+        def chunk(kind, body):
+            return struct.pack('>I', len(body)) + kind + body + struct.pack('>I', zlib.crc32(kind + body) & 0xffffffff)
+        header = struct.pack('>IIBBBBB', 2, 2, 8, 2, 0, 0, 0)
+        # Hand-calculated residual rows for the SAME two RGB rows under PNG filters 0-4.
+        rows = [
+            ([10,20,30,50,60,70], [15,25,35,60,70,80]),
+            ([10,20,30,40,40,40], [15,25,35,45,45,45]),
+            ([10,20,30,50,60,70], [5,5,5,10,10,10]),
+            ([10,20,30,45,50,55], [10,15,20,28,28,28]),
+            ([10,20,30,40,40,40], [5,5,5,10,10,10]),
+        ]
+        hashes = []
+        for kind, (first, second) in enumerate(rows):
+            data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', header) + chunk(b'IDAT', zlib.compress(bytes([kind] + first + [kind] + second))) + chunk(b'IEND', b'')
+            hashes.append(r.png_pixels(data)[1])
+        self.assertEqual(len(set(hashes)), 1)
+
+    def test_metadata_derivative_preserves_pixels_and_private_originals(self):
+        for image, binding in list(r.ev.unseal(self.mapping)['images'].items())[:3]:
+            original = self.run / self.results[binding['cell_id']]['output']['path']
+            reviewed = self.public / 'images' / (image + '.png')
+            self.assertIn(b'generator identity private', original.read_bytes())
+            self.assertNotIn(b'generator identity private', reviewed.read_bytes())
+            self.assertEqual(r.png_pixels(original.read_bytes())[1], r.png_pixels(reviewed.read_bytes())[1])
+            self.assertEqual(r.ev.file_hash(original), binding['original_sha256'])
+            self.assertEqual(r.ev.file_hash(reviewed), binding['review_sha256'])
+            self.assertEqual(binding['removed_chunks'], ['iTXt'])
+
     def test_changed_pixels_and_public_packet_fail(self):
         image = r.ev.unseal(self.ap)['images'][0]
         (self.public / image['path']).write_bytes(b'changed')
@@ -153,7 +222,7 @@ class ReviewPackets(unittest.TestCase):
 
     def test_freeze_after_scored_and_overlapping_public_private_refused(self):
         receipts = self.run / 'receipts'; receipts.mkdir(); (receipts / 'scored.anything.json').write_text('{}')
-        with self.assertRaisesRegex(ValueError, 'precede scored'): r.freeze(self.lock, self.run, self.root / 'evaluators.json', self.root / 'late.json')
+        with self.assertRaisesRegex(ValueError, 'precede all scored'): r.freeze(self.lock, self.run, self.root / 'evaluators.json', self.root / 'late.json')
         with self.assertRaisesRegex(ValueError, 'disjoint'): r.export_verified(self.proto, self.manifest, self.results, self.run, self.root / 'new', self.root / 'new' / 'private')
 
 

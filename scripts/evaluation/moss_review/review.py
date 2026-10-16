@@ -9,8 +9,9 @@ import json
 import math
 from pathlib import Path
 import secrets
-import shutil
 import statistics
+import struct
+import zlib
 
 HARNESS = Path(__file__).resolve().parents[1] / 'moss' / 'evaluate.py'
 _spec = importlib.util.spec_from_file_location('frozen_moss_evaluate', HARNESS)
@@ -57,19 +58,20 @@ def evaluator(spec):
 def freeze(lock_path, run, specs_path, out):
     lock = load(lock_path)
     manifest = ev.unseal(lock)
-    check(not list((Path(run) / 'receipts').glob('scored.*')), 'review protocol must precede scored receipts')
+    check(not list(Path(run).rglob('scored.*')), 'review protocol must precede all scored artifacts, including orphan outputs')
     specs = load(specs_path)
     check(set(specs) == set(ROLES), 'declare annotator, judge and custodian before scoring')
     roles = {}
     for role in ROLES:
-        check(set(specs[role]) == {'identity', 'additional_instructions'}, 'invalid evaluator specification')
+        check(set(specs[role]) == {'identity', 'task_contexts', 'additional_instructions'}, 'invalid evaluator specification')
         identity = evaluator(specs[role]['identity'])
         instructions = BASE_INSTRUCTIONS[role] + '\n' + specs[role]['additional_instructions']
-        roles[role] = dict(identity=identity, instructions=instructions,
+        roles[role] = dict(identity=identity, task_contexts=specs[role]['task_contexts'], instructions=instructions,
                            instructions_sha256=hashlib.sha256(instructions.encode()).hexdigest())
     # Independence is a declared separate reviewer/context, not a cryptographic identity claim.
     check(len({roles[r]['identity']['reviewer'] for r in ROLES}) == 3, 'independent role/context identities required')
-    protocol = dict(schema_version=1, lock_sha256=lock['sha256'], created_at=datetime.now(timezone.utc).isoformat(),
+    disjoint_contexts({role: roles[role]['task_contexts'] for role in ROLES}, require_nonempty=True)
+    protocol = dict(schema_version=1, lock_sha256=lock['sha256'], run_root=str(Path(run).resolve()), created_at=datetime.now(timezone.utc).isoformat(),
                     before_scored_receipts=True, rubric=manifest['visual_rubric'], thresholds=manifest['thresholds'], scoring_protocol=manifest['scoring_protocol'], roles=roles,
                     review_tool_sha256=ev.file_hash(__file__), harness_sha256=ev.file_hash(HARNESS),
                     legacy_rubric_meaning='componentwise minimum of A/B absolute scores; unavailable pairs omit rubric',
@@ -77,8 +79,61 @@ def freeze(lock_path, run, specs_path, out):
     save_new(out, ev.seal(protocol))
 
 
+def png_pixels(data):
+    """Decode the harness-supported 8-bit RGB/RGBA PNG rows, without color transforms."""
+    check(data.startswith(b'\x89PNG\r\n\x1a\n'), 'review image must be PNG')
+    offset = 8; chunks = []; compressed = []; header = None
+    while offset + 12 <= len(data):
+        size = int.from_bytes(data[offset:offset + 4], 'big'); end = offset + size + 12
+        check(end <= len(data), 'truncated PNG')
+        kind = data[offset + 4:offset + 8]; body = data[offset + 8:end - 4]
+        check(zlib.crc32(kind + body) & 0xffffffff == int.from_bytes(data[end - 4:end], 'big'), 'PNG CRC mismatch')
+        chunks.append((kind, data[offset:end]))
+        if kind == b'IHDR': header = body
+        if kind == b'IDAT': compressed.append(body)
+        offset = end
+        if kind == b'IEND': break
+    check(offset == len(data) and header is not None, 'invalid PNG end/header')
+    width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', header)
+    check(0 < width <= 8192 and 0 < height <= 8192 and depth == 8 and color in (2, 6) and compression == filtering == interlace == 0, 'unsupported review pixel encoding')
+    channels = 3 if color == 2 else 4; stride = width * channels
+    decoder = zlib.decompressobj(); raw = decoder.decompress(b''.join(compressed), height * (stride + 1) + 1)
+    check(decoder.eof and not decoder.unused_data and len(raw) == height * (stride + 1), 'invalid PNG pixels')
+    previous = bytearray(stride); digest = hashlib.sha256(header)
+    for y in range(height):
+        start = y * (stride + 1); kind = raw[start]; row = bytearray(raw[start + 1:start + 1 + stride])
+        check(kind in range(5), 'invalid PNG filter')
+        if kind:
+            for x in range(stride):
+                left = row[x - channels] if x >= channels else 0
+                up = previous[x]; upper_left = previous[x - channels] if x >= channels else 0
+                if kind == 1: predictor = left
+                elif kind == 2: predictor = up
+                elif kind == 3: predictor = (left + up) // 2
+                else:
+                    p = left + up - upper_left
+                    dl, du, dc = abs(p - left), abs(p - up), abs(p - upper_left)
+                    predictor = left if dl <= du and dl <= dc else up if du <= dc else upper_left
+                row[x] = (row[x] + predictor) & 255
+        digest.update(row); previous = row
+    return chunks, digest.hexdigest()
+
+
+def review_png(source, target):
+    original = source.read_bytes(); chunks, pixel_hash = png_pixels(original)
+    # Keep original run output immutable. Remove only ancillary identity-bearing metadata.
+    removed = [kind.decode('ascii') for kind, _ in chunks if kind in (b'tEXt', b'zTXt', b'iTXt', b'eXIf')]
+    reviewed = b'\x89PNG\r\n\x1a\n' + b''.join(chunk for kind, chunk in chunks if kind not in (b'tEXt', b'zTXt', b'iTXt', b'eXIf'))
+    _, after = png_pixels(reviewed)
+    check(after == pixel_hash, 'review derivative changed decoded pixels')
+    target.write_bytes(reviewed)
+    return dict(original_sha256=hashlib.sha256(original).hexdigest(), review_sha256=hashlib.sha256(reviewed).hexdigest(), decoded_pixel_sha256=pixel_hash,
+                pixel_method='SHA256(IHDR bytes + decoded 8bit RGB/RGBA row bytes), no color/orientation transform', removed_chunks=removed)
+
+
 def export_verified(protocol_doc, manifest, results, run, public, private):
     protocol = ev.unseal(protocol_doc)
+    check(protocol['run_root'] == str(Path(run).resolve()), 'checked run root differs from review freeze')
     public, private = Path(public).resolve(), Path(private).resolve()
     check(not private.is_relative_to(public) and not public.is_relative_to(private), 'private and public directories must be disjoint')
     check(not public.exists() and not private.exists(), 'fresh packet directories required')
@@ -93,20 +148,11 @@ def export_verified(protocol_doc, manifest, results, run, public, private):
         src = ev.artifact(Path(run), row['output'])
         target = public / 'images' / (opaque + '.png')
         target.parent.mkdir(exist_ok=True)
-        # Keep exact output bytes; refuse metadata that could identify a generator.
-        # ev.receipts already validates PNG structure/pixels before this export boundary.
-        data = src.read_bytes()
-        if data.startswith(b'\x89PNG\r\n\x1a\n'):
-            offset = 8
-            while offset + 12 <= len(data):
-                size = int.from_bytes(data[offset:offset + 4], 'big')
-                check(data[offset + 4:offset + 8] not in (b'tEXt', b'zTXt', b'iTXt', b'eXIf'), 'identifying PNG metadata requires a reviewed pixel-preserving export; refusing leakage')
-                offset += size + 12
-        shutil.copyfile(src, target)
-        image_map[opaque] = dict(cell_id=cell_id, output_sha256=row['output']['sha256'])
+        pixel_proof = review_png(src, target)
+        image_map[opaque] = dict(cell_id=cell_id, output_sha256=row['output']['sha256'], **pixel_proof)
         image_for_cell[cell_id] = opaque
         image_tasks.append(dict(image_id=opaque, path='images/' + target.name,
-                                sha256=row['output']['sha256'], width=row['cell']['width'], height=row['cell']['height']))
+                                sha256=pixel_proof['review_sha256'], width=row['cell']['width'], height=row['cell']['height']))
     pairs = []; pair_map = {}
     for case in manifest['corpus']['cases']:
         for seed in manifest['corpus']['seeds']:
@@ -125,7 +171,7 @@ def export_verified(protocol_doc, manifest, results, run, public, private):
     judge_packet = ev.seal(dict(protocol_sha256=protocol_doc['sha256'], role=protocol['roles']['judge'], rubric=protocol['rubric'], images=image_tasks, pairs=pairs))
     save_new(public / 'annotations.packet.json', annotator_packet)
     save_new(public / 'judgments.packet.json', judge_packet)
-    mapping = dict(protocol_sha256=protocol_doc['sha256'], images=image_map, pairs=pair_map,
+    mapping = dict(protocol_sha256=protocol_doc['sha256'], run_root=protocol['run_root'], images=image_map, pairs=pair_map,
                    annotations_packet_sha256=annotator_packet['sha256'], judgments_packet_sha256=judge_packet['sha256'])
     save_new(private / 'mapping.json', ev.seal(mapping))
     # A fresh vision context receives only one role's bounded batch and its opaque image files.
@@ -142,7 +188,19 @@ def export_verified(protocol_doc, manifest, results, run, public, private):
     return mapping
 
 
+def disjoint_contexts(by_role, require_nonempty=False):
+    contexts = {}
+    for role, values in by_role.items():
+        check(isinstance(values, list) and all(isinstance(v, str) and v.strip() for v in values), 'exact actual task/context identities required')
+        contexts[role] = set(values)
+        check(not require_nonempty or (values and len(values) == len(contexts[role])), 'freeze distinct nonempty actual context lists')
+    for index, role in enumerate(ROLES):
+        for other in ROLES[index + 1:]:
+            check(not contexts[role].intersection(contexts[other]), 'actual context reused across independent review roles')
+
+
 def verify_protocol(protocol, manifest):
+    disjoint_contexts({role: protocol['roles'][role]['task_contexts'] for role in ROLES}, require_nonempty=True)
     check(protocol['rubric'] == manifest['visual_rubric'] and protocol['thresholds'] == manifest['thresholds'], 'frozen rubric/thresholds mismatch')
     for role in ROLES:
         item = protocol['roles'][role]
@@ -153,6 +211,7 @@ def verify_protocol(protocol, manifest):
 def export(lock, run, protocol, public, private):
     doc = load(protocol); proto = ev.unseal(doc)
     check(load(lock)['sha256'] == proto['lock_sha256'], 'protocol/lock mismatch')
+    check(proto['run_root'] == str(Path(run).resolve()), 'checked run root differs from review freeze')
     check(proto['harness_sha256'] == ev.file_hash(HARNESS) and proto['review_tool_sha256'] == ev.file_hash(__file__), 'frozen review code changed')
     manifest, results = ev.receipts(lock, run)
     verify_protocol(proto, manifest)
@@ -165,7 +224,7 @@ def provenance(record, role, protocol, evidence):
     check(record['uncertainty'] in ('low', 'medium', 'high') and isinstance(record['notes'], str) and record['notes'].strip(), 'observation evidence/uncertainty required')
     # Transcript paths stay private and must be regular confined files, not arbitrary external paths.
     check(ev.artifact(Path(evidence), record['transcript']).stat().st_size > 0, 'empty evaluator transcript')
-    check(isinstance(record.get('task_context'), str) and record['task_context'].strip(), 'exact evaluator task/context identity required')
+    check(record.get('task_context') in protocol['roles'][role]['task_contexts'], 'actual context not bound to frozen evaluator identity')
 
 
 def observations(rows, packet, protocol, evidence):
@@ -193,6 +252,8 @@ def score_arm(value):
 def translate_verified(manifest, results, protocol_doc, mapping_doc, annotation_packet, judge_packet, raw, ratings, alignments, public, evidence):
     protocol, mapping = ev.unseal(protocol_doc), ev.unseal(mapping_doc)
     verify_protocol(protocol, manifest)
+    check(mapping['run_root'] == protocol['run_root'], 'mapping run root differs from review freeze')
+    disjoint_contexts({'annotator': [r.get('task_context') for r in raw], 'judge': [r.get('task_context') for r in ratings], 'custodian': [r.get('task_context') for r in alignments]})
     annotation_tasks, judge_tasks = ev.unseal(annotation_packet), ev.unseal(judge_packet)
     check(mapping['protocol_sha256'] == annotation_tasks['protocol_sha256'] == judge_tasks['protocol_sha256'] == protocol_doc['sha256'], 'review freeze mismatch')
     check(mapping['annotations_packet_sha256'] == annotation_packet['sha256'] and mapping['judgments_packet_sha256'] == judge_packet['sha256'], 'public packet changed')
@@ -207,7 +268,11 @@ def translate_verified(manifest, results, protocol_doc, mapping_doc, annotation_
         provenance(a, 'custodian', protocol, evidence)
         image_id = a['image_id']; row = obs[image_id]; cell_id = mapping['images'][image_id]['cell_id']
         receipt = results[cell_id]; case = case_by_id[receipt['cell']['case_id']]
-        check(row['output_sha256'] == receipt['output']['sha256'], 'observations no longer bind result')
+        image_binding = mapping['images'][image_id]
+        check(row['output_sha256'] == image_binding['review_sha256'] and image_binding['original_sha256'] == receipt['output']['sha256'], 'observations no longer bind result')
+        original = ev.artifact(Path(protocol['run_root']), receipt['output'])
+        reviewed = ev.artifact(Path(public), next(dict(path=i['path'], sha256=i['sha256']) for i in annotation_tasks['images'] if i['image_id'] == image_id))
+        check(png_pixels(original.read_bytes())[1] == png_pixels(reviewed.read_bytes())[1] == image_binding['decoded_pixel_sha256'], 'review/original decoded pixel proof mismatch')
         indices = a['text_indices']; box_ids = a['box_ids']
         check(len(indices) == len(case['expected_text']), 'expected-line alignment count')
         used = [i for i in indices if i is not None]
@@ -216,7 +281,7 @@ def translate_verified(manifest, results, protocol_doc, mapping_doc, annotation_
         boxes = {b['observation_id']: b['box'] for b in row['boxes']}
         used_boxes = [i for i in box_ids.values() if i is not None]
         check(all(i in boxes for i in used_boxes) and len(used_boxes) == len(set(used_boxes)), 'invalid or reused box observation')
-        annotations[cell_id] = dict(output_sha256=row['output_sha256'], annotator=row['evaluator']['reviewer'], method='independent pixel-first observations, private custodian alignment', tool_revision=row['evaluator']['tool_revision'],
+        annotations[cell_id] = dict(output_sha256=receipt['output']['sha256'], review_image_sha256=row['output_sha256'], annotator=row['evaluator']['reviewer'], method='independent pixel-first observations, private custodian alignment', tool_revision=row['evaluator']['tool_revision'],
             text=['' if i is None else row['text'][i] for i in indices], boxes={k: None if i is None else boxes[i] for k, i in box_ids.items()},
             observation_sha256=ev.digest(row), alignment_sha256=ev.digest(a))
     tasks = {p['pair_id']: p for p in judge_tasks['pairs']}
@@ -233,7 +298,7 @@ def translate_verified(manifest, results, protocol_doc, mapping_doc, annotation_
         for arm in ('A', 'B'):
             cell_id = private_pair[arm]; actual = results[cell_id]
             image_id = pair['arms'][arm]['image_id']
-            expected_hash = mapping['images'][image_id]['output_sha256'] if image_id else None
+            expected_hash = mapping['images'][image_id]['review_sha256'] if image_id else None
             check(rating['viewed_image_hashes'][arm] == expected_hash, 'judgment must bind each viewed image hash')
             check((image_id is None) == (actual['status'] != 'ok'), 'arm availability changed')
             if image_id is not None: check(mapping['images'][image_id]['cell_id'] == cell_id, 'arm mapping changed')
@@ -258,7 +323,9 @@ def legacy_pairs(protocol_doc, mapping_doc, judge_packet, results, public):
         entry = dict(id=pair['pair_id'], prompt=pair['prompt'], requirements=pair['requirements'], arms=[])
         for arm in ('A', 'B'):
             i = pair['arms'][arm]['image_id']; task = image_tasks[i] if i else None
-            entry['arms'].append(dict(arm=arm, image=str((Path(public) / task['path']).resolve()) if task else None, sha256=task['sha256'] if task else None, status='available' if task else 'unavailable'))
+            cell_id = mapping['pairs'][pair['pair_id']][arm]
+            original = results[cell_id].get('output') if task else None
+            entry['arms'].append(dict(arm=arm, image=str((Path(mapping['run_root']) / original['path']).resolve()) if original else None, sha256=original['sha256'] if original else None, status='available' if task else 'unavailable'))
         rows.append(entry)
     return ev.seal(dict(lock_sha256=ev.unseal(protocol_doc)['lock_sha256'], pairs=rows)), ev.seal(dict(lock_sha256=ev.unseal(protocol_doc)['lock_sha256'], mapping=[dict(id=k, **v) for k, v in mapping['pairs'].items()]))
 
@@ -300,6 +367,8 @@ def summaries(manifest, results, mapping_doc, ratings, annotations):
 
 
 def validate_translate(lock, run, protocol_path, public, private, raw_path, ratings_path, alignment_path, evidence, out):
+    protocol = load(protocol_path)
+    check(ev.unseal(protocol)['run_root'] == str(Path(run).resolve()), 'checked run root differs from review freeze')
     manifest, results = ev.receipts(lock, run)
     protocol = load(protocol_path); check(ev.unseal(protocol)['lock_sha256'] == load(lock)['sha256'], 'lock identity mismatch')
     check(ev.unseal(protocol)['review_tool_sha256'] == ev.file_hash(__file__) and ev.unseal(protocol)['harness_sha256'] == ev.file_hash(HARNESS), 'frozen review code changed')

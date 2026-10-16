@@ -22,20 +22,26 @@ python scripts/evaluation/moss_review/review.py freeze /ABS/lock.json /ABS/run /
     "version": "EXACT evaluator version or immutable release",
     "tool_revision": "EXACT visual tool/client revision"
   },
+  "task_contexts": ["EXACT actual pre-created role context identity"],
   "additional_instructions": "Reviewed role-specific instructions, including ambiguity handling."
 }
 ```
 
 Use actual values, never placeholders in a real freeze. For a human, use
 `reviewer_kind: human`, `model: not-applicable`, and record the actual review
-procedure version. The three reviewer/context identities must differ. Fresh
-vision-agent contexts can share the same model but must receive only their own
+procedure version. The three reviewer identities must differ. Pre-create the actual isolated review
+contexts before freezing and declare their exact IDs in each role's `task_contexts`
+list; these lists must be pairwise disjoint. Records from undeclared contexts or
+contexts reused across roles are rejected. The same role context may process
+several bounded batches. Fresh vision contexts can share a model but receive only their own
 role's packet. Never expose mappings, run receipts, source model names, expected
 answers, or custodian output to annotators. Do not put credentials in specifications.
 
 The protocol incorporates fixed pixel-first/judging/custodian instructions, exact
 instruction hashes, frozen rubric anchors/thresholds, lock hash and tool/harness
-hashes. It refuses existing scored receipts. It is not a signature, a trusted
+hashes. It binds the exact canonical run root and refuses any existing `scored.*`
+artifact anywhere beneath it, including orphan outputs without receipts. Export
+and translation cannot switch to another run root. It is not a signature, a trusted
 clock, or proof of independence; retain custody and pre-run freeze evidence.
 Changing review code/instructions/identities requires an explicit new freeze;
 never relabel completed ratings under new provenance.
@@ -47,10 +53,16 @@ python scripts/evaluation/moss_review/review.py export /ABS/lock.json /ABS/run /
 ```
 
 The fresh public/private directories must be disjoint. Only the custodian gets
-`private-review/mapping.json`. Public PNGs use random opaque names, preserve exact
-output bytes, and are hash-checked. Export refuses PNG text/EXIF metadata rather
-than potentially leaking generator identities. A metadata refusal needs a reviewed
-pixel-preserving export; it is never silently ignored.
+`private-review/mapping.json`. Public PNGs use random opaque names and are hash-checked. Registered native
+outputs can embed the workflow (including model/prompt) through
+`image_jobs.rs::write_image_asset` / `write_workflow_chunk`. Export therefore
+creates review-only derivatives removing PNG tEXt/zTXt/iTXt/eXIf chunks. Original
+run files remain untouched/private. The private mapping records original and review
+byte hashes, removed chunk kinds, and matching independently decoded RGB/RGBA pixel
+hashes (IHDR plus unfiltered row bytes, without color/orientation transforms).
+Translation rechecks pixel equality against originals. Unsupported PNG encodings
+or unequal pixels fail closed; retain originals and diagnose before another export.
+There is no silent metadata drop or claim that derivative bytes equal original bytes.
 
 Two independently sealed public packets are emitted:
 
@@ -71,7 +83,7 @@ model API calls. Machine-assisted records never become claimed human ratings.
 
 Each annotation record contains:
 
-- `image_id`, `output_sha256` from its opaque task;
+- `image_id`, `output_sha256` (the review derivative hash from its opaque task);
 - `text`: **all** independently observed strings, including unexpected text;
 - `boxes`: a list of `{observation_id, label, box}`, with literal observed labels
   and normalized `[x1,y1,x2,y2]` coordinates. Label illegible text honestly;
@@ -88,7 +100,8 @@ All annotation, judgment and custodian-alignment records require:
 
 - `evaluator`: the exact frozen identity object for that role;
 - `instructions_sha256`: its frozen instruction hash;
-- `task_context`: actual evaluator task/context identity;
+- `task_context`: actual evaluator task/context identity from that role's frozen
+  `task_contexts` list; all three roles' actual context sets must remain disjoint;
 - `transcript: {path, sha256}`: a nonempty regular file relative to the private
   evidence root, retaining actual visual tool/task messages;
 - `notes` and `uncertainty` (`low`, `medium`, `high`).
@@ -97,7 +110,10 @@ After independent annotations are complete, the custodian creates one alignment
 record per opaque image: `image_id`, `text_indices` (one observed-text index or
 null per expected line), `box_ids` (expected element ID to observed box ID or null),
 and custodian provenance. Multiple expected elements cannot reuse one observation.
-Null produces empty/missing legacy observations, never requested text. Original
+Null produces empty/missing legacy observations, never requested text. Translated legacy annotations bind the original output hash and retain
+`review_image_sha256` alongside it. Legacy pair files are private and reference
+original run outputs, so the existing harness validates its original byte hashes;
+never give these unblinded legacy files to judges. Original
 raw records retain extra words and unmatched objects even though the legacy text
 score does not measure them. No-other-text judgments must consider those extras.
 
