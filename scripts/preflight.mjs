@@ -122,10 +122,21 @@ export function nodeTestsReading(files, root = repoRoot) {
 // locally, any inference clone that contains it works. Without it three tests fail on a stale path.
 const STARVECTOR_CONTRACT_REV = "0b084cbf46b5b4f4f561305ef116268b57eecf7f";
 
-function git(...args) {
-  const res = spawnSync("git", args, { cwd: repoRoot, encoding: "utf8" });
-  if (res.status !== 0) throw new Error(`git ${args.join(" ")}: ${res.stderr.trim()}`);
+export function gitOutput(args, { cwd = repoRoot, run = spawnSync } = {}) {
+  // Preserved local build/evidence trees can exceed spawnSync's 1 MiB default listing buffer.
+  // Bound memory without silently dropping paths from preflight's changed-file selection.
+  const res = run("git", args, { cwd, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (res.error || res.status !== 0) {
+    const detail = res.error
+      ? `${res.error.code ?? "spawn error"}: ${res.error.message}`
+      : `exit ${res.status}${res.signal ? ` (${res.signal})` : ""}`;
+    throw new Error(`git ${args.join(" ")}: ${detail}${res.stderr?.trim() ? `: ${res.stderr.trim()}` : ""}`);
+  }
   return res.stdout.trim();
+}
+
+function git(...args) {
+  return gitOutput(args);
 }
 
 function stampPath(sha) {

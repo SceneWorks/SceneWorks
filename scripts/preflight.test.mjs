@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,8 +7,33 @@ import test from "node:test";
 
 import { SOURCE_PATHS as MATRIX_SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 import { PACKAGED_SOURCES_PATH } from "./extract-memory-anchors.mjs";
-import { nodeTestsReading, selectSteps } from "./preflight.mjs";
+import { gitOutput, nodeTestsReading, selectSteps } from "./preflight.mjs";
 import { SOURCE_PATHS as STALE_LANE_SOURCE_PATHS } from "./stale-lane-report.mjs";
+
+test("preflight preserves a Git listing larger than the default child-process buffer", () => {
+  const line = `${"generated-evidence/".repeat(8)}entry.txt\n`;
+  const count = 16000;
+  const listing = gitOutput(["ls-files", "--others", "--exclude-standard"], {
+    run(command, args, options) {
+      assert.equal(command, "git");
+      assert.deepEqual(args, ["ls-files", "--others", "--exclude-standard"]);
+      return spawnSync(process.execPath, ["-e",
+        `process.stdout.write(${JSON.stringify(line)}.repeat(${count}))`], options);
+    },
+  });
+  assert.ok(Buffer.byteLength(listing) > 1024 * 1024);
+  assert.equal(listing, line.repeat(count).trim());
+});
+
+test("preflight reports spawn errors and nonzero Git exits instead of empty stderr", () => {
+  assert.throws(() => gitOutput(["ls-files"], {
+    run: () => ({ status: null, signal: "SIGTERM", stderr: "",
+      error: Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS" }) }),
+  }), /git ls-files: ENOBUFS: spawnSync git ENOBUFS/);
+  assert.throws(() => gitOutput(["merge-base"], {
+    run: () => ({ status: 128, stderr: "fatal: invalid reference\n" }),
+  }), /git merge-base: exit 128: fatal: invalid reference/);
+});
 
 const FULL_SUITE = "scaffold node suite (npm run check)";
 const testFilesRun = (steps) =>
