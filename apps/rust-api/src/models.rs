@@ -7088,33 +7088,74 @@ mod download_receipt_tests {
 
     #[test]
     fn flux3_klein_install_state_gates_on_its_bundled_text_encoder_without_a_component() {
+        for (id, repo, revision, size) in [
+            (
+                "flux3_klein",
+                "black-forest-labs/flux-3-image-klein",
+                "8454017f9ebaada30c998fccd9f67a80c7580f68",
+                43_317_649_602,
+            ),
+            (
+                "flux3_klein_base",
+                "black-forest-labs/flux-3-image-klein-base",
+                "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+                43_229_093_855,
+            ),
+        ] {
+            assert_flux3_runtime_install(id, repo, revision, size);
+        }
+    }
+
+    fn assert_flux3_runtime_install(
+        id: &str,
+        expected_repo: &str,
+        expected_revision: &str,
+        expected_size: u64,
+    ) {
         let _env = isolate_hf_cache();
         let temp = tempfile::Builder::new()
             .prefix(&format!("flux3-install-{}-", std::process::id()))
             .tempdir()
             .unwrap();
         let data_dir = temp.path();
-        let model = builtin_models_entry("flux3_klein");
+        let model = builtin_models_entry(id);
         let downloads = model["downloads"].as_array().unwrap();
         assert_eq!(
-            downloads.len(),
+            downloads
+                .iter()
+                .filter(|download| !download
+                    .get("coRequisite")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false))
+                .count(),
             1,
-            "one whole-repo download, no component split"
+            "one primary whole-repo bundle"
         );
-        assert!(model_co_requisite_downloads(&model).is_empty());
+        assert!(
+            model_co_requisite_downloads(&model)
+                .iter()
+                .all(
+                    |download| download.get("componentId").and_then(Value::as_str)
+                        == Some("prompt_upsampler")
+                        && download.get("required").and_then(Value::as_str) == Some("soft")
+                ),
+            "AE/TE stay bundled; optional PUP is separate"
+        );
         assert!(model.get("component").is_none());
         let revision = downloads[0]["revision"].as_str().unwrap();
-        assert_eq!(revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
+        assert_eq!(revision, expected_revision);
         let context = model_download_context(&model).unwrap().unwrap();
-        assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein");
+        assert_eq!(context.repo, expected_repo);
         assert!(
             context.files.is_empty(),
             "download ALL files, not this runtime fixture's minimum set"
         );
-        assert_eq!(context.fallback_size_bytes, Some(43_317_649_602));
-        let snapshot = huggingface_repo_cache_path(data_dir, &context.repo)
+        assert_eq!(context.fallback_size_bytes, Some(expected_size));
+        let library = sceneworks_core::hf_home::model_source_library(data_dir);
+        let repo_root = library.repository_root(&context.repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&repo_root)
             .unwrap()
-            .join("snapshots")
             .join(revision);
         std::fs::create_dir_all(&snapshot).unwrap();
         for file in ["config.json", "model.safetensors", "ae.safetensors"] {
@@ -7170,8 +7211,9 @@ mod download_receipt_tests {
         );
         assert!(installed.missing_required_files.is_empty());
         assert_eq!(
-            installed.installed_path.as_deref(),
-            Some(snapshot.to_string_lossy().as_ref())
+            std::fs::canonicalize(installed.installed_path.as_deref().unwrap()).unwrap(),
+            std::fs::canonicalize(&snapshot).unwrap(),
+            "the typed resolver must identify this exact selected snapshot (including Windows extended-path form)"
         );
         assert!(model_variant_states(&model, data_dir)[0].installed);
         let managed = data_dir
@@ -7185,17 +7227,61 @@ mod download_receipt_tests {
 
     #[test]
     fn flux3_klein_runtime_bundle_requires_the_selected_revision_and_managed_receipt_identity() {
+        for (id, repo, revision) in [
+            (
+                "flux3_klein",
+                "black-forest-labs/flux-3-image-klein",
+                "8454017f9ebaada30c998fccd9f67a80c7580f68",
+            ),
+            (
+                "flux3_klein_base",
+                "black-forest-labs/flux-3-image-klein-base",
+                "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+            ),
+        ] {
+            assert_flux3_runtime_authority(id, repo, revision);
+        }
+    }
+
+    #[test]
+    fn flux3_runtime_bundles_do_not_alias_between_base_and_distilled() {
+        let _env = isolate_hf_cache();
+        let temp = tempfile::tempdir().unwrap();
+        let library = sceneworks_core::hf_home::model_source_library(temp.path());
+        let distilled = builtin_models_entry("flux3_klein");
+        let base = builtin_models_entry("flux3_klein_base");
+        let distilled_context = model_download_context(&distilled).unwrap().unwrap();
+        let base_context = model_download_context(&base).unwrap().unwrap();
+        let root = library.repository_root(&distilled_context.repo).unwrap();
+        seed_flux3_runtime_bundle(
+            &library
+                .snapshots_root_from_repository_root(&root)
+                .unwrap()
+                .join("8454017f9ebaada30c998fccd9f67a80c7580f68"),
+        );
+        assert!(install_state_for(Some(distilled_context), &distilled, temp.path()).installed);
+        assert!(!install_state_for(Some(base_context), &base, temp.path()).installed);
+    }
+
+    fn assert_flux3_runtime_authority(id: &str, expected_repo: &str, expected_revision: &str) {
         let _env = isolate_hf_cache();
         let temp = tempfile::Builder::new()
             .prefix(&format!("flux3-authority-{}-", std::process::id()))
             .tempdir()
             .unwrap();
-        let model = builtin_models_entry("flux3_klein");
+        let model = builtin_models_entry(id);
         let context = model_download_context(&model).unwrap().unwrap();
-        let revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+        let revision = expected_revision;
         let old_revision = "b".repeat(40);
-        let repo_root = huggingface_repo_cache_path(temp.path(), &context.repo).unwrap();
-        seed_flux3_runtime_bundle(&repo_root.join("snapshots").join(&old_revision));
+        assert_eq!(context.repo, expected_repo);
+        let library = sceneworks_core::hf_home::model_source_library(temp.path());
+        let repo_root = library.repository_root(&context.repo).unwrap();
+        seed_flux3_runtime_bundle(
+            &library
+                .snapshots_root_from_repository_root(&repo_root)
+                .unwrap()
+                .join(&old_revision),
+        );
         assert!(
             !install_state_for(Some(context.clone()), &model, temp.path()).installed,
             "an unrelated complete snapshot cannot certify the selected revision"
@@ -7206,7 +7292,7 @@ mod download_receipt_tests {
             .join(safe_download_dir(&context.repo));
         seed_flux3_runtime_bundle(&managed);
         let receipt_path = managed.join(".sceneworks-download-complete.json");
-        let receipt = json!({"repo":context.repo,"modelId":"flux3_klein","snapshotRevision":revision,"resolvedFiles":["model.safetensors"]});
+        let receipt = json!({"repo":context.repo,"modelId":id,"snapshotRevision":revision,"resolvedFiles":["model.safetensors"]});
         for (key, wrong) in [
             ("snapshotRevision", old_revision.as_str()),
             ("repo", "unrelated/repository"),
@@ -7318,8 +7404,14 @@ mod download_receipt_tests {
             );
             retain_downloads_for_os(&mut model, os);
             assert!(
-                model_co_requisite_downloads(&model).is_empty(),
-                "{os}: still no component"
+                model_co_requisite_downloads(&model)
+                    .iter()
+                    .all(
+                        |download| download.get("componentId").and_then(Value::as_str)
+                            == Some("prompt_upsampler")
+                            && download.get("required").and_then(Value::as_str) == Some("soft")
+                    ),
+                "{os}: no split AE/TE; soft PUP is allowed"
             );
             let context = model_download_context(&model).unwrap().unwrap();
             assert_eq!(context.repo, "black-forest-labs/flux-3-image-klein", "{os}");
@@ -7818,6 +7910,10 @@ mod download_receipt_tests {
 // downloadable model checks the HF cache + the SceneWorks-managed dir; a non-download
 // model (a local manifest entry) checks its declared installed path; otherwise it's
 // simply absent.
+fn is_flux3_runtime_model(model_id: &str) -> bool {
+    matches!(model_id, "flux3_klein" | "flux3_klein_base")
+}
+
 fn flux3_selected_revision<'a>(download: Option<&'a Value>, repo: &str) -> Option<&'a str> {
     let download = download?;
     if download.get("repo").and_then(Value::as_str) != Some(repo) {
@@ -7829,6 +7925,21 @@ fn flux3_selected_revision<'a>(download: Option<&'a Value>, repo: &str) -> Optio
         .then_some(revision)
 }
 
+fn flux3_selected_snapshot(
+    data_dir: &FsPath,
+    repo_root: &FsPath,
+    repo: &str,
+    download: Option<&Value>,
+) -> Option<PathBuf> {
+    let revision = flux3_selected_revision(download, repo)?;
+    // Use the same typed source-library boundary as other exact-revision API consumers; do not
+    // synthesize a model root or authorize a repository outside this selected source library.
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .snapshots_root_from_repository_root(repo_root)
+        .ok()
+        .map(|snapshots| snapshots.join(revision))
+}
+
 // Runtime readiness is separate from whole-repository download completion. A readable DiT is
 // not a usable FLUX 3 bundle when its bundled encoder or an indexed shard is absent. Other
 // families retain their existing cache policy; this card selects only its exact repo/revision.
@@ -7838,9 +7949,10 @@ fn model_cache_health_for_download(
     download: Option<&Value>,
     cache_path: Option<&FsPath>,
     files: &[String],
+    data_dir: &FsPath,
 ) -> Option<HuggingFaceCacheHealth> {
     let root = cache_path?;
-    if model_id != "flux3_klein" {
+    if !is_flux3_runtime_model(model_id) {
         return Some(huggingface_cache_health(root, files));
     }
     let Some(revision) = flux3_selected_revision(download, repo) else {
@@ -7848,7 +7960,11 @@ fn model_cache_health_for_download(
             "FLUX 3 requires its selected immutable repository revision".to_owned(),
         ]));
     };
-    let snapshot = root.join("snapshots").join(revision);
+    let Some(snapshot) = flux3_selected_snapshot(data_dir, root, repo, download) else {
+        return Some(HuggingFaceCacheHealth::missing(vec![
+            "FLUX 3 repository is outside its selected source library".to_owned(),
+        ]));
+    };
     if !snapshot.is_dir() {
         return Some(HuggingFaceCacheHealth {
             installed: false,
@@ -7937,6 +8053,7 @@ fn install_state_for(
                     selected_download.as_ref(),
                     cache_path.as_deref(),
                     &download_context.files,
+                    data_dir,
                 );
                 let installed = cache_health.as_ref().is_some_and(|health| health.installed);
                 let incomplete = cache_health
@@ -7985,7 +8102,7 @@ fn install_state_for(
             &download_context.repo,
             model.get("id").and_then(Value::as_str),
         );
-        let managed_installed = if model_id == "flux3_klein" {
+        let managed_installed = if is_flux3_runtime_model(model_id) {
             flux3_managed_bundle_is_current(
                 &managed_path,
                 model_id,
@@ -7999,10 +8116,10 @@ fn install_state_for(
         };
         // Usable native FLUX 3 components do not prove every extra whole-repo file downloaded.
         // Only the actual downloader may publish that completion receipt for this source.
-        if cache_installed && model_id != "flux3_klein" {
+        if cache_installed && !is_flux3_runtime_model(model_id) {
             backfill_current_receipt(&managed_path, model, &download_context, data_dir);
         }
-        let stale_files_present = model_id != "flux3_klein"
+        let stale_files_present = !is_flux3_runtime_model(model_id)
             && !cache_installed
             && receipt_file_sets.iter().any(|receipt| {
                 receipt_files_present(
@@ -8036,11 +8153,15 @@ fn install_state_for(
         // may still use its complete older receipt.
         let usable_stale = stale_files_present && !breaking_update && !tier_dependencies_missing;
         let primary_installed = managed_installed || cache_installed || usable_stale;
-        let installed_path = if model_id == "flux3_klein" {
+        let installed_path = if is_flux3_runtime_model(model_id) {
             if cache_installed || (cache_incomplete && !managed_installed) {
                 cache_path.as_ref().and_then(|root| {
-                    flux3_selected_revision(selected_download.as_ref(), &download_context.repo)
-                        .map(|revision| root.join("snapshots").join(revision))
+                    flux3_selected_snapshot(
+                        data_dir,
+                        root,
+                        &download_context.repo,
+                        selected_download.as_ref(),
+                    )
                 })
             } else if managed_installed {
                 Some(managed_path.clone())
@@ -8517,6 +8638,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 Some(entry),
                 cache_path.as_deref(),
                 &files,
+                data_dir,
             );
             let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
             let mut cache_incomplete = cache_health
@@ -8533,7 +8655,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             // installed after any single tier's download (sc-9909). Require the tier's own files to
             // actually exist under the managed dir, not just the marker.
             let managed_path = data_dir.join("models").join(safe_download_dir(&repo));
-            let managed_installed = if model_id == "flux3_klein" {
+            let managed_installed = if is_flux3_runtime_model(model_id) {
                 flux3_managed_bundle_is_current(&managed_path, model_id, &repo, Some(entry))
             } else {
                 managed_tier_installed(&managed_path, &files)
@@ -8646,11 +8768,10 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 }
             }
 
-            let installed_path = if model_id == "flux3_klein" {
+            let installed_path = if is_flux3_runtime_model(model_id) {
                 if cache_installed || (cache_incomplete && !managed_installed) {
                     cache_path.as_ref().and_then(|root| {
-                        flux3_selected_revision(Some(entry), &repo)
-                            .map(|revision| root.join("snapshots").join(revision))
+                        flux3_selected_snapshot(data_dir, root, &repo, Some(entry))
                     })
                 } else if managed_installed {
                     Some(managed_path.clone())
