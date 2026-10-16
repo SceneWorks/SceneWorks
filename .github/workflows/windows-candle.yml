@@ -1862,7 +1862,9 @@ jobs:
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
-    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    # The warm listener owns the prepared Python/toolchain; the other listener's
+    # setup-python installation can block on an interactive OS prompt.
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2]
     timeout-minutes: 360
     env:
       MOSS_CONTROL_JSON: ${{ inputs.moss_control_json }}

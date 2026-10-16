@@ -5378,6 +5378,7 @@ test("MOSS telemetry remains isolated and read-only alongside explicit bounded e
   assert.match(topConcurrency, /cancel-in-progress: \$\{\{ github.event_name == 'pull_request' \}\}/);
   assert.doesNotMatch(topConcurrency, /format\('windows-candle-moss-telemetry-/, "workflow key must differ from its own telemetry job key");
   const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison:\n"));
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m, "read-only telemetry remains available on either listener");
   assert.match(job, /github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode == 'telemetry'/);
   assert.match(job, /group: \$\{\{ inputs.moss_image_comparison_mode == 'telemetry' && format\('windows-candle-moss-telemetry-\{0\}', github.run_id\) \|\| 'windows-candle-gpu-real-weights' \}\}/);
   assert.doesNotMatch(job, /^ {6}group: windows-candle-gpu-real-weights$/m, "read-only telemetry must not evict a pending real-weight job");
@@ -5403,6 +5404,7 @@ test("MOSS telemetry remains isolated and read-only alongside explicit bounded e
 test("MOSS execution uses existing registered path, fixed script, and pre-checkout exclusion", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison-execution:\n"));
+  assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights, cuda-windows-2\]$/m, "MOSS execution must use the warm prepared listener");
   assert.match(job, /group: windows-candle-gpu-real-weights/);
   assert.match(job, /cancel-in-progress: false/);
   assert.match(job, /MOSS_CONTROL_JSON: \$\{\{ inputs\.moss_control_json \}\}/);
