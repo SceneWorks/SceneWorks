@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle } from "./flux3-image-klein-app-lifecycle.mjs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { EventEmitter } from "node:events";
+import { createServer } from "node:http";
+import { assertCheckoutIdentity, assertModel, assertDownload, imageBody, assertAccepted, assertSavedAsset, assertServedPng, redactSensitiveText, runLifecycle, attemptIdentity, bindOwnedEnv, boundApiUrl, ownedApiController, stopOwnedChildren } from "./flux3-image-klein-app-lifecycle.mjs";
 
 const sha = "a".repeat(40), inference = "b".repeat(40);
 const revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
@@ -158,4 +162,150 @@ test("served PNG must exactly match persisted bytes and requested dimensions", (
   assert.throws(() => assertServedPng(bytes, other, 1024, 1024));
   assert.throws(() => assertServedPng(bytes, bytes, 512, 512));
   assert.throws(() => assertServedPng(Buffer.from("provider PNG path"), bytes, 1024, 1024));
+});
+
+async function ownershipFixture(t) {
+  const output = await mkdtemp(path.join(tmpdir(), 'flux3-owned-api-'));
+  const identity = attemptIdentity(output), { state } = identity;
+  await mkdir(path.join(state, 'data', 'cache'), { recursive: true });
+  await mkdir(path.join(state, 'data', 'projects')); await mkdir(path.join(state, 'config'));
+  await writeFile(path.join(state, 'data', 'cache', 'jobs.db'), 'fixture');
+  const health = { status: 'ok', service: 'sceneworks-api', runtime: 'rust', auth_required: false, readiness: { status: 'ready' }, directories: { data: await realpath(path.join(state, 'data')), config: await realpath(path.join(state, 'config')), projects: await realpath(path.join(state, 'data', 'projects')), jobs_db: await realpath(path.join(state, 'data', 'cache', 'jobs.db')) } };
+  const api = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  const controller = new AbortController(), requests = []; let workers = 0;
+  const server = createServer((req, res) => { requests.push({ method: req.method, url: req.url }); res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(req.url === '/api/v1/health' ? health : { accepted: true })); });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const endpoint = ownedApiController({ url, state, api, controller });
+  t.after(async () => { endpoint.close(); server.closeAllConnections(); await new Promise((resolve) => server.close(resolve)); await rm(output, { recursive: true, force: true }); });
+  return { identity, health, api, controller, endpoint, requests, server, url, startWorker: () => endpoint.startWorker(() => { workers++; }), workerCount: () => workers, exit: () => { api.exitCode = 1; api.emit('exit', 1, null); } };
+}
+
+test('attempt cryptographic nonce binds all owned state and worker identity after env cleaning', () => {
+  const a = attemptIdentity(path.resolve('output')), b = attemptIdentity(path.resolve('output'));
+  assert.match(a.nonce, /^[a-f0-9]{48}$/); assert.notEqual(a.nonce, b.nonce);
+  assert.ok(a.state.endsWith(a.nonce)); assert.ok(a.workerId.endsWith(a.nonce));
+  const token = ['synthetic', 'runner', 'credential'].join('-');
+  const env = bindOwnedEnv({ HF_TOKEN: token, SCENEWORKS_API_PORT: '17921', SCENEWORKS_DATA_DIR: 'foreign' }, a);
+  assert.equal(env.HF_TOKEN, token); assert.equal(env.SCENEWORKS_API_PORT, '0');
+  for (const key of ['SCENEWORKS_DATA_DIR', 'SCENEWORKS_CONFIG_DIR', 'SCENEWORKS_JOBS_DB_PATH', 'SCENEWORKS_WORKER_ID']) assert.ok(env[key].includes(a.nonce), key);
+  assert.equal(bindOwnedEnv(env, a, 'http://127.0.0.1:49152').SCENEWORKS_API_PORT, '49152');
+});
+
+test('discover only existing structured owned listener event with actual loopback port', () => {
+  assert.equal(boundApiUrl('unrelated log\n{"event":"api_ready","address":"127.0.0.1:77"}'), undefined);
+  assert.equal(boundApiUrl('{"event":"api_listening","address":"127.0.0.1:49152"}\n'), 'http://127.0.0.1:49152');
+  for (const address of ['0.0.0.0:80', '127.0.0.1:0', '127.0.0.1:65536', 'example.com:80']) assert.throws(() => boundApiUrl(JSON.stringify({ event: 'api_listening', address })), /owned API bound/);
+});
+
+test('matching owned canonical API launches worker then permits ordinary mutations', async (t) => {
+  const f = await ownershipFixture(t);
+  assert.equal((await f.endpoint.verify()).status, 'ok');
+  await f.startWorker(); assert.equal(f.workerCount(), 1);
+  assert.deepEqual(await f.endpoint.call('POST', '/api/v1/image/jobs', { model: 'flux3_klein' }), { accepted: true });
+  assert.equal(f.requests.filter((r) => r.method === 'POST').length, 1);
+  const index = f.requests.findIndex((r) => r.method === 'POST'); assert.equal(f.requests[index - 1].url, '/api/v1/health');
+});
+
+test('foreign healthy endpoint with any wrong canonical directory refuses worker, POST and upload', async (t) => {
+  for (const key of ['data', 'config', 'projects', 'jobs_db']) {
+    await t.test(key, async (t) => {
+      const f = await ownershipFixture(t), foreign = ['foreign', 'raw', 'body', 'credential'].join('-');
+      f.health.directories[key] = path.resolve(foreign); f.health.secret = foreign;
+      for (const action of [f.startWorker, () => f.endpoint.call('POST', '/api/v1/projects', {}), () => f.endpoint.served('/upload')]) {
+        await assert.rejects(action(), (error) => { assert.match(error.message, /owned API endpoint identity refused/); assert.ok(!error.message.includes(foreign)); return true; });
+      }
+      assert.equal(f.workerCount(), 0); assert.ok(f.controller.signal.aborted);
+      assert.ok(f.requests.every((r) => r.method === 'GET' && r.url === '/api/v1/health'));
+    });
+  }
+});
+
+test('HTTP200 without actual ready never authorizes registration or mutation', async (t) => {
+  const f = await ownershipFixture(t); f.health.readiness.status = 'starting';
+  assert.equal(await f.endpoint.verify(), false);
+  await assert.rejects(f.startWorker(), /owned API not ready/);
+  await assert.rejects(f.endpoint.call('POST', '/api/v1/image/jobs', {}), /owned API not ready/);
+  assert.equal(f.workerCount(), 0); assert.ok(f.requests.every((r) => r.method === 'GET'));
+});
+
+test('owned bind failure never attaches worker to a foreign healthy listener', async (t) => {
+  const f = await ownershipFixture(t); f.exit();
+  await assert.rejects(f.startWorker(), /owned API exited/);
+  await assert.rejects(f.endpoint.call('POST', '/api/v1/projects', {}), /owned API exited/);
+  assert.equal(f.workerCount(), 0); assert.equal(f.requests.length, 0);
+});
+
+test('rechecks ownership before each mutation and before worker launch', async (t) => {
+  const f = await ownershipFixture(t); await f.endpoint.verify();
+  f.health.directories.data = path.dirname(f.identity.state);
+  await assert.rejects(f.startWorker(), /identity refused/);
+  await assert.rejects(f.endpoint.call('POST', '/api/v1/image/jobs', {}), /identity refused/);
+  assert.equal(f.workerCount(), 0); assert.ok(f.requests.every((r) => r.method === 'GET'));
+});
+
+test('API exit while request is pending aborts fetch/body and prevents any subsequent POST', async (t) => {
+  const f = await ownershipFixture(t);
+  f.server.removeAllListeners('request');
+  let entered; const pending = new Promise((resolve) => entered = resolve);
+  f.server.on('request', (req, res) => { f.requests.push({ method: req.method }); res.writeHead(200, { 'content-type': 'application/json' }); res.write('{'); entered(); });
+  const result = f.endpoint.verify(); await pending; f.exit();
+  await assert.rejects(result, /owned API exited/);
+  await assert.rejects(f.startWorker(), /owned API exited/);
+  await assert.rejects(f.endpoint.call('POST', '/api/v1/image/jobs', {}), /owned API exited/);
+  assert.equal(f.workerCount(), 0); assert.ok(f.requests.every((r) => r.method === 'GET'));
+});
+
+test('each mutation independently refuses a listener whose paths changed after initial verification', async (t) => {
+  const f = await ownershipFixture(t); await f.endpoint.verify();
+  f.health.directories.jobs_db = path.join(path.dirname(f.identity.state), 'other.db');
+  await assert.rejects(f.endpoint.call('POST', '/api/v1/models/flux3_klein/download', {}), /identity refused/);
+  assert.equal(f.workerCount(), 0); assert.ok(f.requests.every((r) => r.method === 'GET'));
+});
+
+test('actual child bind failure against occupied foreign port cannot launch worker or POST', async (t) => {
+  const f = await ownershipFixture(t);
+  const child = spawn(process.execPath, ['-e', `const s=require('node:net').createServer();s.on('error',()=>process.exit(23));s.listen(${new URL(f.url).port},'127.0.0.1')`], { stdio: 'ignore' });
+  const endpoint = ownedApiController({ url: f.url, state: f.identity.state, api: child, controller: new AbortController() });
+  t.after(() => endpoint.close());
+  const [code] = await once(child, 'exit'); assert.equal(code, 23);
+  let workers = 0;
+  await assert.rejects(endpoint.startWorker(() => workers++), /owned API exited/);
+  await assert.rejects(endpoint.call('POST', '/api/v1/image/jobs', {}), /owned API exited/);
+  assert.equal(workers, 0); assert.equal(f.requests.length, 0);
+});
+
+test('foreign malformed or refused HTTP bodies never escape in controller errors', async (t) => {
+  const f = await ownershipFixture(t), secret = ['private', 'foreign', 'response'].join('/');
+  f.server.removeAllListeners('request');
+  f.server.on('request', (_req, res) => { res.writeHead(500); res.end(secret); });
+  await assert.rejects(f.startWorker(), (error) => { assert.equal(error.message, 'owned API request unavailable'); assert.ok(!error.message.includes(secret)); return true; });
+  assert.equal(f.workerCount(), 0);
+});
+
+test('artifact allowlist excludes raw logs and all app/cache/config/database state', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/flux3-image-klein-app-lifecycle.yml', import.meta.url), 'utf8');
+  const upload = workflow.slice(workflow.indexOf('      - name: Retain redacted receipt'));
+  assert.equal((upload.match(/\/evidence\//g) ?? []).length, 3);
+  for (const name of ['receipt.json', 'saved-asset.png', 'saved-asset.sceneworks.json']) assert.ok(upload.includes(`/evidence/${name}`));
+  assert.doesNotMatch(upload, /\/evidence\/\s*$|\.log|private-logs|\/state|\/hub|\/config|\.db/m);
+  const source = await readFile(new URL('./flux3-image-klein-app-lifecycle.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /path\.join\(evidence, name\)|readdir\(logs\)/);
+  assert.match(source, /endpoint\.startWorker\(\(\) => launch/);
+  assert.match(source, /const must = \(\.\.\.args\) => endpoint\.call/);
+});
+
+test('abort cleanup targets only live recorded child groups, never a name or foreign PID', () => {
+  const calls = [], live = { pid: 12345, exitCode: null, signalCode: null };
+  stopOwnedChildren([live, { pid: 54321, exitCode: 0, signalCode: null }, { pid: 11111, exitCode: null, signalCode: 'SIGTERM' }, { exitCode: null, signalCode: null }], (...args) => calls.push(args));
+  assert.deepEqual(calls, [[-live.pid, 'SIGTERM']]);
+  assert.doesNotThrow(() => stopOwnedChildren([live], () => { throw new Error('already gone'); }));
+});
+
+test('API exit event immediately aborts shared cancellation and owned-child cleanup', async (t) => {
+  const f = await ownershipFixture(t), killed = [];
+  f.controller.signal.addEventListener('abort', () => stopOwnedChildren([{ pid: 45678, exitCode: null, signalCode: null }], (...args) => killed.push(args)));
+  f.exit();
+  assert.equal(f.controller.signal.aborted, true);
+  assert.deepEqual(killed, [[-45678, 'SIGTERM']]);
 });

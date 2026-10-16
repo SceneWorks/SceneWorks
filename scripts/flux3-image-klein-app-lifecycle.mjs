@@ -2,10 +2,9 @@
 // or memory campaign. The API alone creates jobs and publishes worker assetWrites.
 import assert from "node:assert/strict";
 import { execFile as execFileCallback, spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { copyFile, cp, mkdir, open, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { copyFile, cp, mkdir, open, readFile, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -87,6 +86,91 @@ async function ownedFile(file, root) {
   fact(relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative) && (await stat(resolved)).isFile() && (await stat(resolved)).size > 0, "evidence file must be nonempty and remain inside its owned root"); return resolved;
 }
 
+// Discover only the actual port-zero listener announced by our exclusively created
+// API log. Never probe-close-bind a fixed port or discover an endpoint over HTTP.
+export function boundApiUrl(text) {
+  for (const line of text.split("\n")) {
+    let event; try { event = JSON.parse(line); } catch { continue; }
+    if (event.event !== "api_listening") continue;
+    const match = /^127\.0\.0\.1:([0-9]{1,5})$/.exec(event.address ?? "");
+    fact(match && Number(match[1]) > 0 && Number(match[1]) <= 65535, "owned API bound address invalid");
+    return `http://127.0.0.1:${Number(match[1])}`;
+  }
+  return undefined;
+}
+
+export function attemptIdentity(output) {
+  const nonce = randomBytes(24).toString("hex");
+  return { nonce, state: path.join(output, `state-${nonce}`), workerId: `flux3-app-${nonce}` };
+}
+
+export function bindOwnedEnv(childEnv, { state, workerId }, url) {
+  // Bind AFTER the shared helper scrubs ambient SCENEWORKS_* values and overwrite
+  // its historical fixed port. Keep the runner's HF_TOKEN only in the child env.
+  const bound = { ...childEnv, SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"), SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"), SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_WORKER_ID: workerId, SCENEWORKS_API_HOST: "127.0.0.1", SCENEWORKS_API_PORT: url ? new URL(url).port : "0", SCENEWORKS_LOG_FORMAT: "json", SCENEWORKS_RUN_UTILITY_INPROCESS: "0", RUST_LOG: "info" };
+  // The API derives its own internal self-call URL from its actual port-zero
+  // listener. Only the separately launched worker gets the discovered URL.
+  if (url) bound.SCENEWORKS_API_URL = url; else delete bound.SCENEWORKS_API_URL;
+  return bound;
+}
+
+export async function assertOwnedHealth(health, state) {
+  fact(health?.status === "ok" && health.service === "sceneworks-api" && health.runtime === "rust" && health.readiness?.status === "ready" && health.auth_required === false, "owned API readiness/identity required");
+  const expected = { data: path.join(state, "data"), config: path.join(state, "config"), projects: path.join(state, "data", "projects"), jobs_db: path.join(state, "data", "cache", "jobs.db") };
+  for (const [key, file] of Object.entries(expected)) {
+    const actual = health.directories?.[key];
+    fact(typeof actual === "string" && path.isAbsolute(actual), "owned API directory identity missing");
+    let same = false;
+    try { same = await realpath(actual) === await realpath(file); } catch { /* no foreign paths/body in errors */ }
+    fact(same, "owned API canonical directory identity mismatch");
+  }
+}
+
+// One gate for worker launch and every subsequent request. API exit cancels even
+// an in-flight response-body read; no foreign body/path/fetch error is disclosed.
+export function ownedApiController({ url, state, api, controller, fetchImpl = fetch }) {
+  const abort = () => controller.abort(new Error("owned API exited"));
+  api.once("exit", abort); api.once("error", abort);
+  const alive = () => {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    fact(api.exitCode === null && api.signalCode === null, "owned API exited");
+  };
+  const request = async (method, route, body) => {
+    alive();
+    try {
+      const response = await fetchImpl(url + route, { method, redirect: "error", headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
+      const value = await response.json(); alive();
+      fact(response.ok, "owned API request refused"); return value;
+    } catch { alive(); throw new Error("owned API request unavailable"); }
+  };
+  const verify = async () => {
+    const health = await request("GET", "/api/v1/health");
+    if (health?.readiness?.status !== "ready") return false;
+    try { await assertOwnedHealth(health, state); alive(); return health; }
+    catch { controller.abort(new Error("owned API endpoint identity refused")); throw controller.signal.reason; }
+  };
+  const requireOwned = async () => { fact(await verify(), "owned API not ready"); alive(); };
+  return {
+    verify,
+    async startWorker(launch) { await requireOwned(); alive(); return launch(); },
+    async call(method, route, body) { await requireOwned(); return request(method, route, body); },
+    async served(route) {
+      await requireOwned();
+      try {
+        const response = await fetchImpl(url + route, { redirect: "error", signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) });
+        fact(response.ok, "owned API file refused"); const bytes = Buffer.from(await response.arrayBuffer()); alive(); return { bytes, status: response.status };
+      } catch { alive(); throw new Error("owned API file unavailable"); }
+    },
+    close() { api.removeListener("exit", abort); api.removeListener("error", abort); },
+  };
+}
+
+export function stopOwnedChildren(children, kill = process.kill) {
+  for (const child of children) if (child.pid && child.exitCode === null && child.signalCode === null) {
+    try { kill(-child.pid, "SIGTERM"); } catch { /* final cleanup verifies exit */ }
+  }
+}
+
 export async function runLifecycle(env = process.env, { preflightOnly = false } = {}) {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   fact(env.FLUX3_APP_OUTPUT && env.RUNNER_TEMP, "unique FLUX3_APP_OUTPUT under RUNNER_TEMP required");
@@ -98,6 +182,10 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
   const save = async () => { await writeFile(path.join(evidence, "receipt.tmp"), redactSensitiveText(JSON.stringify(receipt, null, 2) + "\n", secrets)); await rename(path.join(evidence, "receipt.tmp"), path.join(evidence, "receipt.json")); };
   await save();
   const children = [], handles = [], controller = new AbortController();
+  let endpoint;
+  // Abort fetches and stop only our own process groups immediately on API exit.
+  const stopOwned = () => stopOwnedChildren(children);
+  controller.signal.addEventListener("abort", stopOwned, { once: true });
   const abort = () => controller.abort(new Error("FLUX3 lifecycle interrupted"));
   process.once("SIGTERM", abort); process.once("SIGINT", abort);
   const deadline = setTimeout(() => controller.abort(new Error("FLUX3 app lifecycle exceeded 150 minutes")), 150 * 60_000);
@@ -105,9 +193,12 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
   const delay = async () => { alive(); await new Promise((resolve) => setTimeout(resolve, 1000)); alive(); };
   const launch = async (command, args, childEnv, name, service = false) => {
     const log = await open(path.join(logs, `${name}.log`), "wx"); handles.push(log);
+    alive();
     const child = spawn(command, args, { cwd: root, env: childEnv, detached: true, stdio: ["ignore", log.fd, log.fd] }); children.push(child); child.service = service;
     child.done = new Promise((resolve, reject) => { child.once("error", reject); child.once("exit", (code, signal) => resolve({ code, signal })); });
-    child.done.catch(() => controller.abort(new Error(`${name} process failed to launch`))); return child;
+    child.done.catch(() => controller.abort(new Error(`${name} process failed to launch`)));
+    if (service) child.once("exit", () => controller.abort(new Error("owned API/worker exited")));
+    return child;
   };
   const checked = async (command, args, childEnv, name) => {
     const child = await launch(command, args, childEnv, name);
@@ -135,13 +226,11 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     const config = Buffer.from(await auth.arrayBuffer()); fact(config.length > 0, "pinned gated config empty");
     receipt.auth = { status: "passed", mechanism: "runner_stored_hf_credential", pinned_file: "config.json", http_status: auth.status, sha256: sha256(config) };
     if (preflightOnly) { receipt.status = "passed"; return receipt; }
-    const state = path.join(output, "state"); await mkdir(state); await mkdir(path.join(state, "data")); await mkdir(path.join(state, "credentials")); await cp(path.join(root, "config"), path.join(state, "config"), { recursive: true });
+    const identity = attemptIdentity(output), { state, workerId } = identity; receipt.identity.attempt_nonce = identity.nonce; await mkdir(state); await mkdir(path.join(state, "data", "projects"), { recursive: true }); await mkdir(path.join(state, "credentials")); await cp(path.join(root, "config"), path.join(state, "config"), { recursive: true });
     const weights = path.join(env.HOME, "sceneworks-flux3-app-weights"), hub = path.join(weights, "hub"), xet = path.join(weights, "xet");
     await mkdir(hub, { recursive: true }); await mkdir(xet, { recursive: true });
     fact(await realpath(weights) === weights && await realpath(hub) === hub, "physical task-owned model hub required");
-    const workerId = `flux3-app-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`, url = "http://127.0.0.1:17921";
-    const socket = createServer(); await new Promise((resolve, reject) => { socket.once("error", reject); socket.listen({ host: "127.0.0.1", port: 17921, exclusive: true }, resolve); }); await new Promise((resolve) => socket.close(resolve));
-    const childEnv = buildChildEnv(env, { state, weights, hub, xet, workerId, url });
+    let childEnv = bindOwnedEnv(buildChildEnv(env, { state, weights, hub, xet, workerId, url: "http://127.0.0.1:0" }), identity);
     // Ordinary native downloader receives the runner login only in its environment.
     // Its online fetch installs the manifest-selected pinned package, not a fixture.
     delete childEnv.HF_HUB_OFFLINE; delete childEnv.TRANSFORMERS_OFFLINE; childEnv.HF_TOKEN = token; token = undefined;
@@ -150,13 +239,14 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     fact(await git("status", "--porcelain") === "", "build changed the exact pinned checkout");
     const binary = path.join(target, "release", "sceneworks-rust-api"); receipt.identity.binary_sha256 = await hash(binary);
     await checked(binary, [], { ...childEnv, SCENEWORKS_GPU_CHECK: "1" }, "metal-preflight");
-    await launch(binary, [], childEnv, "api", true);
-    await launch(binary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker", true);
-    const call = async (method, route, body) => { alive(); const response = await fetch(url + route, { method, headers: { "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) }); return { status: response.status, value: await response.json() }; };
-    // Never interpolate API bodies/errors here: auth refusals may carry sensitive context.
-    const must = async (...args) => { const response = await call(...args); fact(response.status >= 200 && response.status < 300, `API ${args[0]} ${args[1]} refused HTTP ${response.status}; inspect the owned service log`); return response.value; };
+    const api = await launch(binary, [], childEnv, "api", true);
     const wait = async (fn, seconds, label) => { const end = Date.now() + seconds * 1000; while (Date.now() < end) { alive(); const value = await fn(); if (value) return value; await delay(); } throw new Error(`${label} timed out`); };
-    receipt.health = await wait(async () => { try { const h = await must("GET", "/api/v1/health"); return h.status === "ok" && h.readiness?.status === "ready" && h; } catch { alive(); return false; } }, 180, "API ready (HTTP 200 alone is not readiness)");
+    const url = await wait(async () => { alive(); const text = await readFile(path.join(logs, "api.log"), "utf8"); fact(text.length <= 8 * 1024 * 1024, "owned API startup log exceeded bound"); return boundApiUrl(text); }, 180, "owned API bound-port announcement");
+    childEnv = bindOwnedEnv(childEnv, identity, url);
+    endpoint = ownedApiController({ url, state, api, controller });
+    receipt.health = await wait(async () => { try { return await endpoint.verify(); } catch { alive(); return false; } }, 180, "owned API ready and canonical nonce paths (HTTP 200 alone is not readiness)");
+    await endpoint.startWorker(() => launch(binary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker", true));
+    const must = (...args) => endpoint.call(...args);
     receipt.worker = await wait(async () => { const w = (await must("GET", "/api/v1/workers")).find((w) => w.id === workerId); if (!w || w.status !== "idle") return false; fact(w.gpuId === "mlx" && w.gpuName === "Apple Silicon (MLX)" && w.capabilities?.includes("gpu") && !w.capabilities.some((c) => ["cpu", "candle", "nvidia"].includes(c)), "owned native MLX worker required"); return w; }, 180, "owned MLX worker registration");
     const relocation = await must("POST", "/api/v1/model-library/relocate", { path: weights });
     fact(relocation.adopted === true && relocation.hfHome === weights && relocation.libraryRoot === hub, "API must adopt the exact task-owned library");
@@ -183,9 +273,9 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
     fact(asset, "completed image must be indexed in the project library");
     const media = await ownedFile(path.join(project.path, asset.file.path), state), sidecarFile = await ownedFile(media.replace(/\.png$/, ".sceneworks.json"), state), sidecar = JSON.parse(await readFile(sidecarFile, "utf8"));
     receipt.saved_asset = assertSavedAsset(job, asset, sidecar, { projectId: project.id, workerId, backend: "mlx", adapter: "mlx_flux3" });
-    const response = await fetch(`${url}/api/v1/projects/${project.id}/files/${asset.file.path}`, { signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30_000)]) }); fact(response.ok, "saved asset must be served by the ordinary project file route");
-    const served = Buffer.from(await response.arrayBuffer()), saved = await readFile(media); assertServedPng(served, saved, body.width, body.height);
-    await copyFile(media, path.join(evidence, "saved-asset.png")); await copyFile(sidecarFile, path.join(evidence, "saved-asset.sceneworks.json"));
+    const response = await endpoint.served(`/api/v1/projects/${project.id}/files/${asset.file.path}`);
+    const served = response.bytes, saved = await readFile(media); assertServedPng(served, saved, body.width, body.height);
+    await copyFile(media, path.join(evidence, "saved-asset.png")); await writeFile(path.join(evidence, "saved-asset.sceneworks.json"), redactSensitiveText(await readFile(sidecarFile, "utf8"), secrets));
     receipt.completed_job = job; receipt.library_asset = asset; receipt.saved_asset.sha256 = sha256(saved); receipt.saved_asset.bytes = saved.length; receipt.saved_asset.api_status = response.status;
     fact(await git("status", "--porcelain") === "", "runtime changed the immutable checkout"); receipt.status = "passed";
   } catch (error) { receipt.status = "failed"; receipt.error = error.message; throw error; }
@@ -197,10 +287,9 @@ export async function runLifecycle(env = process.env, { preflightOnly = false } 
       catch { receipt.status = "failed"; receipt.cleanup.push({ pid: child.pid, exited: false }); process.exitCode = 1; }
     }
     await Promise.all(handles.map((handle) => handle.close()));
-    // Raw subprocess output never lives in the uploaded tree, even on hard cancel.
-    // Only closed, redacted logs are promoted into evidence after owned cleanup.
-    try { for (const name of await readdir(logs)) if (name.endsWith(".log")) await writeFile(path.join(evidence, name), redactSensitiveText(await readFile(path.join(logs, name), "utf8"), secrets)); }
-    catch { receipt.status = "failed"; receipt.log_redaction = "failed; private logs excluded from artifact"; process.exitCode = 1; }
+    endpoint?.close(); controller.signal.removeEventListener("abort", stopOwned);
+    // Neither raw nor redacted logs enter artifacts, only the redacted receipt,
+    // generated PNG and persisted redacted sidecar.
     receipt.finished_at = new Date().toISOString(); await save();
   }
   fact(receipt.status === "passed", "owned process cleanup failed"); return receipt;
