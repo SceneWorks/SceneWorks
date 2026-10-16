@@ -8,6 +8,7 @@ import argparse
 import contextlib
 import csv
 import datetime as dt
+from email.parser import BytesParser
 import hashlib
 import importlib.util
 import json
@@ -226,6 +227,26 @@ def dependency_resolution():
     return resolution
 
 
+def package_name(name):
+    return re.sub(r'[-_.]+', '-', name).lower()
+
+
+def wheel_identity(wheel, expected):
+    # Vendored distributions (notably setuptools/_vendor) have their own
+    # METADATA. Only the wheel's single root distribution is installation authority.
+    metadata_path = '-'.join(wheel.name.split('-')[:2]) + '.dist-info/METADATA'
+    with zipfile.ZipFile(wheel) as archive:
+        roots = [n for n in archive.namelist() if re.fullmatch(r'[^/]+\.dist-info/METADATA', n)]
+        require(roots == [metadata_path], f'ambiguous or mismatched root wheel metadata: {wheel.name}')
+        metadata = BytesParser().parsebytes(archive.read(metadata_path), headersonly=True)
+    names, versions = metadata.get_all('Name', []), metadata.get_all('Version', [])
+    require(len(names) == len(versions) == 1, f'invalid wheel identity fields: {wheel.name}')
+    name, version = names[0], versions[0]
+    require(package_name(name) == package_name(expected['name']) and version == expected['version'],
+            f'wheel identity differs from reviewed dependency resolution: {wheel.name}')
+    return name, version
+
+
 def lock_wheels(root):
     resolution = dependency_resolution()
     wheels = root / 'wheels'
@@ -248,15 +269,11 @@ def lock_wheels(root):
     manifest = []
     seen = set()
     for wheel in sorted(wheels.glob('*.whl')):
-        with zipfile.ZipFile(wheel) as archive:
-            metadata_files = [n for n in archive.namelist() if n.endswith('.dist-info/METADATA')]
-            require(len(metadata_files) == 1, 'ambiguous wheel metadata')
-            metadata = archive.read(metadata_files[0]).decode()
-        name = re.search(r'^Name: (.+)$', metadata, re.M).group(1)
-        version = re.search(r'^Version: (.+)$', metadata, re.M).group(1)
-        require(name.lower().replace('_', '-') not in seen, 'duplicate package wheels; use a fresh campaign')
-        seen.add(name.lower().replace('_', '-'))
         sha = digest(wheel)
+        expected_package = next(item for item in resolution['packages'] if item['sha256'] == sha)
+        name, version = wheel_identity(wheel, expected_package)
+        require(package_name(name) not in seen, 'duplicate package wheels; use a fresh campaign')
+        seen.add(package_name(name))
         requirements.append(f'{name}=={version} --hash=sha256:{sha}')
         manifest.append(dict(name=wheel.name, sha256=sha))
     require(manifest, 'no resolved wheels')

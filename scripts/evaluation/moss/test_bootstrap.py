@@ -16,6 +16,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+import warnings
+import zipfile
 
 spec = importlib.util.spec_from_file_location('bootstrap', Path(__file__).with_name('bootstrap.py'))
 b = importlib.util.module_from_spec(spec)
@@ -175,6 +177,88 @@ class BootstrapContracts(unittest.TestCase):
         with patch.object(b, 'PACKAGES', old):
             with self.assertRaisesRegex(ValueError, 'closure drift'):
                 b.dependency_resolution()
+
+    def wheel(self, filename, entries):
+        path = self.root / filename
+        with warnings.catch_warnings():
+            warnings.simplefilter('ignore', UserWarning)  # Deliberate duplicate ZIP entry fixture.
+            with zipfile.ZipFile(path, 'w') as archive:
+                for name, metadata in entries:
+                    archive.writestr(name, metadata)
+        return path
+
+    def setuptools_entries(self):
+        # Exact METADATA path shape of the reviewed setuptools84 wheel,
+        # SHA256 51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670.
+        vendors = ('autocommand-2.2.2', 'backports.tarfile-1.2.0', 'importlib_metadata-8.7.1',
+                   'jaraco.text-4.0.0', 'jaraco_context-6.1.0', 'jaraco_functools-4.4.0',
+                   'more_itertools-10.8.0', 'packaging-26.0', 'platformdirs-4.4.0',
+                   'tomli-2.4.0', 'wheel-0.46.3', 'zipp-3.23.0')
+        return [(f'setuptools/_vendor/{vendor}.dist-info/METADATA',
+                 f'Name: {vendor.rsplit("-", 1)[0]}\nVersion: {vendor.rsplit("-", 1)[1]}\n')
+                for vendor in vendors] + [('setuptools-84.0.0.dist-info/METADATA',
+                                          'Metadata-Version: 2.4\r\nName: setuptools\r\nVersion: 84.0.0\r\n\r\n')]
+
+    def test_wheel_root_identity_ignores_actual_setuptools_vendor_metadata_shape(self):
+        wheel = self.wheel('setuptools-84.0.0-py3-none-any.whl', self.setuptools_entries())
+        with zipfile.ZipFile(wheel) as archive:
+            self.assertEqual(len([n for n in archive.namelist() if n.endswith('.dist-info/METADATA')]), 13)
+        self.assertEqual(b.wheel_identity(wheel, dict(name='setuptools', version='84.0.0')), ('setuptools', '84.0.0'))
+
+    def test_wheel_root_metadata_is_required_unique_and_matches_filename(self):
+        entries = self.setuptools_entries()
+        for invalid in (entries[:-1], entries + [entries[-1]],
+                        entries + [('other-1.0.dist-info/METADATA', 'Name: other\nVersion: 1.0\n')],
+                        [('other-1.0.dist-info/METADATA', 'Name: setuptools\nVersion: 84.0.0\n')]):
+            with self.subTest(paths=[name for name, _ in invalid]):
+                wheel = self.wheel('setuptools-84.0.0-py3-none-any.whl', invalid)
+                with self.assertRaisesRegex(ValueError, 'root wheel metadata'):
+                    b.wheel_identity(wheel, dict(name='setuptools', version='84.0.0'))
+
+    def test_wheel_identity_must_match_reviewed_name_version_and_single_headers(self):
+        for metadata, error in (
+                ('Name: other\nVersion: 84.0.0\n', 'reviewed dependency'),
+                ('Name: setuptools\nVersion: 83.0.0\n', 'reviewed dependency'),
+                ('Name: setuptools\n', 'identity fields'),
+                ('Name: setuptools\nName: other\nVersion: 84.0.0\n', 'identity fields'),
+                ('Name: setuptools\nVersion: 84.0.0\nVersion: 83.0.0\n', 'identity fields')):
+            with self.subTest(metadata=metadata):
+                wheel = self.wheel('setuptools-84.0.0-py3-none-any.whl',
+                                   [('setuptools-84.0.0.dist-info/METADATA', metadata)])
+                with self.assertRaisesRegex(ValueError, error):
+                    b.wheel_identity(wheel, dict(name='setuptools', version='84.0.0'))
+        wheel = self.wheel('example_pkg-1.0-py3-none-any.whl',
+                           [('example_pkg-1.0.dist-info/METADATA', 'Name: Example.Pkg\nVersion: 1.0\n')])
+        self.assertEqual(b.wheel_identity(wheel, dict(name='example-pkg', version='1.0')), ('Example.Pkg', '1.0'))
+
+    def test_retained_downloads_can_lock_then_resume_with_hash_and_identity_checks(self):
+        wheels = self.root / 'wheels'
+        wheels.mkdir()
+        wheel = self.wheel('setuptools-84.0.0-py3-none-any.whl', self.setuptools_entries())
+        wheel = wheel.rename(wheels / wheel.name)
+        sha = b.digest(wheel)
+        package = dict(name='setuptools', version='84.0.0', sha256=sha, url='https://example.org/' + wheel.name)
+        resolution = dict(primary=list(b.PACKAGES), packages=[package])
+        with patch.object(b, 'dependency_resolution', return_value=resolution), patch.object(b, 'run') as run:
+            b.lock_wheels(self.root)
+            self.assertEqual(run.call_args.args[0][-1], package['url'] + '#sha256=' + sha)
+            self.assertIn('--no-deps', run.call_args.args[0])
+            self.assertIn('--only-binary=:all:', run.call_args.args[0])
+            self.assertEqual((self.root / 'requirements.lock').read_text(), f'setuptools==84.0.0 --hash=sha256:{sha}\n')
+            run.reset_mock()
+            b.lock_wheels(self.root)
+            run.assert_not_called()
+            wheel.write_bytes(b'tamper')
+            with self.assertRaisesRegex(ValueError, 'wheel content drift'):
+                b.lock_wheels(self.root)
+        # Same content hash with a false reviewed identity must fail before a lock is published.
+        (self.root / 'requirements.lock').unlink()
+        wheel = self.wheel('setuptools-84.0.0-py3-none-any.whl', self.setuptools_entries())
+        wheel.replace(wheels / wheel.name)
+        with patch.object(b, 'dependency_resolution', return_value={**resolution, 'packages': [{**package, 'name': 'other'}]}), patch.object(b, 'run'):
+            with self.assertRaisesRegex(ValueError, 'reviewed dependency'):
+                b.lock_wheels(self.root)
+        self.assertFalse((self.root / 'requirements.lock').exists())
 
     def test_scored_control_needs_accepted_digests_and_fixed_authorization(self):
         lease = dict(id='l',owner='chat',host='host',gpu_uuid=b.RUNNER_GPU_UUID,expires_utc=self.deadline,
