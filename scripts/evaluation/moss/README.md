@@ -100,7 +100,8 @@ snapshot, whose shared weight bytes match Base at the researched revisions.
 Base/SFT use the actual published training-grid-snapped scheduler, shift5,
 50steps, CFG3, negative branch skip22, BF16 transformer/encoder and FP32
 noise/Euler/VAE. Actual sigma/timestep arrays and initial noise hashes are saved.
-DMD uses the author's eight-step FP32 fixed-noise recursion with no autocast,
+TF32 matmul/convolution are explicitly disabled and effective precision/device
+flags retained. DMD uses the author's eight-step FP32 fixed-noise recursion with no autocast,
 CFG, negative branch, release Euler scheduler, re-noising or resampled codes:
 `x=z+Q*x0; v=transformer(x,step_codes[r],...); x0=z-v`. Prefixes retain the
 trained order. Q/codes shape, dtype and finiteness are checked; VAE decode uses
@@ -130,7 +131,9 @@ Build the existing binary at the frozen SceneWorks source/inference identity:
 uses an owned loopback API with `SCENEWORKS_TRUST_LOOPBACK=true`, backend Candle
 required, MLX disabled, `CUDA_VISIBLE_DEVICES` restricted, and the frozen isolated
 HF hub. API and worker use the same binary; only the worker gets
-`SCENEWORKS_WORKER_ONLY=1`. Worker PID/log are dynamic attempt evidence.
+`SCENEWORKS_WORKER_ONLY=1`. Worker PID/log are dynamic attempt evidence. The frozen deviceUUID maps to
+the physical nvidia-smi index for worker telemetry/admission, while CUDA device0
+is remapped by UUID; another card's peaks cannot substitute.
 The bootstrap owns preparation and source/build receipts; no pin bump occurs.
 
 Requests put steps, guidance and `mlxQuantize` inside `advanced`, with
@@ -220,7 +223,7 @@ raise SystemExit(pytest.main(['-q', 'tests/test_moss_reference_evaluation.py']))
 PY
 ```
 
-That run currently passes17 tests without skips and can write an explicit CPU
+That run currently passes18 tests without skips and can write an explicit CPU
 fixture receipt: observed FP32 residual1.0001000166, unchanged BF16 backbone,
 both modulation biases FP32. It uses no model weights, GPU allocation or image
 quality observations. Controlled unavailable test fixtures are only tests, never

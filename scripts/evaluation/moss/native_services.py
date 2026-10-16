@@ -16,6 +16,14 @@ from urllib.request import urlopen
 from evaluate import file_hash, write
 
 
+def physical_index(gpu_uuid, query=None):
+    if query is None:
+        query=subprocess.run(['nvidia-smi','--query-gpu=index,uuid','--format=csv,noheader'],check=True,capture_output=True,text=True,timeout=15).stdout
+    matches=[row.split(',')[0].strip() for row in query.splitlines() if len(row.split(','))==2 and row.split(',')[1].strip()==gpu_uuid]
+    if len(matches)!=1 or not matches[0].isdigit():raise ValueError('frozen GPU UUID not uniquely mapped to physical device')
+    return matches[0]
+
+
 @contextmanager
 def services(settings):
     class Args:pass
@@ -23,9 +31,10 @@ def services(settings):
     state=Path(a.state).resolve();binary=Path(a.binary).resolve();hub=Path(a.hub).resolve()
     if state.exists() or not binary.is_file() or not hub.is_dir():raise ValueError('fresh state, existing binary and prepared hub required')
     if file_hash(binary)!=settings['binary_sha256']:raise ValueError('native binary hash mismatch')
+    gpu_index=physical_index(a.gpu)
     state.mkdir(parents=True);env={k:v for k,v in os.environ.items() if not k.startswith('SCENEWORKS_') and not any(word in k.upper() for word in ('TOKEN','SECRET','PASSWORD','CREDENTIAL','API_KEY'))}
     url=f'http://127.0.0.1:{a.port}'
-    env.update(SCENEWORKS_DATA_DIR=str(state/'data'),SCENEWORKS_CONFIG_DIR=str(state/'config'),SCENEWORKS_JOBS_DB_PATH=str(state/'data'/'cache'/'jobs.db'),SCENEWORKS_CREDENTIALS_DIR=str(state/'credentials'),SCENEWORKS_API_HOST='127.0.0.1',SCENEWORKS_API_PORT=str(a.port),SCENEWORKS_API_URL=url,SCENEWORKS_WORKER_ID=a.worker_id,SCENEWORKS_WORKER_CHILD='1',SCENEWORKS_GPU_ID='0',SCENEWORKS_POLL_SECONDS='1',SCENEWORKS_HEARTBEAT_SECONDS='2',SCENEWORKS_BACKEND_MLX_ENABLED='false',SCENEWORKS_BACKEND_CANDLE_ENABLED='true',SCENEWORKS_CANDLE_REQUIRED='1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE='enforce',SCENEWORKS_TRUST_LOOPBACK='true',SCENEWORKS_UTILITY_JOBS='0',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=a.gpu,HF_HOME=str(hub.parent),HF_HUB_CACHE=str(hub),HUGGINGFACE_HUB_CACHE=str(hub),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
+    env.update(SCENEWORKS_DATA_DIR=str(state/'data'),SCENEWORKS_CONFIG_DIR=str(state/'config'),SCENEWORKS_JOBS_DB_PATH=str(state/'data'/'cache'/'jobs.db'),SCENEWORKS_CREDENTIALS_DIR=str(state/'credentials'),SCENEWORKS_API_HOST='127.0.0.1',SCENEWORKS_API_PORT=str(a.port),SCENEWORKS_API_URL=url,SCENEWORKS_WORKER_ID=a.worker_id,SCENEWORKS_WORKER_CHILD='1',SCENEWORKS_GPU_ID=gpu_index,SCENEWORKS_POLL_SECONDS='1',SCENEWORKS_HEARTBEAT_SECONDS='2',SCENEWORKS_BACKEND_MLX_ENABLED='false',SCENEWORKS_BACKEND_CANDLE_ENABLED='true',SCENEWORKS_CANDLE_REQUIRED='1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE='enforce',SCENEWORKS_TRUST_LOOPBACK='true',SCENEWORKS_UTILITY_JOBS='0',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=a.gpu,NVIDIA_VISIBLE_DEVICES=gpu_index,HF_HOME=str(hub.parent),HF_HUB_CACHE=str(hub),HUGGINGFACE_HUB_CACHE=str(hub),HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1')
     children=[];streams=[]
     try:
         for name,extra in (('api',{}),('worker',{'SCENEWORKS_WORKER_ONLY':'1'})):
@@ -40,7 +49,7 @@ def services(settings):
             except OSError:pass
             time.sleep(1)
         else:raise TimeoutError('worker registration timed out; no jobs submitted')
-        context=dict(api=url,binary=str(binary),binary_sha256=file_hash(binary),worker_id=a.worker_id,worker_pid=children[1].pid,worker_log=str(state/'worker.log'),owned_state=str(state),hub_cache=str(hub),runtime_versions=settings['runtime_versions'])
+        context=dict(api=url,binary=str(binary),binary_sha256=file_hash(binary),worker_id=a.worker_id,worker_pid=children[1].pid,worker_log=str(state/'worker.log'),owned_state=str(state),gpu_uuid=a.gpu,physical_gpu_index=gpu_index,hub_cache=str(hub),runtime_versions=settings['runtime_versions'])
         yield context
     finally:
         for child in reversed(children):

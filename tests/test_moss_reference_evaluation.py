@@ -218,3 +218,10 @@ def test_device_lease_requires_live_owner_correct_freeze_and_unexpired_identity(
         mutant=dict(lease,**{key:value});path.write_text(json.dumps(mutant))
         with pytest.raises(ValueError):validate_lease(manifest,lock_hash,env,now=100.,ancestor_pids={42})
     with pytest.raises(ValueError,match='coordinator-held'):validate_lease(manifest,lock_hash,{},now=100.,ancestor_pids={42})
+
+
+def test_native_uuid_maps_physical_telemetry_without_changing_logical_cuda_zero():
+    from native_services import physical_index
+    assert physical_index('GPU-second','0, GPU-first\n1, GPU-second\n')=='1'
+    with pytest.raises(ValueError):physical_index('GPU-missing','0, GPU-first\n1, GPU-second\n')
+    with pytest.raises(ValueError):physical_index('GPU-second','0, GPU-second\n1, GPU-second\n')

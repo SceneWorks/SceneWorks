@@ -6,6 +6,8 @@ inside execution functions so protocol tests remain CPU/dependency independent.
 """
 import hashlib
 import importlib.util
+from collections import Counter
+import os
 import sys
 import time
 from pathlib import Path
@@ -97,6 +99,9 @@ class Reference:
         from safetensors.torch import load_file
         self.torch=torch;self.config=config
         if not torch.cuda.is_available():raise ValueError('CUDA reference required; CPU fallback forbidden')
+        torch.backends.cuda.matmul.allow_tf32=False
+        torch.backends.cudnn.allow_tf32=False
+        torch.set_float32_matmul_precision('highest')
         torch.cuda.reset_peak_memory_stats()
         self.first=True
         settings=config['settings'];m=import_pipeline(settings['pipeline_code'])
@@ -166,5 +171,6 @@ class Reference:
         self.first=False
         return dict(phases, generation_seconds=time.monotonic()-start,noise_sha256=noise_hash,pixels_finite=True,
             peak_gpu_allocated_bytes=allocated,peak_gpu_reserved_bytes=reserved,
-            component_dtypes=dict(transformer=str(pipe.transformer.dtype),encoder=str(pipe.text_encoder.dtype),vae=str(pipe.vae.dtype)),sampler=sampler,
+            component_dtypes=dict(transformer=str(pipe.transformer.dtype),encoder=str(pipe.text_encoder.dtype),vae=str(pipe.vae.dtype),transformer_parameter_numel_by_dtype=dict(Counter({str(dtype):sum(p.numel() for p in pipe.transformer.parameters() if p.dtype==dtype) for dtype in {p.dtype for p in pipe.transformer.parameters()}})),adapter_parameter_numel_by_dtype={str(dtype):sum(p.numel() for p in self.adapter.parameters() if p.dtype==dtype) for dtype in {p.dtype for p in self.adapter.parameters()}} if self.adapter else None),sampler=sampler,
+            device=dict(visible_uuid=os.environ['CUDA_VISIBLE_DEVICES'],name=torch.cuda.get_device_name(0),logical_index=torch.cuda.current_device(),allow_tf32_matmul=torch.backends.cuda.matmul.allow_tf32,allow_tf32_cudnn=torch.backends.cudnn.allow_tf32,float32_matmul_precision=torch.get_float32_matmul_precision()),
             runtime_versions={name:importlib.metadata.version(name) for name in ('torch','transformers','diffusers','safetensors','accelerate','Pillow')})
