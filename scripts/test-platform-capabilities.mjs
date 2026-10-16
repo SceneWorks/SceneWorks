@@ -7,6 +7,7 @@ export function platformFixtureSkip(capability, platform = process.platform) {
   const reasons = {
     "posix-processes": "Windows lacks the fixture's POSIX sessions/process groups, AF_UNIX peer credentials and /bin/ps process identities",
     "posix-process-identity": "Windows lacks the fixture's /bin/ps POSIX process-start identities",
+    "posix-directory-fsync": "Windows does not implement the guarded Metal fixture's POSIX durable directory fsync contract",
     "posix-permissions": "Windows does not enforce the fixture's POSIX read-only file/directory mode seals",
   };
   assert.ok(Object.hasOwn(reasons, capability), `unknown fixture capability: ${capability}`);
