@@ -90,13 +90,14 @@ def template():
     for key in CONFIG_IDS:
         repo, revision = REVISIONS[key]
         configs.append(dict(id=key, repo=repo, revision=revision,
-            precision='fp32' if key == 'moss_dmd' else ('bf16' if key.startswith('moss') else 'q4'),
+            precision='bf16+fp32-unmerged' if key == 'moss_dmd' else ('bf16' if key.startswith('moss') else 'q4'),
             steps=8 if key in ('moss_dmd', 'z_image_turbo') else (4 if key == 'flux2_klein_9b' else (40 if key == 'qwen_image_2_1' else 50)),
             guidance=3.0 if key in ('moss_base','moss_sft') else (0.0 if key in ('moss_dmd','z_image_turbo') else 1.0),
             prompt_mode='raw', negative_prompt='', batch_size=1, snapshot=None,
             # Every local weight/config/tokenizer/code input is frozen by bytes.
             files=[], runtime_command=[sys.executable, str(ROOT / 'run.py')], settings={}, unavailable=None))
     return dict(schema_version=1, corpus=corpus(), configs=configs,
+        dmd_parity_fixtures=[dict(case_id=case_id,seed=173) for case_id in ('english_signage-1','chinese_mixed-1','json_text-1','product_aspect-1','product_aspect-2')],
         runtime=dict(python=None, packages=None, os=None, cuda=None, driver=None),
         hardware=dict(host=None, gpu_uuid=None, gpu_name=None, gpu_memory_bytes=None, host_memory_bytes=None),
         ownership=dict(responsible_chat=None, lease=None, job=None, timeout_seconds=1800, resume=None, next_action=None),
@@ -105,8 +106,9 @@ def template():
         condition='matched corpus canvas; per-model declared steps and precision; raw and enhanced prompt bytes frozen separately')
 
 
-def validate_manifest(manifest):
+def validate_manifest(manifest,config_id=None):
     require(manifest['corpus'] == corpus(), 'corpus changed: new freeze required')
+    require(manifest['dmd_parity_fixtures']==template()['dmd_parity_fixtures'],'controlled parity fixture plan changed')
     require(tuple(c['id'] for c in manifest['configs']) == CONFIG_IDS, 'six ordered configuration identities required')
     for category in ('runtime', 'hardware', 'ownership'):
         require(all(v is not None and v != '' for v in manifest[category].values()), f'incomplete {category}')
@@ -128,7 +130,15 @@ def validate_manifest(manifest):
             require(all(config['unavailable'].get(k) for k in ('reason', 'reproduce', 'evidence_path', 'evidence_sha256')), 'unavailable config needs reproducible evidence')
             require(file_hash(config['unavailable']['evidence_path']) == config['unavailable']['evidence_sha256'], 'unavailable evidence hash mismatch')
         else:
-            if not config['id'].startswith('moss_'):
+            if config_id is not None and config['id']!=config_id:continue
+            if config['id'].startswith('moss_'):
+                shared=next(c['snapshot'] for c in manifest['configs'] if c['id']=='moss_sft')
+                require(config['settings']['shared_snapshot']==shared,'MOSS shared component identity changed')
+                require(Path(config['settings']['pipeline_code'])==Path(shared)/'pipeline_moss_image.py','MOSS pipeline source path changed')
+                if config['id']=='moss_dmd':
+                    require(config['settings'].get('adapter_validation') is True,'DMD candidate adapter and parity must be enabled')
+                    require(Path(config['settings']['lora_path'])==Path(config['snapshot'])/'lora.safetensors' and Path(config['settings']['replacement_path'])==Path(config['snapshot'])/'time_embedding.safetensors','DMD coupled adapter identity changed')
+            else:
                 require(config['settings']['device_id']==manifest['hardware']['gpu_uuid'],'native physical device differs from freeze')
             require(config['snapshot'] and config['files'] and config['runtime_command'], f"unprepared {config['id']}")
             require(all(Path(f['path']).is_absolute() for f in config['files']), 'input paths must be absolute')
@@ -136,7 +146,7 @@ def validate_manifest(manifest):
             for item in config['files']:
                 path = Path(item['path'])
                 require(path.is_file() and not path.is_symlink(), f'invalid input {path}')
-                require(item['sha256'] == file_hash(path), f'input hash mismatch {path}')
+
     return manifest
 
 
@@ -152,6 +162,14 @@ def inventory(config):
             paths.update(Path(settings[k]) for k in ('lora_path','replacement_path'))
     else:
         paths.add(Path(settings['binary']))
+        hub=Path(settings['hub_cache']).resolve()
+        repo_root=hub/('models--'+config['repo'].replace('/','--'))
+        snapshot=repo_root/'snapshots'/config['revision']
+        require(Path(config['snapshot']).resolve()==snapshot.resolve(),'native resolver snapshot identity mismatch')
+        require((repo_root/'refs'/'main').read_text().strip()==config['revision'],'native resolver ref identity changed')
+        require({p.name for p in (repo_root/'snapshots').iterdir()}=={config['revision']},'alternative native resolver snapshot present')
+        # Include refs and all resolver metadata, not merely weight files in one snapshot.
+        roots=[repo_root]
     for root in roots:
         require(root and Path(root).is_dir(), f'missing snapshot {root}')
         paths.update(p for p in Path(root).rglob('*') if p.is_file())
@@ -178,9 +196,42 @@ def cells(manifest, phase='scored'):
             for seed in (seeds[:1] if phase == 'calibration' else seeds):
                 yield dict(id=f"{phase}.{config['id']}.{case['id']}.{seed}", phase=phase,
                     config_id=config['id'], case_id=case['id'], scenario=case['scenario'], seed=seed,
-                    width=512 if phase == 'calibration' else case['width'],
-                    height=512 if phase == 'calibration' else case['height'],
+                    width=case['width'],
+                    height=case['height'],
                     prompt=case['prompt_' + config['prompt_mode']], negative_prompt=config['negative_prompt'])
+
+
+def parity_cells(manifest,phase='scored'):
+    rows={c['case_id']:c for c in cells(manifest) if c['config_id']=='moss_dmd' and c['seed']==173}
+    fixtures=manifest['dmd_parity_fixtures'][:1] if phase=='calibration' else manifest['dmd_parity_fixtures']
+    return [rows[f['case_id']] for f in fixtures]
+
+
+def reject_invalidated(root,lock_hash,cell_id,parity=False):
+    for path in (Path(root)/'invalidations').glob('*.json'):
+        row=unseal(read(path))
+        ids=row.get('parity_cell_ids',[]) if parity else row['cell_ids']
+        require(not (row['lock_sha256']==lock_hash and cell_id in ids),'cell evidence invalidated by execution/input mutation')
+
+
+def validate_parity(root,lock_hash,cell,receipt):
+    row=unseal(receipt)
+    reject_invalidated(root,lock_hash,cell['id'],parity=True)
+    require(row['lock_sha256']==lock_hash and row['cell']==cell,'parity fixture identity mismatch')
+    require(row['status']=='ok','parity fixture did not execute successfully')
+    artifact(Path(root),row['log'])
+    evidence=row['evidence']
+    require(evidence['candidate_arm']=='sft_bf16_unmerged_fp32_adapter' and evidence['oracle_arm']=='published_full_fp32_transformer','wrong parity arms')
+    require(evidence['generated_images']==0 and evidence['forward_count']==16 and len(evidence['steps'])==8 and len(evidence['step_codes'])==8,'incomplete parity fixture')
+    require(evidence['oracle_autocast'] is False,'oracle autocast forbidden')
+    require(all(type(evidence.get(k)) in (float,int) and math.isfinite(evidence[k]) and evidence[k]>=0 for k in ('elapsed_seconds','initialization_seconds','total_process_seconds')),'missing separate parity timing')
+    for key in ('noise_sha256','Q_sha256','context_sha256','mask_sha256'):
+        require(len(evidence[key])==64,'missing parity tensor hash')
+    for code,step in zip(evidence['step_codes'],evidence['steps']):
+        require(code==step['code'] and step['candidate_finite'] is True,'parity code/finiteness mismatch')
+        require(all(type(step[k]) in (int,float) and math.isfinite(step[k]) and step[k]>=0 for k in ('max_abs','mean_abs','reference_rms')),'invalid parity numerical result')
+        require(all(len(step[k])==64 for k in ('input_sha256','candidate_sha256','oracle_sha256')),'missing prediction hashes')
+    return row
 
 
 def image_dimensions(path):
@@ -218,6 +269,7 @@ def artifact(root, item):
 
 def validate_receipt(root, lock_hash, cell, receipt):
     r = unseal(receipt)
+    reject_invalidated(root,lock_hash,cell['id'])
     require(r['lock_sha256'] == lock_hash and r['cell'] == cell, 'receipt identity mismatch')
     require(r['status'] in ('ok', 'failed', 'unavailable', 'timeout'), 'invalid status')
     require(all(r['ownership'].get(k) for k in ('responsible_chat','job','revision','timeout_seconds','resume','next_action')), 'missing resume ownership')
@@ -239,6 +291,26 @@ def validate_receipt(root, lock_hash, cell, receipt):
     require(metrics['peak_host_rss_bytes']>0 and metrics['peak_gpu_bytes']>0 and metrics.get('gpu_memory_method'), 'missing peak memory evidence')
     require(metrics.get('component_dtypes') and metrics.get('sampler') and metrics.get('runtime_versions'), 'missing runtime/sampler evidence')
     require(metrics.get('pixels_finite') is True, 'finite pixels not verified')
+    if cell['config_id']=='moss_dmd':
+        expected_count=1 if cell['phase']=='calibration' else 5
+        declared=metrics.get('parity_fixture_digests',[])
+        require(len(declared)==expected_count and len(set(declared))==expected_count,'DMD controlled parity evidence incomplete')
+        actual={}
+        for path in (Path(root)/'parity').glob('*.json'):
+            doc=read(path)
+            if doc.get('sha256') in declared:
+                row=validate_parity(root,lock_hash,doc['cell'],doc)
+                actual[doc['sha256']]=row
+        require(set(actual)==set(declared),'DMD parity receipt missing or changed')
+        fixtures=template()['dmd_parity_fixtures'][:1] if cell['phase']=='calibration' else template()['dmd_parity_fixtures']
+        expected_ids={f"scored.moss_dmd.{f['case_id']}.{f['seed']}" for f in fixtures}
+        require({r['cell']['id'] for r in actual.values()}==expected_ids,'DMD representative fixture coverage changed')
+        for row in actual.values():
+            proof=row['evidence']
+            require(metrics['sampler']['Q_sha256']==proof['Q_sha256'] and metrics['sampler']['step_codes']==proof['step_codes'],'DMD sampler differs from validated dataspace')
+            if row['cell']['case_id']==cell['case_id'] and row['cell']['seed']==cell['seed']:
+                require(metrics['noise_sha256']==proof['noise_sha256'],'DMD measured input differs from controlled fixture')
+        require(metrics['sampler'].get('execution_arm')=='sft_bf16_unmerged_fp32_adapter' and metrics['sampler'].get('oracle_resident') is False,'wrong or contaminated scored DMD arm')
     return r
 
 
@@ -357,13 +429,16 @@ def report(lock,run,pairs_path,judgments_path,annotations_path):
                     scores.append(objective_scores(case,ann))
             output.append(dict(case_id=case['id'],scenario=case['scenario'],config_id=config['id'],statuses=dict(Counter(r['status'] for r in rows)),objective=scores,
                 costs=[r['metrics'] for r in rows if r['status']=='ok']))
-    dmd=[r for r in results.values() if r['cell']['config_id']=='moss_dmd' and r['status']=='ok']
-    parity_complete=len(dmd)==48 and all(len(r['metrics']['sampler'].get('parity',[]))==8 and all(p['candidate_finite'] and p['max_abs']<=manifest['thresholds']['dmd_prediction_max_abs'] and p['mean_abs']<=manifest['thresholds']['dmd_prediction_mean_abs'] for p in r['metrics']['sampler']['parity']) for r in dmd)
+    parity=[]
+    for cell in parity_cells(manifest):
+        path=Path(run)/'parity'/(cell['id']+'.json')
+        if path.exists():parity.append(validate_parity(run,read(lock)['sha256'],cell,read(path)))
+    parity_complete=len(parity)==5 and all(step['max_abs']<=manifest['thresholds']['dmd_prediction_max_abs'] and step['mean_abs']<=manifest['thresholds']['dmd_prediction_mean_abs'] for fixture in parity for step in fixture['evidence']['steps'])
     usable_pairs=sum(j['winner']!='unavailable' for j in judgments)
     all_outputs=len(results)==288 and all(r['status']=='ok' for r in results.values())
     return dict(status='evidence assembled; analyst shortlist and Michael inclusion decision remain pending', rows=output,
         recommendation_eligible=all_outputs and usable_pairs==432 and parity_complete,
-        dmd_adapter_prediction_parity_complete=parity_complete, usable_blind_pairs=usable_pairs,
+        dmd_adapter_prediction_parity_complete=parity_complete, parity_fixture_count=len(parity),parity_forward_count=sum(r['evidence']['forward_count'] for r in parity),parity_process_seconds=sum(r['evidence']['total_process_seconds'] for r in parity),usable_blind_pairs=usable_pairs,
         blind_wins=dict(votes),blind_pairs=432,missing_outputs=sum(r['status']!='ok' for r in results.values()),
         uncertainty=dict(Counter(j['uncertainty'] for j in judgments)),thresholds=manifest['thresholds'],
         conclusions='No model superiority or native adoption inferred automatically; analyze per scenario, failures and quality/cost tradeoffs.')

@@ -19,18 +19,17 @@ Each configuration selects exactly one frozen raw/enhanced prompt condition;
 this never doubles the render budget. Primary defaults use raw prompts for all
 six configurations. Enhanced prompts must be reviewed for semantic equivalence
 and selected before freezing. Report differing enhancement conditions explicitly.
-The image count is 12×2×2×6=288 scored outputs, at most six serial 512² calibration
+The image count is 12×2×2×6=288 scored outputs, at most six serial 1024² calibration
 outputs, and at most 24 later native probes (not launched by this package):318
 maximum generated images across phases. Prediction parity fixtures add no images.
 Every one of the three MOSS configurations is paired against every one of the
 three baselines on all 48 cases: 3×3×48=432 blind comparisons.
 
-The configuration identities are MOSS Base BF16, MOSS SFT BF16, full-transformer
-DMD FP32, and native Qwen Image 2.1 / FLUX.2 Klein 9B / Z-Image Turbo at q4.
+The configuration identities are MOSS Base BF16, MOSS SFT BF16, SFT BF16 plus unmerged FP32 DMD adapters, and native Qwen Image 2.1 / FLUX.2 Klein 9B / Z-Image Turbo at q4.
 The template freezes exact revisions discovered for this evaluation. It uses
 matched case resolutions and each model's declared steps/guidance, rather than
 silently changing the native defaults to match MOSS. The q4 baselines and MOSS
-BF16/FP32 reference have different precision/runtime costs; comparisons must
+BF16 and mixed-precision candidate paths have different precision/runtime costs; comparisons must
 retain those conditions and cannot establish architecture-only or model-intrinsic efficiency; this is screening
 of concrete product options under declared conditions.
 
@@ -51,7 +50,16 @@ CUDA/driver/host identities. Provisioning is a separate explicit bootstrap actio
 Use absolute paths for all run state, outside the repository. The bootstrap
 transport supplies the concrete host paths, approved byte budget and exclusive
 device lease. Rendering also requires its live ancestor-held device lock and
-MOSS_DEVICE_LOCK/MOSS_LEASE_ID/MOSS_PROTOCOL_SHA256 environment. Direct run.py
+MOSS_DEVICE_LOCK/MOSS_LEASE_ID/MOSS_PROTOCOL_SHA256 environment.
+The direct CLI imports the same ExecutionGuard as bootstrap: physical GPU1 UUID
+GPU-e4b79931-7be6-f216-460a-f5405cfafffe, live ancestor-held lease, reconciled
+background ownership, continuous foreign-process checks and deadline enforcement.
+Native resolver authority includes exact refs/main, the complete snapshot set and
+isolated cache closure; changed refs or an added alternate snapshot fail before
+requests. Full input hashes run at configuration boundaries; inexpensive resolver
+identity and file fingerprints run during cells. Scored execution additionally
+requires accepted calibration receipts/estimate and explicit coordinator
+authorization bound to the same protocol. GPU0 is never an execution option. Direct run.py
 commands below execute only inside that coordinator-owned lease. An expired,
 wrong-device, wrong-freeze, or missing coordinator process fails before spawning. Standalone preparation follows this sequence:
 
@@ -72,8 +80,10 @@ python scripts/evaluation/moss/evaluate.py validate /ABS/lock.json /ABS/run --ph
 ```
 
 Use measured calibration time, actual full-resolution token/step counts, and
-observed memory to propose the remaining campaign wall-clock; 512² is not
-full-resolution quality evidence. Only the coordinator authorizes the scored
+observed memory to estimate the sampled square condition. Calibration uses the
+actual first scored1024² fixture; wide/tall canvas costs and entire-campaign
+wall-clock remain uncertain until measured. No six-square linear extrapolation
+is represented as a complete campaign estimate. Only the coordinator authorizes the scored
 campaign, using the same command with `--phase scored` for each configuration.
 All six calibration receipts must exist first. A failed calibration cannot become
 scored success: explicit unavailable status requires a new reviewed freeze and
@@ -83,7 +93,10 @@ this tool never silently rewrites receipt identities.
 Every invocation has a bounded initialization/per-output timeout. Failure stops
 that configuration's runtime and emits explicit failure receipts for its remaining
 cells without more GPU work. No automatic retry occurs. Existing receipts/logs
-are never overwritten. Review the failure and use a fresh approved run directory
+are never overwritten. Resume skips only validated successful cells; failed
+receipts and orphan images block automatic repeats. Every attempt uses its own
+log. Input/ownership mutations create durable invalidations, and affected prior
+receipts cannot subsequently be accepted or resumed. Review the failure and use a fresh approved run directory
 for a replacement; retain the original attempt. Ownership records include job,
 revision/lock, responsible chat, deadline, resume and next action. A pending
 cell is missing evidence, not an unavailable or successful result.
@@ -107,16 +120,27 @@ CFG, negative branch, release Euler scheduler, re-noising or resampled codes:
 trained order. Q/codes shape, dtype and finiteness are checked; VAE decode uses
 the published batch-normalization denormalization and 2×2 unpatchify.
 
-DMD `settings.adapter_validation=true` additionally loads the SFT BF16 backbone,
-strictly covers every rank128/alpha128 LoRA target, and applies unmerged FP32
-residuals. All time embedding tensors and **both** modulation biases are
-replaced; the three time/modulation modules stay FP32. Each full-reference step
-is compared against the candidate on the same fixed input/noise/conditioning,
-recording maximum/mean error, RMS and finiteness without another decoded image.
-The residual arithmetic is explicit; actual real-weight agreement must pass the
-frozen tolerances before recommendation eligibility. CPU algebra fixtures alone
-cannot establish that agreement. Adapter checks add eight forwards, no images;
-report their time overhead and do not call it ordinary DMD reference latency.
+DMD `settings.adapter_validation=true` is mandatory. The scored arm loads the
+SFT BF16 backbone, strictly covers every rank128/alpha128 LoRA target, and
+applies unmerged FP32 residuals. All time embedding tensors and **both** modulation
+biases are replaced; the three time/modulation modules stay FP32. The scored
+configuration is labeled `bf16+fp32-unmerged`, never full-transformer FP32.
+
+A separate owned parity process loads candidate and full FP32 oracle, without a
+VAE or decoded images. It compares eight predictions on identical fixed noise,
+conditioning, Q/codes and candidate-recurrence inputs, saving input/context/prediction
+hashes, numerical errors and forward counts. That process must exit and join
+before a fresh **candidate-only** process measures generation; oracle tensors,
+CUDA allocator state and host RSS cannot contaminate candidate costs.
+
+Five representative existing fixtures are frozen: English square, Chinese square,
+JSON text layout square, wide product and tall product, one seed each. Calibration
+runs the first fixture once (16 forwards); scored preparation reuses that exact
+hash-bound receipt and adds only the four missing fixtures (64 forwards). Total
+controlled parity is at most80 forwards and zero images. Existing parity receipts
+are immutable and validated before reuse. Recorded errors must meet frozen
+thresholds for recommendation eligibility; CPU tests cannot establish real-weight
+parity. Residual arithmetic is explicit rather than assumed equivalent.
 
 Native baselines use `native.py` and the existing registered product route.
 The frozen settings require `binary`, `binary_sha256`, `runtime_versions`
@@ -136,6 +160,9 @@ the physical nvidia-smi index for worker telemetry/admission, while CUDA device0
 is remapped by UUID; another card's peaks cannot substitute.
 The bootstrap owns preparation and source/build receipts; no pin bump occurs.
 
+Requests contain only the fixed text-to-image fields; imported/modelPath and
+optional-component overrides are excluded. Native resolution uses the isolated
+cache directly; offline environment flags alone are not Rust network-denial proof.
 Requests put steps, guidance and `mlxQuantize` inside `advanced`, with
 `mlxQuantizeExplicit=true`, count1 and enhancement disabled (enhanced prompt
 bytes, if selected, are already frozen). Completion must include settled assets;
@@ -146,7 +173,9 @@ Native revision binding comes indirectly from exact isolated cache inventory,
 source/binary hashes and worker identity; it is never claimed as a direct
 runtime checkpoint-revision receipt.
 
-First image latency includes initialization/model load; later images in the same
+First image latency includes initialization/model load from the staged cache;
+prior checksum reads can warm filesystem caches, so this is not an OS-cold disk
+measurement. Later images in the same
 runtime are warm observations. Single-output calibration has no measured warm
 latency (`null`, never zero). GPU peak includes cold model loading; PyTorch
 allocated/reserved peaks are preserved. Native peaks are one-second sampled
@@ -196,7 +225,7 @@ python scripts/evaluation/moss/evaluate.py report /ABS/lock.json /ABS/run /ABS/b
 The report retains per-scenario/per-configuration statuses, costs, independent
 objective scores, blind wins, failures and uncertainty. Recommendation eligibility
 requires all scored outputs,432 usable blind pairs, every successful output's
-objective annotation, and complete DMD step-level adapter checks within frozen
+objective annotation, and all five controlled DMD step-level adapter fixtures within frozen
 tolerances. It is deliberately conservative; failure rates still count against
 availability and must be reported even when a scenario looks promising.
 The analyst writes the use-case shortlist and tradeoffs; **Michael makes the
@@ -223,7 +252,7 @@ raise SystemExit(pytest.main(['-q', 'tests/test_moss_reference_evaluation.py']))
 PY
 ```
 
-That run currently passes18 tests without skips and can write an explicit CPU
+That run exercises the complete CPU suite without skips and can write an explicit CPU
 fixture receipt: observed FP32 residual1.0001000166, unchanged BF16 backbone,
 both modulation biases FP32. It uses no model weights, GPU allocation or image
 quality observations. Controlled unavailable test fixtures are only tests, never
