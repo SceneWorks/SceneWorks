@@ -18316,9 +18316,11 @@ mod tests {
     /// A synthetic seam prices every untiled rung far over budget and the fixture's 512-px
     /// `BoundedDecode` tile at `generic + EXTRA`, so only a rung that engages bounded decode with
     /// `decode_tile_edge = Some(512)` can be admitted, and its graded (and recorded) peak is the
-    /// same rung's zero-shortfall peak + exactly `transient(Some(512)) − generic`.
+    /// same rung's zero-shortfall peak + exactly `transient(Some(512)) − generic`; the zero-shortfall
+    /// peak is pinned to the fixture's weights + generic headroom floor.
     ///
-    /// *Mutation that reds this:* passing `None` as the forced tile edge (every rung is refused).
+    /// *Mutations that red this:* passing `None` as the forced tile edge (every rung is refused);
+    /// recording any peak other than the graded candidate's (the pinned floor, or the `+ EXTRA`).
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_shed_transient_correction_prices_each_rung_at_its_own_forced_decode_tile() {
@@ -18396,6 +18398,13 @@ mod tests {
             "only the rung tiled at {TILE} px escapes the untiled pricing: {rung:?}"
         );
         assert_eq!(at_generic.context.selection, rung);
+        // The recorded peak is the GRADED candidate's: the fixture's 3 GiB (all transformer — no
+        // rung sheds weights) + the generic headroom, with no correction at a zero shortfall.
+        assert_eq!(
+            at_generic.context.predicted_peak_bytes,
+            contract.asset_facts.base_bytes + plan.generic_headroom_bytes(geometry),
+            "a zero-shortfall rung records its weights + generic headroom floor"
+        );
         assert_eq!(
             corrected.context.predicted_peak_bytes,
             at_generic.context.predicted_peak_bytes + extra,
