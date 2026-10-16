@@ -45,6 +45,19 @@ async function realInputs() {
   return { claims: collectClaims({ models, loras }), evidence };
 }
 
+test("FLUX 3 install selects the two exact index-declared encoder shards", async () => {
+  const manifest = await readJsonc("config/manifests/builtin.models.jsonc");
+  const download = manifest.models.find((model) => model.id === "flux3_klein").downloads[0];
+  assert.equal(download.revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
+  assert.deepEqual(download.files.filter((file) => file.endsWith(".safetensors")), [
+    "model.safetensors", "ae.safetensors",
+    "text_encoder/model-00001-of-00002.safetensors",
+    "text_encoder/model-00002-of-00002.safetensors",
+  ]);
+  assert.ok(download.files.every((file) => !/[?*]/.test(file)));
+  assert.ok(download.files.includes("text_encoder/model.safetensors.index.json"));
+});
+
 test("the per-guard mutation harness passes", () => {
   const failures = runSelfTest({ log: () => {} });
   assert.deepEqual(failures, []);

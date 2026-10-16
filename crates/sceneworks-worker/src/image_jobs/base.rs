@@ -3881,7 +3881,7 @@ fn candle_certified_artifact_path(
 /// chosen.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
-    if engine_id == "iris_3b" {
+    if matches!(engine_id, "iris_3b" | "flux3_klein") {
         "bf16"
     } else {
         gate_tier
@@ -10716,6 +10716,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
         // for the same reason, and neither is derived from the other.
         "qwen_image_2_1" => "candle_qwen_2_1",
+        "flux3_klein" => "candle_flux3",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",

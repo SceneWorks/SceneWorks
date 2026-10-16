@@ -4549,7 +4549,7 @@ def test_minimax_h3_managed_veda_predictor_exact_identity_and_soft_policy():
 
 
 def test_managed_file_schema_rejects_partial_or_unpinned_identity():
-    schema = json.loads(SCHEMA_PATH.read_text())
+    schema = _load_schema(SCHEMA_PATH)
     manifest = _load_builtin_models_manifest()
     model = next(model for model in manifest["models"] if model["id"] == "minimax_h3")
     index = next(index for index, row in enumerate(model["downloads"]) if row.get("componentId") == "veda_predictor")
@@ -4561,3 +4561,21 @@ def test_managed_file_schema_rejects_partial_or_unpinned_identity():
         invalid = copy.deepcopy(manifest)
         del next(model for model in invalid["models"] if model["id"] == "minimax_h3")["downloads"][index][key]
         assert list(jsonschema.Draft202012Validator(schema).iter_errors(invalid)), key
+
+
+def test_managed_file_schema_reader_is_utf8_under_a_windows_default(tmp_path, monkeypatch):
+    schema = _load_schema(SCHEMA_PATH)
+    schema["title"] = "许可"
+    fixture = tmp_path / "non-ascii-schema.json"
+    fixture.write_text(json.dumps(schema, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setitem(globals(), "SCHEMA_PATH", fixture)
+    native_read_text = Path.read_text
+
+    def windows_default(path, *args, **kwargs):
+        if path == fixture and not args and kwargs.get("encoding") is None:
+            kwargs["encoding"] = "cp1252"
+        return native_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_default)
+    # Execute the real identity audit, not only the already-correct generic loader.
+    test_managed_file_schema_rejects_partial_or_unpinned_identity()

@@ -1160,10 +1160,10 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
     // (`iris_mlx_eligible`).
     ModelCaps::new("iris_3b", true, true, false, true, false),
-    // FLUX 3 Image Klein, distilled (sc-26234, epic sc-26233): native MLX only (`mlx-gen-flux3`,
-    // `mac_only`) at this pin — plain text-to-image, no quant tier, no adapters; the Candle twin is
-    // sc-26235, so every candle column is false and an off-Mac request stays unclaimed.
-    ModelCaps::new("flux3_klein", true, false, false, false, false),
+    // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
+    // MLX and Candle/CUDA. Neither lane advertises quant tiers or adapters; the Candle surface
+    // delegates to the MLX predicate so unsupported carriers are never silently discarded.
+    ModelCaps::new("flux3_klein", true, true, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2420,6 +2420,7 @@ mod tests {
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
+        "flux3_klein",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",

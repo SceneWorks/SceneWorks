@@ -5898,7 +5898,8 @@
       "family": "flux3",
       "type": "image",
       "adapter": "mlx_flux3",
-      "macOnly": true,
+      // The same request and pinned package run on MLX (sc-26234) and Candle/CUDA (sc-26235).
+      "macOnly": false,
       "capabilities": ["text_to_image"],
       "downloads": [
         // The upstream package, pulled directly from Black Forest Labs (GATED under the FLUX
@@ -5923,7 +5924,8 @@
             "text_encoder/tokenizer_config.json",
             "text_encoder/chat_template.json",
             "text_encoder/model.safetensors.index.json",
-            "text_encoder/model-*.safetensors"
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors"
           ],
           "estimatedSizeBytes": 20316471770,
           "footprint": { "diskSizeBytes": 20316471770, "residentMemoryBytes": null, "peakMemoryBytes": null }
@@ -5973,10 +5975,16 @@
         // activations. Replaced by measured evidence at the epic-end campaign (sc-26243).
         "minMemoryGb": 32
       },
+      "candle": {
+        // Declared conservative resident floor, not measured: dense bf16 transformer and encoder,
+        // f32 autoencoder, activation scratch and allocator reserve. Terminal sc-26243 owns fitting.
+        "measured": false,
+        "minMemoryGb": 32
+      },
       "ui": {
         "promptEnhance": true,
         "label": "FLUX 3 Image Klein",
-        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon; 16 Euler steps, no classifier-free guidance. One ~20 GB gated download (FLUX Kommunity License); needs ~32 GB unified memory at 1024\u00b2.",
+        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~20 GB gated download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
         "recommendedFor": ["text_to_image"],
         "promptGuide": {
           "title": "FLUX 3 Image Klein Prompt Guide",

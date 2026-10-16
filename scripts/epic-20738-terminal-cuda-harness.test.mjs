@@ -202,6 +202,31 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
   }
 });
 
+test("frozen download profiles reject selected gated authorities, not unrelated catalog entries", async () => {
+  const checked = profile();
+  const evidence = JSON.parse(await readFile("config/download-pattern-evidence.json", "utf8"));
+  const expected = expectedArtifactFilesFromEvidence(checked, evidence);
+  const selected = Object.values(checked.artifacts)[0];
+  const selectedKey = `${selected.repository}@${selected.revision}`;
+  const flux3Key = "black-forest-labs/flux-3-image-klein@8454017f9ebaada30c998fccd9f67a80c7580f68";
+  assert.ok(evidence.repos.some((row) => row.key === flux3Key && row.gated === "auto"));
+  for (const gated of ["auto", "manual"]) {
+    const unrelated = structuredClone(evidence);
+    unrelated.repos.find((row) => row.key === flux3Key).gated = gated;
+    assert.deepEqual(expectedArtifactFilesFromEvidence(checked, unrelated), expected);
+    const selectedMutation = structuredClone(evidence);
+    selectedMutation.repos.find((row) => row.key === selectedKey).gated = gated;
+    assert.throws(() => expectedArtifactFilesFromEvidence(checked, selectedMutation),
+      /selected authority must be ungated/);
+  }
+  for (const gated of [true, null, "unknown"]) {
+    const malformed = structuredClone(evidence);
+    malformed.repos.find((row) => row.key === flux3Key).gated = gated;
+    assert.throws(() => expectedArtifactFilesFromEvidence(checked, malformed),
+      /not an exact immutable file census/);
+  }
+});
+
 test("current and legacy Illustrious download selectors fail closed independently", async () => {
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
@@ -214,12 +239,13 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // de-distill training adapter (136 keys), and the TAEQI2.1 tiny decoder of the Qwen Image 2.1 trainer's
   // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), and the
   // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), and the relicensed SANA / SANA-Sprint
-  // mirror revisions (same 144 keys). The Illustrious
+  // mirror revisions (same 144 keys), then sc-26234's authenticated FLUX 3 package census
+  // (145 keys, independently checked against the pinned repository and encoder index). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "1c5fe4dbdefd112ea48b5b30a8d7a3af6b34c16b10ec6fe10b429df7bf15f920");
+    "b834e98e079011fb51d615f4a24075bd662354b5599772205f3d1f070e76f7e3");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 

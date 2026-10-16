@@ -7191,20 +7191,16 @@ mod download_receipt_tests {
         );
     }
 
-    /// sc-26234: unlike Iris-3B, FLUX 3 Image Klein has NO Candle lane at this pin (the Candle twin
-    /// is sc-26235), so its entry is labelled `macOnly`. For an IMAGE entry that label is the gate —
-    /// the web's `modelEligibility` hides a `macOnly` model off-Mac, and the candle router has no
-    /// claim for `flux3_klein` — rather than a catalog withdrawal (only video products are withdrawn,
-    /// `video_model_withdrawn_on_platform`). So on Windows and Linux the label must SURVIVE the
-    /// platform projection intact, alongside the one package download, for that gate to fire.
+    /// sc-26235: the same pinned package serves native MLX and Candle/CUDA. Platform projection
+    /// must not hide the image entry or replace its upstream download on Windows or Linux.
     #[test]
-    fn flux3_klein_is_mac_only_and_keeps_that_label_on_the_candle_platforms() {
+    fn flux3_klein_keeps_its_native_candle_availability_and_package_on_each_platform() {
         let _env = isolate_hf_cache();
         let base = builtin_models_entry("flux3_klein");
         assert_eq!(
             base.get("macOnly").and_then(Value::as_bool),
-            Some(true),
-            "flux3_klein has no Candle lane at this pin, so it must be labelled macOS-only"
+            Some(false),
+            "flux3_klein has native providers on both platforms"
         );
         for os in ["windows", "linux"] {
             let temp = tempfile::tempdir().unwrap();
@@ -7214,8 +7210,8 @@ mod download_receipt_tests {
             let mut model = projected.remove(0);
             assert_eq!(
                 model.get("macOnly").and_then(Value::as_bool),
-                Some(true),
-                "{os}: the macOnly gate reaches the client"
+                Some(false),
+                "{os}: the native Candle model remains selectable"
             );
             assert!(
                 !video_model_withdrawn_on_platform("flux3_klein", &model, os),
