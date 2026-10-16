@@ -13,9 +13,13 @@ const model = () => ({ id: "flux3_klein", family: "flux3", gated: true, credenti
 const context = { projectId: "project_test", workerId: "worker_test", backend: "mlx", adapter: "mlx_flux3" };
 function fixture() {
   const body = imageBody(context.projectId);
-  const asset = { id: "asset_test", projectId: context.projectId, generationSetId: "genset_test", type: "image", file: { path: "assets/images/genset_test/output.png", mimeType: "image/png", width: 1024, height: 1024 }, lineage: { jobId: "job_test" }, recipe: { model: body.model, mode: body.mode, adapter: context.adapter, prompt: body.prompt, seed: body.seed, normalizedSettings: { width: 1024, height: 1024, count: 1, family: "flux3" }, rawAdapterSettings: { steps: 16, numInferenceSteps: 16, realModelInference: true, repo } } };
-  const job = { id: "job_test", projectId: context.projectId, type: "image_generate", payload: body, status: "completed", stage: "completed", backend: "mlx", workerId: context.workerId, error: null, result: { model: "flux3_klein", adapter: "mlx_flux3", generationSetId: asset.generationSetId, assetIds: [asset.id], assets: [structuredClone(asset)] } };
-  return { body, job, asset, sidecar: structuredClone(asset) };
+  // Production persistence returns this raw sidecar in job.result.assets. Library GET hydrates
+  // three additional fields; cloning one identical envelope for all surfaces hides contract bugs.
+  const sidecar = { schemaVersion: 1, id: "asset_test", projectId: context.projectId, generationSetId: "genset_test", type: "image", displayName: "teapot", createdAt: "2026-10-16T12:00:00Z", origin: "image", status: { favorite: false, rating: 0, rejected: false, trashed: false }, file: { path: "assets/images/genset_test/output.png", mimeType: "image/png", width: 1024, height: 1024 }, lineage: { jobId: "job_test" }, recipe: { model: body.model, mode: body.mode, adapter: context.adapter, prompt: body.prompt, seed: body.seed, normalizedSettings: { width: 1024, height: 1024, count: 1, family: "flux3" }, rawAdapterSettings: { steps: 16, numInferenceSteps: 16, realModelInference: true, repo } } };
+  const generationSet = { schemaVersion: 1, id: sidecar.generationSetId, projectId: context.projectId, jobId: "job_test", mode: body.mode, model: body.model, prompt: body.prompt, negativePrompt: body.negativePrompt, count: 1, createdAt: "2026-10-16T11:59:59Z", recipe: structuredClone(sidecar.recipe) };
+  const asset = { ...structuredClone(sidecar), url: `/api/v1/projects/${context.projectId}/files/${sidecar.file.path}`, sidecarPath: "assets/images/genset_test/output.sceneworks.json", generationSet };
+  const job = { id: "job_test", projectId: context.projectId, type: "image_generate", payload: body, status: "completed", stage: "completed", backend: "mlx", workerId: context.workerId, error: null, result: { model: "flux3_klein", adapter: "mlx_flux3", generationSetId: sidecar.generationSetId, assetIds: [sidecar.id], assets: [structuredClone(sidecar)] } };
+  return { body, job, asset, sidecar };
 }
 
 test("registered dispatcher isolates lifecycle from catalog and calls exact-commit Mac workflow", async () => {
@@ -67,9 +71,54 @@ test("pinned bundled components, license and gated auth are mandatory", () => {
 test("ordinary typed image request and saved library asset bind job, runtime and provenance", () => {
   const { body, job, asset, sidecar } = fixture();
   assert.doesNotThrow(() => assertAccepted(job, body));
+  assert.deepEqual(job.result.assets[0], sidecar);
+  assert.notDeepEqual(job.result.assets[0], asset, "the production library response is hydrated, not the raw job envelope");
+  assert.notEqual(asset.generationSet.createdAt, sidecar.createdAt, "the generation set is created before the image sidecar");
   assert.equal(assertSavedAsset(job, asset, sidecar, context).asset_id, asset.id);
   for (const mutate of [(f) => f.job.status = "running", (f) => f.job.type = "other", (f) => f.job.backend = "candle", (f) => f.job.workerId = "other", (f) => f.job.result.assetWrites = [{}], (f) => f.job.result.assetIds = ["other"], (f) => f.asset.lineage.jobId = "other", (f) => f.asset.recipe.adapter = "procedural_stub", (f) => f.asset.recipe.model = "flux2_klein", (f) => f.asset.recipe.prompt = "different", (f) => f.asset.recipe.seed++, (f) => f.asset.recipe.rawAdapterSettings.realModelInference = false, (f) => f.asset.file.path = "../../provider.png", (f) => f.sidecar.recipe.seed++, (f) => f.job.payload.model = "flux2_klein"]) { const f = fixture(); mutate(f); assert.throws(() => assertSavedAsset(f.job, f.asset, f.sidecar, context)); }
   assert.throws(() => assertAccepted({ ...job, payload: { ...body, advanced: { ...body.advanced, steps: 1 } } }, body));
+});
+
+test("raw job and library persisted projections reject recipe, file and provenance divergence", () => {
+  for (const [name, mutate] of [
+    ["job recipe", (f) => f.job.result.assets[0].recipe.seed++],
+    ["library recipe", (f) => f.asset.recipe.seed++],
+    ["sidecar recipe", (f) => f.sidecar.recipe.seed++],
+    ["job file", (f) => f.job.result.assets[0].file.path = "assets/images/genset_test/other.png"],
+    ["library file", (f) => f.asset.file.path = "assets/images/genset_test/other.png"],
+    ["sidecar file", (f) => f.sidecar.file.path = "assets/images/genset_test/other.png"],
+    ["job provenance", (f) => f.job.result.assets[0].lineage.jobId = "another_job"],
+    ["library provenance", (f) => f.asset.lineage.jobId = "another_job"],
+    ["sidecar provenance", (f) => f.sidecar.lineage.jobId = "another_job"],
+    ["unrecognized persisted field", (f) => f.asset.unexpectedPersistedField = true],
+  ]) {
+    const f = fixture(); mutate(f);
+    assert.throws(() => assertSavedAsset(f.job, f.asset, f.sidecar, context), /must agree/, name);
+  }
+});
+
+test("hydrated fields bind exact project file, sidecar and embedded generation provenance", () => {
+  for (const [name, mutate] of [
+    ["URL project", (a) => a.url = a.url.replace(context.projectId, "another_project")],
+    ["URL file", (a) => a.url = a.url.replace("output.png", "other.png")],
+    ["relative sidecar path", (a) => a.sidecarPath = "assets/images/genset_test/other.sceneworks.json"],
+    ["absolute sidecar path", (a) => a.sidecarPath = `/project/${a.sidecarPath}`],
+    ["generation set missing", (a) => delete a.generationSet],
+    ["generation set schema", (a) => a.generationSet.schemaVersion = 2],
+    ["generation set id", (a) => a.generationSet.id = "another_set"],
+    ["generation set project", (a) => a.generationSet.projectId = "another_project"],
+    ["generation set job", (a) => a.generationSet.jobId = "another_job"],
+    ["generation set mode", (a) => a.generationSet.mode = "image_edit"],
+    ["generation set model", (a) => a.generationSet.model = "flux2_klein"],
+    ["generation set prompt", (a) => a.generationSet.prompt = "another_prompt"],
+    ["generation set negative prompt", (a) => a.generationSet.negativePrompt = "not_requested"],
+    ["generation set count", (a) => a.generationSet.count = 2],
+    ["generation creation provenance", (a) => a.generationSet.createdAt = ""],
+    ["generation recipe", (a) => a.generationSet.recipe.seed++],
+  ]) {
+    const f = fixture(); mutate(f.asset);
+    assert.throws(() => assertSavedAsset(f.job, f.asset, f.sidecar, context), /hydrated/, name);
+  }
 });
 
 test("negative controls kill removed dispatch and worker provenance guards", () => {
@@ -90,7 +139,7 @@ test("negative controls kill removed dispatch and worker provenance guards", () 
 
 test("backend-neutral asset validator permits a real Candle identity without claiming Mac evidence", () => {
   const f = fixture(); f.job.backend = "candle"; f.job.result.adapter = "candle_flux3";
-  for (const a of [f.asset, f.sidecar, f.job.result.assets[0]]) a.recipe.adapter = "candle_flux3";
+  for (const a of [f.asset, f.sidecar, f.job.result.assets[0], f.asset.generationSet]) a.recipe.adapter = "candle_flux3";
   assert.doesNotThrow(() => assertSavedAsset(f.job, f.asset, f.sidecar, { ...context, backend: "candle", adapter: "candle_flux3" }));
 });
 

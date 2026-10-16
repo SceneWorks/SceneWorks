@@ -50,8 +50,11 @@ export function assertSavedAsset(job, library, sidecar, { projectId, workerId, b
   const result = job.result;
   fact(result?.model === body.model && result.adapter === adapter && !Object.hasOwn(result, "assetWrites") && result.assetIds?.length === 1 && result.assets?.length === 1, "API must publish worker facts into final assets/assetIds, not provider-only PNG or unregistered assetWrites");
   fact(library?.id && result.assetIds[0] === library.id && result.assets[0].id === library.id && library.projectId === projectId && library.type === "image", "job result must identify the saved project-library image");
-  assert.deepEqual(result.assets[0], library, "job asset and indexed library record must agree");
-  assert.deepEqual(sidecar, library, "persisted sidecar and indexed library record must agree");
+  // Job results and disk sidecars are raw persistence envelopes. The library API adds these
+  // three filesystem-derived fields; compare every persisted field, then verify hydration itself.
+  const { url, sidecarPath, generationSet, ...persistedLibrary } = library;
+  assert.deepEqual(result.assets[0], sidecar, "job asset and raw persisted sidecar must agree");
+  assert.deepEqual(persistedLibrary, sidecar, "library persisted fields and raw sidecar must agree");
   fact(library.generationSetId && library.generationSetId === result.generationSetId && library.lineage?.jobId === job.id, "saved asset provenance must bind generation set and actual job");
   const recipe = library.recipe;
   fact(recipe?.model === body.model && recipe.adapter === adapter && recipe.mode === body.mode && recipe.prompt === body.prompt && recipe.seed === body.seed, "saved recipe must preserve native model/adapter/mode/prompt/seed");
@@ -60,6 +63,12 @@ export function assertSavedAsset(job, library, sidecar, { projectId, workerId, b
   fact(settings?.family === "flux3" && settings.width === body.width && settings.height === body.height && settings.count === 1, "saved FLUX3 settings required");
   const file = library.file;
   fact(file?.mimeType === "image/png" && file.width === body.width && file.height === body.height && /^assets\/images\/[a-zA-Z0-9_./-]+\.png$/.test(file.path ?? "") && !file.path.split("/").includes(".."), "saved PNG must be a project-relative library image of the requested dimensions");
+  assert.equal(url, `/api/v1/projects/${projectId}/files/${file.path}`, "hydrated library URL must identify the exact saved project file");
+  assert.equal(sidecarPath, file.path.replace(/\.png$/, ".sceneworks.json"), "hydrated sidecar path must identify the exact project-relative sidecar");
+  fact(generationSet?.schemaVersion === 1 && generationSet.id === library.generationSetId && generationSet.projectId === projectId && generationSet.jobId === job.id, "hydrated generation set must identify the same persisted set, project and job");
+  for (const key of ["mode", "model", "prompt", "negativePrompt", "count"]) assert.deepEqual(generationSet[key], body[key], `hydrated generation set must preserve ${key}`);
+  fact(typeof generationSet.createdAt === "string" && generationSet.createdAt.length > 0, "hydrated generation set must retain its creation provenance");
+  assert.deepEqual(generationSet.recipe, sidecar.recipe, "hydrated generation set recipe must match the raw persisted recipe");
   return { job_id: job.id, asset_id: library.id, generation_set_id: library.generationSetId, project_id: projectId, backend, adapter, model: body.model, media_path: file.path };
 }
 export function assertServedPng(served, saved, width, height) {
