@@ -414,6 +414,7 @@ class BootstrapContracts(unittest.TestCase):
         raw.update(calibration_receipts_sha256='b'*64,calibration_estimate_sha256='c'*64,
             authorization=dict(id='accepted',coordinator='chat',accepted_calibration=True,max_scored_outputs=288,acknowledge_shape_uncertainty=True))
         b.control('scored',json.dumps(raw),self.root)
+        b.control('scored',json.dumps({**raw,'unavailable_configs':{'moss_dmd':{'reviewed':'structure validated against actual receipts during authorization'}}}),self.root)
         for key,value in [('max_scored_outputs',289),('accepted_calibration',False),('acknowledge_shape_uncertainty',False),('coordinator','other')]:
             broken=json.loads(json.dumps(raw));broken['authorization'][key]=value
             with self.assertRaises(ValueError):b.control('scored',json.dumps(broken),self.root)
@@ -462,13 +463,13 @@ class BootstrapContracts(unittest.TestCase):
         value=dict(protocol_sha256='a'*64,calibration_receipts_sha256='b'*64,
             calibration_estimate_sha256=b.digest(self.root/'calibration-estimate.json'),
             authorization=dict(id='accepted',coordinator='chat',accepted_calibration=True,max_scored_outputs=288,acknowledge_shape_uncertainty=True))
-        with patch.object(b,'calibration_bundle',return_value='b'*64):
-            first=b.accepted_scored_authorization(self.root,value)
-            self.assertEqual(first,b.accepted_scored_authorization(self.root,value))
+        with patch.object(b,'calibration_bundle',return_value='b'*64),patch.object(b,'availability_decisions',return_value={}):
+            first=b.accepted_scored_authorization(self.root,value,manifest={})
+            self.assertEqual(first,b.accepted_scored_authorization(self.root,value,manifest={}))
             changed=json.loads(json.dumps(value));changed['authorization']['id']='replacement'
-            with self.assertRaisesRegex(ValueError,'authorization changed'):b.accepted_scored_authorization(self.root,changed)
+            with self.assertRaisesRegex(ValueError,'authorization changed'):b.accepted_scored_authorization(self.root,changed,manifest={})
             (self.root/'calibration-estimate.json').write_text('{}')
-            with self.assertRaisesRegex(ValueError,'estimate digest'):b.accepted_scored_authorization(self.root,value)
+            with self.assertRaisesRegex(ValueError,'estimate digest'):b.accepted_scored_authorization(self.root,value,manifest={})
 
     def test_foreign_uuid_and_malformed_controls_cannot_create_lock(self):
         with self.assertRaises(ValueError):
@@ -541,6 +542,25 @@ class SharedOwnershipContracts(unittest.TestCase):
         file.write_bytes(b'x'*file.stat().st_size)
         with self.assertRaisesRegex(ValueError,'metadata changed'):guard.check()
 
+    def test_mixed_scored_guard_monitors_original_calibration_evidence(self):
+        import evaluate as ev
+        run=self.root/'run';run.mkdir();(run/'logs').mkdir();(run/'receipts').mkdir()
+        cells=[]
+        for key in o.REPOS:
+            cell=dict(id='calibration.'+key);cells.append(cell)
+            log=run/'logs'/(key+'.log');log.write_text('CPU guard fixture')
+            b.write(run/'receipts'/(cell['id']+'.json'),dict(log=dict(path='logs/'+log.name,sha256=b.digest(log))))
+        estimate=self.root/'calibration-estimate.json';b.write(estimate,{'fixture':True})
+        accepted=dict(protocol_sha256='a'*64,calibration_receipts_sha256='b'*64,calibration_estimate_sha256=b.digest(estimate),authorization=dict(id='fixture',coordinator='chat',accepted_calibration=True,max_scored_outputs=288,acknowledge_shape_uncertainty=True))
+        authority=self.root/'scored-authorization.json';b.write(authority,accepted);b.write(run/'availability-authorization.json',accepted)
+        self.lease.update(phase='scored',scored_authorization=dict(path=str(authority),sha256=b.digest(authority)))
+        self.path.unlink();b.write(self.path,self.lease)
+        with patch.object(o,'calibration_bundle',return_value='b'*64),patch.object(o,'availability_decisions',return_value={'moss_dmd':{'fixture':True}}),patch.object(ev,'cells',return_value=cells):
+            guard=self.guard(phase='scored')
+        self.assertEqual(set(guard.unavailable_configs),{'moss_dmd'})
+        (run/'logs'/'moss_dmd.log').write_text('mutated evidence')
+        with self.assertRaisesRegex(ValueError,'availability calibration evidence changed'):guard.check()
+
     def test_shared_guard_rejects_unresolved_desktop_identity(self):
         self.lease['desktop_baseline']=[dict(pid=2356,name='[Insufficient Permissions]',created_epoch=100)]
         self.path.unlink();b.write(self.path,self.lease)
@@ -549,7 +569,7 @@ class SharedOwnershipContracts(unittest.TestCase):
     def test_scored_digests_cannot_accept_failed_or_missing_calibration(self):
         value=dict(calibration_receipts_sha256='b'*64,calibration_estimate_sha256='c'*64)
         with patch.object(b,'calibration_bundle',side_effect=ValueError('six successful validated calibration receipts required')):
-            with self.assertRaisesRegex(ValueError,'successful'):b.accepted_scored_authorization(self.root,value)
+            with self.assertRaisesRegex(ValueError,'successful'):b.accepted_scored_authorization(self.root,value,manifest={})
         self.assertFalse((self.root/'scored-authorization.json').exists())
 
     def test_direct_scored_guard_requires_accepted_authorization(self):

@@ -125,13 +125,70 @@ def validate_baseline(lease):
             'reviewed idle desktop utilization ceiling must be between0 and5percent')
 
 
+def reject_run_invalidated(run_root, lock_hash):
+    from evaluate import unseal
+    for path in (Path(run_root)/'invalidations').glob('*.json'):
+        require(unseal(read(path))['lock_sha256'] != lock_hash,
+                'execution/input invalidations cannot be approved as unavailability')
+
+
+def calibration_results(manifest, lock_hash, run_root, *, complete=True):
+    from evaluate import cells, validate_receipt
+    reject_run_invalidated(run_root,lock_hash)
+    results={}
+    for cell in cells(manifest,'calibration'):
+        path=Path(run_root)/'receipts'/(cell['id']+'.json')
+        if not path.exists():
+            require(not complete,'six terminal validated calibration attempts required')
+            continue
+        row=validate_receipt(run_root,lock_hash,cell,read(path),manifest=manifest)
+        require(row['status']=='ok' or (row['status'] in ('failed','timeout') and row.get('failure_kind')=='runtime'),
+                'calibration failure is not an actual guarded runtime attempt')
+        results[cell['id']]=row
+    return results
+
+
 def calibration_bundle(lock, run_root):
-    """Canonical identity of all six successful, fully validated calibration receipts."""
-    from evaluate import receipts, canonical
-    _, results = receipts(lock, run_root, 'calibration')
-    require(len(results) == 6 and all(r['status'] == 'ok' for r in results.values()),
-            'six successful validated calibration receipts required')
+    """Identity of six immutable attempts; failure never becomes a success."""
+    from evaluate import load_lock, canonical
+    results=calibration_results(load_lock(lock),read(lock)['sha256'],run_root)
     return hashlib.sha256(canonical(results)).hexdigest()
+
+
+def availability_decisions(manifest, lock_hash, run_root, accepted, *, pending_cell=None):
+    """Explicit pre-score coordinator disposition of actual runtime failures only."""
+    from evaluate import canonical
+    results=calibration_results(manifest,lock_hash,run_root)
+    reject_run_invalidated(run_root,lock_hash)
+    require(accepted['protocol_sha256']==lock_hash,'availability protocol changed')
+    authority=accepted['authorization']
+    require(authority['id'] and authority['coordinator']==manifest['ownership']['responsible_chat']
+        and authority['accepted_calibration'] is True and authority['max_scored_outputs']==288
+        and authority['acknowledge_shape_uncertainty'] is True,'explicit coordinator calibration authorization required')
+    require(accepted['calibration_receipts_sha256']==hashlib.sha256(canonical(results)).hexdigest(),'accepted calibration attempt bundle changed')
+    failed={r['cell']['config_id']:r for r in results.values() if r['status']!='ok'}
+    decisions=accepted.get('unavailable_configs',{})
+    require(isinstance(decisions,dict) and set(decisions)==set(failed),'every failed calibration requires explicit disposition; healthy configs cannot be excluded')
+    for key,decision in decisions.items():
+        require(set(decision)=={'calibration_receipt_sha256','calibration_log_sha256','reason','reproduce','code_and_acquisition_defects_excluded'},'exact unavailable evidence fields required')
+        row=failed[key]
+        require(row['status'] in ('failed','timeout') and row.get('failure_kind')=='runtime','only actual guarded runtime failures can be approved')
+        require(decision['code_and_acquisition_defects_excluded'] is True and all(isinstance(decision[k],str) and decision[k].strip() for k in ('reason','reproduce')),'code/acquisition defects must be fixed; explicit reason/reproduction required')
+        require(decision['calibration_receipt_sha256']==digest(Path(run_root)/'receipts'/(row['cell']['id']+'.json'))
+            and decision['calibration_log_sha256']==row['log']['sha256'],'approved calibration receipt/log evidence changed')
+    if decisions:
+        scored=list((Path(run_root)/'receipts').glob('scored.*.json'))
+        images=list((Path(run_root)/'outputs').glob('scored.*.png'))
+        if scored or images:
+            mirror=Path(run_root)/'availability-authorization.json'
+            require(mirror.is_file() and read(mirror)==accepted,'availability decision must precede scored execution')
+            binding=dict(path='availability-authorization.json',sha256=digest(mirror))
+            from evaluate import unseal
+            require(all(unseal(read(path)).get('availability_authorization')==binding for path in scored),
+                    'post-scored exclusion forbidden: existing scores lack original availability binding')
+            require(all(path.stem==pending_cell or (Path(run_root)/'receipts'/(path.stem+'.json')).is_file() for path in images),
+                    'orphan scored image prevents availability approval')
+    return decisions
 
 
 class ExecutionGuard:
@@ -187,6 +244,8 @@ class ExecutionGuard:
         self.input_fingerprints = {item['path']: self.fingerprint(Path(item['path']))
                                    for config in manifest['configs'] for item in config['files']}
         self.authorization = None
+        self.unavailable_configs = {}
+        self.availability_fingerprints = {}
         if phase == 'scored':
             authority = lease.get('scored_authorization')
             require(isinstance(authority, dict) and set(authority) == {'path', 'sha256'}, 'accepted scored authorization missing from held lease')
@@ -201,6 +260,17 @@ class ExecutionGuard:
                     and accepted['authorization']['coordinator'] == lease['responsible_chat'], 'explicit accepted scored authorization required')
             require(accepted['calibration_receipts_sha256'] == calibration_bundle(self.prepared_root / 'protocol.lock.json', self.prepared_root / 'run'), 'accepted calibration receipt bundle changed')
             require(accepted['calibration_estimate_sha256'] == digest(self.prepared_root / 'calibration-estimate.json'), 'accepted calibration estimate changed')
+            self.unavailable_configs=availability_decisions(manifest,protocol_sha256,self.prepared_root/'run',accepted)
+            if self.unavailable_configs:
+                mirror=self.prepared_root/'run'/'availability-authorization.json'
+                require(digest(mirror)==authority['sha256'],'availability authorization mirror changed')
+                from evaluate import cells, artifact
+                evidence=[mirror]
+                for cell in cells(manifest,'calibration'):
+                    path=self.prepared_root/'run'/'receipts'/(cell['id']+'.json')
+                    evidence.extend([path,artifact(self.prepared_root/'run',read(path)['log'])])
+                self.availability_fingerprints={str(p):self.fingerprint(p) for p in evidence}
+
         self.check()
 
     @staticmethod
@@ -212,6 +282,7 @@ class ExecutionGuard:
     def check(self, allowed_pids=None, idle=False):
         import psutil
         require(self.now() < self.deadline_epoch, 'device lease expired or execution deadline reached')
+        reject_run_invalidated(self.prepared_root/'run',self.protocol_sha256)
         physical(self.path)
         require(digest(self.path) == self.record_sha256, 'held lease changed during execution')
         require(psutil.Process(self.owner_pid).create_time() == self.owner_created, 'coordinator lease owner PID changed')
@@ -226,6 +297,7 @@ class ExecutionGuard:
             allowed_pids = {self.owner_pid} | {p.pid for p in psutil.Process(self.owner_pid).children(recursive=True)}
         require(compute_pids(RUNNER_GPU_UUID) <= set(allowed_pids) | baseline,
                 'foreign process appeared on leased physical GPU1')
+        require(all(self.fingerprint(Path(p))==before for p,before in self.availability_fingerprints.items()),'availability calibration evidence changed during execution')
         if self.authorization:
             require(digest(self.authorization[0]) == self.authorization[1], 'scored authorization changed during execution')
         require(self.now() < self.deadline_epoch, 'device lease expired during ownership check')

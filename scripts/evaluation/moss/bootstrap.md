@@ -129,16 +129,16 @@ print(json.dumps({'moss_image_comparison_mode':'calibration','moss_control_json'
 PY
 ```
 
-Calibration executes the first existing scored fixture at its actual1024x1024 canvas, once per configuration, serially, at most six images total. Completed validated receipts resume without rendering again; failed cells or orphaned outputs never retry. Actual receipts include per-cell measurements and logs; `calibration-estimate.json` reports that actual canvas and one image/config, estimates only matching-canvas scored rows, and leaves the whole campaign estimate unknown because other shapes/prompt variance are unmeasured. DMD parity uses separate oracle/candidate prediction processes; candidate-only generation timings exclude that oracle work. Hash validation warms the filesystem cache, so cold measurements mean a fresh model/worker from staged cache, not OS-cold disk. The coordinator must review those measurements before scored authorization. Native MOSS feasibility remains a later comparison-dependent decision. Failed cells, missing evidence, DMD parity uncertainty and unavailable configurations must remain visible in the evaluation report.
+Calibration attempts the first existing scored fixture at its actual1024x1024 canvas once per configuration, serially, at most six images total. Completed validated attempts resume without rendering again; terminal runtime failures/timeouts remain failed and are never retried. Independent configurations continue after such a guarded runtime failure. A lease, foreign-owner, cache/input, or evidence-validation error still invalidates and stops execution. Orphaned outputs block retry. Actual receipts include per-cell measurements and logs; `calibration-estimate.json` reports that actual canvas and one image/config, estimates only matching-canvas scored rows, and leaves the whole campaign estimate unknown because other shapes/prompt variance are unmeasured. DMD parity uses separate oracle/candidate prediction processes; candidate-only generation timings exclude that oracle work. Hash validation warms the filesystem cache, so cold measurements mean a fresh model/worker from staged cache, not OS-cold disk. The coordinator must review those measurements before scored authorization. Native MOSS feasibility remains a later comparison-dependent decision. Failed cells, missing evidence, DMD parity uncertainty and unavailable configurations must remain visible in the evaluation report.
 
 Direct host equivalents, when access is separately available, are `python scripts/evaluation/moss/bootstrap.py prepare|freeze|calibration|scored` with the same reviewed `MOSS_CONTROL_JSON`. Freeze/calibration/scored relaunch themselves using the persistent campaign's locked Python and verified copied harness. Job receipts remain outside git and include run/attempt identity, absolute log path, deadline, resume command and next action.
 
 
-After reviewing all six successful calibration receipts, the estimate and its shape uncertainty, create `scored-control.json` by extending the calibration control with these fields:
+After reviewing all six terminal calibration attempts, the estimate and its shape uncertainty, create `scored-control.json` by extending the calibration control with these fields:
 
 ```json
 {
-  "calibration_receipts_sha256": "<printed canonical successful six-receipt bundle digest>",
+  "calibration_receipts_sha256": "<printed canonical terminal six-attempt bundle digest>",
   "calibration_estimate_sha256": "<printed calibration-estimate.json file SHA256>",
   "authorization": {
     "id": "<coordinator-issued scored authorization ID>",
@@ -150,6 +150,51 @@ After reviewing all six successful calibration receipts, the estimate and its sh
 }
 ```
 
+Normally all six calibration attempts succeed and the control above is unchanged.
+If an actual owned runtime attempt failed or timed out, inspect and fix any code,
+acquisition, or environment defect in place before making an availability decision.
+A failed attempt is not automatically model unavailability. Only after reviewing
+genuine configuration unavailability may the coordinator add this optional field
+at the top level of the same scored control (structure example, **not evidence
+that MOSS DMD or any configuration has failed**):
+
+```json
+{
+  "unavailable_configs": {
+    "moss_dmd": {
+      "calibration_receipt_sha256": "<actual failed calibration JSON file SHA256>",
+      "calibration_log_sha256": "<log SHA256 bound by that failed receipt>",
+      "reason": "<reviewed genuine unavailability reason>",
+      "reproduce": "<exact reproducible failed request/environment and evidence>",
+      "code_and_acquisition_defects_excluded": true
+    }
+  }
+}
+```
+
+Use only actual failed configuration IDs. The mapping must cover every failed
+calibration and cannot contain a successful one. Missing attempts, unguarded
+failures, changed receipts/logs, and guard/resource/cache/input invalidations
+cannot be approved. The coordinator identity and accepted six-attempt bundle
+remain bound to the original frozen protocol. No generation setting changes,
+new freeze, calibration rerenders, or receipt rewriting are involved. The
+estimate preserves failed conditions with null cost estimates and records actual
+successful outputs separately from the six-attempt/six-image cap.
+
+The immutable `scored-authorization.json` and its private run mirror
+`run/availability-authorization.json` must be established before any scored
+receipt or image. Existing calibration-only DMD prediction proofs are not scored
+images. Every scored receipt in a mixed-availability campaign binds the same
+original authorization; later quality-conditioned exclusions or decision changes
+are rejected. The approved failed configuration launches no model and emits all
+48 unavailable scored records with the explicit reproduction and calibration
+receipt/log evidence. The other configurations follow the original settings.
+All288 cells and432 comparisons remain present, with unavailable arms counted
+against availability; missing quality/cost measurements remain missing. Retain
+all six original calibration receipts/logs and the authorization mirror when
+copying private evidence for review. Machine review never relabels these as
+successful renders or positive evidence.
+
 Retain `campaign`, a fresh bounded `deadline_utc`, the reviewed `protocol_sha256`, and a currently valid GPU1 `lease` with its exact reviewed desktop baseline. The authorization's coordinator must equal that lease owner. No new user approval is needed for the already authorized288 outputs; this control records the coordinator's post-calibration execution decision. A larger budget is rejected.
 
 ```sh
@@ -159,4 +204,4 @@ print(json.dumps({'moss_image_comparison_mode':'scored','moss_control_json':open
 PYRUN
 ```
 
-Both phases use the same persistent `run/receipts` and `run/outputs`. A bounded job may resume only validated immutable successful cells; it refuses failed cells, changed receipts, invalidated inputs, and output files without valid receipts. It never duplicates an already completed image and never expands the frozen288-cell plan. Renew only the lease/deadline for a subsequent reviewed dispatch; `scored-authorization.json` remains identical. Actual renders are guarded by the same `ownership.ExecutionGuard` in the workflow and direct `run.py` CLI, including GPU1 index/UUID, live coordinator ancestor, expiry, desktop PID/name/creation identity, foreign GPU owners, and exact isolated cache refs/repository/snapshot closure. Cheap input stat fingerprints are monitored during each cell; full selected-config hashes are checked at configuration boundaries and mutations invalidate the attempt's evidence.
+Both phases use the same persistent `run/receipts` and `run/outputs`. A bounded job resumes validated immutable successful cells and approved unavailable scored records. Calibration resumes terminal runtime-failure records without retrying them. It refuses unapproved scored failures, changed receipts, invalidated inputs, and output files without valid receipts. It never duplicates an already completed image and never expands the frozen288-cell plan. Renew only the lease/deadline for a subsequent reviewed dispatch; `scored-authorization.json` remains identical. Actual renders are guarded by the same `ownership.ExecutionGuard` in the workflow and direct `run.py` CLI, including GPU1 index/UUID, live coordinator ancestor, expiry, desktop PID/name/creation identity, foreign GPU owners, and exact isolated cache refs/repository/snapshot closure. Cheap input stat fingerprints are monitored during each cell; full selected-config hashes are checked at configuration boundaries and mutations invalidate the attempt's evidence.

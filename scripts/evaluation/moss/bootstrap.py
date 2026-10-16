@@ -24,7 +24,7 @@ import urllib.request
 from urllib.parse import unquote, urlparse
 import zipfile
 
-from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle,
+from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle, calibration_results, availability_decisions, reject_run_invalidated,
     physical, gpu_rows, compute_pids, desktop_identities, idle_device, verify_staged, validate_baseline)
 
 SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'
@@ -80,6 +80,7 @@ def control(mode, raw, base=BASE):
     allowed = required | ({'ownership', 'gpu_uuid'} if mode == 'freeze' else
                           ({'protocol_sha256', 'lease', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization'} if mode == 'scored' else {'protocol_sha256', 'lease'}) if mode in ('calibration', 'scored') else set())
     if mode=='prepare' and 'reuse' in value:allowed.add('reuse')
+    if mode=='scored' and 'unavailable_configs' in value:allowed.add('unavailable_configs')
     require(set(value) == allowed, f'{mode} control fields must be exactly {sorted(allowed)}')
     require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}', value['campaign']), 'invalid campaign id')
     require(utc() < timestamp(value['deadline_utc']) <= utc() + dt.timedelta(hours=6), 'deadline must be in next six hours')
@@ -577,37 +578,52 @@ def kill_owned(process, known=None):
                 child.kill()
 
 
-def accepted_scored_authorization(root, value):
-    require(value['calibration_receipts_sha256'] == calibration_bundle(root / 'protocol.lock.json', root / 'run'), 'coordinator accepted calibration digest differs from actual successful receipts')
+def accepted_scored_authorization(root, value, manifest=None):
+    require(value['calibration_receipts_sha256'] == calibration_bundle(root / 'protocol.lock.json', root / 'run'), 'coordinator accepted calibration digest differs from actual terminal attempts')
     require(value['calibration_estimate_sha256'] == digest(root / 'calibration-estimate.json'), 'coordinator accepted estimate digest differs from actual measurement')
     accepted = {key: value[key] for key in ('protocol_sha256', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization')}
+    if 'unavailable_configs' in value:accepted['unavailable_configs']=value['unavailable_configs']
+    if manifest is None:
+        from evaluate import load_lock
+        manifest=load_lock(root/'protocol.lock.json')
+    decisions=availability_decisions(manifest,value['protocol_sha256'],root/'run',accepted)
     path = root / 'scored-authorization.json'
+    physical(path)
     if path.exists():
         require(read(path) == accepted, 'scored authorization changed; no automatic replacement')
     else:
+        require(not list((root/'run'/'receipts').glob('scored.*.json')) and not list((root/'run'/'outputs').glob('scored.*.png')),'availability/scored authorization must precede every scored artifact')
         write(path, accepted)
+    if decisions:
+        mirror=root/'run'/'availability-authorization.json'
+        physical(mirror)
+        if mirror.exists():require(digest(mirror)==digest(path),'immutable availability authorization changed')
+        else:shutil.copyfile(path,mirror)
     return dict(path=str(path.resolve()), sha256=digest(path))
 
 
 def calibration_estimate(manifest, results, parity=None):
-    require(len(results) == 6 and all(r['status'] == 'ok' for r in results.values()), 'six successful calibration measurements required')
+    require(len(results)==6 and all(r['status']=='ok' or (r['status'] in ('failed','timeout') and r.get('failure_kind')=='runtime') for r in results.values()),'six terminal guarded calibration attempts required')
     conditions = {}
     for key in REPOS:
         record = next(r for r in results.values() if r['cell']['config_id'] == key)
         width, height = record['cell']['width'], record['cell']['height']
         require((width, height) == (1024, 1024), 'calibration must use first actual1024x1024 scored fixture')
         compatible = [case for case in manifest['corpus']['cases'] if (case['width'], case['height']) == (width, height)]
+        if record['status']!='ok':
+            conditions[key]=dict(status=record['status'],disposition='pending_coordinator_review',calibration_canvas=[width,height],calibration_outputs=int(bool(record.get('output'))),candidate_generation_seconds=None,load_seconds=None,same_canvas_scored_outputs=len(compatible)*len(manifest['corpus']['seeds']),same_canvas_generation_estimate_seconds=None,error=record['error'],log=record['log'])
+            continue
         conditions[key] = dict(calibration_canvas=[width, height], calibration_outputs=1,
             candidate_generation_seconds=record['metrics']['generation_seconds'],
             load_seconds=record['metrics'].get('load_seconds'),
             same_canvas_scored_outputs=len(compatible) * len(manifest['corpus']['seeds']),
             same_canvas_generation_estimate_seconds=record['metrics']['generation_seconds'] * len(compatible) * len(manifest['corpus']['seeds']),
-            other_canvas_shapes=sorted({(case['width'], case['height']) for case in manifest['corpus']['cases'] if (case['width'], case['height']) != (width, height)}))
+            other_canvas_shapes=[list(shape) for shape in sorted({(case['width'], case['height']) for case in manifest['corpus']['cases'] if (case['width'], case['height']) != (width, height)})])
     counts = {}
     for case in manifest['corpus']['cases']:
         shape = f"{case['width']}x{case['height']}"
         counts[shape] = counts.get(shape, 0) + len(manifest['corpus']['seeds'])
-    return dict(scored_outputs=288, calibration_outputs=6, conditions=conditions,
+    return dict(scored_outputs=288, calibration_outputs=sum(r['status']=='ok' or bool(r.get('output')) for r in results.values()),calibration_output_cap=6,calibration_attempts=6,successful_calibration_outputs=sum(r['status']=='ok' for r in results.values()), conditions=conditions,
         dmd_parity_overhead=parity,
         scored_outputs_by_canvas_per_config=counts,
         scored_outputs_by_canvas_all_configs={shape: count * 6 for shape, count in counts.items()},
@@ -631,7 +647,7 @@ def execute_phase(root, value, phase):
     campaign.mkdir(exist_ok=True)
     expected_images = {cell['id'] + '.png' for mode in ('calibration', 'scored') for cell in cells(manifest, mode)}
     require(not (campaign / 'outputs').exists() or all(path.name in expected_images for path in (campaign / 'outputs').iterdir()), 'unexpected output outside fixed294-image plan')
-    authority = accepted_scored_authorization(root, value) if phase == 'scored' else None
+    authority = accepted_scored_authorization(root, value,manifest) if phase == 'scored' else None
     lock_record = dict(lease_id=lease['id'], host=lease['host'], gpu_uuid=lease['gpu_uuid'], phase=phase,
         protocol_sha256=protocol['sha256'], deadline_epoch=timestamp(value['deadline_utc']).timestamp(),
         lease_expires_epoch=timestamp(lease['expires_utc']).timestamp(), owner_pid=os.getpid(), responsible_chat=lease['owner'],
@@ -650,7 +666,9 @@ def execute_phase(root, value, phase):
         for config in manifest['configs']:
             guard.check(idle=True)
             _, completed_before = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
-            require(all(record['status'] == 'ok' for record in completed_before.values()), 'failed cells cannot resume or be silently accepted')
+            reject_run_invalidated(campaign,protocol['sha256'])
+            if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign,complete=False)
+            else:require(all(record['status']=='ok' or (record['status']=='unavailable' and record['cell']['config_id'] in guard.unavailable_configs) for record in completed_before.values()),'unapproved scored failure cannot resume')
             pending = [cell['id'] for cell in cells(manifest, phase) if cell['config_id'] == config['id'] and cell['id'] not in completed_before]
             if not pending:
                 continue
@@ -675,10 +693,12 @@ def execute_phase(root, value, phase):
                 finally:
                     kill_owned(process, owned)
             _, results = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
-            require(all(r['status'] == 'ok' for r in results.values()), 'execution cell failed; no automatic retry or further allocation')
+            if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign,complete=False)
+            else:require(all(r['status']=='ok' or (r['status']=='unavailable' and r['cell']['config_id'] in guard.unavailable_configs) for r in results.values()),'execution cell failed; no automatic retry or further allocation')
             guard.check(idle=True)
         _, results = receipts(root / 'protocol.lock.json', campaign, phase)
-        require(all(record['status'] == 'ok' for record in results.values()), 'phase contains failed cells; not complete')
+        if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign)
+        else:require(all(record['status']=='ok' or (record['status']=='unavailable' and record['cell']['config_id'] in guard.unavailable_configs) for record in results.values()),'phase contains unapproved failed cells')
         if phase == 'calibration':
             parity_records = []
             for path in sorted((campaign / 'parity').glob('*.json')):

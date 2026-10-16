@@ -298,13 +298,28 @@ def artifact(root, item):
     return path
 
 
-def validate_receipt(root, lock_hash, cell, receipt):
+def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
     r = unseal(receipt)
     reject_invalidated(root,lock_hash,cell['id'])
     require(r['lock_sha256'] == lock_hash and r['cell'] == cell, 'receipt identity mismatch')
     require(r['status'] in ('ok', 'failed', 'unavailable', 'timeout'), 'invalid status')
     require(all(r['ownership'].get(k) for k in ('responsible_chat','job','revision','timeout_seconds','resume','next_action')), 'missing resume ownership')
     require(r['elapsed_seconds'] >= 0 and math.isfinite(r['elapsed_seconds']), 'invalid elapsed time')
+    if cell['phase']=='scored' and (Path(root)/'availability-authorization.json').exists():
+        binding=dict(path='availability-authorization.json',sha256=file_hash(Path(root)/'availability-authorization.json'))
+        require(r.get('availability_authorization')==binding,'mixed campaign receipt lacks original availability authorization binding')
+    if r['status']=='unavailable' and not r.get('availability_authorization'):
+        require(manifest is not None and next(c for c in manifest['configs'] if c['id']==cell['config_id'])['unavailable'],
+                'unavailable status requires frozen evidence or approved calibration disposition')
+    if r.get('availability_authorization'):
+        require(manifest is not None,'availability validation requires original frozen manifest')
+        from ownership import availability_decisions
+        authority=artifact(root,r['availability_authorization'])
+        decisions=availability_decisions(manifest,lock_hash,root,read(authority),pending_cell=cell['id'])
+        decision=decisions.get(cell['config_id'])
+        require(cell['phase']=='scored','availability decisions apply only to scored cells')
+        if decision:require(r['status']=='unavailable' and r['error']==decision['reason'] and r['reproduce']==decision['reproduce'],'unavailable cell differs from approved calibration disposition')
+        else:require(r['status']!='unavailable','healthy configuration cannot be excluded')
     if r['status'] != 'ok':
         require(r.get('error') and r.get('reproduce'), 'failure needs reason and reproduction')
         artifact(root, r['log'])
@@ -356,7 +371,7 @@ def receipts(lock, run, phase='scored', complete=True):
         if not path.exists():
             require(not complete, f"missing cell {cell['id']}")
             continue
-        results[cell['id']] = validate_receipt(run, lock_doc['sha256'], cell, read(path))
+        results[cell['id']] = validate_receipt(run, lock_doc['sha256'], cell, read(path),manifest=manifest)
     return manifest, results
 
 

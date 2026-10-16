@@ -271,3 +271,13 @@ actual artifact bytes; they are not signatures or a substitute for trusted
 execution, frozen lock custody, and independent review. Changing source/weights,
 corpus/settings, hardware, precision or scoring rules requires a new explicit
 freeze; do not overwrite accepted evidence.
+
+A guarded calibration runtime failure remains an actual failed/timeout attempt;
+independent configurations can finish their one existing fixture. Before scored
+execution, the coordinator must explicitly disposition every such failure in the
+hash-bound availability control documented in `bootstrap.md`. This preserves the
+original protocol and successful calibration receipts. Healthy configurations
+cannot be excluded, code/acquisition defects must be fixed, and guard/input
+invalidations cannot be approved away. Approved unavailable configurations emit
+all48 failure records without GPU work. The matrix remains288 scored cells and
+432 pairs; availability losses never become positive quality evidence.

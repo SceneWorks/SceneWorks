@@ -477,3 +477,299 @@ def test_dmd_image_receipt_binds_candidate_arm_to_separate_fixture_dataspace_and
         with pytest.raises(ValueError):ev.validate_receipt(tmp_path,'a'*64,cell,ev.seal(mutant))
     mutant=deepcopy(row);mutant['metrics']['noise_sha256']='d'*64
     with pytest.raises(ValueError,match='measured input'):ev.validate_receipt(tmp_path,'a'*64,cell,ev.seal(mutant))
+
+
+@pytest.fixture
+def mixed_calibration(tmp_path):
+    """Synthetic CPU evidence, never a claim about actual config availability."""
+    import bootstrap as b
+    import ownership as o
+    manifest=ev.template()
+    manifest['ownership']=dict(responsible_chat='CPU fixture coordinator',lease='fixture',job='fixture',timeout_seconds=30,resume='fixture',next_action='fixture')
+    lock=tmp_path/'protocol.lock.json';ev.write(lock,ev.seal(manifest));lock_hash=ev.read(lock)['sha256']
+    root=tmp_path/'run';(root/'receipts').mkdir(parents=True);(root/'outputs').mkdir()
+    logs=root/'logs';logs.mkdir();metrics=dict(generation_seconds=.1,peak_gpu_bytes=42,peak_host_rss_bytes=42,download_bytes=0,latency_condition='cold_process',cold_seconds=.1,warm_seconds=None,gpu_memory_method='CONTROLLED CPU FIXTURE',component_dtypes={'fixture':'none'},sampler={'fixture':True},runtime_versions={'fixture':'1'},pixels_finite=True)
+    for cell in ev.cells(manifest,'calibration'):
+        log=logs/(cell['config_id']+'.log');log.write_text('CONTROLLED CPU runtime failure fixture; not observed model evidence')
+        row=dict(lock_sha256=lock_hash,cell=cell,ownership=dict(manifest['ownership'],revision=lock_hash),elapsed_seconds=.1,log=dict(path='logs/'+log.name,sha256=ev.file_hash(log)))
+        if cell['config_id']=='moss_dmd':row.update(status='failed',failure_kind='runtime',error='Synthetic owned runtime failure',reproduce='CPU fixture only',output=None,metrics=None)
+        else:
+            out=root/'outputs'/(cell['id']+'.png');out.write_bytes(png(cell['width'],cell['height']))
+            row.update(status='ok',output=dict(path='outputs/'+out.name,sha256=ev.file_hash(out)),metrics=deepcopy(metrics))
+        ev.write(root/'receipts'/(cell['id']+'.json'),ev.seal(row))
+    results=o.calibration_results(manifest,lock_hash,root)
+    ev.write(tmp_path/'calibration-estimate.json',b.calibration_estimate(manifest,results))
+    failed=next(r for r in results.values() if r['status']=='failed')
+    value=dict(protocol_sha256=lock_hash,calibration_receipts_sha256=o.calibration_bundle(lock,root),calibration_estimate_sha256=ev.file_hash(tmp_path/'calibration-estimate.json'),authorization=dict(id='CPU disposition',coordinator=manifest['ownership']['responsible_chat'],accepted_calibration=True,max_scored_outputs=288,acknowledge_shape_uncertainty=True),unavailable_configs={'moss_dmd':dict(calibration_receipt_sha256=ev.file_hash(root/'receipts'/(failed['cell']['id']+'.json')),calibration_log_sha256=failed['log']['sha256'],reason='Synthetic genuinely unavailable runtime fixture',reproduce='CPU fixture only; no actual model failure',code_and_acquisition_defects_excluded=True)})
+    return manifest,lock,root,value,metrics
+
+
+def test_mixed_calibration_requires_explicit_actual_failure_disposition(mixed_calibration):
+    import bootstrap as b
+    import ownership as o
+    m,lock,root,value,_=mixed_calibration;sha=ev.read(lock)['sha256']
+    assert set(o.availability_decisions(m,sha,root,value))=={'moss_dmd'}
+    for change in ('missing','healthy','log','coordinator','defect'):
+        bad=deepcopy(value)
+        if change=='missing':bad.pop('unavailable_configs')
+        elif change=='healthy':bad['unavailable_configs']['moss_base']=bad['unavailable_configs']['moss_dmd']
+        elif change=='log':bad['unavailable_configs']['moss_dmd']['calibration_log_sha256']='0'*64
+        elif change=='coordinator':bad['authorization']['coordinator']='other'
+        else:bad['unavailable_configs']['moss_dmd']['code_and_acquisition_defects_excluded']=False
+        with pytest.raises(ValueError):o.availability_decisions(m,sha,root,bad)
+    b.accepted_scored_authorization(root.parent,value,m)
+    changed=deepcopy(value);changed['authorization']['id']='posthoc replacement'
+    with pytest.raises(ValueError,match='authorization changed'):b.accepted_scored_authorization(root.parent,changed,m)
+    (root/'logs'/'moss_dmd.log').write_text('tampered log')
+    with pytest.raises(ValueError,match='artifact hash mismatch'):o.availability_decisions(m,sha,root,value)
+
+
+def test_invalidations_and_postscored_exclusion_cannot_be_approved(mixed_calibration):
+    import bootstrap as b
+    import ownership as o
+    m,lock,root,value,_=mixed_calibration;sha=ev.read(lock)['sha256']
+    marker=root/'outputs'/'scored.orphan.png';marker.write_bytes(b'fixture')
+    with pytest.raises(ValueError,match='precede'):b.accepted_scored_authorization(root.parent,value,m)
+    marker.unlink()
+    ev.write(root/'invalidations'/'guard.json',ev.seal(dict(lock_sha256=sha,cell_ids=[],parity_cell_ids=[],reason='Synthetic foreign owner',attempt='fixture')))
+    with pytest.raises(ValueError,match='invalidations cannot be approved'):o.availability_decisions(m,sha,root,value)
+    assert not (root.parent/'scored-authorization.json').exists()
+
+
+def test_approved_failed_config_emits_all48_cells_without_gpu_or_calibration_rewrites(mixed_calibration,monkeypatch,tmp_path):
+    import bootstrap as b
+    import ownership as o
+    import run
+    m,lock,root,value,metrics=mixed_calibration;sha=ev.read(lock)['sha256']
+    before={p:p.read_bytes() for p in (root/'receipts').glob('calibration.*.json')}
+    before.update({p:p.read_bytes() for p in (root/'outputs').glob('calibration.*.png')})
+    b.accepted_scored_authorization(root.parent,value,m)
+    class Guard:
+        def __init__(self,*a,**k):self.prepared_root=root.parent;self.unavailable_configs=o.availability_decisions(m,sha,root,value)
+        def check(self,*a,**k):pass
+    monkeypatch.setattr(o,'ExecutionGuard',Guard)
+    monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)  # CPU fixture has no weights/hardware.
+    monkeypatch.setattr(run,'launch',lambda *a,**k:pytest.fail('approved failed config spawned a runtime'))
+    run.execute(lock,root,'moss_dmd','scored')
+    records=list((root/'receipts').glob('scored.*.json'));assert len(records)==48
+    saved={p:p.read_bytes() for p in records}
+    assert all(ev.read(p)['status']=='unavailable' for p in records)
+    assert run.execute(lock,root,'moss_dmd','scored')==0
+    assert all(p.read_bytes()==body for p,body in {**before,**saved}.items())
+    cases={c['id']:c for c in m['corpus']['cases']};annotations={};images={}
+    for cell in ev.cells(m):
+        if cell['config_id']=='moss_dmd':continue
+        shape=(cell['width'],cell['height'])
+        if shape not in images:images[shape]=png(*shape)
+        out=root/'outputs'/(cell['id']+'.png');out.write_bytes(images[shape])
+        row=dict(lock_sha256=sha,cell=cell,status='ok',ownership=dict(m['ownership'],revision=sha),elapsed_seconds=.1,output=dict(path='outputs/'+out.name,sha256=ev.file_hash(out)),log=dict(path='logs/moss_base.log',sha256=ev.file_hash(root/'logs'/'moss_base.log')),metrics=deepcopy(metrics),availability_authorization=dict(path='availability-authorization.json',sha256=ev.file_hash(root/'availability-authorization.json')))
+        ev.write(root/'receipts'/(cell['id']+'.json'),ev.seal(row))
+        case=cases[cell['case_id']];annotations[cell['id']]=dict(output_sha256=row['output']['sha256'],annotator='CPU synthetic fixture',method='fixture',tool_revision='fixture',text=case['expected_text'],boxes={box['id']:box['box'] for box in case['boxes']})
+    _,complete=ev.receipts(lock,root);assert len(complete)==288
+    public=tmp_path/'mixed-pairs.json';ev.blind_pairs(lock,root,public)
+    pairs=ev.unseal(ev.read(public))['pairs'];assert len(pairs)==432
+    judgments=[dict(pair_id=p['id'],winner='unavailable' if any(a['image'] is None for a in p['arms']) else 'tie',rubric={k:3 for k in ('visual_quality','instruction_following','composition')},reviewer='CPU fixture',reviewer_kind='machine_assisted',judge_version='fixture',notes='Synthetic CPU records; not real judgments',uncertainty='high') for p in pairs]
+    ev.write(tmp_path/'annotations.json',annotations);ev.write(tmp_path/'judgments.json',judgments)
+    report=ev.report(lock,root,public,tmp_path/'judgments.json',tmp_path/'annotations.json')
+    assert report['missing_outputs']==48 and report['usable_blind_pairs']==288 and report['blind_pairs']==432
+    assert report['recommendation_eligible'] is False
+    # An offline reader must reject whole-campaign removal, not only one row.
+    for path in (root/'receipts').glob('scored.*.json'):
+        row=ev.unseal(ev.read(path));row.pop('availability_authorization');path.write_text(json.dumps(ev.seal(row)))
+    with pytest.raises(ValueError,match='lacks original availability'):ev.receipts(lock,root)
+    (root/'availability-authorization.json').unlink()
+    with pytest.raises(ValueError,match='unavailable status requires'):ev.receipts(lock,root)
+
+
+def test_transport_finishes_independent_calibrations_and_resumes_terminal_attempts_without_rerender(tmp_path,monkeypatch):
+    """Real transport/runner control flow with synthetic workers; no hardware imports."""
+    import bootstrap as b
+    import ownership as o
+    import run
+    import socket
+    from types import SimpleNamespace
+    m=ev.template();m['hardware'].update(host=socket.gethostname(),gpu_uuid=o.RUNNER_GPU_UUID)
+    m['ownership']=dict(responsible_chat='fixture',lease='fixture',job='fixture',timeout_seconds=30,resume='fixture',next_action='fixture')
+    lock=tmp_path/'protocol.lock.json';ev.write(lock,ev.seal(m));sha=ev.read(lock)['sha256'];calls=[]
+    class Guard:
+        unavailable_configs={}
+        def __init__(self,*a,**k):self.prepared_root=tmp_path
+        def check(self,*a,**k):return {'cpu_fixture':True}
+    monkeypatch.setattr(b,'ExecutionGuard',Guard);monkeypatch.setattr(o,'ExecutionGuard',Guard)
+    ev.write(tmp_path/'prepared.json',{'CPU_fixture':True})
+    monkeypatch.setattr(b,'prepared',lambda root:{})
+    monkeypatch.setattr(ev,'load_lock',lambda *a,**k:m)
+    monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    def parity(*a,**k):raise run.RuntimeFailure('Synthetic guarded DMD worker failed; CPU fixture only')
+    monkeypatch.setattr(run,'ensure_parity',parity)
+    metrics=dict(generation_seconds=.01,peak_gpu_bytes=42,peak_gpu_reserved_bytes=42,peak_host_rss_bytes=42,download_bytes=0,gpu_memory_method='CPU fixture',component_dtypes={'fixture':'none'},sampler={'fixture':True},runtime_versions={'fixture':'1'},pixels_finite=True)
+    class Requests:
+        def put(self,item):
+            if item:
+                cell,out=item;Path(out).write_bytes(png(cell['width'],cell['height']))
+    def launch(*a,**k):return SimpleNamespace(),Requests(),iter([('ready',.01),('result',deepcopy(metrics))])
+    monkeypatch.setattr(run,'launch',launch)
+    monkeypatch.setattr(run,'receive',lambda p,q,*a:(next(q),42))
+    monkeypatch.setattr(run,'finish',lambda *a:None);monkeypatch.setattr(run,'stop',lambda *a:None)
+    class Process:
+        returncode=0
+        def __init__(self,args,**kwargs):
+            config=args[args.index('--config')+1];calls.append(config)
+            run.execute(lock,tmp_path/'run',config,'calibration')
+        def poll(self):return 0
+    monkeypatch.setattr(b.subprocess,'Popen',Process);monkeypatch.setattr(b,'kill_owned',lambda *a:None)
+    deadline='2030-01-01T00:00:00+00:00'
+    value=dict(protocol_sha256=sha,deadline_utc=deadline,lease=dict(id='fixture',owner='fixture',host=socket.gethostname(),gpu_uuid=o.RUNNER_GPU_UUID,expires_utc=deadline,external_owners_reconciled=True,desktop_baseline=[],baseline_max_memory_mib=1000,baseline_max_utilization_percent=2))
+    monkeypatch.setenv('GITHUB_RUN_ID','fixture-1')
+    b.execute_phase(tmp_path,value,'calibration')
+    assert calls==list(ev.CONFIG_IDS)
+    _,results=ev.receipts(lock,tmp_path/'run','calibration')
+    assert sum(r['status']=='ok' for r in results.values())==5
+    assert next(r for r in results.values() if r['status']=='failed')['failure_kind']=='runtime'
+    assert len(list((tmp_path/'run'/'outputs').glob('*.png')))==5
+    saved={p:p.read_bytes() for p in (tmp_path/'run'/'receipts').glob('calibration.*.json')}
+    monkeypatch.setenv('GITHUB_RUN_ID','fixture-2')
+    b.execute_phase(tmp_path,value,'calibration')
+    assert calls==list(ev.CONFIG_IDS) and all(p.read_bytes()==body for p,body in saved.items())
+    estimate=ev.read(tmp_path/'calibration-estimate.json')
+    assert estimate['calibration_attempts']==estimate['calibration_output_cap']==6
+    assert estimate['calibration_outputs']==estimate['successful_calibration_outputs']==5
+    assert estimate['conditions']['moss_dmd']['candidate_generation_seconds'] is None
+
+
+def test_mixed_campaign_healthy_generation_binds_same_decision_before_receipt_write(mixed_calibration,monkeypatch):
+    import bootstrap as b
+    import ownership as o
+    import run
+    from types import SimpleNamespace
+    m,lock,root,value,metrics=mixed_calibration;sha=ev.read(lock)['sha256']
+    b.accepted_scored_authorization(root.parent,value,m)
+    class Guard:
+        def __init__(self,*a,**k):self.prepared_root=root.parent;self.unavailable_configs=o.availability_decisions(m,sha,root,value)
+        def check(self,*a,**k):pass
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    cache={}
+    class Requests:
+        def put(self,item):
+            if item:
+                cell,path=item;shape=(cell['width'],cell['height'])
+                if shape not in cache:cache[shape]=png(*shape)
+                Path(path).write_bytes(cache[shape])
+    def replies():
+        yield ('ready',.01)
+        while True:yield ('result',dict(deepcopy(metrics),peak_gpu_reserved_bytes=42))
+    calls=[]
+    def launch(config,*a,**k):calls.append(config['id']);return SimpleNamespace(),Requests(),replies()
+    monkeypatch.setattr(run,'launch',launch);monkeypatch.setattr(run,'receive',lambda p,q,*a:(next(q),42));monkeypatch.setattr(run,'finish',lambda *a:None)
+    run.execute(lock,root,'moss_base','scored')
+    assert calls==['moss_base']
+    records=list((root/'receipts').glob('scored.*.json'));assert len(records)==48
+    assert all(ev.read(p)['availability_authorization']['sha256']==ev.file_hash(root/'availability-authorization.json') for p in records)
+    original=records[0].read_bytes();row=ev.unseal(ev.read(records[0]));row.pop('availability_authorization');records[0].write_text(json.dumps(ev.seal(row)))
+    with pytest.raises(ValueError,match='post-scored exclusion forbidden'):o.availability_decisions(m,sha,root,value)
+    records[0].write_bytes(original)
+    mirror=root/'availability-authorization.json';mirror.write_bytes(mirror.read_bytes()+b' ')
+    with pytest.raises(ValueError):b.accepted_scored_authorization(root.parent,value,m)
+
+
+@pytest.mark.parametrize('failure',['worker_error','owned_timeout','guard','invalid_metrics','parity_integrity'])
+def test_calibration_runtime_failures_are_terminal_but_integrity_errors_invalidate(tmp_path,monkeypatch,failure):
+    import ownership as o
+    import run
+    from types import SimpleNamespace
+    m=ev.template();m['ownership']=dict(responsible_chat='fixture',lease='fixture',job='fixture',timeout_seconds=30,resume='fixture',next_action='fixture')
+    lock=tmp_path/'protocol.lock.json';ev.write(lock,ev.seal(m));root=tmp_path/'run'
+    config='moss_dmd' if failure=='parity_integrity' else 'moss_base'
+    class Guard:
+        unavailable_configs={}
+        def __init__(self,*a,**k):self.prepared_root=tmp_path
+        def check(self,*a,**k):pass
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    class Requests:
+        def put(self,item):
+            if item:
+                cell,out=item;Path(out).write_bytes(png(cell['width'],cell['height']))
+    monkeypatch.setattr(run,'launch',lambda *a,**k:(SimpleNamespace(),Requests(),None))
+    monkeypatch.setattr(run,'finish',lambda *a:None);monkeypatch.setattr(run,'stop',lambda *a:None)
+    def parity(*a,**k):raise ValueError('Synthetic malformed parity proof')
+    monkeypatch.setattr(run,'ensure_parity',parity)
+    calls=[]
+    def receive(*a,**k):
+        calls.append(True)
+        if failure=='worker_error':return (('error','Synthetic CUDA RuntimeError'),0)
+        if failure=='owned_timeout':raise run.RuntimeTimeout('Synthetic owned timeout')
+        if failure=='guard':raise ValueError('Synthetic foreign owner guard')
+        if len(calls)==1:return (('ready',.01),0)
+        return (('result',dict(generation_seconds=.1,peak_gpu_reserved_bytes=42,pixels_finite=False)),0)
+    monkeypatch.setattr(run,'receive',receive)
+    if failure in ('worker_error','owned_timeout'):
+        run.execute(lock,root,config,'calibration')
+        row=ev.read(next((root/'receipts').glob('calibration.*.json')))
+        assert row['failure_kind']=='runtime' and row['status']==('timeout' if failure=='owned_timeout' else 'failed')
+        assert not list((root/'invalidations').glob('*.json'))
+    else:
+        with pytest.raises(ValueError):run.execute(lock,root,config,'calibration')
+        assert not list((root/'receipts').glob('calibration.*.json'))
+        assert list((root/'invalidations').glob('*.json'))
+    assert run.worker_failure(ValueError('nonfinite or shape/hash validation'))=='integrity_error'
+    assert run.worker_failure(ImportError('dependency defect'))=='integrity_error'
+    for defect in (AttributeError('code defect'),NameError('code defect'),IndexError('code defect'),Exception('unknown defect')):assert run.worker_failure(defect)=='integrity_error'
+    assert run.worker_failure(RuntimeError('CUDA runtime'))=='error'
+    assert run.worker_failure(TimeoutError('owned timeout'))=='timeout'
+
+
+def test_all_success_default_keeps_finite_parity_differences_as_quality_evidence(mixed_calibration):
+    import bootstrap as b
+    import ownership as o
+    m,lock,root,value,metrics=mixed_calibration;sha=ev.read(lock)['sha256']
+    proof=parity_evidence()
+    for step in proof['steps']:step.update(max_abs=1.,mean_abs=.1)  # Deliberately above frozen report thresholds.
+    fixture=ev.parity_cells(m,'calibration')[0]
+    parity=ev.seal(dict(lock_sha256=sha,cell=fixture,status='ok',evidence=proof,log=dict(path='logs/moss_dmd.log',sha256=ev.file_hash(root/'logs'/'moss_dmd.log'))))
+    ev.write(root/'parity'/(fixture['id']+'.json'),parity)
+    cell=next(c for c in ev.cells(m,'calibration') if c['config_id']=='moss_dmd')
+    out=root/'outputs'/(cell['id']+'.png');out.write_bytes(png(cell['width'],cell['height']))
+    path=root/'receipts'/(cell['id']+'.json');row=ev.unseal(ev.read(path))
+    row.update(status='ok',output=dict(path='outputs/'+out.name,sha256=ev.file_hash(out)),metrics=dict(deepcopy(metrics),parity_fixture_digests=[parity['sha256']],noise_sha256=proof['noise_sha256'],sampler=dict(Q_sha256=proof['Q_sha256'],step_codes=proof['step_codes'],execution_arm='sft_bf16_unmerged_fp32_adapter',oracle_resident=False)))
+    row.pop('failure_kind');row.pop('error');row.pop('reproduce');path.write_text(json.dumps(ev.seal(row)))
+    results=o.calibration_results(m,sha,root)
+    assert len(results)==6 and all(r['status']=='ok' for r in results.values())
+    assert all(s['max_abs']>m['thresholds']['dmd_prediction_max_abs'] for s in ev.validate_parity(root,sha,fixture,parity)['evidence']['steps'])
+    estimate=root.parent/'calibration-estimate.json';estimate.write_text(json.dumps(b.calibration_estimate(m,results)))
+    value.pop('unavailable_configs');value.update(calibration_receipts_sha256=o.calibration_bundle(lock,root),calibration_estimate_sha256=ev.file_hash(estimate))
+    b.accepted_scored_authorization(root.parent,value,m)
+    assert set(ev.read(root.parent/'scored-authorization.json'))=={'protocol_sha256','calibration_receipts_sha256','calibration_estimate_sha256','authorization'}
+    assert not (root/'availability-authorization.json').exists()
+    assert len(list(ev.cells(m)))==288  # Finite numerical differences do not remove DMD image cases.
+
+
+def test_direct_cli_cannot_fork_receipt_history_outside_held_campaign(mixed_calibration,monkeypatch):
+    import ownership as o
+    import run
+    m,lock,root,_,_=mixed_calibration
+    class Guard:
+        unavailable_configs={}
+        def __init__(self,*a,**k):self.prepared_root=root.parent
+        def check(self,*a,**k):pass
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    monkeypatch.setattr(run,'launch',lambda *a,**k:pytest.fail('fork reached GPU spawn'))
+    with pytest.raises(ValueError,match='original prepared campaign authority'):run.execute(lock,root.parent/'forked-run','moss_base','calibration')
+    copied=root.parent/'copied-lock.json';copied.write_bytes(lock.read_bytes())
+    with pytest.raises(ValueError,match='original prepared campaign authority'):run.execute(copied,root,'moss_base','calibration')
+
+
+@pytest.mark.parametrize('status,exception',[('failed',RuntimeError),('canceled',ValueError)])
+def test_native_terminal_failure_preserves_error_without_canceling_terminal_job(status,exception,tmp_path):
+    from native import Native
+    import run
+    runtime=Native.__new__(Native);runtime.config=deepcopy(ev.template()['configs'][3]);runtime.config['settings']['job_timeout_seconds']=1;runtime.project={'id':'CPU fixture'}
+    calls=[]
+    def call(method,path,body=None,raw=False):
+        calls.append((method,path))
+        if method=='POST':return {'id':'CPU-owned-job'}
+        return {'status':status,'error':'CPU synthetic runtime error; not actual evidence'}
+    runtime.call=call
+    cell=next(c for c in ev.cells(ev.template()) if c['config_id']=='qwen_image_2_1')
+    with pytest.raises(exception) as result:runtime.render(cell,tmp_path/'never-created.png')
+    assert run.worker_failure(result.value)==('error' if status=='failed' else 'integrity_error')
+    assert not any(path.endswith('/cancel') for _,path in calls)

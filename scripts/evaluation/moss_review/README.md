@@ -18,7 +18,10 @@ above against that generation lock and the empty local directory **before the
 coordinator dispatches scored execution**. This is a separate review protocol;
 the Windows bootstrap generation freeze remains unchanged. After generation,
 copy the untouched receipts, logs, parity proofs and PNGs into that **same** local
-run directory, preserving their relative directory structure. Then export and
+run directory, preserving their relative directory structure. For an explicitly
+approved mixed-availability campaign, include all six original calibration
+receipts/logs and the private `availability-authorization.json` run mirror; do not
+put that unblinded evidence in evaluator packets. Then export and
 translate there. Keep originals private and retain the pre-dispatch review freeze
 and custody evidence. Do not freeze review after importing scored files, move the
 bound local root, edit Windows receipt paths, or reseal copied receipts. The

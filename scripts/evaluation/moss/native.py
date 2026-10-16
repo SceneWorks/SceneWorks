@@ -58,7 +58,8 @@ class Native:
         try:
             while time.monotonic()<deadline:
                 job=self.call('GET',f'/api/v1/jobs/{job_id}')
-                if job['status'] in ('failed','canceled'):raise ValueError(f'native job {job_id} {job["status"]}: {job.get("error")}')
+                if job['status']=='failed':raise RuntimeError(f'native job {job_id} failed: {job.get("error")}')
+                if job['status']=='canceled':raise ValueError(f'owned native job {job_id} was canceled; review execution integrity')
                 if job['status']=='completed' and job.get('result',{}).get('assets'):
                     metrics=self.call('GET',f'/api/v1/jobs/{job_id}/metrics')
                     # Completion can precede the final coalesced metrics write.
@@ -67,7 +68,8 @@ class Native:
             else:raise TimeoutError(f'native job {job_id} timed out')
         except BaseException:
             # Cancel only this harness-created job; never terminate a shared worker.
-            self.call('POST',f'/api/v1/jobs/{job_id}/cancel',{})
+            if job is None or job['status'] not in ('failed','canceled','completed'):
+                self.call('POST',f'/api/v1/jobs/{job_id}/cancel',{})
             raise
         expected=dict(model=config['id'],quantLabel=config['precision'],steps=config['steps'],seed=cell['seed'],width=cell['width'],height=cell['height'],imageCount=1,backend='cuda')
         if job.get('workerId')!=config['settings']['worker_id'] or any(metrics.get(k)!=v for k,v in expected.items()):

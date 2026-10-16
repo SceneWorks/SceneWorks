@@ -14,6 +14,27 @@ from evaluate import (CONFIG_IDS, cells, file_hash, load_lock, parity_cells, rea
     receipts, require, seal, validate_manifest, validate_parity, validate_receipt, write)
 
 
+class RuntimeFailure(RuntimeError):
+    """Observed owned worker failure after the live guard passed."""
+
+
+class RuntimeTimeout(TimeoutError,RuntimeFailure):
+    pass
+
+
+def expect_runtime(state,value,expected):
+    if state=='error':raise RuntimeFailure(str(value))
+    if state=='timeout':raise RuntimeTimeout(str(value))
+    require(state==expected,str(value))
+
+
+def worker_failure(exc):
+    # Unknown/programming/input/dependency errors fail closed as integrity errors.
+    # Even a runtime error needs coordinator diagnosis before unavailability.
+    if isinstance(exc,TimeoutError):return 'timeout'
+    return 'error' if isinstance(exc,RuntimeError) else 'integrity_error'
+
+
 def worker(config, requests, replies, log, gpu_uuid, mode='candidate'):
     os.environ.update(HF_HUB_OFFLINE='1',TRANSFORMERS_OFFLINE='1',CUDA_DEVICE_ORDER='PCI_BUS_ID',CUDA_VISIBLE_DEVICES=gpu_uuid)
     with open(log,'a',encoding='utf-8') as stream,contextlib.redirect_stdout(stream),contextlib.redirect_stderr(stream):
@@ -36,7 +57,7 @@ def worker(config, requests, replies, log, gpu_uuid, mode='candidate'):
         except BaseException as exc:
             import traceback
             traceback.print_exc()
-            replies.put(('error',f'{type(exc).__name__}: {exc}'))
+            replies.put((worker_failure(exc),f'{type(exc).__name__}: {exc}'))
         finally:
             if runtime is not None and hasattr(runtime,'close'):runtime.close()
 
@@ -61,9 +82,9 @@ def receive(process,replies,timeout,guard):
             guard.check()  # no result is accepted after lease/cache/owner changes
             return reply,peak
         except queue.Empty:
-            if not process.is_alive():raise RuntimeError(f'owned runtime exited {process.exitcode}')
+            if not process.is_alive():raise RuntimeFailure(f'owned runtime exited {process.exitcode}')
     guard.check()
-    raise TimeoutError(f'owned runtime exceeded bounded {timeout}s; no automatic retry')
+    raise RuntimeTimeout(f'owned runtime exceeded bounded {timeout}s; no automatic retry')
 
 
 def stop(process):
@@ -111,18 +132,21 @@ def ensure_parity(manifest,lock_hash,run,phase,guard,attempt):
     try:
         process,requests,replies=launch(config,manifest,log,guard,mode='parity')
         (state,value),_=receive(process,replies,manifest['ownership']['timeout_seconds'],guard)
-        require(state=='ready',str(value))
+        expect_runtime(state,value,'ready')
         initialization_seconds=value
         for index,cell in enumerate(pending):
             guard.check();requests.put((cell,None))
             (state,evidence),_=receive(process,replies,manifest['ownership']['timeout_seconds'],guard)
-            require(state=='result',str(evidence))
+            expect_runtime(state,evidence,'result')
             evidence['initialization_seconds']=initialization_seconds if index==0 else 0.0
             evidence['total_process_seconds']=evidence['initialization_seconds']+evidence['elapsed_seconds']
             row=seal(dict(lock_sha256=lock_hash,cell=cell,status='ok',attempt=attempt,evidence=evidence,ownership=dict(manifest['ownership'],revision=lock_hash),
                 log=snapshot_log(run,log,root/(cell['id']+'.'+attempt+'.log'))))
             validate_parity(run,lock_hash,cell,row)
             write(root/(cell['id']+'.json'),row);records.append({k:v for k,v in row.items() if k!='sha256'})
+    except RuntimeFailure:
+        guard.check()
+        raise
     except BaseException as exc:
         created=[read(p)['cell']['id'] for p in root.glob('*.json') if read(p).get('attempt')==attempt]
         write(run/'invalidations'/(attempt+'-parity.json'),seal(dict(lock_sha256=lock_hash,cell_ids=[],parity_cell_ids=created,reason=str(exc),attempt=attempt)))
@@ -133,14 +157,16 @@ def ensure_parity(manifest,lock_hash,run,phase,guard,attempt):
     return records
 
 
-def existing_successes(manifest,lock_hash,run,config_id,phase):
+def existing_successes(manifest,lock_hash,run,config_id,phase,approved=None):
     selected=[c for c in cells(manifest,phase) if c['config_id']==config_id]
     pending=[]
     for cell in selected:
         path=run/'receipts'/(cell['id']+'.json')
         if path.exists():
-            row=validate_receipt(run,lock_hash,cell,read(path))
-            require(row['status']=='ok','failed attempts cannot be retried automatically')
+            row=validate_receipt(run,lock_hash,cell,read(path),manifest=manifest)
+            terminal_calibration=phase=='calibration' and row['status'] in ('failed','timeout') and row.get('failure_kind')=='runtime'
+            terminal_unavailable=phase=='scored' and config_id in (approved or {}) and row['status']=='unavailable'
+            require(row['status']=='ok' or terminal_calibration or terminal_unavailable,'failed attempts cannot be retried automatically')
         else:
             require(not (run/'outputs'/(cell['id']+'.png')).exists(),'orphan image blocks retry; retain and reconcile image budget')
             pending.append(cell)
@@ -156,34 +182,45 @@ def execute(lock,run,config_id,phase):
     guard.check()
     validate_manifest(manifest,config_id=config_id)
     guard.check()
+    require(run==(guard.prepared_root/'run').resolve() and Path(lock).resolve()==(guard.prepared_root/'protocol.lock.json').resolve(),'run/lock must use original prepared campaign authority')
     config=next(c for c in manifest['configs'] if c['id']==config_id)
-    selected=existing_successes(manifest,lock_hash,run,config_id,phase)
+    approved=getattr(guard,'unavailable_configs',{})
+    selected=existing_successes(manifest,lock_hash,run,config_id,phase,approved)
     if phase=='scored':
         _,calibration=receipts(lock,run,'calibration')
         own=next(c for c in cells(manifest,'calibration') if c['config_id']==config_id)
-        require(calibration[own['id']]['status']=='ok' or config['unavailable'],'failed calibration needs explicitly reviewed unavailable freeze')
+        require(calibration[own['id']]['status']=='ok' or config_id in approved,'failed calibration requires explicit approved availability decision')
     if not selected:return 0.0
     for directory in ('receipts','outputs','invalidations'):(run/directory).mkdir(parents=True,exist_ok=True)
     attempt=f'{phase}-{config_id}-{uuid.uuid4().hex}'
     log=run/(attempt+'.log');log.write_text(f'lock={lock_hash} phase={phase} config={config_id}\n')
     timeout=manifest['ownership']['timeout_seconds'];process=requests=None
-    failure=config['unavailable'];load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic()
+    decision=approved.get(config_id) if phase=='scored' else None
+    failure=decision or config['unavailable'];load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic();initial_error=None
     try:
-        if not failure and config_id=='moss_dmd':parity=ensure_parity(manifest,lock_hash,run,phase,guard,attempt)
-        if not failure:
-            process,requests,replies=launch(config,manifest,log,guard)
-            (state,value),load_peak=receive(process,replies,timeout,guard)
-            require(state=='ready',str(value));load_seconds=value
+        try:
+            if not failure and config_id=='moss_dmd':parity=ensure_parity(manifest,lock_hash,run,phase,guard,attempt)
+            if not failure:
+                process,requests,replies=launch(config,manifest,log,guard)
+                (state,value),load_peak=receive(process,replies,timeout,guard)
+                expect_runtime(state,value,'ready');load_seconds=value
+        except RuntimeFailure as exc:
+            guard.check()
+            if phase!='calibration':raise
+            initial_error=exc;failure={'reason':str(exc)};stop(process)
+            parity_log=run/'parity'/(attempt+'.log')
+            if config_id=='moss_dmd' and parity_log.exists():
+                with log.open('ab') as stream:stream.write(parity_log.read_bytes())
         for index,cell in enumerate(selected):
             guard.check();touched.append(cell['id'])
-            output=run/'outputs'/(cell['id']+'.png');cell_start=time.monotonic();metrics=None;error=None
-            status='unavailable' if failure else 'failed'
+            output=run/'outputs'/(cell['id']+'.png');cell_start=start if index==0 else time.monotonic();metrics=None;error=None
+            status='unavailable' if decision or config['unavailable'] else ('timeout' if isinstance(initial_error,TimeoutError) else 'failed')
             if failure:error=failure['reason']
             else:
                 try:
                     requests.put((cell,str(output)))
                     (state,value),peak=receive(process,replies,timeout,guard)
-                    require(state=='result',str(value));metrics=value
+                    expect_runtime(state,value,'result');metrics=value
                     metrics.update(peak_host_rss_bytes=max(peak,load_peak if index==0 else 0),download_bytes=0,
                         cold_seconds=(load_seconds+metrics['generation_seconds']) if index==0 else None,
                         warm_seconds=metrics['generation_seconds'] if index>0 else None,
@@ -194,17 +231,19 @@ def execute(lock,run,config_id,phase):
                     if config_id=='moss_dmd':
                         metrics['parity_fixture_digests']=[seal(r)['sha256'] for r in parity]
                     status='ok'
-                except (ValueError,RuntimeError,TimeoutError) as exc:
+                except RuntimeFailure as exc:
                     # Authorization/cache changes invalidate the attempt rather than becoming mere render failures.
                     guard.check()
                     error=str(exc);status='timeout' if isinstance(exc,TimeoutError) else 'failed';failure={'reason':error};stop(process)
-            with log.open('a') as stream:stream.write(f"{cell['id']}: {status} {error or ''}\n")
+            with log.open('a',encoding='utf-8') as stream:stream.write(f"{cell['id']}: {status} {error or ''}\n")
             record=dict(lock_sha256=lock_hash,cell=cell,status=status,elapsed_seconds=time.monotonic()-cell_start,
                 ownership=dict(manifest['ownership'],revision=lock_hash),metrics=metrics,
-                reproduce=f'guarded bootstrap {phase} resume at lock {lock_hash}; never repeat an existing image',error=error,
+                reproduce=decision['reproduce'] if decision else f'guarded bootstrap {phase} at lock {lock_hash}; failed attempts never retry',error=error,
                 output=dict(path=output.relative_to(run).as_posix(),sha256=file_hash(output)) if output.exists() else None,
                 log=snapshot_log(run,log,run/'receipts'/(cell['id']+'.'+attempt+'.log')))
-            if status=='ok':validate_receipt(run,lock_hash,cell,seal(record))
+            if status in ('failed','timeout'):record['failure_kind']='runtime'
+            if approved:record['availability_authorization']=dict(path='availability-authorization.json',sha256=file_hash(run/'availability-authorization.json'))
+            validate_receipt(run,lock_hash,cell,seal(record),manifest=manifest)
             write(run/'receipts'/(cell['id']+'.json'),seal(record))
             print(f"{cell['id']}: {status}",flush=True);load_peak=0
         finish(process,requests);process=None

@@ -122,6 +122,7 @@ class ReviewPackets(unittest.TestCase):
     def test_empty_local_review_root_freeze_precedes_unchanged_windows_receipt_import(self):
         local=self.root/'persistent-mac-evidence';local.mkdir()
         manifest=copy.deepcopy(self.manifest);manifest['runtime']['os']='Windows producer CPU fixture';manifest['runtime']['python']='3.12 Windows producer CPU fixture'
+        for config in manifest['configs']:config['unavailable']=dict(reason='CPU fixture unavailable',reproduce='CPU fixture only',evidence_path='fixture',evidence_sha256='0'*64)
         lock=self.root/'windows-generation-lock.json';r.save_new(lock,r.ev.seal(manifest))
         protocol=self.root/'local-review-protocol.json'
         with patch.object(r.ev,'validate_manifest',side_effect=AssertionError('review must not execute producer validation')):

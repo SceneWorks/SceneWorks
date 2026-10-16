@@ -1937,6 +1937,7 @@ jobs:
             ${{ env.MOSS_RECEIPTS }}/protocol.lock.json
             ${{ env.MOSS_RECEIPTS }}/calibration-estimate.json
             ${{ env.MOSS_RECEIPTS }}/scored-authorization.json
+            ${{ env.MOSS_RECEIPTS }}/run/availability-authorization.json
             ${{ env.MOSS_RECEIPTS }}/run/*-background-*.json
             ${{ env.MOSS_RECEIPTS }}/run/outputs/*.png
             ${{ env.MOSS_RECEIPTS }}/run/receipts/*
