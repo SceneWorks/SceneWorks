@@ -49,6 +49,15 @@ use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadPhase, LoadSpec, Progress, Quant, WeightsSource,
 };
+// These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
+// this same implementation without pulling in an accelerator runtime bundle.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod prompt_upsampling;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use prompt_upsampling::{
+    attach_prompt_upsampler, prompt_enhancement_fact, publish_upsampling_progress,
+};
+
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
 #[cfg(target_os = "macos")]
@@ -417,6 +426,14 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     {
+        if matches!(request.model.as_str(), "flux3_klein" | "flux3_klein_base")
+            && mode != "text_to_image"
+        {
+            return Err(WorkerError::InvalidPayload(
+                "FLUX 3 prompt enhancement currently requires the native text_to_image route"
+                    .to_owned(),
+            ));
+        }
         if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
             return Err(WorkerError::InvalidPayload(
                 "prompt enhancement text_to_image cannot include source or reference image assets"
@@ -451,9 +468,12 @@ fn validate_prompt_enhancement_request(
     if !enabled {
         return Ok(());
     }
-    if request.model != "flux2_dev" {
+    if !matches!(
+        request.model.as_str(),
+        "flux2_dev" | "flux3_klein" | "flux3_klein_base"
+    ) {
         return Err(WorkerError::InvalidPayload(
-            "prompt enhancement is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it"
+            "prompt enhancement is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it"
                 .to_owned(),
         ));
     }
@@ -467,7 +487,7 @@ fn validate_prompt_enhancement_request(
         || request.advanced.contains_key("controlMode");
     if strict_control {
         return Err(WorkerError::InvalidPayload(
-            "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
+            "prompt enhancement cannot be combined with strict control".to_owned(),
         ));
     }
     validate_prompt_enhancement_route(request, settings)

@@ -7315,13 +7315,10 @@ mod sampling_knob_tests {
 
 /// Optional prompt-enhancement settings resolved from a job request's `advanced` block and threaded
 /// into a [`GenerationRequest`] (sc-6135). Mirrors the LTX-2.3 video path (`advanced.enhancePrompt` /
-/// `enhanceTemperature` / `enhanceMaxTokens`). Only FLUX.2-dev / FLUX.2-dev-edit act on it — the
-/// Mistral3 caption upsampler (sc-6030), text-only for txt2img and image-conditioned on the
-/// reference image(s) for edit; every other engine ignores the fields, and the dev Image-Studio
-/// toggle (manifest `ui.promptEnhance`) is the only surface that sets `enhancePrompt`, so this is a
-/// no-op for all other models.
-const PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS: usize = 16_000;
-const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
+/// `enhanceTemperature` / `enhanceMaxTokens`). FLUX.2-dev owns its integrated Mistral3 enhancer;
+/// FLUX 3 Image Klein owns a separately provisioned optional Qwen3.5 VLM (sc-26238). API/worker
+/// route checks fail closed for other engines; manifest `ui.promptEnhance` controls the existing
+/// Image Studio toggle. Disabled requests do not attach the optional FLUX 3 component.
 
 #[derive(Clone, Default)]
 pub(crate) struct PromptEnhance {
@@ -7358,72 +7355,6 @@ impl PromptEnhance {
             gen_core::PromptEnhancementSink::default()
         };
     }
-}
-
-fn prompt_enhancement_fact(
-    report: gen_core::PromptEnhancementReport,
-    requested_prompt: &str,
-) -> WorkerResult<Value> {
-    if report.original_prompt != requested_prompt {
-        return Err(WorkerError::Engine(
-            "prompt-enhancement report original_prompt did not match the per-image request".to_owned(),
-        ));
-    }
-    if report.effective_prompt.trim().is_empty()
-        || report.effective_prompt.chars().count() > PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS
-    {
-        return Err(WorkerError::Engine(format!(
-            "prompt-enhancement report effective_prompt must contain 1..={PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS} characters"
-        )));
-    }
-    let (outcome, fallback_reason) = match report.outcome {
-        gen_core::PromptEnhancementOutcome::Enhanced => {
-            if report.fallback_reason.is_some() {
-                return Err(WorkerError::Engine(
-                    "enhanced prompt report unexpectedly carried a fallback reason".to_owned(),
-                ));
-            }
-            if report.effective_prompt == report.original_prompt {
-                return Err(WorkerError::Engine(
-                    "enhanced prompt report did not rewrite the original prompt".to_owned(),
-                ));
-            }
-            ("enhanced", None)
-        }
-        gen_core::PromptEnhancementOutcome::Fallback => {
-            if report.effective_prompt != report.original_prompt {
-                return Err(WorkerError::Engine(
-                    "fallback prompt report did not preserve the original prompt".to_owned(),
-                ));
-            }
-            let reason = report
-                .fallback_reason
-                .as_deref()
-                .map(str::trim)
-                .filter(|reason| {
-                    !reason.is_empty()
-                        && reason.chars().count() <= PROMPT_ENHANCE_MAX_REASON_CHARS
-                        && !reason.chars().any(char::is_control)
-                })
-                .ok_or_else(|| {
-                    WorkerError::Engine(
-                        "fallback prompt report did not carry a safe bounded reason".to_owned(),
-                    )
-                })?;
-            ("fallback", Some(reason.to_owned()))
-        }
-        gen_core::PromptEnhancementOutcome::Absent => {
-            return Err(WorkerError::Engine(
-                "enabled prompt enhancement reported an absent outcome".to_owned(),
-            ));
-        }
-    };
-    Ok(json!({
-        "outcome": outcome,
-        "originalPrompt": report.original_prompt,
-        "effectivePrompt": report.effective_prompt,
-        "fallbackReason": fallback_reason,
-    }))
 }
 
 type PromptEnhancementReports = std::collections::HashMap<
@@ -8061,6 +7992,7 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8121,6 +8053,7 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -10179,6 +10112,7 @@ async fn generate_stream_using(
         // stages its Qwen3-VL `text_encoder` here (sc-25679).
         spec =
             attach_required_components(spec, engine_id, &request.model_manifest_entry, settings)?;
+        spec = attach_prompt_upsampler(spec, engine_id, request, settings)?;
         // F3 alternate decoder: attach before both the provider-specific memory contract and the generic
         // MLX fit gate, so donor bytes + normal activation/OS margin are admitted as one composition.
         spec = attach_selected_decoder(spec, engine_id, request, settings)?;
@@ -13251,6 +13185,7 @@ async fn generate_candle_stream_using(
         &request.model_manifest_entry,
         settings,
     )?;
+    shared_contract_spec = attach_prompt_upsampler(shared_contract_spec, engine_id, request, settings)?;
     if let Some((_, convrot_dit)) = convrot.as_ref() {
         shared_contract_spec = shared_contract_spec.with_component(
             gen_core::KREA_CONVROT_DIT_COMPONENT,
@@ -14907,6 +14842,26 @@ async fn consume_gen_events_with_disclosure(
                     ),
                 )
                 .await?;
+            }
+            GenEvent::Upsampling { index, tokens, max_tokens } => {
+                mark_started(index);
+                // This is before denoise: do not mark a sampling phase or invent effective_steps.
+                // The select loop's independent interval still polls cancellation during prefill
+                // and between coalesced token updates.
+                if publish_upsampling_progress(tokens, max_tokens) {
+                    update_job(
+                        api,
+                        &job.id,
+                        image_progress(
+                            JobStatus::Running,
+                            ProgressStage::Generating,
+                            step_fraction(index, 0, 1, step_slices),
+                            &step_text(index, format!("enhancing prompt ({tokens}/{max_tokens} tokens)")),
+                            Some(streaming_result(plan, asset_writes)),
+                            backend,
+                        ),
+                    ).await?;
+                }
             }
             GenEvent::Decoding { index } => {
                 mark_started(index);
