@@ -1911,11 +1911,9 @@ mod tests {
             "qwen_image_2_1" => 32,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
-            // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
-            // A literal until the inference pin carries `gen_core::flux3` (PR #1263); the pin bump
-            // replaces it with that module's `DOWNSAMPLING_RATIO`, and from then on the envelope
-            // test below reads the provider's `size_floor` live on this lane.
-            "flux3_klein" => 16,
+            // FLUX 3 Image Klein (sc-26234): the pinned contract publishes its packed-token grid.
+            // The provider envelope test reads `size_floor` live on the lane that links it.
+            "flux3_klein" => gen_core::flux3::DOWNSAMPLING_RATIO,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,

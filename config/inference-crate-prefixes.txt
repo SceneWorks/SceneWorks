@@ -85,6 +85,7 @@ crates/media/mlx-gen/mlx-gen-depth
 crates/media/mlx-gen/mlx-gen-face
 crates/media/mlx-gen/mlx-gen-flux
 crates/media/mlx-gen/mlx-gen-flux2
+crates/media/mlx-gen/mlx-gen-flux3
 crates/media/mlx-gen/mlx-gen-ideogram
 crates/media/mlx-gen/mlx-gen-instantid
 crates/media/mlx-gen/mlx-gen-iris
