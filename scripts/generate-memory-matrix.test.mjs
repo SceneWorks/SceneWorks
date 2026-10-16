@@ -31,6 +31,7 @@ import {
   isImplemented,
   isPublishableCell,
   MODEL_STORIES,
+  PAIRED_MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
   IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
@@ -385,8 +386,8 @@ test("the ownership tables scope every story to exactly one backend", () => {
   ].flatMap((stories) => Object.values(stories));
   assert.equal(
     scope.size,
-    scopedStoryIds.length,
-    "every declared (story, backend) pair resolves to exactly one scope entry",
+    scopedStoryIds.length - Object.keys(PAIRED_MODEL_STORIES).length,
+    "each logical owner resolves once; every checked same-model pair covers exactly two lanes",
   );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
@@ -414,6 +415,26 @@ test("the ownership tables scope every story to exactly one backend", () => {
     () => buildStoryBackendScope({ alpha: { mlx: 1 }, beta: { mlx: 1 } }, {}),
     /exactly one owner and one backend/,
   );
+});
+
+test("explicit paired same-model ownership covers both backends and no other scope", () => {
+  const models = { flux3_klein_base: { mlx: 26239, candle: 26239 } };
+  const families = { 26233: { mlx: 26233, candle: 26241 } };
+  const pairs = { flux3_klein_base: 26239 };
+  let scope;
+  assert.doesNotThrow(() => { scope = buildStoryBackendScope(models, families, pairs); });
+  for (const backend of ["mlx", "candle"]) {
+    assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped([{
+      id: `base-${backend}`, modelId: "flux3_klein_base", backend,
+      owningModelStory: 26239, owningFamilyStory: families[26233][backend],
+    }], scope));
+  }
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239 } }, families, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239, candle: 26239 } }, families, { ...pairs, other: 26239 }), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope(models, { 26233: { mlx: 26239 } }, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ flux3_klein_base: { mlx: 26239, candle: 26240 } }, {}, pairs), /paired/);
+  assert.throws(() => buildStoryBackendScope(models, families, { absent: 26239 }), /paired/);
 });
 
 test("a cell may never name a story scoped to the other backend", () => {

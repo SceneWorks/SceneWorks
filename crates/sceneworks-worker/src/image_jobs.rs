@@ -1645,7 +1645,7 @@ pub(crate) async fn run_image_generate_job(
         }
     }
 
-    if !handled {
+    dispatch_legacy_fallback(&request.model, handled, || async {
         if request.hires_fix.enabled {
             return Err(WorkerError::InvalidPayload(
                 "Hires.fix requires a native image engine with img2img support; this job resolved only to the procedural stub."
@@ -1661,8 +1661,8 @@ pub(crate) async fn run_image_generate_job(
             backend,
             &mut asset_writes,
         )
-        .await?;
-    }
+        .await
+    }).await?;
 
     // sc-8091: Image Studio "Upscale" toggle. The native worker never ported the Python inline-upscale
     // path, so the UI's `upscale` request was silently dropped (images came out at the base size). Mirror

@@ -202,6 +202,121 @@ fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
 }
 
+/// Execute the actual production dispatch/fallback seam, not a copy of its classification.
+/// Mutations: delete require_legacy_fallback_allowed CALL inside it, or remove the root callsite.
+#[tokio::test]
+async fn flux3_missing_native_handler_never_invokes_procedural_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let production = include_str!("../image_jobs.rs");
+    let call = production
+        .find("dispatch_legacy_fallback(&request.model, handled,")
+        .expect("real dispatcher calls the shared decision seam");
+    let stub = production[call..]
+        .find("generate_stub_stream(")
+        .expect("real stub closure is guarded");
+    assert!(stub > 0);
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let called = AtomicBool::new(false);
+        let error = dispatch_legacy_fallback(model, false, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(message) if message.contains("unsupported") && message.contains(model))
+        );
+        assert!(
+            !called.load(Ordering::Relaxed),
+            "{model} produced fake procedural success"
+        );
+        dispatch_legacy_fallback(model, true, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!called.load(Ordering::Relaxed));
+    }
+    let called = AtomicBool::new(false);
+    dispatch_legacy_fallback("test_stub_model", false, || async {
+        called.store(true, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        called.load(Ordering::Relaxed),
+        "legacy non-FLUX3 stub behavior must remain"
+    );
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cache_head() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = isolate_hf_hub_cache_to(&hub);
+    let mut settings = Settings::from_env();
+    settings.data_dir = root.path().to_path_buf();
+    let repo = "black-forest-labs/flux-3-image-klein-base";
+    let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+    let stage = |repo: &str, revision: &str| {
+        let cache =
+            sceneworks_core::hf_home::huggingface_repo_cache_path(root.path(), repo).unwrap();
+        let snapshot = cache.join("snapshots").join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors"),
+            b"tiny source fixture, not model weights",
+        )
+        .unwrap();
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), revision).unwrap();
+        snapshot
+    };
+    let expected = stage(repo, revision);
+    let write_receipt = |repo: &str, revision: &str, snapshot: &Path| {
+        let marker = root.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&marker).unwrap();
+        let stamp =
+            crate::model_jobs::resolved_files_tree_stamp(snapshot, &["model.safetensors"]).unwrap();
+        std::fs::write(marker.join(crate::INSTALL_MARKER), serde_json::to_vec(&json!({
+            "schemaVersion":2,"repo":repo,"modelId":"flux3_klein_base","variant":"default",
+            "snapshotRevision":revision,"resolvedFiles":["model.safetensors"],"artifactTreeStamp":stamp
+        })).unwrap()).unwrap();
+    };
+    let selected = request(json!({"model":"flux3_klein_base"}));
+    let error = resolve_weights_dir(&selected, &settings).unwrap_err();
+    assert!(error.to_string().contains("exact-revision install receipt"));
+    let distilled_repo = "black-forest-labs/flux-3-image-klein";
+    let distilled_revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+    let distilled = stage(distilled_repo, distilled_revision);
+    write_receipt(distilled_repo, distilled_revision, &distilled);
+    assert!(resolve_weights_dir(&selected, &settings).is_err());
+    let wrong_revision = "0000000000000000000000000000000000000000";
+    let wrong = stage(repo, wrong_revision);
+    write_receipt(repo, wrong_revision, &wrong);
+    assert!(resolve_weights_dir(&selected, &settings).is_err());
+    write_receipt(repo, revision, &expected);
+    assert_eq!(
+        resolve_weights_dir(&selected, &settings).unwrap(),
+        Some(expected.clone())
+    );
+    let wrong_override = root.path().join("models/another-checkpoint");
+    std::fs::create_dir_all(&wrong_override).unwrap();
+    let overridden =
+        request(json!({"model":"flux3_klein_base", "advanced":{"modelPath":wrong_override}}));
+    assert!(resolve_weights_dir(&overridden, &settings).is_err());
+    std::fs::write(
+        expected.join("model.safetensors"),
+        b"changed under same snapshot path",
+    )
+    .unwrap();
+    assert!(resolve_weights_dir(&selected, &settings).is_err());
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")

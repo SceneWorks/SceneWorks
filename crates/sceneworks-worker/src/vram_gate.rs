@@ -383,6 +383,20 @@ pub(crate) fn predicted_sequential_peak_gb_with_adapter_bytes(
 /// Decide whether the predicted peak fits the (possibly capped) live budget. Missing either input ⇒
 /// `Unknown` (never block). Compares against `free_gb` — what is actually allocatable now — mirroring
 /// the flux2 edit guard's use of `available_gb`.
+/// FLUX3 base's catalog floor is weights/fixed reserve, not a measured one-row activation
+/// anchor. Add its full two-row source allowance; keep adapters, optional VLM and decode separate.
+pub(crate) fn flux3_source_activation_allowance_bytes(
+    engine_id: &str,
+    width: u32,
+    height: u32,
+) -> u64 {
+    if engine_id != "flux3_klein_base" {
+        return 0;
+    }
+    let workspace = crate::mlx_fit_gate::flux3_source_workspaces(engine_id, width, height);
+    workspace.0.max(workspace.1)
+}
+
 pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<VramBudget>) -> FitDecision {
     let (Some(needed_gb), Some(budget)) = (needed_gb, budget) else {
         return FitDecision::Unknown;
@@ -2988,6 +3002,29 @@ fn video_weights_too_big_error(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn flux3_base_source_allowance_is_two_rows_without_doubling_weight_floor() {
+        let workspace = crate::mlx_fit_gate::flux3_source_workspaces("flux3_klein_base", 1024, 768);
+        let allowance = flux3_source_activation_allowance_bytes("flux3_klein_base", 1024, 768);
+        assert_eq!(allowance, workspace.0.max(workspace.1));
+        assert!(allowance > 0);
+        assert_eq!(
+            flux3_source_activation_allowance_bytes("flux3_klein", 1024, 768),
+            0
+        );
+        assert_eq!(
+            flux3_source_activation_allowance_bytes("iris_3b", 1024, 768),
+            0
+        );
+        assert!(
+            flux3_source_activation_allowance_bytes("flux3_klein_base", 1536, 1024) > allowance
+        );
+        let entry = obj(json!({"candle":{"minMemoryGb":32,"measured":false}}));
+        let floor = predicted_peak_gb(&entry, "bf16").unwrap();
+        let priced = predicted_peak_gb_with_adapter_bytes(&entry, "bf16", allowance).unwrap();
+        assert!((priced - floor - allowance as f64 / 1_073_741_824.0).abs() < 1e-8);
+    }
 
     fn obj(value: Value) -> JsonObject {
         value.as_object().expect("object literal").clone()

@@ -5881,12 +5881,13 @@
       // (64..=2048 here; the engine admits up to 4096), count <= 8 (rendered one after another from
       // seed + i), seed, steps (the release's 16), the flow-map Euler sampler (`euler`, the only
       // integrator; its schedule alpha 6.93 is fixed, so no scheduler / shift axis). It is a flow
-      // map: NO classifier-free guidance and NO negative prompt — the engine refuses a guidance
-      // other than 1.0 and any negative prompt by name (`supportsGuidance` /
+      // map: NO classifier-free guidance and NO negative prompt — the engine refuses any guidance
+      // and any negative prompt by name (`supportsGuidance` /
       // `supportsNegativePrompt` false, the z_image_turbo shape). References / boxes (sc-26236/7),
       // prompt upsampling (sc-26238), the base checkpoint + LoRA (sc-26239) and quantized tiers
       // (sc-26241) are later stories.
       "id": "flux3_klein",
+      "loraCompatibility": { "families": ["flux3"], "types": ["style", "enhance", "character"], "baseModel": "black-forest-labs/flux-3-image-klein", "baseRevision": "8454017f9ebaada30c998fccd9f67a80c7580f68", "adapterKinds": ["lora"] },
       "image": {
         "supportsGuidance": false,
         "supportsNegativePrompt": false,
@@ -5982,6 +5983,135 @@
             { "label": "FLUX 3 Image Klein announcement", "url": "https://bfl.ai/blog/flux-3-image-klein" }
           ]
         }
+      }
+    },
+    // S6 (sc-26239): separate frozen CFG checkpoint, not an alias of the distilled flow map.
+    // Whole pinned repository download; the dense native loader uses only the root checkpoint.
+    // Declared 32 GB weight/reserve floor, not a measured peak; source-derived two-row
+    // conditioning/denoise activations and optional VLM are accounted separately.
+    {
+      "id": "flux3_klein_base",
+      "image": {
+        "patchGridVisibleBelow": 1024
+      },
+      "name": "FLUX 3 Image Klein Base",
+      "family": "flux3",
+      "type": "image",
+      "adapter": "mlx_flux3",
+      "macOnly": false,
+      "capabilities": [
+        "text_to_image"
+      ],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "default": true,
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-pup",
+          "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "prompt_upsampler",
+          "files": [],
+          "estimatedSizeBytes": 18839746673
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/flux-3-image-klein-base"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/flux-3-image-klein-base/blob/1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4/LICENSE.md",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3.5,
+        "sampler": "euler",
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 64,
+        "maxDimension": 2048,
+        "requiresDimensionsMultipleOf": 16,
+        "samplers": [
+          "euler"
+        ]
+      },
+      "mlx": {
+        "minMemoryGb": 32
+      },
+      "candle": {
+        "measured": false,
+        "minMemoryGb": 32
+      },
+      "ui": {
+        "label": "FLUX 3 Image Klein Base",
+        "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately.",
+        "recommendedFor": [
+          "text_to_image"
+        ],
+        "promptGuide": {
+          "title": "FLUX 3 Image Klein Prompt Guide",
+          "path": "/prompt-guides/flux3-image-klein.md",
+          "sources": [
+            {
+              "label": "FLUX 3 Image Klein model card",
+              "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-base"
+            },
+            {
+              "label": "FLUX 3 Image Klein code",
+              "url": "https://github.com/black-forest-labs/flux-3-image-klein"
+            },
+            {
+              "label": "FLUX 3 Image Klein announcement",
+              "url": "https://bfl.ai/blog/flux-3-image-klein"
+            }
+          ]
+        },
+        "promptEnhance": true
+      },
+      "loraCompatibility": {
+        "families": [
+          "flux3"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ],
+        "baseModel": "black-forest-labs/flux-3-image-klein-base",
+        "baseRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+        "adapterKinds": [
+          "lora"
+        ]
       }
     },
     {

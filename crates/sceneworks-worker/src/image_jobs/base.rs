@@ -1662,13 +1662,18 @@ fn grouped_edit_image_count(request: &ImageRequest) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn model_repo(request: &ImageRequest, model: &ResolvedModel) -> String {
+    model_repo_with_default(request, model.default_repo())
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String {
     request
         .model_manifest_entry
         .get("repo")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(model.default_repo())
+        .unwrap_or(default_repo)
         .to_owned()
 }
 
@@ -1986,6 +1991,22 @@ pub(crate) fn candle_weights_gap(request: &ImageRequest) -> Option<String> {
     }
 }
 
+fn require_legacy_fallback_allowed(model: &str) -> WorkerResult<()> {
+    if matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return Err(WorkerError::InvalidPayload(format!("unsupported: {model} requires its native MLX/Candle handler and verified pinned components. No native handler completed this request; update/enable the native worker and check the selected operation. Procedural or text-to-image fallback is disabled")));
+    }
+    Ok(())
+}
+
+/// The production dispatch/fallback decision, with the real stub invocation supplied by the
+/// caller. Kept backend-neutral so a missing/unlinked/disabled backend is testable without GPU.
+pub(super) async fn dispatch_legacy_fallback<F, Fut>(model: &str, handled: bool, stub: F) -> WorkerResult<()>
+where F: FnOnce() -> Fut, Fut: std::future::Future<Output = WorkerResult<()>> {
+    if handled { return Ok(()); }
+    require_legacy_fallback_allowed(model)?;
+    stub().await
+}
+
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -1995,6 +2016,29 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
+    // Canonical FLUX3 identities must be proved by the worker-owned exact-revision receipt.
+    // Never let an arbitrary cache HEAD, a distilled snapshot, or a modelPath override impersonate
+    // the training base an adapter declares. Other families retain their historical resolution.
+    let flux3_identity = match request.model.as_str() {
+        "flux3_klein" => Some(("black-forest-labs/flux-3-image-klein", "8454017f9ebaada30c998fccd9f67a80c7580f68")),
+        "flux3_klein_base" => Some(("black-forest-labs/flux-3-image-klein-base", "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4")),
+        _ => None,
+    };
+    if let Some((repo, revision)) = flux3_identity {
+        if model_repo_with_default(request, repo) != repo {
+            return Err(WorkerError::InvalidPayload(format!("{} requires pinned {repo}@{revision}; a different repo is not this checkpoint", request.model)));
+        }
+        let pinned = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(
+            &settings.data_dir, repo, revision, Some(&request.model), None,
+        ).ok_or_else(|| WorkerError::InvalidPayload(format!("{} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized Hugging Face credential. Unpinned cache snapshots are not a fallback", request.model)))?;
+        if let Some(path) = model_path_override(request) {
+            let explicit = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+            if !explicit.canonicalize().ok().zip(pinned.canonicalize().ok()).is_some_and(|(explicit, pinned)| explicit == pinned) {
+                return Err(WorkerError::InvalidPayload(format!("{} modelPath does not match the verified {repo}@{revision} snapshot; remove the override or install the pinned package", request.model)));
+            }
+        }
+        return Ok(Some(pinned));
+    }
     if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
@@ -3881,7 +3925,7 @@ fn candle_certified_artifact_path(
 /// chosen.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_shared_memory_tier<'a>(engine_id: &str, gate_tier: &'a str) -> &'a str {
-    if matches!(engine_id, "iris_3b" | "flux3_klein") {
+    if matches!(engine_id, "iris_3b" | "flux3_klein" | "flux3_klein_base") {
         "bf16"
     } else {
         gate_tier
@@ -10782,7 +10826,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
         // for the same reason, and neither is derived from the other.
         "qwen_image_2_1" => "candle_qwen_2_1",
-        "flux3_klein" => "candle_flux3",
+        "flux3_klein" | "flux3_klein_base" => "candle_flux3",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -13178,9 +13222,13 @@ async fn generate_candle_stream_using(
         memory_width,
         memory_height,
     )?;
+    let source_activation_bytes = crate::vram_gate::flux3_source_activation_allowance_bytes(
+        engine_id, memory_width, memory_height,
+    );
     let adapter_resident_bytes =
         candle_adapter_resident_bytes(engine_id, tier, adapter_source_bytes)
-            .saturating_add(batch_overlay_bytes);
+            .saturating_add(batch_overlay_bytes)
+            .saturating_add(source_activation_bytes);
     let needed = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13192,7 +13240,9 @@ async fn generate_candle_stream_using(
     // providers retain their established source-byte accounting.
     let provider_receipt_priced = matches!(
         engine_id,
-        "chroma1_hd"
+        "flux3_klein"
+            | "flux3_klein_base"
+            | "chroma1_hd"
             | "chroma1_base"
             | "chroma1_flash"
             | "ideogram_4"
@@ -13204,7 +13254,12 @@ async fn generate_candle_stream_using(
             | "sd3_5_medium"
     );
     let shared_predicted_peak_gb = if provider_receipt_priced {
-        crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier)
+        let base = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
+        if matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
+            // Provider receipts replace only adapter/PUP weights. Keep source-derived activation
+            // work exactly once in the base peak; never re-label it as adapter residency.
+            base.map(|peak| peak + batch_overlay_bytes.saturating_add(source_activation_bytes) as f64 / 1_073_741_824.0)
+        } else { base }
     } else {
         needed
     };

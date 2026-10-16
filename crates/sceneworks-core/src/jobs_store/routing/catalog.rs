@@ -1163,7 +1163,8 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
     // MLX and Candle/CUDA. Neither lane advertises quant tiers or adapters; the Candle surface
     // delegates to the MLX predicate so unsupported carriers are never silently discarded.
-    ModelCaps::new("flux3_klein", true, true, false, false, false),
+    ModelCaps::new("flux3_klein", true, true, false, true, false),
+    ModelCaps::new("flux3_klein_base", true, true, false, true, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2417,10 +2418,12 @@ mod tests {
         "anima_turbo",
         "iris_3b",
         "flux3_klein",
+        "flux3_klein_base",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
         "flux3_klein",
+        "flux3_klein_base",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -2571,6 +2574,8 @@ mod tests {
         "anima_turbo",
         // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
         "iris_3b",
+        "flux3_klein",
+        "flux3_klein_base",
     ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[

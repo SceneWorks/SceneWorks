@@ -484,7 +484,7 @@ fn candle_refuses_iris_surface(model: &str, payload: &Map<String, Value>) -> boo
 }
 
 fn candle_refuses_flux3_surface(model: &str, payload: &Map<String, Value>) -> bool {
-    model == "flux3_klein" && !flux3_mlx_eligible(payload)
+    matches!(model, "flux3_klein" | "flux3_klein_base") && !flux3_mlx_eligible(payload)
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the

@@ -97,7 +97,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
             mage_flow_edit_mlx_eligible(payload)
         }
         "iris_3b" => iris_mlx_eligible(payload),
-        "flux3_klein" => flux3_mlx_eligible(payload),
+        "flux3_klein" | "flux3_klein_base" => flux3_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -489,12 +489,23 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
 
 /// FLUX 3 Image Klein, distilled (sc-26234) is plain text-to-image in S1: the `flux3_klein` engine
 /// takes no source, reference, mask, control or pose (references and boxes are sc-26236/7), no
-/// adapter (sc-26239) and no quant tier (sc-26241) — it refuses `LoadSpec::adapters` and
+/// quant tier (sc-26241). S6 admits exact-identity LoRA stacks on base and distilled;
 /// `LoadSpec::quantize` by name — and an enabled hires fix is refused for the same reason as Iris
 /// (its second pass is an img2img refinement the engine refuses). Any such carrier keeps the job
 /// off MLX (an `mlx_unsupported` affordance) instead of reaching an engine that would refuse it.
 pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
-    iris_mlx_eligible(payload) && !has_nonempty_or_malformed_array(payload, "loras")
+    iris_mlx_eligible(payload)
+        && payload.get("loras").is_none_or(|value| {
+            value.is_null()
+                || value.as_array().is_some_and(|loras| {
+                    loras.iter().all(|lora| {
+                        lora.as_str()
+                            .or_else(|| lora.get("id").and_then(Value::as_str))
+                            .or_else(|| lora.get("loraId").and_then(Value::as_str))
+                            .is_some_and(|id| !id.trim().is_empty())
+                    })
+                })
+        })
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
