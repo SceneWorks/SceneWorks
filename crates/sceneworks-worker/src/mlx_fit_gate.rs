@@ -2326,6 +2326,10 @@ struct SynthesizedEstimate {
     /// as `estimate_floor_weights_bytes + generic_headroom_bytes` and therefore knows the split;
     /// the fitted-curve arm scales a measured envelope and has none to declare.
     unmodeled_activation_bytes: Option<u64>,
+    /// Which activation term the peak was composed with — `Some` only on the weights+headroom
+    /// floor arm. sc-25909 reads it to know whether the rung was charged the generic area-scaled
+    /// headroom (and nothing request-specific) as its activation.
+    activation_term: Option<ImageFloorActivationTerm>,
     decode_quality: DecodeQualityRequestDecision,
 }
 
@@ -3227,6 +3231,7 @@ fn synthesize_estimate_ladder_with_conditioning(
                         ),
                         basis: CandidateBasis::EstimateFittedCurve,
                         unmodeled_activation_bytes: None,
+                        activation_term: None,
                         decode_quality: parameter_candidate.decode_quality.clone(),
                     })
                 });
@@ -3264,6 +3269,7 @@ fn synthesize_estimate_ladder_with_conditioning(
                     ),
                     basis: CandidateBasis::EstimateFloor,
                     unmodeled_activation_bytes: None,
+                    activation_term: None,
                     decode_quality: parameter_candidate.decode_quality.clone(),
                 });
                 continue;
@@ -3318,6 +3324,7 @@ fn synthesize_estimate_ladder_with_conditioning(
                             // The anchor derivation decomposes its peak by PHASE, not into counted
                             // weights plus an activation remainder — same reason as the fitted arm.
                             unmodeled_activation_bytes: None,
+                            activation_term: None,
                             decode_quality: parameter_candidate.decode_quality.clone(),
                         })
                     });
@@ -3405,6 +3412,7 @@ fn synthesize_estimate_ladder_with_conditioning(
                 ),
                 basis: CandidateBasis::EstimateFloor,
                 unmodeled_activation_bytes: Some(unmodeled_activation_bytes),
+                activation_term: Some(activation_term),
                 decode_quality: parameter_candidate.decode_quality,
             };
             ladder
@@ -3640,8 +3648,9 @@ fn evaluate_request_with_budget_using_bundle(
 /// to), at the loaded tier and the rung's forced decode tile; `None` for every other provider.
 ///
 /// sc-25909: the cached-path fit check compares this against the activation a reference
-/// request's rung was charged (the generic area-scaled headroom) and prices the shortfall on top
-/// of the cache surcharge. Same 256-row conditioning assumption as the generator's own bound.
+/// request's rung was charged — the activation slice of the generic area-scaled headroom, on a
+/// rung whose activation term is that headroom — and prices the shortfall on top of the cache
+/// surcharge. Same 256-row conditioning assumption as the generator's own bound.
 fn mlx_prefix_kv_cache_shed_transient_bytes(
     engine_id: &str,
     tier_quant: Option<gen_core::Quant>,
@@ -4452,6 +4461,44 @@ fn select_request_with_budget_using_bundle(
         };
         outcome
     };
+    // sc-25909: the provider's own cache-shed request transient over the activation a reference
+    // request's rung was charged. Only a rung whose activation term IS the generic area-scaled
+    // headroom qualifies — the resident baseline (`request_total_peak_bytes` is the generic
+    // weights+headroom total on every non-`mage_flow` route) and a weights+headroom floor estimate
+    // composed with `ImageFloorActivationTerm::GenericHeadroom`. A measured, fitted-curve,
+    // anchor-derived, phase or law-residue rung prices its own activation, so subtracting the
+    // generic figure from the provider transient would compare unlike terms; it gets no correction.
+    // The generic headroom carries the held-back fixed OS/app reserve, which is not activation, so
+    // only its activation slice is compared (as the floor arm's `unmodeled_activation_bytes` does).
+    // Where the provider's transient exceeds it — ≤1024², many references, a packed tier — the
+    // cache is priced over that shortfall too. Only the cached-path check sees it: the rung and the
+    // admit/refuse outcome are the shed pass's.
+    let transient_shortfall = |rung: &MemorySelection| -> u64 {
+        if admission.path != AdmissionPath::Legacy || geometry.reference_count == 0 {
+            return 0;
+        }
+        let charges_generic_headroom = (*rung == resident_selection
+            && !plan.engine_id.starts_with("mage_flow"))
+            || synthesized_estimates
+                .iter()
+                .find(|estimate| estimate.selection == *rung)
+                .is_some_and(|estimate| {
+                    estimate.activation_term == Some(ImageFloorActivationTerm::GenericHeadroom)
+                });
+        if !charges_generic_headroom {
+            return 0;
+        }
+        let forced_tile_edge = contract
+            .engages_selection(rung, MemoryStrategy::BoundedDecode)
+            .then_some(rung.parameters.decode_tile_edge)
+            .flatten();
+        let generic_activation_bytes = plan
+            .generic_headroom_bytes(geometry)
+            .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
+        prefix_kv_cache_shed_transient(forced_tile_edge).map_or(0, |transient| {
+            transient.saturating_sub(generic_activation_bytes)
+        })
+    };
     let ((selection, grant_outcome), prefix_kv_cache) =
         crate::execution_planner::plan_prefix_kv_cache(
             prefix_kv_cache_surcharge,
@@ -4464,25 +4511,8 @@ fn select_request_with_budget_using_bundle(
                 else {
                     return None;
                 };
-                // sc-25909: a reference request's rung carries the generic area-scaled headroom
-                // as its activation (every anchor, law-residue and phase arm refuses a reference
-                // geometry). Where the provider's own shed transient exceeds it — ≤1024², many
-                // references, a packed tier — the cache is priced over that shortfall too. Only
-                // this check sees it: the rung and the admit/refuse outcome are the shed pass's.
-                let transient_shortfall =
-                    if admission.path == AdmissionPath::Legacy && geometry.reference_count > 0 {
-                        let forced_tile_edge = contract
-                            .engages_selection(rung, MemoryStrategy::BoundedDecode)
-                            .then_some(rung.parameters.decode_tile_edge)
-                            .flatten();
-                        prefix_kv_cache_shed_transient(forced_tile_edge).map_or(0, |transient| {
-                            transient.saturating_sub(plan.generic_headroom_bytes(geometry))
-                        })
-                    } else {
-                        0
-                    };
                 let (cached, _) = run_ladder(
-                    priced_bytes.saturating_add(transient_shortfall),
+                    priced_bytes.saturating_add(transient_shortfall(rung)),
                     Some(*rung),
                 );
                 // The shed pass's warm-policy outcome stands: it decided the rung.
@@ -4490,7 +4520,19 @@ fn select_request_with_budget_using_bundle(
                     .then_some((cached, *grant_outcome))
             },
         );
-    let prefix_kv_cache_extra = prefix_kv_cache.map_or(0, |plan| plan.admitted_surcharge_bytes());
+    // The demand a cached selection was graded at on top of its shed peak: the provider's own cache
+    // figure plus the sc-25909 transient shortfall. `priced_bytes` stays the cache alone.
+    let prefix_kv_cache_extra = match (&selection, prefix_kv_cache) {
+        (
+            Selection::Selected {
+                selection: rung, ..
+            },
+            Some(plan),
+        ) if plan.mode.is_cached() => plan
+            .admitted_surcharge_bytes()
+            .saturating_add(transient_shortfall(rung)),
+        (_, plan) => plan.map_or(0, |plan| plan.admitted_surcharge_bytes()),
+    };
     warm_policy.settle_with_selection(
         grant_outcome.unwrap_or(crate::execution_planner::GrantOutcome::AlreadyStaged),
     );
@@ -4623,7 +4665,8 @@ fn select_request_with_budget_using_bundle(
     } else {
         predicted_peak_bytes
     };
-    // The demand the admission approved: a cached selection was graded at shed + surcharge.
+    // The demand the admission approved: a cached selection was graded at shed + surcharge +
+    // transient shortfall (`prefix_kv_cache_extra`).
     let predicted_peak_bytes = predicted_peak_bytes.saturating_add(prefix_kv_cache_extra);
     tracing::info!(
         event = if phase == MlxAdmissionPhase::TierProbe {
@@ -17823,13 +17866,18 @@ mod tests {
     /// * AC2: where the provider's transient is under the generic figure (bf16 at ten references,
     ///   any tier with no reference) production is the uncorrected admission byte for byte.
     ///
+    /// * a production `Cached` records the demand it was graded at — shed peak + cache + shortfall —
+    ///   as its `context.predicted_peak_bytes`.
+    ///
     /// *Mutations that red this:* dropping the correction from the cached check (the demoted band
-    /// disappears); adding it to the shed ladder (the shed and production outcomes diverge).
+    /// disappears); subtracting the WHOLE generic headroom, fixed reserve included (the band
+    /// narrows below the shortfall); adding it to the shed ladder (the shed and production outcomes
+    /// diverge); dropping the shortfall from the recorded demand.
     #[cfg(target_os = "macos")]
     #[test]
     fn mlx_prefix_kv_cache_fit_prices_the_provider_transient_above_the_generic_headroom() {
         use gen_core::Generator as _;
-        const STEP_GIB: f64 = 0.5;
+        const STEP_GIB: f64 = 1.0;
         const TOTAL_GIB: f64 = 96.0;
         let scan = |engine_id: &'static str,
                     quant: Option<gen_core::Quant>,
@@ -17864,7 +17912,9 @@ mod tests {
                 ..fixture_inputs(1024, 1024)
             };
             let geometry = request_geometry(&inputs);
-            let generic = plan.generic_headroom_bytes(geometry);
+            // The ACTIVATION slice of the generic headroom: its fixed OS/app reserve is held back,
+            // not available to the render.
+            let generic = plan.generic_headroom_bytes(geometry) - plan.fixed_reserve_bytes;
             let derived = mlx_prefix_kv_cache_shed_transient_bytes(engine_id, quant, &inputs, None)
                 .expect("the provider prices its cache-shed transient");
             let shortfall = derived.saturating_sub(generic);
@@ -17975,6 +18025,14 @@ mod tests {
                                     mode(&priced),
                                     gen_core::PrefixKvCacheMode::Cached,
                                     "the correction only ever demotes (at {committed})"
+                                );
+                                // The approved demand a cached evaluation records is the shed
+                                // peak + the cache + the shortfall it was graded at.
+                                assert_eq!(
+                                    corrected.context.predicted_peak_bytes,
+                                    shed.context.predicted_peak_bytes + surcharge + shortfall,
+                                    "a cached selection records the demand it was graded at \
+                                     (at {committed})"
                                 );
                                 cached += 1;
                             }
