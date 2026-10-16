@@ -5375,7 +5375,8 @@ test("MOSS telemetry is isolated, read-only, and calibration fails closed", asyn
   assert.equal(defaults.moss_image_comparison_mode, "off");
   const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison:\n"));
   assert.match(job, /github.event_name == 'workflow_dispatch' && \(inputs.moss_image_comparison_mode == 'telemetry' \|\| inputs.moss_image_comparison_mode == 'calibration'\)/);
-  assert.match(job, /group: windows-candle-gpu-real-weights/);
+  assert.match(job, /group: \$\{\{ inputs.moss_image_comparison_mode == 'telemetry' && format\('windows-candle-moss-telemetry-\{0\}', github.run_id\) \|\| 'windows-candle-gpu-real-weights' \}\}/);
+  assert.doesNotMatch(job, /^ {6}group: windows-candle-gpu-real-weights$/m, "read-only telemetry must not evict a pending real-weight job");
   assert.match(job, /cancel-in-progress: false/);
   assert.match(job, /if \(\$env:MODE -ne 'telemetry'\) \{ throw 'MOSS calibration disabled/);
   for (const input of ["provision_snapshot", "run_five_rung_reference", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"]) {
