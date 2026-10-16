@@ -3064,18 +3064,16 @@ fn flux3_projection_shape(stem: &str) -> Option<(String, u64, u64)> {
             return None;
         }
         (format!("txt_mode_blocks.{index}"), leaf)
-    } else if let Some(rest) = stem
-        .strip_prefix("single_transformer_blocks.")
-        .or_else(|| stem.strip_prefix("single_blocks."))
-    {
+    } else {
+        let rest = stem
+            .strip_prefix("single_transformer_blocks.")
+            .or_else(|| stem.strip_prefix("single_blocks."))?;
         let (index, leaf) = rest.split_once('.')?;
         let index = index.parse::<usize>().ok()?;
         if index >= 28 {
             return None;
         }
         (format!("single_blocks.{index}"), leaf)
-    } else {
-        return None;
     };
     let (leaf, output, input) = match leaf {
         "q_proj" | "attn.to_q" => ("q_proj", 3072, 3072),

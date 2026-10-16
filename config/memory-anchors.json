@@ -12192,6 +12192,28 @@
       "evidence": null
     },
     {
+      "id": "analytic:flux3_klein_base:candle:default",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:flux3_klein_base:mlx:default",
+      "modelId": "flux3_klein_base",
+      "modelFamily": "flux3",
+      "route": "flux3_klein_base",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:illustrious_xl_v1:mlx:bf16",
       "modelId": "illustrious_xl_v1",
       "modelFamily": "sdxl",
