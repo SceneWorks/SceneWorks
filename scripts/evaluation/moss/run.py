@@ -191,12 +191,23 @@ def execute(lock,run,config_id,phase):
         own=next(c for c in cells(manifest,'calibration') if c['config_id']==config_id)
         require(calibration[own['id']]['status']=='ok' or config_id in approved,'failed calibration requires explicit approved availability decision')
     if not selected:return 0.0
+    stopped=None
+    if phase=='scored':
+        ordered=[c for c in cells(manifest) if c['config_id']==config_id]
+        order={c['id']:i for i,c in enumerate(ordered)}
+        for cell in ordered:
+            path=run/'receipts'/(cell['id']+'.json')
+            if path.exists() and read(path).get('failure_kind')=='runtime':
+                require(stopped is None,'multiple actual failures in stopped config history')
+                stopped=validate_receipt(run,lock_hash,cell,read(path),manifest=manifest)
+        if stopped:
+            require(all(order[c['id']]>order[stopped['cell']['id']] for c in selected),'missing receipt before actual runtime failure; cannot rerender or censor earlier cells')
     for directory in ('receipts','outputs','invalidations'):(run/directory).mkdir(parents=True,exist_ok=True)
     attempt=f'{phase}-{config_id}-{uuid.uuid4().hex}'
     log=run/(attempt+'.log');log.write_text(f'lock={lock_hash} phase={phase} config={config_id}\n')
     timeout=manifest['ownership']['timeout_seconds'];process=requests=None
     decision=approved.get(config_id) if phase=='scored' else None
-    failure=decision or config['unavailable'];load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic();initial_error=None;failure_cell=None
+    failure=decision or ({'reason':stopped['error']} if stopped else config['unavailable']);load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic();initial_error=None;failure_cell=stopped['cell']['id'] if stopped else None
     try:
         try:
             if not failure and config_id=='moss_dmd':parity=ensure_parity(manifest,lock_hash,run,phase,guard,attempt)

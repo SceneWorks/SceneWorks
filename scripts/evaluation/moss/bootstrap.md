@@ -220,3 +220,9 @@ separate actual failures from censored cells. Integrity, cancellation, lease,
 cache/input, and evidence faults still abort immediately and cannot use this
 continuation path. No post-scored availability approval or quality-conditioned
 exclusion is introduced.
+
+An interrupted stopped-configuration ledger also resumes without generation:
+the runner recovers the existing validated actual runtime failure before launch
+and emits only missing later censored records. Missing earlier receipts are not
+rerendered or retroactively censored. A censored record cannot claim a PNG,
+metrics, or a cause later than itself in the frozen configuration order.

@@ -324,8 +324,11 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
         require(r.get('attempted') is True and r.get('runtime_failure_cell')==cell['id'] and r['status'] in ('failed','timeout'),'missing actual scored runtime-attempt provenance')
     if r.get('failure_kind')=='runtime_censored':
         require(manifest is not None and cell['phase']=='scored' and r.get('attempted') is False and r.get('censored_reason'),'missing explicit censored-cell provenance')
+        require(r['status'] in ('failed','timeout') and r.get('output') is None and r.get('metrics') is None,'unattempted censored rows cannot claim images or measurements')
         cause=next((c for c in cells(manifest) if c['id']==r.get('runtime_failure_cell')),None)
         require(cause and cause['config_id']==cell['config_id'] and cause['id']!=cell['id'],'invalid stopped-runtime cause')
+        order={c['id']:i for i,c in enumerate(cells(manifest)) if c['config_id']==cell['config_id']}
+        require(order[cause['id']]<order[cell['id']],'cannot censor a cell preceding its runtime failure')
         prior=unseal(read(Path(root)/'receipts'/(cause['id']+'.json')))
         require(prior.get('failure_kind')=='runtime' and prior.get('attempted') is True and prior['status'] in ('failed','timeout'),'censored cause was not an actual runtime failure')
         validate_receipt(root,lock_hash,cause,seal(prior),manifest=manifest)

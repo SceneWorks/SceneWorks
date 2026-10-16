@@ -846,3 +846,35 @@ def test_scored_runtime_failure_censors_only_its_config_and_finishes_other_confi
     monkeypatch.setenv('GITHUB_RUN_ID','CPU-scored-2')
     with pytest.raises(ValueError,match='attempts complete with runtime failures'):b.execute_phase(root.parent,control,'scored')
     assert calls==list(ev.CONFIG_IDS) and all(p.read_bytes()==body for p,body in before.items())
+
+
+def test_interrupted_stopped_config_history_finishes_only_later_censored_rows_without_spawn(mixed_calibration,monkeypatch):
+    import bootstrap as b
+    import ownership as o
+    import run
+    m,lock,root,value,metrics=mixed_calibration;sha=ev.read(lock)['sha256']
+    b.accepted_scored_authorization(root.parent,value,m)
+    ordered=[c for c in ev.cells(m) if c['config_id']=='moss_base'];before,cause=ordered[:2]
+    binding=dict(path='availability-authorization.json',sha256=ev.file_hash(root/'availability-authorization.json'))
+    log=dict(path='logs/moss_base.log',sha256=ev.file_hash(root/'logs'/'moss_base.log'))
+    out=root/'outputs'/(before['id']+'.png');out.write_bytes(png(before['width'],before['height']))
+    common=dict(lock_sha256=sha,ownership=dict(m['ownership'],revision=sha),elapsed_seconds=.1,log=log,availability_authorization=binding)
+    ev.write(root/'receipts'/(before['id']+'.json'),ev.seal(dict(common,cell=before,status='ok',attempted=True,output=dict(path='outputs/'+out.name,sha256=ev.file_hash(out)),metrics=deepcopy(metrics))))
+    ev.write(root/'receipts'/(cause['id']+'.json'),ev.seal(dict(common,cell=cause,status='failed',failure_kind='runtime',attempted=True,runtime_failure_cell=cause['id'],error='Synthetic owned failure before interruption',reproduce='CPU fixture only',output=None,metrics=None)))
+    original={p:p.read_bytes() for p in (root/'receipts').glob('scored.*.json')}
+    class Guard:
+        def __init__(self,*a,**k):self.prepared_root=root.parent;self.unavailable_configs=o.availability_decisions(m,sha,root,value)
+        def check(self,*a,**k):pass
+    monkeypatch.setattr(o,'ExecutionGuard',Guard);monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    monkeypatch.setattr(run,'launch',lambda *a,**k:pytest.fail('interrupted stopped config relaunched GPU work'))
+    run.execute(lock,root,'moss_base','scored')
+    assert all(p.read_bytes()==body for p,body in original.items())
+    records=[ev.read(root/'receipts'/(cell['id']+'.json')) for cell in ordered]
+    assert len(records)==48 and all(r['failure_kind']=='runtime_censored' and r['attempted'] is False for r in records[2:])
+    row=ev.unseal(records[2]);cell=ordered[2]
+    for change in (dict(status='ok'),dict(output={'path':'made-up.png','sha256':'0'*64}),dict(metrics={'generation_seconds':1})):
+        with pytest.raises(ValueError,match='cannot claim images or measurements'):ev.validate_receipt(root,sha,cell,ev.seal(dict(row,**change)),manifest=m)
+    with pytest.raises(ValueError,match='preceding its runtime failure'):ev.validate_receipt(root,sha,before,ev.seal(dict(row,cell=before)),manifest=m)
+    # A missing earlier receipt is a damaged ledger, not permission to regenerate it.
+    (root/'receipts'/(before['id']+'.json')).unlink();out.unlink()
+    with pytest.raises(ValueError,match='missing receipt before actual runtime failure'):run.execute(lock,root,'moss_base','scored')
