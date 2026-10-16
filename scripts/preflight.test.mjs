@@ -7,7 +7,7 @@ import test from "node:test";
 
 import { SOURCE_PATHS as MATRIX_SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 import { PACKAGED_SOURCES_PATH } from "./extract-memory-anchors.mjs";
-import { gitOutput, nodeTestsReading, selectSteps } from "./preflight.mjs";
+import { commandInvocation, gitOutput, nodeTestsReading, selectSteps, venvPython } from "./preflight.mjs";
 import { SOURCE_PATHS as STALE_LANE_SOURCE_PATHS } from "./stale-lane-report.mjs";
 
 test("preflight preserves a Git listing larger than the default child-process buffer", () => {
@@ -33,6 +33,36 @@ test("preflight reports spawn errors and nonzero Git exits instead of empty stde
   assert.throws(() => gitOutput(["merge-base"], {
     run: () => ({ status: 128, stderr: "fatal: invalid reference\n" }),
   }), /git merge-base: exit 128: fatal: invalid reference/);
+});
+
+test("Windows npm uses Git Bash with literal argument forwarding, never WSL or shell interpolation", () => {
+  const args = ["--prefix", "path with spaces", "run", "check", "--", "a'b", '$(touch injected)', "x&y"];
+  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/Windows/System32" };
+  const expectedBash = path.join(env.ProgramFiles, "Git", "bin", "bash.exe");
+  const invocation = commandInvocation(["npm", ...args], {
+    platform: "win32", env, exists: (file) => file === expectedBash,
+  });
+  assert.equal(invocation.executable, expectedBash);
+  assert.deepEqual(invocation.args, ["-c", 'exec npm "$@"', "preflight-npm", ...args]);
+  assert.equal(invocation.env.npm_config_script_shell, expectedBash);
+  assert.equal(invocation.env.PATH, `${path.dirname(expectedBash)};${env.PATH}`);
+  assert.throws(() => commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: () => false,
+  }), /requires Git Bash/);
+});
+
+test("POSIX commands and native Windows executables retain their direct argument vectors", () => {
+  const env = { PATH: "/usr/bin" };
+  for (const [platform, command] of [["linux", ["npm", "run", "check"]],
+    ["darwin", ["npm", "run", "check"]], ["win32", ["cargo", "fmt", "--check"]]]) {
+    assert.deepEqual(commandInvocation(command, { platform, env }), {
+      executable: command[0], args: command.slice(1), env,
+    });
+  }
+  assert.equal(venvPython("fixture-venv", "win32"), path.join("fixture-venv", "Scripts", "python.exe"));
+  for (const platform of ["linux", "darwin"]) {
+    assert.equal(venvPython("fixture-venv", platform), path.join("fixture-venv", "bin", "python"));
+  }
 });
 
 const FULL_SUITE = "scaffold node suite (npm run check)";

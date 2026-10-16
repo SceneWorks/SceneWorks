@@ -202,7 +202,7 @@ const PYTEST_DEPS = ["pytest==9.0.2", "httpx==0.28.1", "jsonschema==4.25.1"];
 
 function workerPytest() {
   const venv = path.resolve(repoRoot, git("rev-parse", "--git-common-dir"), "sceneworks-preflight", "venv");
-  const python = path.join(venv, "bin", "python");
+  const python = venvPython(venv);
   const marker = path.join(venv, "preflight-deps.txt");
   const wanted = PYTEST_DEPS.join("\n");
   if (!existsSync(marker) || readFileSync(marker, "utf8") !== wanted) {
@@ -215,12 +215,37 @@ function workerPytest() {
   return run([python, "-m", "pytest", "-q", "tests/", "-m", "not e2e and not parity", "--strict-markers"]);
 }
 
+export function venvPython(venv, platform = process.platform) {
+  return platform === "win32"
+    ? path.join(venv, "Scripts", "python.exe")
+    : path.join(venv, "bin", "python");
+}
+
+export function commandInvocation(command, {
+  platform = process.platform, env = process.env, exists = existsSync,
+} = {}) {
+  if (platform !== "win32" || command[0] !== "npm") {
+    return { executable: command[0], args: command.slice(1), env };
+  }
+  // Windows cannot spawn npm.cmd directly. Use Git Bash (never WSL bash) with a CONSTANT
+  // script and positional arguments, not interpolated shell text or blanket shell:true.
+  const bash = path.join(env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe");
+  if (!exists(bash)) throw new Error(`Windows preflight requires Git Bash at ${bash}`);
+  return {
+    executable: bash,
+    args: ["-c", 'exec npm "$@"', "preflight-npm", ...command.slice(1)],
+    env: { ...env, PATH: `${path.dirname(bash)};${env.PATH ?? ""}`, npm_config_script_shell: bash },
+  };
+}
+
 function run(command, env = {}) {
-  const res = spawnSync(command[0], command.slice(1), {
+  const invocation = commandInvocation(command, { env: { ...process.env, ...env } });
+  const res = spawnSync(invocation.executable, invocation.args, {
     cwd: repoRoot,
     stdio: "inherit",
-    env: { ...process.env, ...env },
+    env: invocation.env,
   });
+  if (res.error) console.error(`${command[0]}: ${res.error.code ?? "spawn error"}: ${res.error.message}`);
   return res.error ? 1 : res.status;
 }
 
