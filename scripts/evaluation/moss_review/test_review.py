@@ -101,6 +101,44 @@ class ReviewPackets(unittest.TestCase):
         self.assertTrue(all(t['comparisons'] == 4 for t in tables['tables']))
         self.assertTrue(all(v['measured_summary']['cold_seconds']['median'] is None for t in tables['tables'] for v in t['costs'].values()))
 
+    def test_windows_output_paths_translate_to_original_local_files_without_receipt_changes(self):
+        originals={}
+        outputs=self.run/'outputs';outputs.mkdir()
+        for key,row in self.results.items():
+            source=self.run/row['output']['path'];destination=outputs/source.name;source.rename(destination)
+            row['output']['path']='outputs\\'+destination.name
+            sealed=r.ev.seal(row);originals[key]=(sealed,r.ev.canonical(sealed))
+        annotations,_=self.translate()
+        pairs,_=r.legacy_pairs(self.proto,self.mapping,self.jp,self.results,self.public)
+        for pair in r.ev.unseal(pairs)['pairs']:
+            for arm in pair['arms']:
+                path=Path(arm['image'])
+                self.assertTrue(path.is_file())
+                self.assertEqual(path.parent,outputs.resolve())
+                self.assertEqual(r.ev.file_hash(path),arm['sha256'])
+        self.assertTrue(all(r.ev.canonical(doc)==body for doc,body in originals.values()))
+        self.assertEqual(len(annotations),288)
+
+    def test_empty_local_review_root_freeze_precedes_unchanged_windows_receipt_import(self):
+        local=self.root/'persistent-mac-evidence';local.mkdir()
+        manifest=copy.deepcopy(self.manifest);manifest['runtime']['os']='Windows producer CPU fixture';manifest['runtime']['python']='3.12 Windows producer CPU fixture'
+        lock=self.root/'windows-generation-lock.json';r.save_new(lock,r.ev.seal(manifest))
+        protocol=self.root/'local-review-protocol.json'
+        with patch.object(r.ev,'validate_manifest',side_effect=AssertionError('review must not execute producer validation')):
+            r.freeze(lock,local,self.root/'evaluators.json',protocol)
+            # Simulate copied Windows producer artifacts, preserving sealed bytes.
+            logs=local/'logs';logs.mkdir();log=logs/'worker.log';log.write_text('CPU fixture: no output generated')
+            receipts=local/'receipts';receipts.mkdir();originals={}
+            for cell in r.ev.cells(manifest):
+                record=r.ev.seal(dict(lock_sha256=r.ev.read(lock)['sha256'],cell=cell,status='unavailable',ownership=dict(responsible_chat='fixture',job='fixture',revision='fixture',timeout_seconds=1,resume='fixture',next_action='fixture'),elapsed_seconds=0,error='CPU fixture unavailable',reproduce='CPU fixture',log=dict(path=r'logs\worker.log',sha256=r.ev.file_hash(log))))
+                path=receipts/(cell['id']+'.json');r.save_new(path,record);originals[path]=path.read_bytes()
+            public=self.root/'local-public';private=self.root/'local-private'
+            r.export(lock,local,protocol,public,private)
+        self.assertEqual(r.ev.unseal(r.load(protocol))['run_root'],str(local.resolve()))
+        self.assertEqual(len(r.ev.unseal(r.load(public/'judgments.packet.json'))['pairs']),432)
+        self.assertEqual(r.ev.unseal(r.load(public/'annotations.packet.json'))['images'],[])
+        self.assertTrue(all(path.read_bytes()==body for path,body in originals.items()))
+
     def test_complete_translation_writes_hash_bound_private_artifacts(self):
         paths = [self.private / name for name in ('observations.json', 'ratings.json', 'alignments.json')]
         for path, value in zip(paths, (self.raw, self.ratings, self.alignment)): r.save_new(path, value)

@@ -10,7 +10,7 @@ import importlib.metadata
 import socket
 import json
 import math
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import random
 import struct
 import sys
@@ -279,9 +279,21 @@ def image_dimensions(path):
     return width,height
 
 
+def artifact_path(root, relative):
+    # Old sealed Windows receipts contain backslashes. Interpret either relative
+    # separator without changing those hash-bound receipt bytes.
+    require(isinstance(relative,str) and relative and '\0' not in relative,'invalid relative artifact path')
+    windows=PureWindowsPath(relative)
+    require(not windows.drive and not windows.root and not PurePosixPath(relative).is_absolute(),'absolute artifact path forbidden')
+    parts=relative.replace('\\','/').split('/')
+    require(all(part not in ('','.', '..') and ':' not in part for part in parts),'artifact path escapes run: traversal or drive forbidden')
+    root=Path(root).resolve();candidate=root.joinpath(*parts);path=candidate.resolve()
+    require(path.is_relative_to(root) and path.is_file() and not candidate.is_symlink(),'artifact escapes run or missing')
+    return path
+
+
 def artifact(root, item):
-    path = (root / item['path']).resolve()
-    require(path.is_relative_to(root.resolve()) and path.is_file() and not (root / item['path']).is_symlink(), 'artifact escapes run or missing')
+    path=artifact_path(root,item['path'])
     require(file_hash(path) == item['sha256'], f'artifact hash mismatch {path}')
     return path
 

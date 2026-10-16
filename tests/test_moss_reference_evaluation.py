@@ -162,6 +162,38 @@ def test_artifact_tampering_and_escape_rejected(unavailable_run):
     with pytest.raises(ValueError,match='escapes'):ev.artifact(run,dict(path='../manifest.json',sha256='bad'))
 
 
+def test_windows_relative_artifacts_resolve_on_posix_without_rewriting_sealed_receipts(unavailable_run):
+    manifest,lock,run=unavailable_run
+    (run/'logs').mkdir();(run/'log').rename(run/'logs'/'worker.log')
+    before={}
+    for path in (run/'receipts').glob('*.json'):
+        row=ev.unseal(ev.read(path));row['log']['path']=r'logs\worker.log'
+        path.write_text(json.dumps(ev.seal(row)));before[path]=path.read_bytes()
+    _,results=ev.receipts(lock,run)
+    assert len(results)==288 and all(r['log']['path']==r'logs\worker.log' for r in results.values())
+    assert all(path.read_bytes()==body for path,body in before.items())
+    cell=next(ev.cells(manifest));output=run/'outputs'/'sample.png';output.parent.mkdir();output.write_bytes(png(cell['width'],cell['height']))
+    row=dict(lock_sha256=ev.read(lock)['sha256'],cell=cell,status='ok',ownership=dict(manifest['ownership'],revision='CPU FIXTURE'),elapsed_seconds=1,
+        output=dict(path=r'outputs\sample.png',sha256=ev.file_hash(output)),log=dict(path=r'logs\worker.log',sha256=ev.file_hash(run/'logs'/'worker.log')),
+        metrics=dict(generation_seconds=1,peak_gpu_bytes=1,peak_host_rss_bytes=1,download_bytes=0,latency_condition='cold_process',cold_seconds=1,gpu_memory_method='CPU FIXTURE ONLY',component_dtypes={'fixture':'none'},sampler={'fixture':True},runtime_versions={'fixture':True},pixels_finite=True))
+    sealed=ev.seal(row);original=ev.canonical(sealed)
+    assert ev.validate_receipt(run,ev.read(lock)['sha256'],cell,sealed)['output']['path']==r'outputs\sample.png'
+    assert ev.canonical(sealed)==original
+    output.write_bytes(b'tampered')
+    with pytest.raises(ValueError,match='artifact hash mismatch'):ev.artifact(run,row['output'])
+
+
+def test_portable_artifact_paths_reject_both_platforms_absolute_traversal_and_escape(tmp_path):
+    (tmp_path/'safe').write_bytes(b'fixture')
+    for relative in ('/etc/passwd',r'C:\outputs\safe',r'C:outputs\safe',r'\\server\share\safe',r'\outputs\safe','../safe',r'outputs\..\safe',r'outputs/..\safe','outputs/./safe','outputs//safe','safe:stream',''):
+        with pytest.raises(ValueError):ev.artifact_path(tmp_path,relative)
+    outside=tmp_path.parent/(tmp_path.name+'-outside');outside.write_bytes(b'fixture')
+    try:
+        (tmp_path/'escape').symlink_to(outside)
+        with pytest.raises(ValueError,match='escapes'):ev.artifact_path(tmp_path,'escape')
+    finally:outside.unlink()
+
+
 def test_unicode_text_and_boxes_are_independently_scored():
     case=next(c for c in ev.corpus()['cases'] if c['id']=='json_text-1')
     annotation=dict(annotator='fixture',method='manual',tool_revision='v1',text=list(case['expected_text']),boxes={b['id']:b['box'] for b in case['boxes']})

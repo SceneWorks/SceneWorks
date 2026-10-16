@@ -11,6 +11,21 @@ Freeze review instructions and evaluator identities **before scored execution**:
 python scripts/evaluation/moss_review/review.py freeze /ABS/lock.json /ABS/run /ABS/evaluators.json /ABS/review-protocol.json
 ```
 
+For Windows generation reviewed on macOS, use this order. First download the
+Windows generation `protocol.lock.json` and preserve its bytes. Choose and create
+an empty persistent local run directory, then run the review `freeze` command
+above against that generation lock and the empty local directory **before the
+coordinator dispatches scored execution**. This is a separate review protocol;
+the Windows bootstrap generation freeze remains unchanged. After generation,
+copy the untouched receipts, logs, parity proofs and PNGs into that **same** local
+run directory, preserving their relative directory structure. Then export and
+translate there. Keep originals private and retain the pre-dispatch review freeze
+and custody evidence. Do not freeze review after importing scored files, move the
+bound local root, edit Windows receipt paths, or reseal copied receipts. The
+reader accepts relative Windows backslashes and POSIX slashes while rejecting
+absolute/drive/UNC/traversal paths; new receipts use forward slashes. Review loads
+the generation lock without running its Windows execution/environment guards.
+
 `evaluators.json` declares exactly `annotator`, `judge`, and `custodian`. Each has:
 
 ```json

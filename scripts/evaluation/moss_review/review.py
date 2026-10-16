@@ -325,7 +325,7 @@ def legacy_pairs(protocol_doc, mapping_doc, judge_packet, results, public):
             i = pair['arms'][arm]['image_id']; task = image_tasks[i] if i else None
             cell_id = mapping['pairs'][pair['pair_id']][arm]
             original = results[cell_id].get('output') if task else None
-            entry['arms'].append(dict(arm=arm, image=str((Path(mapping['run_root']) / original['path']).resolve()) if original else None, sha256=original['sha256'] if original else None, status='available' if task else 'unavailable'))
+            entry['arms'].append(dict(arm=arm, image=str(ev.artifact(Path(mapping['run_root']),original)) if original else None, sha256=original['sha256'] if original else None, status='available' if task else 'unavailable'))
         rows.append(entry)
     return ev.seal(dict(lock_sha256=ev.unseal(protocol_doc)['lock_sha256'], pairs=rows)), ev.seal(dict(lock_sha256=ev.unseal(protocol_doc)['lock_sha256'], mapping=[dict(id=k, **v) for k, v in mapping['pairs'].items()]))
 

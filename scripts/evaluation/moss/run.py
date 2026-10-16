@@ -94,7 +94,7 @@ def launch(config,manifest,log,guard,mode='candidate'):
 
 def snapshot_log(run,log,destination):
     destination.write_bytes(log.read_bytes())
-    return dict(path=str(destination.relative_to(run)),sha256=file_hash(destination))
+    return dict(path=destination.relative_to(run).as_posix(),sha256=file_hash(destination))
 
 
 def ensure_parity(manifest,lock_hash,run,phase,guard,attempt):
@@ -202,7 +202,7 @@ def execute(lock,run,config_id,phase):
             record=dict(lock_sha256=lock_hash,cell=cell,status=status,elapsed_seconds=time.monotonic()-cell_start,
                 ownership=dict(manifest['ownership'],revision=lock_hash),metrics=metrics,
                 reproduce=f'guarded bootstrap {phase} resume at lock {lock_hash}; never repeat an existing image',error=error,
-                output=dict(path=str(output.relative_to(run)),sha256=file_hash(output)) if output.exists() else None,
+                output=dict(path=output.relative_to(run).as_posix(),sha256=file_hash(output)) if output.exists() else None,
                 log=snapshot_log(run,log,run/'receipts'/(cell['id']+'.'+attempt+'.log')))
             if status=='ok':validate_receipt(run,lock_hash,cell,seal(record))
             write(run/'receipts'/(cell['id']+'.json'),seal(record))
