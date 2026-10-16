@@ -318,7 +318,11 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
     write_receipt(repo, wrong_revision, &wrong);
     assert!(resolve().is_err());
     write_receipt(repo, revision, &expected);
-    assert_eq!(resolve().unwrap(), expected.clone());
+    // Compare filesystem identity, not Windows path spelling (`\\?\` extended form).
+    assert_eq!(
+        std::fs::canonicalize(resolve().unwrap()).unwrap(),
+        std::fs::canonicalize(&expected).unwrap()
+    );
     std::fs::remove_file(expected.join("ae.safetensors")).unwrap();
     assert!(resolve()
         .unwrap_err()
