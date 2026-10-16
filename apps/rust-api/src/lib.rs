@@ -4925,14 +4925,17 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
 
 /// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
 /// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
 /// LLM sampler and must never inherit the old truthy/coercing behavior.
-fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+fn validate_prompt_enhancement_fields(
+    model_id: &str,
+    advanced: &JsonObject,
+) -> Result<bool, ApiError> {
+    let max_tokens = sceneworks_worker::prompt_enhancement_max_tokens(model_id);
     if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
         return Err(ApiError::bad_request(format!(
             "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
@@ -4969,9 +4972,9 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
         let tokens = value
             .as_u64()
             .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
-        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+        if !(1..=max_tokens).contains(&tokens) {
             return Err(ApiError::bad_request(format!(
-                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                "advanced.enhanceMaxTokens must be between 1 and {max_tokens}"
             )));
         }
         if !enabled {
@@ -5095,13 +5098,13 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
         .get("advanced")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    if !validate_prompt_enhancement_fields(advanced)? {
-        return Ok(());
-    }
     let model = payload
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if !validate_prompt_enhancement_fields(model, advanced)? {
+        return Ok(());
+    }
     if !matches!(model, "flux2_dev" | "flux3_klein" | "flux3_klein_base") {
         return Err(ApiError::bad_request(
             "advanced.enhancePrompt is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it",
@@ -5180,7 +5183,7 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
-    validate_prompt_enhancement_fields(&payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(

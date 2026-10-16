@@ -7313,49 +7313,6 @@ mod sampling_knob_tests {
     }
 }
 
-/// Optional prompt-enhancement settings resolved from a job request's `advanced` block and threaded
-/// into a [`GenerationRequest`] (sc-6135). Mirrors the LTX-2.3 video path (`advanced.enhancePrompt` /
-/// `enhanceTemperature` / `enhanceMaxTokens`). FLUX.2-dev owns its integrated Mistral3 enhancer;
-/// FLUX 3 Image Klein owns a separately provisioned optional Qwen3.5 VLM (sc-26238). API/worker
-/// route checks fail closed for other engines; manifest `ui.promptEnhance` controls the existing
-/// Image Studio toggle. Disabled requests do not attach the optional FLUX 3 component.
-
-#[derive(Clone, Default)]
-pub(crate) struct PromptEnhance {
-    enabled: bool,
-    temperature: Option<f32>,
-    max_tokens: Option<u32>,
-}
-
-impl PromptEnhance {
-    /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
-    /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
-    /// the API and inference providers.
-    pub(crate) fn from_advanced(advanced: &JsonObject) -> WorkerResult<Self> {
-        let (enabled, temperature, max_tokens) = parse_prompt_enhancement_fields(advanced)?;
-        Ok(Self {
-            enabled,
-            temperature,
-            max_tokens,
-        })
-    }
-
-    /// Write the resolved enhancement settings onto a `GenerationRequest`.
-    fn apply(
-        &self,
-        request: &mut GenerationRequest,
-        prompt_enhancement: gen_core::PromptEnhancementSink,
-    ) {
-        request.enhance_prompt = self.enabled;
-        request.enhance_temperature = self.temperature;
-        request.enhance_max_tokens = self.max_tokens;
-        request.prompt_enhancement = if self.enabled {
-            prompt_enhancement
-        } else {
-            gen_core::PromptEnhancementSink::default()
-        };
-    }
-}
 
 type PromptEnhancementReports = std::collections::HashMap<
     usize,
@@ -10020,7 +9977,7 @@ async fn generate_stream_using(
     let adapter_count = adapters.len();
     // sc-6135: caption upsampling (FLUX.2-dev only; every other engine ignores it). Resolved from
     // the request's advanced `enhancePrompt` toggle, gated to dev by the manifest `ui.promptEnhance`.
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
     // Per-generation PiD decode (epic 7840, sc-7849): resolve the PiD checkpoint + Gemma for this
     // model's latent space when `advanced.usePid` is set and the snapshots are cached; otherwise keep
     // the native VAE. `use_pid` and `spec.pid` stay in lockstep (the engine rejects a mismatch).
@@ -12738,7 +12695,7 @@ async fn generate_candle_stream_using(
     // sc-18474: FLUX.2-dev prompt enhancement is native on Candle too. The request-local report
     // sink below is the proof seam: an enabled request cannot silently run the raw prompt without a
     // typed, honestly persisted fallback. The stale passthrough-only behavior is no longer allowed.
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
     // Record the effective CFG knob (guidance for guided families, else true_cfg) + quant bits in the
     // recipe, so a Lens asset's sidecar reflects the Q4/Q8 it ran at (parity with the MLX path). The
     // recorded repo is the resolved model repo (the MLX turnkey the candle lane now packed-loads from,

@@ -9,6 +9,54 @@ use gen_core::{LoadSpec, WeightsSource};
 use serde_json::{json, Value};
 const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
 
+/// Optional prompt-enhancement settings resolved from a job request's `advanced` block and threaded
+/// into a [`gen_core::GenerationRequest`] (sc-6135). Mirrors the LTX-2.3 video path (`advanced.enhancePrompt` /
+/// `enhanceTemperature` / `enhanceMaxTokens`). FLUX.2-dev owns its integrated Mistral3 enhancer;
+/// FLUX 3 Image Klein owns a separately provisioned optional Qwen3.5 VLM (sc-26238). API/worker
+/// route checks fail closed for other engines; manifest `ui.promptEnhance` controls the existing
+/// Image Studio toggle. Disabled requests do not attach the optional FLUX 3 component.
+
+#[derive(Clone, Default)]
+pub(crate) struct PromptEnhance {
+    pub(super) enabled: bool,
+    pub(super) temperature: Option<f32>,
+    pub(super) max_tokens: Option<u32>,
+}
+
+impl PromptEnhance {
+    /// Resolve from a job request's `advanced` settings without truthy/string coercions. These
+    /// values drive a native LLM sampler and therefore have one typed, bounded contract shared with
+    /// the API and inference providers.
+    pub(crate) fn from_advanced(
+        model_id: &str,
+        advanced: &serde_json::Map<String, Value>,
+    ) -> WorkerResult<Self> {
+        let (enabled, temperature, max_tokens) =
+            parse_prompt_enhancement_fields(model_id, advanced)?;
+        Ok(Self {
+            enabled,
+            temperature,
+            max_tokens,
+        })
+    }
+
+    /// Write the resolved enhancement settings onto a `GenerationRequest`.
+    pub(super) fn apply(
+        &self,
+        request: &mut gen_core::GenerationRequest,
+        prompt_enhancement: gen_core::PromptEnhancementSink,
+    ) {
+        request.enhance_prompt = self.enabled;
+        request.enhance_temperature = self.temperature;
+        request.enhance_max_tokens = self.max_tokens;
+        request.prompt_enhancement = if self.enabled {
+            prompt_enhancement
+        } else {
+            gen_core::PromptEnhancementSink::default()
+        };
+    }
+}
+
 /// Stage FLUX 3's separately installed optional VLM only for an enabled request. This must run
 /// before memory admission and cache identity on both native backends: a plain render never
 /// requires or pays for it, and an enabled request never silently falls back to a missing model.
@@ -19,7 +67,7 @@ pub(super) fn attach_prompt_upsampler(
     settings: &Settings,
 ) -> WorkerResult<LoadSpec> {
     if !matches!(engine_id, "flux3_klein" | "flux3_klein_base")
-        || !parse_prompt_enhancement_fields(&request.advanced)?.0
+        || !parse_prompt_enhancement_fields(engine_id, &request.advanced)?.0
     {
         return Ok(spec);
     }
@@ -259,6 +307,9 @@ mod tests {
         for engine_id in ["flux3_klein", "flux3_klein_base"] {
             let mut model_request = req.clone();
             model_request.model = engine_id.to_owned();
+            model_request
+                .advanced
+                .insert("enhanceMaxTokens".to_owned(), json!(3_584));
             let prepared =
                 attach_prompt_upsampler(spec(), engine_id, &model_request, &settings).unwrap();
             assert_eq!(prepared.components.len(), 1);
@@ -339,6 +390,128 @@ mod tests {
         .unwrap();
         assert_eq!(fallback["effectivePrompt"], "a fox");
         assert_eq!(fallback["fallbackReason"], "reference_aspect_ratio");
+    }
+
+    #[test]
+    fn request_token_limits_share_sdk_model_policy_without_clamping() {
+        for (model, limit) in [
+            ("flux2_dev", 2_048),
+            ("ltx_2_3", 2_048),
+            ("flux3_klein_alias", 2_048),
+            ("flux3_klein", 3_584),
+            ("flux3_klein_base", 3_584),
+        ] {
+            assert_eq!(crate::prompt_enhancement_max_tokens(model), limit);
+            assert_eq!(
+                u64::from(gen_core::generator::max_enhance_tokens_for_model(model)),
+                limit
+            );
+            for tokens in [0, 2_048, 2_049, 3_584, 3_585] {
+                let advanced = json!({"enhancePrompt": true, "enhanceMaxTokens": tokens});
+                let parsed = parse_prompt_enhancement_fields(model, advanced.as_object().unwrap());
+                assert_eq!(
+                    parsed.is_ok(),
+                    tokens > 0 && tokens <= limit,
+                    "{model}: {tokens}"
+                );
+                if let Ok((enabled, _, max_tokens)) = parsed {
+                    assert!(enabled);
+                    assert_eq!(
+                        max_tokens,
+                        Some(tokens as u32),
+                        "never silently clamp a request"
+                    );
+                }
+            }
+            for enabled in [false, true] {
+                let advanced = json!({"enhancePrompt": enabled});
+                let parsed =
+                    parse_prompt_enhancement_fields(model, advanced.as_object().unwrap()).unwrap();
+                assert_eq!(parsed, (enabled, None, None));
+            }
+            let disabled = json!({"enhancePrompt": false, "enhanceMaxTokens": limit});
+            assert!(parse_prompt_enhancement_fields(model, disabled.as_object().unwrap()).is_err());
+        }
+    }
+
+    #[test]
+    fn raw_absent_tuning_reaches_native_options_and_frozen_pup_budget() {
+        use gen_core::flux3::pup::{self, UpsampleDecision, UpsampleOptions, UpsamplerInput};
+        let root = tempfile::Builder::new()
+            .prefix(&format!("sc26238-budget-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        package_shape(root.path());
+        // A two-token CPU-only tokenizer/template fixture exercises real package budgeting,
+        // not model execution. The frozen contract suite separately tests full chat templates.
+        std::fs::write(root.path().join("tokenizer.json"), serde_json::to_vec(&json!({
+            "version": "1.0", "truncation": null, "padding": null, "added_tokens": [],
+            "normalizer": null, "pre_tokenizer": {"type": "Whitespace"},
+            "post_processor": null, "decoder": null,
+            "model": {"type": "WordLevel", "vocab": {"[UNK]": 0, "budget": 1}, "unk_token": "[UNK]"}
+        })).unwrap()).unwrap();
+        std::fs::write(root.path().join("chat_template.jinja"), "budget").unwrap();
+        let prompts = pup::SystemPrompts::builtin();
+        std::fs::write(
+            root.path().join("system_prompts.json"),
+            serde_json::to_vec(&json!({
+                "t2i": prompts.t2i, "i2i": prompts.i2i,
+                "t2i_bbox": prompts.t2i_bbox, "i2i_bbox": prompts.i2i_bbox
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let package = pup::UpsamplePackage::open(root.path()).unwrap();
+        for model in ["flux3_klein", "flux3_klein_base", "flux2_dev"] {
+            for enabled in [false, true] {
+                let advanced = json!({"enhancePrompt": enabled});
+                let parsed =
+                    PromptEnhance::from_advanced(model, advanced.as_object().unwrap()).unwrap();
+                let mut native = gen_core::GenerationRequest {
+                    prompt: "as typed".to_owned(),
+                    ..Default::default()
+                };
+                parsed.apply(&mut native, gen_core::PromptEnhancementSink::default());
+                let options = UpsampleOptions::from_generation_request(&native);
+                assert_eq!(
+                    options.max_tokens, None,
+                    "{model}: preserve the model's absent default"
+                );
+                assert_eq!(options.temperature, None);
+                assert_eq!(native.enhance_prompt, enabled);
+                if model == "flux2_dev" {
+                    continue;
+                } // Its untouched native default is 512, not PUP.
+                let input = UpsamplerInput {
+                    prompt: native.prompt.clone(),
+                    references: vec![],
+                    boxes: None,
+                    mode: UpsampleMode::Text,
+                    bypass: !native.enhance_prompt,
+                };
+                match pup::decide(&input, &package, &options).unwrap() {
+                    UpsampleDecision::Run(plan) => assert_eq!(plan.max_new_tokens, 3_584),
+                    UpsampleDecision::Bypass(outcome) => assert_eq!(outcome.caption, "as typed"),
+                }
+                if enabled {
+                    for max_tokens in [2, 3_584] {
+                        let advanced =
+                            json!({"enhancePrompt": true, "enhanceMaxTokens": max_tokens});
+                        PromptEnhance::from_advanced(model, advanced.as_object().unwrap())
+                            .unwrap()
+                            .apply(&mut native, gen_core::PromptEnhancementSink::default());
+                        let options = UpsampleOptions::from_generation_request(&native);
+                        assert_eq!(options.max_tokens, Some(max_tokens));
+                        let UpsampleDecision::Run(plan) =
+                            pup::decide(&input, &package, &options).unwrap()
+                        else {
+                            panic!("enabled explicit request must run");
+                        };
+                        assert_eq!(plan.max_new_tokens, max_tokens);
+                    }
+                }
+            }
+        }
     }
 
     fn producer_plan(
