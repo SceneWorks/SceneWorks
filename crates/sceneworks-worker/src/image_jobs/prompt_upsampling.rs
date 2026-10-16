@@ -2,10 +2,11 @@
 //! in both native production lanes; CPU tests exercise them without linking a CUDA/MLX bundle.
 
 use super::{parse_prompt_enhancement_fields, ImageRequest, Settings, WorkerError, WorkerResult};
+use gen_core::flux3::pup::{
+    UpsampleMode, MAX_EFFECTIVE_CAPTION_CHARS as PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS,
+};
 use gen_core::{LoadSpec, WeightsSource};
 use serde_json::{json, Value};
-
-const PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS: usize = 16_000;
 const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
 
 /// Stage FLUX 3's separately installed optional VLM only for an enabled request. This must run
@@ -84,7 +85,16 @@ pub(super) fn prompt_enhancement_fact(
                     "enhanced prompt report unexpectedly carried a fallback reason".to_owned(),
                 ));
             }
-            if report.effective_prompt == report.original_prompt {
+            // A known PUP mode records that the VLM ran and its answer was accepted; an
+            // already-rich prompt can validly be returned unchanged. Keep the legacy single-mode
+            // FLUX.2 guard, and never trust arbitrary user-provided mode/report metadata.
+            if report.effective_prompt == report.original_prompt
+                && report
+                    .mode
+                    .as_deref()
+                    .and_then(UpsampleMode::from_system_key)
+                    .is_none()
+            {
                 return Err(WorkerError::Engine(
                     "enhanced prompt report did not rewrite the original prompt".to_owned(),
                 ));
@@ -135,7 +145,7 @@ pub(super) fn prompt_enhancement_fact(
     }
     if let Some(rows) = report.locked_annotations {
         if rows.chars().count() > PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS
-            || !serde_json::from_str::<Value>(&rows).is_ok_and(|value| value.is_array())
+            || !gen_core::flux3::pup::loads(&rows).is_ok_and(|value| value.as_array().is_some())
         {
             return Err(WorkerError::Engine(
                 "prompt-enhancement locked annotations must be a bounded JSON array".to_owned(),
@@ -329,6 +339,90 @@ mod tests {
         .unwrap();
         assert_eq!(fallback["effectivePrompt"], "a fox");
         assert_eq!(fallback["fallbackReason"], "reference_aspect_ratio");
+    }
+
+    fn producer_plan(
+        locked: Option<Vec<gen_core::flux3::pup::JsonValue>>,
+    ) -> gen_core::flux3::pup::UpsamplePlan {
+        gen_core::flux3::pup::UpsamplePlan {
+            mode: if locked.is_some() {
+                UpsampleMode::TextWithBoxes
+            } else {
+                UpsampleMode::Text
+            },
+            original_prompt: "already rich".to_owned(),
+            system_prompt: String::new(),
+            user_text: String::new(),
+            locked,
+            references: vec![],
+            max_new_tokens: gen_core::flux3::pup::MAX_TOKENS,
+        }
+    }
+
+    fn produce_then_persist(
+        plan: &gen_core::flux3::pup::UpsamplePlan,
+        raw: &str,
+    ) -> WorkerResult<Value> {
+        let outcome = plan
+            .finish(raw)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+        prompt_enhancement_fact(outcome.report, &plan.original_prompt)
+    }
+
+    #[test]
+    fn actual_pup_producer_unchanged_success_is_accepted_by_production_persistence() {
+        let plan = producer_plan(None);
+        let outcome = plan.finish("already rich").unwrap();
+        assert_eq!(
+            outcome.report.outcome,
+            gen_core::PromptEnhancementOutcome::Enhanced
+        );
+        assert_eq!(outcome.report.fallback_reason, None);
+        let fact = prompt_enhancement_fact(outcome.report, &plan.original_prompt).unwrap();
+        assert_eq!(fact["originalPrompt"], "already rich");
+        assert_eq!(fact["effectivePrompt"], "already rich");
+        assert_eq!(fact["outcome"], "enhanced");
+        assert!(fact["fallbackReason"].is_null());
+    }
+
+    #[test]
+    fn actual_pup_producer_and_persistence_share_unicode_and_complete_locked_caption_bound() {
+        use gen_core::flux3::pup::{self, JsonValue, MAX_EFFECTIVE_CAPTION_CHARS};
+        let plan = producer_plan(None);
+        let edge = "界".repeat(MAX_EFFECTIVE_CAPTION_CHARS);
+        assert_eq!(edge.len(), MAX_EFFECTIVE_CAPTION_CHARS * 3);
+        assert_eq!(
+            produce_then_persist(&plan, &edge).unwrap()["effectivePrompt"],
+            edge
+        );
+        assert!(produce_then_persist(&plan, &format!("界{edge}"))
+            .unwrap_err()
+            .to_string()
+            .contains("effective caption"));
+        let locked = pup::loads(r#"[{"id":"obj_1","bbox":[10,20,30,40],"desc":"locked"}]"#)
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .to_vec();
+        let baseline = pup::reconcile("scene <obj_1>", &locked).unwrap();
+        let padding = MAX_EFFECTIVE_CAPTION_CHARS - baseline.chars().count();
+        let raw_edge = format!("{}scene <obj_1>", "界".repeat(padding));
+        let plan = producer_plan(Some(locked.clone()));
+        let outcome = plan.finish(&raw_edge).unwrap();
+        assert_eq!(outcome.caption.chars().count(), MAX_EFFECTIVE_CAPTION_CHARS);
+        let rows = pup::dumps(&JsonValue::Array(locked.clone()));
+        assert!(outcome.caption.ends_with(&rows));
+        let fact = prompt_enhancement_fact(outcome.report, &plan.original_prompt).unwrap();
+        assert_eq!(fact["lockedAnnotations"], rows);
+        assert!(produce_then_persist(&plan, &format!("界{raw_edge}"))
+            .unwrap_err()
+            .to_string()
+            .contains("effective caption"));
+        assert_eq!(
+            plan.locked.as_ref().unwrap(),
+            &locked,
+            "no locked rows were truncated or rewritten"
+        );
     }
 
     #[cfg(any(target_os = "macos", feature = "backend-candle"))]
