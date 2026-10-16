@@ -60,10 +60,33 @@ For native reuse, preparation rechecks the old clean exact source and inference
 lock, then runs the same `cargo build --release --locked -p sceneworks-rust-api
 --features backend-candle --bin sceneworks-rust-api` against the old owned
 `CARGO_HOME` and `CARGO_TARGET_DIR`, with `CARGO_NET_OFFLINE=true`. The resulting
-exe must have the old prepared SHA256. It is copied independently into the new
+exe must have the old prepared SHA256 by default. It is copied independently into the new
 campaign, so later Cargo writes cannot mutate the new binary through a hardlink.
 If adjacent DLLs are present, reuse stops for inspection or a reviewed fresh
 locked build; it never silently copies unrecorded dependency files.
+
+If a controlled build changes the executable bytes, preserve the failed job and
+original prepared receipt. Byte-identical rebuilding is not guaranteed by the
+source/pin lock. Do not attribute a difference to a particular compiler input or
+PE field without evidence. The original campaign's `prepared` validation continues
+to reject its now-changed target executable.
+
+For an explicitly authorized new build, add `"native_rebuild": true` inside the
+`reuse` control shown above and select a fresh campaign ID. This option verifies
+the same immutable old model/metadata/wheel/harness closure and receipt hashes,
+but does not trust, copy or execute the old mutable target executable. It checks
+the clean pinned native source and lock, runs `cargo clean --release -p
+sceneworks-rust-api` against the old owned target, requires the executable to be
+gone, then performs the same locked offline build using the old owned dependency
+cache. It verifies source cleanliness/pins again and copies the newly built
+executable independently. `reuse.json` and the new `prepared.json` bind its actual
+SHA256, previous prepared and observed target hashes, exact commands, source/lock/
+build-file hashes, selected build environment, compiler and PE/DLL evidence.
+The old receipt is never rewritten. Changed or missing immutable inputs still
+fail; this option only authorizes a controlled new native build, not a waiver of
+staging/source/execution checks. A partially prepared campaign's copied harness
+is also immutable: changed transport requires a fresh campaign ID rather than
+overwriting that harness. Retained verified wheels/models can still seed it.
 
 Both build paths capture actual `rustc -Vv`, `cargo -V`, `nvcc --version`,
 `CUDA_PATH`, PE import names from `dumpbin /DEPENDENTS`, and hashes/versions of

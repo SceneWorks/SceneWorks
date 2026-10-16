@@ -86,7 +86,10 @@ def control(mode, raw, base=BASE):
     require(utc() < timestamp(value['deadline_utc']) <= utc() + dt.timedelta(hours=6), 'deadline must be in next six hours')
     if mode=='prepare' and 'reuse' in value:
         reuse=value['reuse']
-        require(set(reuse)=={'campaign','prepared_sha256','job','job_receipt_sha256'},'reuse requires exact source campaign/receipt/job bindings')
+        require(set(reuse) in ({'campaign','prepared_sha256','job','job_receipt_sha256'},
+                              {'campaign','prepared_sha256','job','job_receipt_sha256','native_rebuild'}),'reuse requires exact source campaign/receipt/job bindings')
+        if 'native_rebuild' in reuse:
+            require(reuse['native_rebuild'] is True,'native_rebuild must explicitly authorize a controlled new native build')
         require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}',reuse['campaign']) and reuse['campaign']!=value['campaign'],'reuse must name a different owned sibling campaign')
         require(re.fullmatch(r'[0-9]+-[0-9]+',reuse['job']),'exact completed source job/attempt required')
         require(all(re.fullmatch(r'[0-9a-f]{64}',reuse[k]) for k in ('prepared_sha256','job_receipt_sha256')),'exact source receipt digests required')
@@ -373,7 +376,12 @@ def reuse_inputs(root,value):
     require(job['mode']=='prepare' and job['status']=='completed' and job['job']==reuse['job'] and Path(job['root']).resolve()==source.resolve(),'source preparation is not complete in the owned campaign')
     require(job['sceneworks_source']==SOURCE and job['inference']==INFERENCE and job['accelerator_execution_requested'] is False,'source job identity or scope changed')
     require(digest(source/'prepared.json')==reuse['prepared_sha256'],'source prepared receipt changed')
-    prep=prepared(source)
+    # A Cargo target is mutable build output. Explicit rebuild may recover its drift,
+    # but cannot waive verification of any immutable preparation input.
+    prep=read(source/'prepared.json')
+    verify_prepared_inputs(source,prep)
+    if not reuse.get('native_rebuild'):
+        require(digest(prep['binary'])==prep['binary_sha256'],'native binary drift')
     # Source preparation has ended before any old build/cache path is used.
     require(Path(prep['binary']).resolve()==(source/'target'/'release'/'sceneworks-rust-api.exe').resolve(),'source binary outside owned build')
     require((source/'requirements.lock').is_file() and (source/'wheels.json').is_file(),'source locked wheels missing')
@@ -392,7 +400,7 @@ def reuse_inputs(root,value):
         for file in item['files']:
             relative=Path(file['path']).relative_to(source)
             seeds.append(seed_file(Path(file['path']),root/relative,file['sha256']))
-    record=dict(source_campaign=reuse['campaign'],source_root=str(source.resolve()),source_prepared_sha256=reuse['prepared_sha256'],source_job_receipt_sha256=reuse['job_receipt_sha256'],source_job=reuse['job'],seeds=seeds,downloaded_seed_bytes=0)
+    record=dict(source_campaign=reuse['campaign'],source_root=str(source.resolve()),source_prepared_sha256=reuse['prepared_sha256'],source_job_receipt_sha256=reuse['job_receipt_sha256'],source_job=reuse['job'],seeds=seeds,downloaded_seed_bytes=0,native_rebuild=reuse.get('native_rebuild',False))
     return source,prep,record
 
 
@@ -402,13 +410,31 @@ def reuse_native(root,source,prep,record):
     verify_native_source(native_source)
     env=native_env(source,offline=True)
     command=['cargo','build','--release','--locked','-p','sceneworks-rust-api','--features','backend-candle','--bin','sceneworks-rust-api']
-    run(command,cwd=native_source,env=env,timeout=10800)
     binary=Path(prep['binary'])
-    require(digest(binary)==prep['binary_sha256'],'locked old-cache build changed source binary; refuse reuse')
+    before=digest(binary) if binary.is_file() else None
+    rebuild=record.get('native_rebuild',False)
+    require(rebuild or before==prep['binary_sha256'],'native binary drift')
+    # Force this package to be rebuilt: a no-op Cargo invocation must not bless an
+    # overwritten target executable. Dependencies stay in the same owned cache.
+    clean=['cargo','clean','--release','-p','sceneworks-rust-api'] if rebuild else None
+    if clean:
+        run(clean,cwd=native_source,env=env,timeout=600)
+        require(not binary.exists(),'package clean retained old native executable')
+    run(command,cwd=native_source,env=env,timeout=10800)
+    verify_native_source(native_source)
+    require(binary.is_file(),'native build produced no binary')
+    current=digest(binary)
+    require(rebuild or current==prep['binary_sha256'],'locked old-cache build changed source binary; use explicit native_rebuild in a fresh campaign')
     identity=native_identity(binary)
     require(not identity['required_adjacent_dlls'] and not identity['adjacent_dll_files'],'native reuse has unrecorded adjacent DLLs; inspect dependencies or explicitly prepare a fresh locked build')
     target=root/'target'/'release'/'sceneworks-rust-api.exe'
-    record['native']=dict(command=command,cwd=str(native_source),cargo_home=env['CARGO_HOME'],cargo_target_dir=env['CARGO_TARGET_DIR'],offline=True,source=SOURCE,inference=INFERENCE,binary=seed_file(binary,target,prep['binary_sha256'],link=False),identity=identity,
+    inputs={name:digest(native_source/name) for name in ('Cargo.toml','Cargo.lock','apps/rust-api/Cargo.toml','apps/rust-api/build.rs','.cargo/config.toml','rust-toolchain.toml') if (native_source/name).is_file()}
+    identity['build']=dict(mode='controlled_rebuild' if rebuild else 'exact_binary_reuse',command=command,clean_command=clean,
+        cwd=str(native_source),source=SOURCE,inference=INFERENCE,cargo_home=env['CARGO_HOME'],cargo_target_dir=env['CARGO_TARGET_DIR'],offline=True,
+        input_sha256=inputs,environment={key:env.get(key) for key in ('CUDA_COMPUTE_CAP','NVCC_CCBIN','CUDA_PATH','RUSTC_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','CARGO_BUILD_JOBS','CMAKE_BUILD_PARALLEL_LEVEL','MAX_JOBS')},
+        prior_prepared_binary_sha256=prep['binary_sha256'],observed_before_binary_sha256=before,binary_sha256=current,
+        byte_identity_to_prior_prepared=current==prep['binary_sha256'])
+    record['native']=dict(command=command,cwd=str(native_source),cargo_home=env['CARGO_HOME'],cargo_target_dir=env['CARGO_TARGET_DIR'],offline=True,source=SOURCE,inference=INFERENCE,binary=seed_file(binary,target,current,link=False),identity=identity,
         prior_toolchain=prep.get('native_build',{'status':'not captured by original source prepare'}))
     return target,identity
 
@@ -475,10 +501,9 @@ def prepare(root, value):
     print(f'Prepared {root}; next: review artifact/dependency receipts then freeze with ownership/device UUID.', flush=True)
 
 
-def prepared(root):
-    value = read(root / 'prepared.json')
+def verify_prepared_inputs(root,value):
+    """Immutable inputs only; the explicit rebuild route never trusts the old exe."""
     require(value['sceneworks_source'] == SOURCE and value['inference'] == INFERENCE, 'prepared source drift')
-    require(digest(value['binary']) == value['binary_sha256'], 'native binary drift')
     require(digest(root / 'requirements.lock') == value['requirements_sha256'], 'dependency lock drift')
     if value.get('reuse'):
         receipt=root/'reuse.json';physical(receipt)
@@ -486,6 +511,12 @@ def prepared(root):
     verify_staged(root, value['staged'])
     for name, sha in value['harness'].items():
         require(digest(root / 'harness' / name) == sha, 'harness drift')
+
+
+def prepared(root):
+    value = read(root / 'prepared.json')
+    verify_prepared_inputs(root,value)
+    require(digest(value['binary']) == value['binary_sha256'], 'native binary drift')
     return value
 
 

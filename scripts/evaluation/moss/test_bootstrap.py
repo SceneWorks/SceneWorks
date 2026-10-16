@@ -49,6 +49,10 @@ class BootstrapContracts(unittest.TestCase):
     def test_reuse_control_binds_owned_sibling_and_completed_job_digests(self):
         reuse=dict(campaign='sc-26322-reference-v1',prepared_sha256='a'*64,job='123-1',job_receipt_sha256='b'*64)
         b.control('prepare',self.request(reuse=reuse),self.root)
+        b.control('prepare',self.request(reuse={**reuse,'native_rebuild':True}),self.root)
+        for invalid in (False,'true',1,None):
+            with self.assertRaisesRegex(ValueError,'native_rebuild'):
+                b.control('prepare',self.request(reuse={**reuse,'native_rebuild':invalid}),self.root)
         for update in (dict(campaign='../escape'),dict(campaign='sc-26322-contract'),dict(job='latest'),dict(prepared_sha256='HEAD'),dict(path='E:/production')):
             with self.assertRaises(ValueError):
                 b.control('prepare',self.request(reuse={**reuse,**update}),self.root)
@@ -95,7 +99,7 @@ class BootstrapContracts(unittest.TestCase):
         identity=dict(required_adjacent_dlls=[],adjacent_dll_files=[])
         with patch.object(b,'verify_native_source') as verify,patch.object(b,'native_identity',return_value=identity),patch.object(b,'run') as run:
             target,_=b.reuse_native(new,source,prep,record)
-            verify.assert_called_once_with(native)
+            self.assertEqual(verify.call_args_list,[unittest.mock.call(native),unittest.mock.call(native)])
             self.assertEqual(run.call_args.kwargs['cwd'],native)
             env=run.call_args.kwargs['env']
             self.assertEqual(env['CARGO_NET_OFFLINE'],'true')
@@ -104,12 +108,61 @@ class BootstrapContracts(unittest.TestCase):
             self.assertIn('--locked',run.call_args.args[0])
             self.assertEqual(b.digest(target),prep['binary_sha256'])
             self.assertEqual(record['native']['binary']['method'],'copy')
+            self.assertEqual(record['native']['identity']['build']['mode'],'exact_binary_reuse')
             self.assertNotEqual(target.stat().st_ino,binary.stat().st_ino)
         with patch.object(b,'verify_native_source'),patch.object(b,'run'),patch.object(b,'native_identity',return_value={**identity,'required_adjacent_dlls':['unreviewed.dll']}):
             with self.assertRaisesRegex(ValueError,'adjacent DLLs'):b.reuse_native(new,source,prep,{})
         def changed(*args,**kwargs):binary.write_bytes(b'changed build')
         with patch.object(b,'verify_native_source'),patch.object(b,'run',side_effect=changed):
             with self.assertRaisesRegex(ValueError,'changed source binary'):b.reuse_native(new,source,prep,{})
+
+    def test_explicit_native_rebuild_recovers_drift_without_trusting_old_executable(self):
+        source=self.root/'old';native=source/'native-source';native.mkdir(parents=True)
+        binary=source/'target'/'release'/'sceneworks-rust-api.exe';binary.parent.mkdir(parents=True)
+        binary.write_bytes(b'original prepared executable');original=b.digest(binary)
+        prep=dict(binary=str(binary),binary_sha256=original)
+        b.write(source/'prepared.json',prep);old_receipt=(source/'prepared.json').read_bytes()
+        (native/'Cargo.lock').write_text('controlled lock');(source/'cargo-home').mkdir()
+        binary.write_bytes(b'mutable target left by failed prior reuse')
+        observed=b.digest(binary);commands=[];new=self.root/'new';new.mkdir()
+        def cargo(args,**kwargs):
+            commands.append(args)
+            self.assertEqual(kwargs['env']['CARGO_NET_OFFLINE'],'true')
+            if args[1]=='clean':binary.unlink()
+            else:
+                self.assertFalse(binary.exists())
+                # A controlled build may embed different non-source inputs. This
+                # synthetic fixture establishes recovery, not the PE drift cause.
+                binary.write_bytes(('fresh build '+kwargs['env']['RUSTFLAGS']).encode())
+        identity=dict(required_adjacent_dlls=[],adjacent_dll_files=[],rustc='actual compiler fixture')
+        with patch.object(b,'verify_native_source'),patch.object(b,'run',side_effect=cargo),patch.object(b,'native_identity',return_value=identity),patch.dict(os.environ,{'RUSTFLAGS':'new controlled build flags'}):
+            with self.assertRaisesRegex(ValueError,'native binary drift'):b.reuse_native(new,source,prep,{})
+            self.assertFalse(commands)
+            record={'native_rebuild':True};target,evidence=b.reuse_native(new,source,prep,record)
+        self.assertEqual(commands[0],['cargo','clean','--release','-p','sceneworks-rust-api'])
+        self.assertIn('--locked',commands[1])
+        self.assertEqual((source/'prepared.json').read_bytes(),old_receipt)
+        self.assertNotEqual(b.digest(target),original)
+        self.assertFalse(os.path.samefile(binary,target))
+        build=evidence['build']
+        self.assertEqual(build['mode'],'controlled_rebuild')
+        self.assertEqual(build['prior_prepared_binary_sha256'],original)
+        self.assertEqual(build['observed_before_binary_sha256'],observed)
+        self.assertEqual(build['binary_sha256'],b.digest(target))
+        self.assertFalse(build['byte_identity_to_prior_prepared'])
+        self.assertEqual(build['input_sha256']['Cargo.lock'],b.digest(native/'Cargo.lock'))
+        self.assertEqual(build['environment']['RUSTFLAGS'],'new controlled build flags')
+        binary.write_bytes(b'later cargo mutation')
+        self.assertEqual(b.digest(target),build['binary_sha256'])
+
+    def test_explicit_native_rebuild_requires_clean_to_remove_old_binary(self):
+        source=self.root/'old';native=source/'native-source';native.mkdir(parents=True)
+        binary=source/'target'/'release'/'sceneworks-rust-api.exe';binary.parent.mkdir(parents=True);binary.write_bytes(b'old')
+        (source/'cargo-home').mkdir()
+        with patch.object(b,'verify_native_source'),patch.object(b,'run') as run,patch.object(b,'native_identity') as identity:
+            with self.assertRaisesRegex(ValueError,'clean retained'):
+                b.reuse_native(self.root/'new',source,dict(binary=str(binary),binary_sha256=b.digest(binary)),{'native_rebuild':True})
+        self.assertEqual(run.call_count,1);identity.assert_not_called()
 
     def test_native_source_pin_and_own_cache_physical_ancestors_required(self):
         native=self.root/'native';native.mkdir()
@@ -168,6 +221,17 @@ class BootstrapContracts(unittest.TestCase):
         self.assertEqual((source/'harness'/'evaluate.py').read_text(),'OLD HARNESS, MUST NOT BE REUSED')
         self.assertEqual(record['downloaded_seed_bytes'],0)
         self.assertEqual(len(record['seeds']),1+2+6+7)
+        binary.write_bytes(b'previous controlled build changed mutable target')
+        value['reuse']['native_rebuild']=True
+        other=self.root/'sc-26322-recovered';other.mkdir()
+        with patch.object(b,'PIPELINE',hashlib.sha256(payload).hexdigest()),patch.object(b,'dependency_resolution',return_value=resolution),patch.object(b,'run',side_effect=AssertionError('subprocess forbidden')):
+            with self.assertRaisesRegex(ValueError,'native binary drift'):b.prepared(source)
+            _,_,recovery=b.reuse_inputs(other,value)
+            self.assertTrue(recovery['native_rebuild'])
+            self.assertFalse((other/'target').exists())
+            self.assertEqual((source/'prepared.json').read_bytes(),old_prepared)
+            (source/'harness'/'evaluate.py').write_text('tampered immutable harness')
+            with self.assertRaisesRegex(ValueError,'harness drift'):b.reuse_inputs(other,value)
 
     def test_native_identity_records_compiler_and_unknown_dlls_without_executing_binary(self):
         binary=self.root/'app.exe';binary.write_bytes(b'fixture')
