@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,8 +7,88 @@ import test from "node:test";
 
 import { SOURCE_PATHS as MATRIX_SOURCE_PATHS } from "./generate-memory-matrix.mjs";
 import { PACKAGED_SOURCES_PATH } from "./extract-memory-anchors.mjs";
-import { nodeTestsReading, selectSteps } from "./preflight.mjs";
+import { commandInvocation, gitOutput, nodeTestsReading, selectSteps, venvPython } from "./preflight.mjs";
 import { SOURCE_PATHS as STALE_LANE_SOURCE_PATHS } from "./stale-lane-report.mjs";
+
+test("preflight preserves a Git listing larger than the default child-process buffer", () => {
+  const line = `${"generated-evidence/".repeat(8)}entry.txt\n`;
+  const count = 16000;
+  const listing = gitOutput(["ls-files", "--others", "--exclude-standard"], {
+    run(command, args, options) {
+      assert.equal(command, "git");
+      assert.deepEqual(args, ["ls-files", "--others", "--exclude-standard"]);
+      return spawnSync(process.execPath, ["-e",
+        `process.stdout.write(${JSON.stringify(line)}.repeat(${count}))`], options);
+    },
+  });
+  assert.ok(Buffer.byteLength(listing) > 1024 * 1024);
+  assert.equal(listing, line.repeat(count).trim());
+});
+
+test("preflight reports spawn errors and nonzero Git exits instead of empty stderr", () => {
+  assert.throws(() => gitOutput(["ls-files"], {
+    run: () => ({ status: null, signal: "SIGTERM", stderr: "",
+      error: Object.assign(new Error("spawnSync git ENOBUFS"), { code: "ENOBUFS" }) }),
+  }), /git ls-files: ENOBUFS: spawnSync git ENOBUFS/);
+  assert.throws(() => gitOutput(["merge-base"], {
+    run: () => ({ status: 128, stderr: "fatal: invalid reference\n" }),
+  }), /git merge-base: exit 128: fatal: invalid reference/);
+});
+
+test("Windows npm uses Node CLI with literal arguments and preserves native compiler PATH", () => {
+  const args = ["--prefix", "path with spaces", "run", "rust:check", "--", "a'b", '$(touch injected)', "x&y"];
+  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/MSVC/bin;C:/Windows/System32",
+    npm_execpath: "C:/node with spaces/npm-cli.js" };
+  const invocation = commandInvocation(["npm", ...args], {
+    platform: "win32", env, exists: (file) => file === env.npm_execpath,
+  });
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [env.npm_execpath, ...args]);
+  assert.equal(invocation.env, env, "native Rust/npm steps must not prepend Git's GNU link.exe or change the shell");
+  assert.throws(() => commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: () => false,
+  }), /cannot find npm CLI/);
+});
+
+test("only Windows scaffold check and exact Vitest vector select Git Bash instead of WSL", () => {
+  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/MSVC/bin", npm_execpath: "C:/node/npm-cli.js" };
+  const bash = path.join(env.ProgramFiles, "Git", "bin", "bash.exe");
+  const invocation = commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: (file) => [env.npm_execpath, bash].includes(file),
+  });
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [env.npm_execpath, "run", "check"]);
+  assert.equal(invocation.env.npm_config_script_shell, bash);
+  assert.equal(invocation.env.PATH, `${path.dirname(bash)};${env.PATH}`);
+  const web = commandInvocation(["npm", "--prefix", "apps/web", "run", "test", "--", "literal&arg"], {
+    platform: "win32", env, exists: (file) => [env.npm_execpath, bash].includes(file),
+  });
+  assert.equal(web.env.npm_config_script_shell, bash);
+  assert.deepEqual(web.args, [env.npm_execpath, "--prefix", "apps/web", "run", "test", "--", "literal&arg"]);
+  for (const script of ["lint", "build"]) {
+    const native = commandInvocation(["npm", "--prefix", "apps/web", "run", script], {
+      platform: "win32", env, exists: (file) => file === env.npm_execpath,
+    });
+    assert.equal(native.env, env);
+  }
+  assert.throws(() => commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: (file) => file === env.npm_execpath,
+  }), /requires Git Bash/);
+});
+
+test("POSIX commands and native Windows executables retain their direct argument vectors", () => {
+  const env = { PATH: "/usr/bin" };
+  for (const [platform, command] of [["linux", ["npm", "run", "check"]],
+    ["darwin", ["npm", "run", "check"]], ["win32", ["cargo", "fmt", "--check"]]]) {
+    assert.deepEqual(commandInvocation(command, { platform, env }), {
+      executable: command[0], args: command.slice(1), env,
+    });
+  }
+  assert.equal(venvPython("fixture-venv", "win32"), path.join("fixture-venv", "Scripts", "python.exe"));
+  for (const platform of ["linux", "darwin"]) {
+    assert.equal(venvPython("fixture-venv", platform), path.join("fixture-venv", "bin", "python"));
+  }
+});
 
 const FULL_SUITE = "scaffold node suite (npm run check)";
 const testFilesRun = (steps) =>

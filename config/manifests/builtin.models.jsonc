@@ -5924,7 +5924,8 @@
             "text_encoder/tokenizer_config.json",
             "text_encoder/chat_template.json",
             "text_encoder/model.safetensors.index.json",
-            "text_encoder/model-*.safetensors"
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors"
           ],
           "estimatedSizeBytes": 20316471770,
           "footprint": { "diskSizeBytes": 20316471770, "residentMemoryBytes": null, "peakMemoryBytes": null }
