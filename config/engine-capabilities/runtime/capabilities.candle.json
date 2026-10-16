@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "04033dd5ed49d61625d6096bb4ae7e6fcadd4553",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -19,6 +19,7 @@
     "flux2_klein_9b": "flux2_klein_9b",
     "flux2_klein_9b_kv": "flux2_klein_9b",
     "flux2_klein_9b_true_v2": "flux2_klein_9b",
+    "flux3_klein": "flux3_klein",
     "flux_dev": "flux1_dev",
     "flux_schnell": "flux1_schnell",
     "ideogram_4": "ideogram_4",

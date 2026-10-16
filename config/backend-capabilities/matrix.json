@@ -4,8 +4,8 @@
   "summary": {
     "modelCount": 137,
     "importedFamilyCount": 4,
-    "cellCount": 1060,
-    "mlxOnlyCellCount": 44,
+    "cellCount": 1061,
+    "mlxOnlyCellCount": 46,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
   },
@@ -15,14 +15,14 @@
     "apiGeneration": "33914bb53c07c013a1670ce4a7d9d8f39d68ab785af7e15e8ee5815d6e51de4c",
     "apiValidation": "696e591d5a03e42d96a4a1a59397ee05ef1bc355b08dd62aeeec0f26cfd23631",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "c758f6eb145be2e1f736f7edb1b15f174c327c5c0f9e506ceff4003af0224485",
-    "descriptorCandleFacts": "756f38cdfa521c3f98fda82220a0e191acfc5f1f3a0b4b3e15118260c62051ff",
-    "descriptorCandleRuntime": "780e1875cbba03f36df39fdfc2f39f4a4931578a8275a9ee4dfee333b986b221",
-    "descriptorMlxFacts": "0657ed49a49213de979637077abbf142660a30d515b4322f8c599bc2b225e207",
-    "descriptorMlxRuntime": "a91c5ba0c5e4580d8f63d58d5436960af23bcf3ce63fcd9ab147d4f794262046",
-    "descriptorPreviewFacts": "46fb2ddc72947b4f6c1c644380ac944a755070a76d18cba070e7a98d6bc32b1a",
+    "descriptorAudioFacts": "b343ab15e49a3e193ff9e8ab04d8c330871829786b21f6b4dcd1ed3969a9cf76",
+    "descriptorCandleFacts": "c742d6101a1490b7fe988fb811d922ff7410e42e1a38bba5a1db5006e3415eef",
+    "descriptorCandleRuntime": "a044717781bdca0fcf1b2e0a15c1dce98ea9edffcc54cfbb25e349b6ec88219a",
+    "descriptorMlxFacts": "445ceaa890b469b2be7f8de63e802fb564b5eb070c3c8ea2671ba008e960073a",
+    "descriptorMlxRuntime": "849eba2c710023f33f896915499ef4fd21d2bf55c43affb9d99552894b4c4f45",
+    "descriptorPreviewFacts": "cf16641470be6272229e16316ceb90159b52c1327288d03de55a85dc7c6bba59",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "a436b07e14aeec208ca7627f13b74e02f3145fd4606c48e82adbb00de45cbec7",
+    "manifest": "0bbe3838d7387a3394ce0855c3a8f2471d75f0654482f4678e1171ef1713ab0d",
     "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
     "routerCandle": "9f4adef06bcae0a06250e38e2e14acd92280ab7e2d0b2f85e6c6908e0a9ee947",
     "routerCatalog": "a46297e1ef5d822c7066f38dee496f6a0f8c48e4aa40e2a249f72c90c586ba73",
@@ -45,8 +45,8 @@
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
     "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
-    "workerEngineTable": "2d3325e020cbc72b3462ff29caeb9afdb25b1dca5f90751ac6a8b15b9b671b8f",
+    "workerDispatch": "9f621761116d598440a65337d8fb75dc088c007e7e6131b08f85662ed9d13004",
+    "workerEngineTable": "85a15b1e623f7e1fab1643f490dd01b64560f84d3ff784b1642efd3fa5176e7c",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
     "workerImageDispatch": "b87ccabda813f0ba735a2d7fe29e3fcfec418994ec4240a99751db6a56d903c7",
     "workerImageKreaImported": "6fbc8d9a80bc03a295bcbf39c6c11298e7fba33f4d702dc5a06f328ac9eb4c1b",
@@ -1567,8 +1567,12 @@
       "operationAndMode": [
         {
           "capability": "text_to_image",
-          "mlx": false,
-          "candle": false
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "sc-18481",
+            "url": "https://app.shortcut.com/trefry/story/18481"
+          }
         }
       ],
       "conditioningShape": [],
@@ -1584,11 +1588,22 @@
           "candle": false
         }
       ],
-      "precisionTier": [],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": false,
+          "parityObligation": {
+            "workItem": "epic-9083",
+            "url": "https://app.shortcut.com/trefry/epic/9083",
+            "authority": "epic-9083"
+          }
+        }
+      ],
       "guidanceMethod": [],
       "preview": {
         "capability": "live_preview",
-        "mlx": null,
+        "mlx": false,
         "candle": null
       }
     },
