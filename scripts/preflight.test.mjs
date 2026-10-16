@@ -35,19 +35,33 @@ test("preflight reports spawn errors and nonzero Git exits instead of empty stde
   }), /git merge-base: exit 128: fatal: invalid reference/);
 });
 
-test("Windows npm uses Git Bash with literal argument forwarding, never WSL or shell interpolation", () => {
-  const args = ["--prefix", "path with spaces", "run", "check", "--", "a'b", '$(touch injected)', "x&y"];
-  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/Windows/System32" };
-  const expectedBash = path.join(env.ProgramFiles, "Git", "bin", "bash.exe");
+test("Windows npm uses Node CLI with literal arguments and preserves native compiler PATH", () => {
+  const args = ["--prefix", "path with spaces", "run", "rust:check", "--", "a'b", '$(touch injected)', "x&y"];
+  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/MSVC/bin;C:/Windows/System32",
+    npm_execpath: "C:/node with spaces/npm-cli.js" };
   const invocation = commandInvocation(["npm", ...args], {
-    platform: "win32", env, exists: (file) => file === expectedBash,
+    platform: "win32", env, exists: (file) => file === env.npm_execpath,
   });
-  assert.equal(invocation.executable, expectedBash);
-  assert.deepEqual(invocation.args, ["-c", 'exec npm "$@"', "preflight-npm", ...args]);
-  assert.equal(invocation.env.npm_config_script_shell, expectedBash);
-  assert.equal(invocation.env.PATH, `${path.dirname(expectedBash)};${env.PATH}`);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [env.npm_execpath, ...args]);
+  assert.equal(invocation.env, env, "native Rust/npm steps must not prepend Git's GNU link.exe or change the shell");
   assert.throws(() => commandInvocation(["npm", "run", "check"], {
     platform: "win32", env, exists: () => false,
+  }), /cannot find npm CLI/);
+});
+
+test("only Windows scaffold check selects Git Bash instead of WSL", () => {
+  const env = { ProgramFiles: "C:/Program Files", PATH: "C:/MSVC/bin", npm_execpath: "C:/node/npm-cli.js" };
+  const bash = path.join(env.ProgramFiles, "Git", "bin", "bash.exe");
+  const invocation = commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: (file) => [env.npm_execpath, bash].includes(file),
+  });
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [env.npm_execpath, "run", "check"]);
+  assert.equal(invocation.env.npm_config_script_shell, bash);
+  assert.equal(invocation.env.PATH, `${path.dirname(bash)};${env.PATH}`);
+  assert.throws(() => commandInvocation(["npm", "run", "check"], {
+    platform: "win32", env, exists: (file) => file === env.npm_execpath,
   }), /requires Git Bash/);
 });
 

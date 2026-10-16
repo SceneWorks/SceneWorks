@@ -227,15 +227,18 @@ export function commandInvocation(command, {
   if (platform !== "win32" || command[0] !== "npm") {
     return { executable: command[0], args: command.slice(1), env };
   }
-  // Windows cannot spawn npm.cmd directly. Use Git Bash (never WSL bash) with a CONSTANT
-  // script and positional arguments, not interpolated shell text or blanket shell:true.
-  const bash = path.join(env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe");
-  if (!exists(bash)) throw new Error(`Windows preflight requires Git Bash at ${bash}`);
-  return {
-    executable: bash,
-    args: ["-c", 'exec npm "$@"', "preflight-npm", ...command.slice(1)],
-    env: { ...env, PATH: `${path.dirname(bash)};${env.PATH ?? ""}`, npm_config_script_shell: bash },
-  };
+  // Windows cannot spawn npm.cmd directly. Run npm's JS entry point with Node: no shell,
+  // interpolation, or Git Bash PATH injection that could shadow MSVC's link.exe during Rust builds.
+  const cli = env.npm_execpath ?? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (!exists(cli)) throw new Error(`Windows preflight cannot find npm CLI at ${cli}`);
+  let childEnv = env;
+  if (command[1] === "run" && command[2] === "check") {
+    // Only the scaffold suite needs Git Bash; Windows' bash.exe may otherwise resolve to WSL.
+    const bash = path.join(env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe");
+    if (!exists(bash)) throw new Error(`Windows preflight requires Git Bash at ${bash}`);
+    childEnv = { ...env, PATH: `${path.dirname(bash)};${env.PATH ?? ""}`, npm_config_script_shell: bash };
+  }
+  return { executable: process.execPath, args: [cli, ...command.slice(1)], env: childEnv };
 }
 
 function run(command, env = {}) {
