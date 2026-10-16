@@ -45,17 +45,19 @@ async function realInputs() {
   return { claims: collectClaims({ models, loras }), evidence };
 }
 
-test("FLUX 3 install selects the two exact index-declared encoder shards", async () => {
+test("FLUX 3 downloads the whole pinned repository with its actual full-tree byte estimate", async () => {
   const manifest = await readJsonc("config/manifests/builtin.models.jsonc");
   const download = manifest.models.find((model) => model.id === "flux3_klein").downloads[0];
+  assert.equal(download.repo, "black-forest-labs/flux-3-image-klein");
   assert.equal(download.revision, "8454017f9ebaada30c998fccd9f67a80c7580f68");
-  assert.deepEqual(download.files.filter((file) => file.endsWith(".safetensors")), [
-    "model.safetensors", "ae.safetensors",
-    "text_encoder/model-00001-of-00002.safetensors",
-    "text_encoder/model-00002-of-00002.safetensors",
-  ]);
-  assert.ok(download.files.every((file) => !/[?*]/.test(file)));
-  assert.ok(download.files.includes("text_encoder/model.safetensors.index.json"));
+  assert.deepEqual(download.files, [], "whole repository, including extra configs and variants");
+  // Authenticated recursive HF tree: all 42 files, including diffusers and fp8r/nvfp4 copies.
+  assert.equal(download.estimatedSizeBytes, 43_317_649_602);
+  assert.equal(download.footprint.diskSizeBytes, 43_317_649_602);
+  const { claims, evidence } = await realInputs();
+  const key = claimKey(download.repo, download.revision);
+  assert.ok(!claims.some((claim) => claimKey(claim.repo, claim.revision) === key));
+  assert.ok(!evidence.repos.some((row) => row.key === key), "whole-repo requests have no orphan selective census");
 });
 
 test("the per-guard mutation harness passes", () => {

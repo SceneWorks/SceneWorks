@@ -57,6 +57,34 @@ use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
 
+/// Validate the canonical FLUX 3 runtime payload independently of download selectors.
+/// This is filesystem/index integrity, not whole-repository download completion or a weights
+/// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact
+/// pinned inference contract without linking MLX or CUDA. Indexed paths retain the inference
+/// resolver's containment rules and allowance for this HF repository's own blob symlinks.
+pub fn flux3_runtime_bundle_check(
+    package_dir: &Path,
+    model_id: &str,
+) -> std::result::Result<(), String> {
+    let resources = gen_core::flux3::GenerationResources {
+        package_dir: package_dir.to_path_buf(),
+        text_encoder_dir: package_dir.join(gen_core::flux3::TEXT_ENCODER_COMPONENT),
+        autoencoder_file: package_dir.join("ae.safetensors"),
+    };
+    resources
+        .check(model_id)
+        .map_err(|error| error.to_string())?;
+    let roots = gen_core::safetensors_shards::snapshot_shard_roots(&resources.text_encoder_dir)
+        .map_err(|error| error.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(
+        &resources.text_encoder_dir,
+        "model",
+        &roots,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
 // candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow

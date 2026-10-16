@@ -9,7 +9,7 @@ const sha = "a".repeat(40), inference = "b".repeat(40);
 const revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
 const repo = "black-forest-labs/flux-3-image-klein";
 const files = ["config.json", "manifest.json", "model.safetensors", "ae.safetensors", "LICENSE.md", "NOTICE.md", "text_encoder/config.json", "text_encoder/tokenizer.json", "text_encoder/tokenizer_config.json", "text_encoder/model.safetensors.index.json", "text_encoder/model-00001-of-00002.safetensors", "text_encoder/model-00002-of-00002.safetensors"];
-const model = () => ({ id: "flux3_klein", family: "flux3", gated: true, credentialHost: "huggingface.co", licenseUrl: `https://huggingface.co/${repo}/blob/main/LICENSE.md`, capabilities: ["text_to_image"], downloads: [{ provider: "huggingface", repo, revision, files }] });
+const model = () => ({ id: "flux3_klein", family: "flux3", gated: true, credentialHost: "huggingface.co", licenseUrl: `https://huggingface.co/${repo}/blob/main/LICENSE.md`, capabilities: ["text_to_image"], downloads: [{ provider: "huggingface", repo, revision, files: [] }] });
 const context = { projectId: "project_test", workerId: "worker_test", backend: "mlx", adapter: "mlx_flux3" };
 function fixture() {
   const body = imageBody(context.projectId);
@@ -62,7 +62,7 @@ test("controller retains failed exact-source receipt before build, auth or proce
 
 test("pinned bundled components, license and gated auth are mandatory", () => {
   assert.doesNotThrow(() => assertModel(model()));
-  for (const mutate of [(m) => m.downloads[0].revision = sha, (m) => m.downloads[0].repo = "unapproved/rehost", (m) => m.gated = false, (m) => m.credentialHost = "elsewhere", (m) => m.licenseUrl = "https://example.com", (m) => m.downloads[0].files = ["model.safetensors"]]) { const m = model(); mutate(m); assert.throws(() => assertModel(m)); }
+  for (const mutate of [(m) => m.downloads[0].revision = sha, (m) => m.downloads[0].repo = "unapproved/rehost", (m) => m.gated = false, (m) => m.credentialHost = "elsewhere", (m) => m.licenseUrl = "https://example.com", (m) => m.downloads[0].files = ["model.safetensors"], (m) => m.downloads[0].files = files]) { const m = model(); mutate(m); assert.throws(() => assertModel(m)); }
   const job = { type: "model_download", payload: { modelId: "flux3_klein", repo, revision } };
   assert.doesNotThrow(() => assertDownload(job));
   assert.throws(() => assertDownload({ ...job, payload: { ...job.payload, revision: sha } }));

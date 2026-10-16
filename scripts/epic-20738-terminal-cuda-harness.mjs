@@ -190,11 +190,11 @@ const REQUEST_MEMORY_STRATEGY_KEYS = [
 // vivym/lpips, laion/CLIP-convnext_xxlarge-…-soup) and the REPA teacher (facebook/dinov2-base) join
 // main's 137 keys: 143 keys. The MiniMax-H3 Veda epic (sc-25140) adds the optional Veda sparse
 // predictor (Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview): 144 keys.
-// sc-26234 adds the authenticated, pinned FLUX 3 package census (145 keys); its 42 filenames
-// agree with the live immutable revision, including the two index-declared encoder shards.
+// sc-26234 uses a whole-repository FLUX 3 download (files: []), so it has no selective census
+// row. The original 144 selection authorities and their file inventories remain unchanged.
 // The digest moves with any honest re-record; what it guards is a HAND EDIT of the evidence file,
 // which is why it is pinned here rather than recomputed.
-const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "b834e98e079011fb51d615f4a24075bd662354b5599772205f3d1f070e76f7e3";
+const CURRENT_DOWNLOAD_EVIDENCE_SHA256 = "1c5fe4dbdefd112ea48b5b30a8d7a3af6b34c16b10ec6fe10b429df7bf15f920";
 const LEGACY_DOWNLOAD_EVIDENCE_SHA256 = "9eda09eeacb9386167ca4a080b4805b9c7dd3cd5134ca037ce342ad434b17e0b";
 const SCAIL2_REFERENCE_DELTA_FLOOR = 1e-6;
 
