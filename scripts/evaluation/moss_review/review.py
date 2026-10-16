@@ -356,10 +356,10 @@ def summaries(manifest, results, mapping_doc, ratings, annotations):
                 values = [v for v in values if type(v) in (int, float) and math.isfinite(v)]
                 return dict(n=len(values), median=statistics.median(values) if values else None, minimum=min(values) if values else None, maximum=max(values) if values else None)
             objective = [ev.objective_scores(next(c for c in manifest['corpus']['cases'] if c['id'] == r['cell']['case_id']), annotations[r['cell']['id']]) for r in rows if r['status'] == 'ok']
-            costs[config] = dict(statuses=dict(Counter(r['status'] for r in rows)),
+            costs[config] = dict(statuses=dict(Counter(r['status'] for r in rows)),failure_kinds=dict(Counter(r.get('failure_kind','none') for r in rows)),censored=sum(r.get('failure_kind')=='runtime_censored' for r in rows),
                 measured_summary={key: measured(key) for key in ('cold_seconds', 'warm_seconds', 'peak_host_rss_bytes', 'download_bytes')},
                 gpu_peaks_by_method={method: [r['metrics']['peak_gpu_bytes'] for r in rows if r['status'] == 'ok' and r['metrics'].get('gpu_memory_method') == method] for method in {r['metrics'].get('gpu_memory_method') for r in rows if r['status'] == 'ok'}},
-                independent_objective_scores=objective, observations=[dict(cell_id=r['cell']['id'], metrics=r.get('metrics'), elapsed_seconds=r['elapsed_seconds']) for r in rows],
+                independent_objective_scores=objective, observations=[dict(cell_id=r['cell']['id'], metrics=r.get('metrics'), elapsed_seconds=r['elapsed_seconds'],attempted=r.get('attempted'),failure_kind=r.get('failure_kind'),runtime_failure_cell=r.get('runtime_failure_cell'),censored_reason=r.get('censored_reason'),error=r.get('error')) for r in rows],
                 quality={k: dict(n=len(v), mean=statistics.mean(v) if v else None) for k, v in g['scores'][config].items()})
         tables.append(dict(moss=g['moss'], baseline=g['baseline'], scenario=g['scenario'], comparisons=g['comparisons'], wins=dict(g['wins']), costs=costs))
     check(len(tables) == 108 and all(t['comparisons'] == 4 for t in tables), 'nine matchups x twelve scenarios x four comparisons required')

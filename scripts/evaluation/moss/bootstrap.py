@@ -24,7 +24,7 @@ import urllib.request
 from urllib.parse import unquote, urlparse
 import zipfile
 
-from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle, calibration_results, availability_decisions, reject_run_invalidated,
+from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle, calibration_results, availability_decisions, reject_run_invalidated, terminal_scored,
     physical, gpu_rows, compute_pids, desktop_identities, idle_device, verify_staged, validate_baseline)
 
 SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'
@@ -668,7 +668,7 @@ def execute_phase(root, value, phase):
             _, completed_before = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
             reject_run_invalidated(campaign,protocol['sha256'])
             if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign,complete=False)
-            else:require(all(record['status']=='ok' or (record['status']=='unavailable' and record['cell']['config_id'] in guard.unavailable_configs) for record in completed_before.values()),'unapproved scored failure cannot resume')
+            else:require(all(terminal_scored(record,guard.unavailable_configs) for record in completed_before.values()),'unapproved scored failure cannot resume')
             pending = [cell['id'] for cell in cells(manifest, phase) if cell['config_id'] == config['id'] and cell['id'] not in completed_before]
             if not pending:
                 continue
@@ -694,11 +694,12 @@ def execute_phase(root, value, phase):
                     kill_owned(process, owned)
             _, results = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
             if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign,complete=False)
-            else:require(all(r['status']=='ok' or (r['status']=='unavailable' and r['cell']['config_id'] in guard.unavailable_configs) for r in results.values()),'execution cell failed; no automatic retry or further allocation')
+            else:require(all(terminal_scored(r,guard.unavailable_configs) for r in results.values()),'execution cell failed; no automatic retry or further allocation')
             guard.check(idle=True)
         _, results = receipts(root / 'protocol.lock.json', campaign, phase)
         if phase=='calibration':calibration_results(manifest,protocol['sha256'],campaign)
-        else:require(all(record['status']=='ok' or (record['status']=='unavailable' and record['cell']['config_id'] in guard.unavailable_configs) for record in results.values()),'phase contains unapproved failed cells')
+        else:require(all(terminal_scored(record,guard.unavailable_configs) for record in results.values()),'phase contains unapproved failed cells')
+        if phase=='scored':require(not any(r['status'] in ('failed','timeout') for r in results.values()),'scored attempts complete with runtime failures/censored cells; inspect full matrix, no retry or retrospective exclusion')
         if phase == 'calibration':
             parity_records = []
             for path in sorted((campaign / 'parity').glob('*.json')):

@@ -165,7 +165,7 @@ def existing_successes(manifest,lock_hash,run,config_id,phase,approved=None):
         if path.exists():
             row=validate_receipt(run,lock_hash,cell,read(path),manifest=manifest)
             terminal_calibration=phase=='calibration' and row['status'] in ('failed','timeout') and row.get('failure_kind')=='runtime'
-            terminal_unavailable=phase=='scored' and config_id in (approved or {}) and row['status']=='unavailable'
+            terminal_unavailable=phase=='scored' and ((config_id in (approved or {}) and row['status']=='unavailable') or (row['status'] in ('failed','timeout') and row.get('failure_kind') in ('runtime','runtime_censored')))
             require(row['status']=='ok' or terminal_calibration or terminal_unavailable,'failed attempts cannot be retried automatically')
         else:
             require(not (run/'outputs'/(cell['id']+'.png')).exists(),'orphan image blocks retry; retain and reconcile image budget')
@@ -196,7 +196,7 @@ def execute(lock,run,config_id,phase):
     log=run/(attempt+'.log');log.write_text(f'lock={lock_hash} phase={phase} config={config_id}\n')
     timeout=manifest['ownership']['timeout_seconds'];process=requests=None
     decision=approved.get(config_id) if phase=='scored' else None
-    failure=decision or config['unavailable'];load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic();initial_error=None
+    failure=decision or config['unavailable'];load_seconds=None;load_peak=0;parity=[];touched=[];start=time.monotonic();initial_error=None;failure_cell=None
     try:
         try:
             if not failure and config_id=='moss_dmd':parity=ensure_parity(manifest,lock_hash,run,phase,guard,attempt)
@@ -206,7 +206,6 @@ def execute(lock,run,config_id,phase):
                 expect_runtime(state,value,'ready');load_seconds=value
         except RuntimeFailure as exc:
             guard.check()
-            if phase!='calibration':raise
             initial_error=exc;failure={'reason':str(exc)};stop(process)
             parity_log=run/'parity'/(attempt+'.log')
             if config_id=='moss_dmd' and parity_log.exists():
@@ -214,7 +213,9 @@ def execute(lock,run,config_id,phase):
         for index,cell in enumerate(selected):
             guard.check();touched.append(cell['id'])
             output=run/'outputs'/(cell['id']+'.png');cell_start=start if index==0 else time.monotonic();metrics=None;error=None
-            status='unavailable' if decision or config['unavailable'] else ('timeout' if isinstance(initial_error,TimeoutError) else 'failed')
+            attempted=not failure or (initial_error is not None and index==0)
+            if failure and not decision and not config['unavailable'] and failure_cell is None:failure_cell=cell['id']
+            status='unavailable' if decision or config['unavailable'] else ('timeout' if attempted and isinstance(initial_error,TimeoutError) else 'failed')
             if failure:error=failure['reason']
             else:
                 try:
@@ -234,14 +235,17 @@ def execute(lock,run,config_id,phase):
                 except RuntimeFailure as exc:
                     # Authorization/cache changes invalidate the attempt rather than becoming mere render failures.
                     guard.check()
-                    error=str(exc);status='timeout' if isinstance(exc,TimeoutError) else 'failed';failure={'reason':error};stop(process)
+                    error=str(exc);status='timeout' if isinstance(exc,TimeoutError) else 'failed';failure={'reason':error};failure_cell=cell['id'];stop(process)
             with log.open('a',encoding='utf-8') as stream:stream.write(f"{cell['id']}: {status} {error or ''}\n")
             record=dict(lock_sha256=lock_hash,cell=cell,status=status,elapsed_seconds=time.monotonic()-cell_start,
                 ownership=dict(manifest['ownership'],revision=lock_hash),metrics=metrics,
                 reproduce=decision['reproduce'] if decision else f'guarded bootstrap {phase} at lock {lock_hash}; failed attempts never retry',error=error,
                 output=dict(path=output.relative_to(run).as_posix(),sha256=file_hash(output)) if output.exists() else None,
                 log=snapshot_log(run,log,run/'receipts'/(cell['id']+'.'+attempt+'.log')))
-            if status in ('failed','timeout'):record['failure_kind']='runtime'
+            record['attempted']=attempted
+            if status in ('failed','timeout'):
+                record.update(failure_kind='runtime' if attempted else 'runtime_censored',runtime_failure_cell=failure_cell)
+                if not attempted:record['censored_reason']=f'Not attempted after {failure_cell} stopped this owned runtime; no retry'
             if approved:record['availability_authorization']=dict(path='availability-authorization.json',sha256=file_hash(run/'availability-authorization.json'))
             validate_receipt(run,lock_hash,cell,seal(record),manifest=manifest)
             write(run/'receipts'/(cell['id']+'.json'),seal(record))

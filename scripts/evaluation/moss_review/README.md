@@ -156,7 +156,9 @@ tables. Then run the original `moss/evaluate.py report` on these translated file
 `analyst-tables.json` contains all nine model matchups × twelve scenarios, four
 pair judgments per row, wins/ties/unavailable counts, per-arm absolute quality
 means/sample counts, independent text/box scores, source statuses and cost records.
-Cold/warm latency summaries remain separate. GPU peaks remain grouped by their
+Actual runtime failure rows and remaining unattempted `runtime_censored` rows
+remain distinct in failure-kind counts and observation provenance; neither is
+retroactively labeled unavailable. Cold/warm latency summaries remain separate. GPU peaks remain grouped by their
 measurement method; native device sampling and PyTorch allocator peaks are not
 combined. Missing measurements remain null; preparation acquisition/disk evidence
 must be read from the separate bootstrap receipts. Repeated image exposures are

@@ -485,6 +485,7 @@ def mixed_calibration(tmp_path):
     import bootstrap as b
     import ownership as o
     manifest=ev.template()
+    manifest['hardware'].update(host=__import__('socket').gethostname(),gpu_uuid=o.RUNNER_GPU_UUID)
     manifest['ownership']=dict(responsible_chat='CPU fixture coordinator',lease='fixture',job='fixture',timeout_seconds=30,resume='fixture',next_action='fixture')
     lock=tmp_path/'protocol.lock.json';ev.write(lock,ev.seal(manifest));lock_hash=ev.read(lock)['sha256']
     root=tmp_path/'run';(root/'receipts').mkdir(parents=True);(root/'outputs').mkdir()
@@ -773,3 +774,75 @@ def test_native_terminal_failure_preserves_error_without_canceling_terminal_job(
     with pytest.raises(exception) as result:runtime.render(cell,tmp_path/'never-created.png')
     assert run.worker_failure(result.value)==('error' if status=='failed' else 'integrity_error')
     assert not any(path.endswith('/cancel') for _,path in calls)
+
+
+@pytest.mark.parametrize('failure_state',['error','integrity_error'])
+def test_scored_runtime_failure_censors_only_its_config_and_finishes_other_configs(mixed_calibration,monkeypatch,tmp_path,failure_state):
+    import bootstrap as b
+    import ownership as o
+    import run
+    from types import SimpleNamespace
+    m,lock,root,value,metrics=mixed_calibration;sha=ev.read(lock)['sha256'];calls=[];cache={}
+    b.accepted_scored_authorization(root.parent,value,m);ev.write(root.parent/'prepared.json',{'CPU_fixture':True})
+    original={p:p.read_bytes() for p in (root/'receipts').glob('calibration.*.json')}
+    class Guard:
+        def __init__(self,*a,**k):self.prepared_root=root.parent;self.unavailable_configs=o.availability_decisions(m,sha,root,value)
+        def check(self,*a,**k):return {'CPU_fixture':True}
+    monkeypatch.setattr(b,'ExecutionGuard',Guard);monkeypatch.setattr(o,'ExecutionGuard',Guard)
+    monkeypatch.setattr(b,'prepared',lambda *a:{})
+    monkeypatch.setattr(ev,'load_lock',lambda *a,**k:m);monkeypatch.setattr(run,'validate_manifest',lambda *a,**k:None)
+    class Requests:
+        pending=None
+        def put(self,item):self.pending=item
+    def launch(config,*a,**k):
+        q=Requests()
+        def replies():
+            yield ('ready',.01)
+            count=0
+            while True:
+                count+=1
+                if config['id']=='moss_base' and count==2:yield (failure_state,'Synthetic owned runtime error, CPU fixture only')
+                else:
+                    cell,path=q.pending;shape=(cell['width'],cell['height'])
+                    if shape not in cache:cache[shape]=png(*shape)
+                    Path(path).write_bytes(cache[shape])
+                    yield ('result',dict(deepcopy(metrics),peak_gpu_reserved_bytes=42))
+        return SimpleNamespace(),q,replies()
+    monkeypatch.setattr(run,'launch',launch);monkeypatch.setattr(run,'receive',lambda p,q,*a:(next(q),42));monkeypatch.setattr(run,'finish',lambda *a:None);monkeypatch.setattr(run,'stop',lambda *a:None)
+    class Process:
+        returncode=0
+        def __init__(self,args,**kwargs):
+            config=args[args.index('--config')+1];calls.append(config)
+            run.execute(lock,root,config,'scored')
+        def poll(self):return 0
+    monkeypatch.setattr(b.subprocess,'Popen',Process);monkeypatch.setattr(b,'kill_owned',lambda *a:None)
+    deadline='2030-01-01T00:00:00+00:00'
+    control=dict(value,deadline_utc=deadline,lease=dict(id=m['ownership']['lease'],owner=m['ownership']['responsible_chat'],host=m['hardware']['host'],gpu_uuid=o.RUNNER_GPU_UUID,expires_utc=deadline,external_owners_reconciled=True,desktop_baseline=[],baseline_max_memory_mib=1000,baseline_max_utilization_percent=2))
+    monkeypatch.setenv('GITHUB_RUN_ID','CPU-scored-1')
+    if failure_state=='integrity_error':
+        with pytest.raises(ValueError,match='Synthetic owned runtime error'):b.execute_phase(root.parent,control,'scored')
+        assert calls==['moss_base'] and list((root/'invalidations').glob('*.json'))
+        with pytest.raises(ValueError,match='invalidations cannot be approved'):o.availability_decisions(m,sha,root,value)
+        return
+    with pytest.raises(ValueError,match='attempts complete with runtime failures'):b.execute_phase(root.parent,control,'scored')
+    assert calls==list(ev.CONFIG_IDS)  # The first config's second render did not stop later configs.
+    _,results=ev.receipts(lock,root);assert len(results)==288
+    failed=[r for r in results.values() if r.get('failure_kind')=='runtime'];censored=[r for r in results.values() if r.get('failure_kind')=='runtime_censored']
+    assert len(failed)==1 and failed[0]['attempted'] is True and len(censored)==46
+    assert all(r['attempted'] is False and r['runtime_failure_cell']==failed[0]['cell']['id'] for r in censored)
+    assert sum(r['status']=='ok' for r in results.values())==193
+    assert all(p.read_bytes()==body for p,body in original.items())
+    public=tmp_path/'terminal-pairs.json';ev.blind_pairs(lock,root,public)
+    pairs=ev.unseal(ev.read(public))['pairs'];assert len(pairs)==432
+    cases={c['id']:c for c in m['corpus']['cases']};annotations={}
+    for key,row in results.items():
+        if row['status']=='ok':
+            case=cases[row['cell']['case_id']];annotations[key]=dict(output_sha256=row['output']['sha256'],annotator='CPU fixture',method='fixture',tool_revision='fixture',text=case['expected_text'],boxes={v['id']:v['box'] for v in case['boxes']})
+    judgments=[dict(pair_id=p['id'],winner='unavailable' if any(a['image'] is None for a in p['arms']) else 'tie',rubric={k:3 for k in ('visual_quality','instruction_following','composition')},reviewer='CPU fixture',reviewer_kind='machine_assisted',judge_version='fixture',notes='Synthetic records only',uncertainty='high') for p in pairs]
+    ev.write(tmp_path/'terminal-annotations.json',annotations);ev.write(tmp_path/'terminal-judgments.json',judgments)
+    report=ev.report(lock,root,public,tmp_path/'terminal-judgments.json',tmp_path/'terminal-annotations.json')
+    assert report['failed_attempts']==1 and report['censored_outputs']==46 and report['missing_outputs']==95
+    before={p:p.read_bytes() for p in (root/'receipts').glob('*.json')}
+    monkeypatch.setenv('GITHUB_RUN_ID','CPU-scored-2')
+    with pytest.raises(ValueError,match='attempts complete with runtime failures'):b.execute_phase(root.parent,control,'scored')
+    assert calls==list(ev.CONFIG_IDS) and all(p.read_bytes()==body for p,body in before.items())

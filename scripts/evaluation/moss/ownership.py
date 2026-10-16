@@ -148,6 +148,12 @@ def calibration_results(manifest, lock_hash, run_root, *, complete=True):
     return results
 
 
+def terminal_scored(row, approved):
+    return (row['status']=='ok' or
+        (row['status']=='unavailable' and row['cell']['config_id'] in approved) or
+        (row['status'] in ('failed','timeout') and row.get('failure_kind') in ('runtime','runtime_censored')))
+
+
 def calibration_bundle(lock, run_root):
     """Identity of six immutable attempts; failure never becomes a success."""
     from evaluate import load_lock, canonical

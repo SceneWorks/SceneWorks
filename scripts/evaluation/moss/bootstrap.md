@@ -204,4 +204,19 @@ print(json.dumps({'moss_image_comparison_mode':'scored','moss_control_json':open
 PYRUN
 ```
 
-Both phases use the same persistent `run/receipts` and `run/outputs`. A bounded job resumes validated immutable successful cells and approved unavailable scored records. Calibration resumes terminal runtime-failure records without retrying them. It refuses unapproved scored failures, changed receipts, invalidated inputs, and output files without valid receipts. It never duplicates an already completed image and never expands the frozen288-cell plan. Renew only the lease/deadline for a subsequent reviewed dispatch; `scored-authorization.json` remains identical. Actual renders are guarded by the same `ownership.ExecutionGuard` in the workflow and direct `run.py` CLI, including GPU1 index/UUID, live coordinator ancestor, expiry, desktop PID/name/creation identity, foreign GPU owners, and exact isolated cache refs/repository/snapshot closure. Cheap input stat fingerprints are monitored during each cell; full selected-config hashes are checked at configuration boundaries and mutations invalidate the attempt's evidence.
+Both phases use the same persistent `run/receipts` and `run/outputs`. A bounded job resumes validated immutable successful cells and approved unavailable scored records. Calibration resumes terminal runtime-failure records without retrying them. It refuses untyped scored failures, changed receipts, invalidated inputs, and output files without valid receipts. It never duplicates an already completed image and never expands the frozen288-cell plan. Renew only the lease/deadline for a subsequent reviewed dispatch; `scored-authorization.json` remains identical. Actual renders are guarded by the same `ownership.ExecutionGuard` in the workflow and direct `run.py` CLI, including GPU1 index/UUID, live coordinator ancestor, expiry, desktop PID/name/creation identity, foreign GPU owners, and exact isolated cache refs/repository/snapshot closure. Cheap input stat fingerprints are monitored during each cell; full selected-config hashes are checked at configuration boundaries and mutations invalidate the attempt's evidence.
+
+If a previously calibrated healthy configuration later has a genuine owned
+runtime failure during scored execution, its earlier successful outputs remain
+successful. The actual failing row records `attempted: true` and
+`failure_kind: runtime`. Remaining rows for that stopped configuration record
+`attempted: false`, `failure_kind: runtime_censored`, and the exact causing cell;
+these are not claimed render attempts or retroactively unavailable outputs.
+Independent configurations continue under the unchanged live guard. The phase
+finishes all288 terminal records but reports job failure after completion when
+actual runtime failures occurred. Validated terminal failed/censored rows resume
+without retry; a repeated dispatch cannot create replacement images. Reports
+separate actual failures from censored cells. Integrity, cancellation, lease,
+cache/input, and evidence faults still abort immediately and cannot use this
+continuation path. No post-scored availability approval or quality-conditioned
+exclusion is introduced.

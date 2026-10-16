@@ -320,6 +320,16 @@ def validate_receipt(root, lock_hash, cell, receipt, *, manifest=None):
         require(cell['phase']=='scored','availability decisions apply only to scored cells')
         if decision:require(r['status']=='unavailable' and r['error']==decision['reason'] and r['reproduce']==decision['reproduce'],'unavailable cell differs from approved calibration disposition')
         else:require(r['status']!='unavailable','healthy configuration cannot be excluded')
+    if cell['phase']=='scored' and r.get('failure_kind')=='runtime':
+        require(r.get('attempted') is True and r.get('runtime_failure_cell')==cell['id'] and r['status'] in ('failed','timeout'),'missing actual scored runtime-attempt provenance')
+    if r.get('failure_kind')=='runtime_censored':
+        require(manifest is not None and cell['phase']=='scored' and r.get('attempted') is False and r.get('censored_reason'),'missing explicit censored-cell provenance')
+        cause=next((c for c in cells(manifest) if c['id']==r.get('runtime_failure_cell')),None)
+        require(cause and cause['config_id']==cell['config_id'] and cause['id']!=cell['id'],'invalid stopped-runtime cause')
+        prior=unseal(read(Path(root)/'receipts'/(cause['id']+'.json')))
+        require(prior.get('failure_kind')=='runtime' and prior.get('attempted') is True and prior['status'] in ('failed','timeout'),'censored cause was not an actual runtime failure')
+        validate_receipt(root,lock_hash,cause,seal(prior),manifest=manifest)
+        require(r['error']==prior['error'],'censored row differs from actual failure')
     if r['status'] != 'ok':
         require(r.get('error') and r.get('reproduce'), 'failure needs reason and reproduction')
         artifact(root, r['log'])
@@ -474,7 +484,7 @@ def report(lock,run,pairs_path,judgments_path,annotations_path):
                     require(ann and ann['output_sha256']==row['output']['sha256'],'missing or mismatched annotation')
                     scores.append(objective_scores(case,ann))
             output.append(dict(case_id=case['id'],scenario=case['scenario'],config_id=config['id'],statuses=dict(Counter(r['status'] for r in rows)),objective=scores,
-                costs=[r['metrics'] for r in rows if r['status']=='ok']))
+                costs=[r['metrics'] for r in rows if r['status']=='ok'],failure_kinds=dict(Counter(r.get('failure_kind','none') for r in rows)),censored=sum(r.get('failure_kind')=='runtime_censored' for r in rows)))
     parity=[]
     for cell in parity_cells(manifest):
         path=Path(run)/'parity'/(cell['id']+'.json')
@@ -486,6 +496,7 @@ def report(lock,run,pairs_path,judgments_path,annotations_path):
         recommendation_eligible=all_outputs and usable_pairs==432 and parity_complete,
         dmd_adapter_prediction_parity_complete=parity_complete, parity_fixture_count=len(parity),parity_forward_count=sum(r['evidence']['forward_count'] for r in parity),parity_process_seconds=sum(r['evidence']['total_process_seconds'] for r in parity),usable_blind_pairs=usable_pairs,
         blind_wins=dict(votes),blind_pairs=432,missing_outputs=sum(r['status']!='ok' for r in results.values()),
+        failed_attempts=sum(r['status'] in ('failed','timeout') and r.get('attempted',True) for r in results.values()),censored_outputs=sum(r.get('failure_kind')=='runtime_censored' for r in results.values()),
         uncertainty=dict(Counter(j['uncertainty'] for j in judgments)),thresholds=manifest['thresholds'],
         conclusions='No model superiority or native adoption inferred automatically; analyze per scenario, failures and quality/cost tradeoffs.')
 
