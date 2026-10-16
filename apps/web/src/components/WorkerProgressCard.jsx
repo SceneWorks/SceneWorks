@@ -18,10 +18,43 @@ import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailConte
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
-// Provider-specific result detail is not needed to render the initial Queue.
-const PrefixKvCacheDetail = React.lazy(() =>
-  import("./PrefixKvCacheDetail.jsx").then((module) => ({ default: module.PrefixKvCacheDetail })),
-);
+// Keep chunk failures local to this optional result detail. A retry must create a new lazy
+// component: React.lazy caches rejected imports as well as successful ones.
+export class PrefixKvCacheDetailBoundary extends React.Component {
+  static loadDetail() {
+    return import("./PrefixKvCacheDetail.jsx");
+  }
+
+  createDetail = () => React.lazy(() =>
+    PrefixKvCacheDetailBoundary.loadDetail()
+      .then((module) => ({ default: module.PrefixKvCacheDetail })),
+  );
+
+  state = { error: null, Detail: this.createDetail() };
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div role="alert">
+          Prompt cache details could not be loaded.{" "}
+          <button type="button" onClick={() => this.setState({ error: null, Detail: this.createDetail() })}>
+            Try again
+          </button>
+        </div>
+      );
+    }
+    const { Detail } = this.state;
+    return (
+      <React.Suspense fallback={<p role="status">Loading prompt cache details…</p>}>
+        <Detail job={this.props.job} />
+      </React.Suspense>
+    );
+  }
+}
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -870,9 +903,7 @@ export function WorkerProgressCard({
       {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
           a prefix KV cache; renders nothing for every other job. */}
       {Array.isArray(job.result?.prefixKvCache) && job.result.prefixKvCache.length > 0 ? (
-        <React.Suspense fallback={<p role="status">Loading prompt cache details…</p>}>
-          <PrefixKvCacheDetail job={job} />
-        </React.Suspense>
+        <PrefixKvCacheDetailBoundary job={job} />
       ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (

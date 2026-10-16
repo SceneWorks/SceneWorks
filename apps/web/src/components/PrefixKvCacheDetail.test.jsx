@@ -6,7 +6,8 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { WorkerProgressCard } from "./WorkerProgressCard.jsx";
+import { PrefixKvCacheDetailBoundary, WorkerProgressCard } from "./WorkerProgressCard.jsx";
+import { ErrorBoundary } from "./ErrorBoundary.jsx";
 import { AppContext } from "../context/AppContext.js";
 
 const GIB = 1024 ** 3;
@@ -22,14 +23,17 @@ function job(records) {
 }
 
 let mounted = null;
-async function render(card, whileLoading) {
+async function render(card, whileLoading, siblings) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
       <AppContext.Provider value={{ visibleWorkers: [], workersById: new Map(), models: [] }}>
-        <WorkerProgressCard job={card} />
+        <ErrorBoundary>
+          <WorkerProgressCard job={card} />
+          {siblings}
+        </ErrorBoundary>
       </AppContext.Provider>,
     );
   });
@@ -47,6 +51,7 @@ afterEach(() => {
     mounted.container.remove();
     mounted = null;
   }
+  vi.restoreAllMocks();
 });
 
 const detail = (container) => container.querySelector("details.worker-progress-card__prefix-cache");
@@ -120,6 +125,42 @@ describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
     const rows = [...disclosure.querySelectorAll("li")].map((row) => row.textContent);
     expect(rows[0]).toMatch(/^Image 1: ran cached/);
     expect(rows[2]).toMatch(/^Image 3: ran prefill/);
+  });
+
+  it("contains a rejected chunk locally and retries a fresh import without removing neighboring job controls", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const importDetail = PrefixKvCacheDetailBoundary.loadDetail;
+    const load = vi.spyOn(PrefixKvCacheDetailBoundary, "loadDetail")
+      .mockRejectedValueOnce(new Error("chunk unavailable"))
+      .mockImplementation(importDetail);
+    const onCancel = vi.fn();
+    const neighbor = { ...job(), id: "neighbor", status: "queued" };
+    const container = await render(
+      job([{ selected: "cached", pricedBytes: GIB, path: "cached", cacheBytes: GIB, overflow: null }]),
+      undefined,
+      <WorkerProgressCard job={neighbor} onCancel={onCancel} />,
+    );
+    const button = (text) => [...container.querySelectorAll("button")].find((node) => node.textContent === text);
+    const cancel = button("Cancel");
+    expect(cancel, "a failed optional chunk must not replace the Queue or neighboring job controls").toBeTruthy();
+    act(() => cancel.click());
+    expect(onCancel).toHaveBeenCalledWith(neighbor);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Prompt cache details could not be loaded");
+    expect(load).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      button("Try again").click();
+    });
+    await act(async () => {
+      await vi.dynamicImportSettled();
+    });
+    expect(load, "retry must not reuse React.lazy's cached rejection").toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(detail(container).querySelector("summary").textContent).toBe("Prompt cache: cached");
+    expect(detail(container).open).toBe(false);
+    expect(button("Cancel"), "neighboring controls must stay mounted throughout retry").toBe(cancel);
+    act(() => cancel.click());
+    expect(onCancel).toHaveBeenCalledTimes(2);
   });
 
   it("renders nothing for a job whose provider prices no cache", async () => {
