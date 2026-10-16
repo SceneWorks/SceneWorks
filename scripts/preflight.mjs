@@ -232,8 +232,11 @@ export function commandInvocation(command, {
   const cli = env.npm_execpath ?? path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
   if (!exists(cli)) throw new Error(`Windows preflight cannot find npm CLI at ${cli}`);
   let childEnv = env;
-  if (command[1] === "run" && command[2] === "check") {
-    // Only the scaffold suite needs Git Bash; Windows' bash.exe may otherwise resolve to WSL.
+  const scaffoldCheck = command[1] === "run" && command[2] === "check";
+  const webTests = command[1] === "--prefix" && command[2] === "apps/web"
+    && command[3] === "run" && command[4] === "test";
+  if (scaffoldCheck || webTests) {
+    // Scaffold and Vitest suites need Git Bash; Windows' bash.exe may otherwise resolve to WSL.
     const bash = path.join(env.ProgramFiles ?? "C:/Program Files", "Git", "bin", "bash.exe");
     if (!exists(bash)) throw new Error(`Windows preflight requires Git Bash at ${bash}`);
     childEnv = { ...env, PATH: `${path.dirname(bash)};${env.PATH ?? ""}`, npm_config_script_shell: bash };

@@ -50,7 +50,7 @@ test("Windows npm uses Node CLI with literal arguments and preserves native comp
   }), /cannot find npm CLI/);
 });
 
-test("only Windows scaffold check selects Git Bash instead of WSL", () => {
+test("only Windows scaffold check and exact Vitest vector select Git Bash instead of WSL", () => {
   const env = { ProgramFiles: "C:/Program Files", PATH: "C:/MSVC/bin", npm_execpath: "C:/node/npm-cli.js" };
   const bash = path.join(env.ProgramFiles, "Git", "bin", "bash.exe");
   const invocation = commandInvocation(["npm", "run", "check"], {
@@ -60,6 +60,17 @@ test("only Windows scaffold check selects Git Bash instead of WSL", () => {
   assert.deepEqual(invocation.args, [env.npm_execpath, "run", "check"]);
   assert.equal(invocation.env.npm_config_script_shell, bash);
   assert.equal(invocation.env.PATH, `${path.dirname(bash)};${env.PATH}`);
+  const web = commandInvocation(["npm", "--prefix", "apps/web", "run", "test", "--", "literal&arg"], {
+    platform: "win32", env, exists: (file) => [env.npm_execpath, bash].includes(file),
+  });
+  assert.equal(web.env.npm_config_script_shell, bash);
+  assert.deepEqual(web.args, [env.npm_execpath, "--prefix", "apps/web", "run", "test", "--", "literal&arg"]);
+  for (const script of ["lint", "build"]) {
+    const native = commandInvocation(["npm", "--prefix", "apps/web", "run", script], {
+      platform: "win32", env, exists: (file) => file === env.npm_execpath,
+    });
+    assert.equal(native.env, env);
+  }
   assert.throws(() => commandInvocation(["npm", "run", "check"], {
     platform: "win32", env, exists: (file) => file === env.npm_execpath,
   }), /requires Git Bash/);
