@@ -317,6 +317,31 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
     assert!(resolve_weights_dir(&selected, &settings).is_err());
 }
 
+#[test]
+fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availability() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = false;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let req = request(
+            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true}}),
+        );
+        let result = validate_prompt_enhancement_request(&req, &settings);
+        #[cfg(target_os = "macos")]
+        assert!(result.is_ok(), "{result:?}");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+        #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -22408,6 +22433,7 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::Upsampling { .. } => "Upsampling",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",

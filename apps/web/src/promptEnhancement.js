@@ -8,14 +8,13 @@ const SUPPORTED_MODES_BY_BACKEND = new Map([
 ]);
 
 // The catalog flag says the model family owns the control. The remaining inputs are live route
-// facts: prompt enhancement is implemented only by FLUX.2-dev's base/edit providers, on both native
-// backends, and never by its separate strict-control provider.
+// facts: FLUX.2-dev owns base/edit; FLUX 3 Klein owns its current text-to-image route with a
+// separately installed optional upsampler. Neither grants enhancement to strict-control routes.
 export function promptEnhancementAvailable({ model, backend, mode, strictControlActive = false }) {
+  if (model?.ui?.promptEnhance !== true || strictControlActive) return false;
+  if (model?.id === "flux3_klein" || model?.id === "flux3_klein_base") {
+    return (backend === "mlx" || backend === "candle") && mode === "text_to_image";
+  }
   const supportedModes = SUPPORTED_MODES_BY_BACKEND.get(backend);
-  return Boolean(
-    model?.id === "flux2_dev" &&
-      model?.ui?.promptEnhance === true &&
-      supportedModes?.has(mode) &&
-      !strictControlActive,
-  );
+  return Boolean(model?.id === "flux2_dev" && supportedModes?.has(mode));
 }

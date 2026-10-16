@@ -3168,8 +3168,11 @@ pub(super) async fn generate_video_using(
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                         Progress::Loading(_) => {}
+                        // FLUX 3 image enhancement is not a Wan sampling/decode boundary.
+                        Progress::Upsampling { .. } => {}
                     }
                     let (status, stage, fraction, message) = match progress {
+                        Progress::Upsampling { .. } => continue,
                         Progress::Step { current, total } => (
                             JobStatus::Running,
                             ProgressStage::Generating,

@@ -1,5 +1,6 @@
 //! rust-api jobs tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
+use crate::validate_prompt_enhancement_payload;
 
 #[test]
 fn vector_detail_default_allows_five_minutes_per_svg() {
@@ -3522,6 +3523,60 @@ async fn create_image_job_rejects_oversized_advanced_object() {
     assert!(error["detail"]
         .as_str()
         .is_some_and(|detail| detail.contains("advanced")));
+}
+
+#[test]
+fn flux3_prompt_enhancement_validates_worker_shape_without_requiring_a_local_gpu_build() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let payload = |mode: &str, enabled: bool| {
+            json!({
+                "model": model, "mode": mode, "prompt": "as typed
+            ",
+                "advanced": { "enhancePrompt": enabled }
+            })
+            .as_object()
+            .unwrap()
+            .clone()
+        };
+        let bypass = payload("text_to_image", false);
+        let original = bypass.clone();
+        validate_prompt_enhancement_payload(&bypass).unwrap();
+        assert_eq!(bypass, original);
+        let enabled = payload("text_to_image", true);
+        // Docker API has no Candle dependency; the actual worker independently enforces native
+        // availability and optional-component installation. This is valid even on a backendless API.
+        validate_prompt_enhancement_payload(&enabled).unwrap();
+        for mode in [
+            "edit_image",
+            "character_image",
+            "style_variations",
+            "reference",
+        ] {
+            assert!(
+                validate_prompt_enhancement_payload(&payload(mode, true)).is_err(),
+                "{model}/{mode}"
+            );
+        }
+        for carrier in [
+            json!({"sourceAssetId":"source-1"}),
+            json!({"referenceAssetId":"ref-1"}),
+            json!({"referenceAssetIds":["ref-1"]}),
+        ] {
+            let mut invalid = enabled.clone();
+            invalid.extend(carrier.as_object().unwrap().clone());
+            assert!(validate_prompt_enhancement_payload(&invalid)
+                .unwrap_err()
+                .detail
+                .contains("cannot include source or reference"));
+        }
+        let mut untrusted = enabled;
+        untrusted.get_mut("advanced").unwrap()["promptEnhancement"] =
+            json!({"effectivePrompt":"injected"});
+        assert!(validate_prompt_enhancement_payload(&untrusted)
+            .unwrap_err()
+            .detail
+            .contains("worker-owned"));
+    }
 }
 
 #[tokio::test]
