@@ -251,15 +251,16 @@ async fn flux3_missing_native_handler_never_invokes_procedural_fallback() {
     );
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cache_head() {
     let root = tempfile::tempdir().unwrap();
     let hub = root.path().join("hub");
     std::fs::create_dir_all(&hub).unwrap();
-    let _hf = isolate_hf_hub_cache_to(&hub);
-    let mut settings = Settings::from_env();
-    settings.data_dir = root.path().to_path_buf();
+    let _hf = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
     let repo = "black-forest-labs/flux-3-image-klein-base";
     let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
     let stage = |repo: &str, revision: &str| {
@@ -277,7 +278,7 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
         snapshot
     };
     let expected = stage(repo, revision);
-    let write_receipt = |repo: &str, revision: &str, snapshot: &Path| {
+    let write_receipt = |repo: &str, revision: &str, snapshot: &std::path::Path| {
         let marker = root.path().join("models").join("flux3_klein_base");
         std::fs::create_dir_all(&marker).unwrap();
         let stamp =
@@ -287,34 +288,37 @@ fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cach
             "snapshotRevision":revision,"resolvedFiles":["model.safetensors"],"artifactTreeStamp":stamp
         })).unwrap()).unwrap();
     };
-    let selected = request(json!({"model":"flux3_klein_base"}));
-    let error = resolve_weights_dir(&selected, &settings).unwrap_err();
+    let resolve =
+        || resolve_pinned_native_package(root.path(), repo, revision, "flux3_klein_base", None);
+    let error = resolve().unwrap_err();
     assert!(error.to_string().contains("exact-revision install receipt"));
     let distilled_repo = "black-forest-labs/flux-3-image-klein";
     let distilled_revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
     let distilled = stage(distilled_repo, distilled_revision);
     write_receipt(distilled_repo, distilled_revision, &distilled);
-    assert!(resolve_weights_dir(&selected, &settings).is_err());
+    assert!(resolve().is_err());
     let wrong_revision = "0000000000000000000000000000000000000000";
     let wrong = stage(repo, wrong_revision);
     write_receipt(repo, wrong_revision, &wrong);
-    assert!(resolve_weights_dir(&selected, &settings).is_err());
+    assert!(resolve().is_err());
     write_receipt(repo, revision, &expected);
-    assert_eq!(
-        resolve_weights_dir(&selected, &settings).unwrap(),
-        Some(expected.clone())
-    );
+    assert_eq!(resolve().unwrap(), expected.clone());
     let wrong_override = root.path().join("models/another-checkpoint");
     std::fs::create_dir_all(&wrong_override).unwrap();
-    let overridden =
-        request(json!({"model":"flux3_klein_base", "advanced":{"modelPath":wrong_override}}));
-    assert!(resolve_weights_dir(&overridden, &settings).is_err());
+    assert!(resolve_pinned_native_package(
+        root.path(),
+        repo,
+        revision,
+        "flux3_klein_base",
+        Some(&wrong_override)
+    )
+    .is_err());
     std::fs::write(
         expected.join("model.safetensors"),
         b"changed under same snapshot path",
     )
     .unwrap();
-    assert!(resolve_weights_dir(&selected, &settings).is_err());
+    assert!(resolve().is_err());
 }
 
 #[test]

@@ -493,6 +493,56 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+fn require_legacy_fallback_allowed(model: &str) -> WorkerResult<()> {
+    if matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return Err(WorkerError::InvalidPayload(format!("unsupported: {model} requires its native MLX/Candle handler and verified pinned components. No native handler completed this request; update/enable the native worker and check the selected operation. Procedural or text-to-image fallback is disabled")));
+    }
+    Ok(())
+}
+
+/// The production dispatch/fallback decision, with the real stub invocation supplied by the
+/// caller. Kept backend-neutral so a missing/unlinked/disabled backend is testable without GPU.
+pub(super) async fn dispatch_legacy_fallback<F, Fut>(
+    model: &str,
+    handled: bool,
+    stub: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
+{
+    if handled {
+        return Ok(());
+    }
+    require_legacy_fallback_allowed(model)?;
+    stub().await
+}
+
+// Backend-neutral filesystem part of the actual canonical package resolution. Never infer
+// revision from cache HEAD or a directory name; use the worker-owned immutable receipt.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn resolve_pinned_native_package(
+    data_dir: &std::path::Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+    explicit: Option<&std::path::Path>,
+) -> WorkerResult<PathBuf> {
+    let pinned = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(data_dir, repo, revision, Some(model), None)
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("{model} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized credential. Unpinned cache snapshots are not a fallback")))?;
+    if let Some(explicit) = explicit {
+        if !explicit
+            .canonicalize()
+            .ok()
+            .zip(pinned.canonicalize().ok())
+            .is_some_and(|(explicit, pinned)| explicit == pinned)
+        {
+            return Err(WorkerError::InvalidPayload(format!("{model} modelPath does not match verified {repo}@{revision}; remove the override or install the pinned package")));
+        }
+    }
+    Ok(pinned)
+}
+
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,

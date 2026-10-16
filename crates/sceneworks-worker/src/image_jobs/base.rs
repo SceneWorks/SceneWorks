@@ -1991,22 +1991,6 @@ pub(crate) fn candle_weights_gap(request: &ImageRequest) -> Option<String> {
     }
 }
 
-fn require_legacy_fallback_allowed(model: &str) -> WorkerResult<()> {
-    if matches!(model, "flux3_klein" | "flux3_klein_base") {
-        return Err(WorkerError::InvalidPayload(format!("unsupported: {model} requires its native MLX/Candle handler and verified pinned components. No native handler completed this request; update/enable the native worker and check the selected operation. Procedural or text-to-image fallback is disabled")));
-    }
-    Ok(())
-}
-
-/// The production dispatch/fallback decision, with the real stub invocation supplied by the
-/// caller. Kept backend-neutral so a missing/unlinked/disabled backend is testable without GPU.
-pub(super) async fn dispatch_legacy_fallback<F, Fut>(model: &str, handled: bool, stub: F) -> WorkerResult<()>
-where F: FnOnce() -> Fut, Fut: std::future::Future<Output = WorkerResult<()>> {
-    if handled { return Ok(()); }
-    require_legacy_fallback_allowed(model)?;
-    stub().await
-}
-
 /// Resolve the weights snapshot directory: an explicit `modelPath` dir wins, else the
 /// HuggingFace cache snapshot for the model repo. `None` when the model is not a known
 /// engine family or its snapshot is absent. Available on the candle lane too (sc-5501): the
@@ -2028,16 +2012,8 @@ pub(crate) fn resolve_weights_dir(
         if model_repo_with_default(request, repo) != repo {
             return Err(WorkerError::InvalidPayload(format!("{} requires pinned {repo}@{revision}; a different repo is not this checkpoint", request.model)));
         }
-        let pinned = crate::model_jobs::huggingface_receipt_weights_dir_at_revision(
-            &settings.data_dir, repo, revision, Some(&request.model), None,
-        ).ok_or_else(|| WorkerError::InvalidPayload(format!("{} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized Hugging Face credential. Unpinned cache snapshots are not a fallback", request.model)))?;
-        if let Some(path) = model_path_override(request) {
-            let explicit = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
-            if !explicit.canonicalize().ok().zip(pinned.canonicalize().ok()).is_some_and(|(explicit, pinned)| explicit == pinned) {
-                return Err(WorkerError::InvalidPayload(format!("{} modelPath does not match the verified {repo}@{revision} snapshot; remove the override or install the pinned package", request.model)));
-            }
-        }
-        return Ok(Some(pinned));
+        let explicit = model_path_override(request).map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath")).transpose()?;
+        return Ok(Some(resolve_pinned_native_package(&settings.data_dir, repo, revision, &request.model, explicit.as_deref())?));
     }
     if let Some(path) = model_path_override(request) {
         let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
