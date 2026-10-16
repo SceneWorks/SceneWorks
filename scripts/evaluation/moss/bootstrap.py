@@ -22,24 +22,18 @@ import time
 import urllib.request
 import zipfile
 
+from ownership import (REPOS, RUNNER_GPU_UUID, ExecutionGuard, calibration_bundle,
+    physical, gpu_rows, compute_pids, desktop_identities, idle_device, verify_staged, validate_baseline)
+
 SOURCE = 'ba2954f47bfd75a3186002e3cef859c4e4e1d37d'
 INFERENCE = '91ffb4a819aa2990c652db2d881ba0b9b10126ce'
-RUNNER_GPU_UUID = 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe'
 PIPELINE = '1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31'
 BASE = Path(r'E:\sceneworks-evaluation\moss')
 PACKAGES = ('torch==2.9.1+cu128', 'diffusers==0.38.0', 'transformers==5.3.0',
-            'accelerate==1.10.1', 'safetensors==0.6.2', 'Pillow==12.1.1',
+            'accelerate==1.10.1', 'safetensors==0.8.0', 'Pillow==12.1.1',
             'psutil==7.2.2', 'huggingface-hub==1.5.0')
 DEADLINE = None
 COMMAND_LOG = None
-REPOS = {
- 'moss_base': ('OpenMOSS-Team/MOSS-Image-Base', '1ceede80badddd6a7812069619edaa5633587192'),
- 'moss_sft': ('OpenMOSS-Team/MOSS-Image-SFT', 'fc5de0d56fc910cbca6f6625a70f5f582b26deb1'),
- 'moss_dmd': ('lodestones/MOSS-Image-SFT-8-steps-dmd', '5ff314b4c1470876b114b810146085db8a181a6e'),
- 'qwen_image_2_1': ('SceneWorks/qwen-image-2-1-mlx', 'ef03535eac756dd21feb7ac47c4f2df3e9b5b3c0'),
- 'flux2_klein_9b': ('SceneWorks/flux2-klein-9b-mlx', '1902693279fcfb828919370dfac2b8922d99499a'),
- 'z_image_turbo': ('SceneWorks/z-image-turbo-mlx', 'bb2bc9893b3c49ae96c813350775f791a2e8bc80'),
-}
 
 
 def require(ok, message):
@@ -77,17 +71,12 @@ def timestamp(value):
     return parsed
 
 
-def physical(path):
-    for part in [path, *path.parents]:
-        require(not part.is_symlink() and not (part.exists() and getattr(part.stat(), 'st_file_attributes', 0) & 1024), 'reparse point in artifact path')
-
-
 def control(mode, raw, base=BASE):
     require(len(raw) <= 8192, 'oversized control')
     value = json.loads(raw)
     required = {'campaign', 'deadline_utc'}
     allowed = required | ({'ownership', 'gpu_uuid'} if mode == 'freeze' else
-                          {'protocol_sha256', 'lease'} if mode == 'calibration' else set())
+                          ({'protocol_sha256', 'lease', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization'} if mode == 'scored' else {'protocol_sha256', 'lease'}) if mode in ('calibration', 'scored') else set())
     require(set(value) == allowed, f'{mode} control fields must be exactly {sorted(allowed)}')
     require(re.fullmatch(r'sc-26322-[a-z0-9][a-z0-9-]{0,48}', value['campaign']), 'invalid campaign id')
     require(utc() < timestamp(value['deadline_utc']) <= utc() + dt.timedelta(hours=6), 'deadline must be in next six hours')
@@ -100,23 +89,22 @@ def control(mode, raw, base=BASE):
         own = value['ownership']
         require(set(own) == expected and all(own.values()), 'complete ownership required')
         require(type(own['timeout_seconds']) is int and 0 < own['timeout_seconds'] <= 1800, 'per-cell timeout exceeds calibration bound')
-    if mode == 'calibration':
+    if mode in ('calibration', 'scored'):
         require(re.fullmatch(r'[0-9a-f]{64}', value['protocol_sha256']), 'reviewed frozen protocol SHA256 required')
         lease = value['lease']
         require(set(lease) == {'id', 'owner', 'host', 'gpu_uuid', 'expires_utc', 'external_owners_reconciled', 'desktop_baseline', 'baseline_max_memory_mib', 'baseline_max_utilization_percent'}, 'complete device lease required')
         require(all(lease[k] for k in ('id', 'owner', 'host', 'gpu_uuid', 'expires_utc')) and lease['external_owners_reconciled'] is True, 'coordinator must reconcile ALL physical host owners')
-        require(type(lease['desktop_baseline']) is list, 'reviewed desktop baseline list required (empty only on empty device)')
-        for item in lease['desktop_baseline']:
-            require(set(item) == {'pid', 'name', 'created_epoch'} and type(item['pid']) is int and item['pid'] > 0
-                    and isinstance(item['name'], str) and item['name'] and '[' not in item['name']
-                    and type(item['created_epoch']) in (float, int) and item['created_epoch'] > 0, 'complete known process identity required')
-        require(len({p['pid'] for p in lease['desktop_baseline']}) == len(lease['desktop_baseline']), 'duplicate desktop process identity')
-        require(type(lease['baseline_max_memory_mib']) in (float, int) and 0 <= lease['baseline_max_memory_mib'] <= 4096,
-                'reviewed desktop memory ceiling must be between0 and4096MiB')
-        require(type(lease['baseline_max_utilization_percent']) in (float, int) and 0 <= lease['baseline_max_utilization_percent'] <= 5,
-                'reviewed idle desktop utilization ceiling must be between0 and5percent')
+        validate_baseline(lease)
         require(lease['gpu_uuid'] == RUNNER_GPU_UUID, 'runner evaluation is restricted to the verified physical GPU1 UUID')
         require(timestamp(lease['expires_utc']) >= timestamp(value['deadline_utc']), 'lease must cover whole deadline')
+    if mode == 'scored':
+        for key in ('calibration_receipts_sha256', 'calibration_estimate_sha256'):
+            require(re.fullmatch(r'[0-9a-f]{64}', value[key]), 'accepted calibration digest required')
+        authorization = value['authorization']
+        require(set(authorization) == {'id', 'coordinator', 'accepted_calibration', 'max_scored_outputs', 'acknowledge_shape_uncertainty'}
+                and authorization['id'] and authorization['coordinator'] == value['lease']['owner']
+                and authorization['accepted_calibration'] is True and authorization['max_scored_outputs'] == 288
+                and authorization['acknowledge_shape_uncertainty'] is True, 'explicit coordinator authorization for exactly288 scored outputs required')
     return value, root
 
 
@@ -232,19 +220,30 @@ def stage(root, key):
                 metadata=str(metadata_path), metadata_sha256=digest(metadata_path))
 
 
+def dependency_resolution():
+    resolution = read(Path(__file__).with_name('dependency-resolution.json'))
+    require(resolution['primary'] == list(PACKAGES) and len(resolution['packages']) == 43, 'reviewed dependency closure drift')
+    return resolution
+
+
 def lock_wheels(root):
+    resolution = dependency_resolution()
     wheels = root / 'wheels'
     lock = root / 'requirements.lock'
+    expected = {item['sha256'] for item in resolution['packages']}
     if lock.exists():
         manifest = read(root / 'wheels.json')
+        require(manifest['primary'] == list(PACKAGES) and {item['sha256'] for item in manifest['files']} == expected, 'retained wheel closure is from another dependency resolution')
         require(manifest['requirements_sha256'] == digest(lock), 'wheel lock drift')
         for item in manifest['files']:
             require(digest(wheels / item['name']) == item['sha256'], 'wheel content drift')
         return
     wheels.mkdir(exist_ok=True)
-    # Resolve only binary wheels for THIS host's Python3.12; no source builds.
-    run([sys.executable, '-m', 'pip', 'download', '--only-binary=:all:', '--dest', wheels,
-         '--index-url', 'https://pypi.org/simple', '--extra-index-url', 'https://download.pytorch.org/whl/cu128', *PACKAGES], timeout=7200)
+    # Metadata-only Windows resolution is checked in; fetch exactly that43-wheel closure.
+    links = [item['url'] + '#sha256=' + item['sha256'] for item in resolution['packages']]
+    run([sys.executable, '-m', 'pip', 'download', '--no-deps', '--only-binary=:all:', '--dest', wheels, *links], timeout=7200)
+    expected = {item['sha256'] for item in resolution['packages']}
+    require({digest(path) for path in wheels.glob('*.whl')} == expected, 'downloaded wheel closure differs from reviewed Windows resolution')
     requirements = []
     manifest = []
     seen = set()
@@ -292,7 +291,7 @@ def prepare(root, value):
     harness = root / 'harness'
     harness.mkdir(exist_ok=True)
     for source in Path(__file__).parent.iterdir():
-        if source.suffix == '.py' or source.name == 'corpus.json':
+        if source.suffix == '.py' or source.name in ('corpus.json', 'dependency-resolution.json'):
             destination = harness / source.name
             if destination.exists():
                 require(digest(destination) == digest(source), 'harness changed during preparation; fresh campaign required')
@@ -323,63 +322,6 @@ def prepare(root, value):
     print(f'Prepared {root}; next: review artifact/dependency receipts then freeze with ownership/device UUID.', flush=True)
 
 
-def gpu_rows():
-    data = run(['nvidia-smi', '--query-gpu=index,uuid,name,memory.total,driver_version,memory.free,memory.used,utilization.gpu', '--format=csv,noheader,nounits'])
-    return [dict(zip(('index','uuid','name','memory_mib','driver','free_mib','used_mib','utilization_percent'), (v.strip() for v in row))) for row in csv.reader(data.splitlines())]
-
-
-def compute_pids(uuid):
-    data = run(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid', '--format=csv,noheader,nounits'])
-    pids = set()
-    for row in csv.reader(data.splitlines()):
-        if len(row) == 2 and row[0].strip() == uuid:
-            require(row[1].strip().isdigit(), 'unattributable GPU process')
-            pids.add(int(row[1].strip()))
-    return pids
-
-
-def desktop_identities(lease):
-    import psutil
-    for item in lease['desktop_baseline']:
-        # Permission denied, missing or reused PID is unresolved ownership, never an allow.
-        process = psutil.Process(item['pid'])
-        require(process.name().lower() == item['name'].lower() and abs(process.create_time() - item['created_epoch']) < .01,
-                f'desktop baseline identity changed for PID{item["pid"]}')
-    return {p['pid'] for p in lease['desktop_baseline']}
-
-
-def idle_device(lease):
-    baseline = desktop_identities(lease)
-    require(compute_pids(lease['gpu_uuid']) == baseline, 'device owners differ from reviewed desktop baseline')
-    matches = [g for g in gpu_rows() if g['uuid'] == lease['gpu_uuid']]
-    require(len(matches) == 1, 'leased device absent')
-    gpu = matches[0]
-    require(gpu['index'] == '1' and gpu['uuid'] == RUNNER_GPU_UUID, 'physical GPU1 identity changed; review ownership before proceeding')
-    require(float(gpu['used_mib']) <= lease['baseline_max_memory_mib'] and
-            float(gpu['utilization_percent']) <= lease['baseline_max_utilization_percent'],
-            'desktop device exceeds reviewed idle memory/utilization ceiling')
-    return dict(gpu=gpu, desktop_baseline=lease['desktop_baseline'],
-                limitation='Reviewed desktop processes share this physical device; device-wide peak memory includes their presence.')
-
-
-def verify_staged(root, staged, hash_weights=True):
-    for key, item in staged.items():
-        require((item['repo'], item['revision']) == REPOS[key], 'staged model revision drift')
-        require(digest(item['metadata']) == item['metadata_sha256'], 'upstream metadata receipt drift')
-        snapshot = Path(item['snapshot'])
-        repo_root = snapshot.parent.parent
-        require((repo_root / 'refs' / 'main').read_text() == item['revision'], 'Hub cache ref drift')
-        require({p.name for p in snapshot.parent.iterdir()} == {item['revision']}, 'unexpected snapshot in isolated cache')
-        expected = {f['path'] for f in item['files']}
-        actual = {str(p.resolve()) for p in snapshot.rglob('*') if p.is_file()}
-        require(actual == expected, 'snapshot input closure changed')
-        for file in item['files']:
-            path = Path(file['path'])
-            physical(path)
-            if hash_weights:
-                require(digest(path) == file['sha256'], 'prepared artifact bytes changed')
-
-
 def prepared(root):
     value = read(root / 'prepared.json')
     require(value['sceneworks_source'] == SOURCE and value['inference'] == INFERENCE, 'prepared source drift')
@@ -406,6 +348,7 @@ def freeze(root, value):
     manifest['hardware'] = dict(host=socket.gethostname(), gpu_uuid=gpu['uuid'], gpu_name=gpu['name'],
         gpu_memory_bytes=int(float(gpu['memory_mib']) * 1024**2), host_memory_bytes=psutil.virtual_memory().total)
     manifest['ownership'] = value['ownership']
+    manifest['preparation'] = dict(path=str((root / 'prepared.json').resolve()), sha256=digest(root / 'prepared.json'))
     shared = prep['staged']['moss_sft']['snapshot']
     for index, config in enumerate(manifest['configs']):
         config['snapshot'] = prep['staged'][config['id']]['snapshot']
@@ -443,86 +386,166 @@ def device_lock(base, uuid, lease):
         path.unlink()
 
 
-def kill_owned(process):
+def remember_owned(process, known):
     import psutil
-    if process.poll() is not None:
-        return
     try:
-        children = psutil.Process(process.pid).children(recursive=True)
+        for child in psutil.Process(process.pid).children(recursive=True):
+            known[child.pid] = child.create_time()
     except psutil.NoSuchProcess:
-        children = []
+        pass
+
+
+def kill_owned(process, known=None):
+    """Only stop identities observed in this explicitly spawned process tree."""
+    import psutil
+    known = {} if known is None else known
+    remember_owned(process, known)
+    children = []
+    for pid, created in known.items():
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child = psutil.Process(pid)
+            if child.create_time() == created:
+                children.append(child)
     for child in reversed(children):
         with contextlib.suppress(psutil.NoSuchProcess):
             child.terminate()
-    process.terminate()
-    try:
-        process.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        process.kill()
-        process.wait(timeout=5)
+    if process.poll() is None:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
     for child in children:
         with contextlib.suppress(psutil.NoSuchProcess):
             if child.is_running():
                 child.kill()
 
 
-def calibrate(root, value):
+def accepted_scored_authorization(root, value):
+    require(value['calibration_receipts_sha256'] == calibration_bundle(root / 'protocol.lock.json', root / 'run'), 'coordinator accepted calibration digest differs from actual successful receipts')
+    require(value['calibration_estimate_sha256'] == digest(root / 'calibration-estimate.json'), 'coordinator accepted estimate digest differs from actual measurement')
+    accepted = {key: value[key] for key in ('protocol_sha256', 'calibration_receipts_sha256', 'calibration_estimate_sha256', 'authorization')}
+    path = root / 'scored-authorization.json'
+    if path.exists():
+        require(read(path) == accepted, 'scored authorization changed; no automatic replacement')
+    else:
+        write(path, accepted)
+    return dict(path=str(path.resolve()), sha256=digest(path))
+
+
+def calibration_estimate(manifest, results, parity=None):
+    require(len(results) == 6 and all(r['status'] == 'ok' for r in results.values()), 'six successful calibration measurements required')
+    conditions = {}
+    for key in REPOS:
+        record = next(r for r in results.values() if r['cell']['config_id'] == key)
+        width, height = record['cell']['width'], record['cell']['height']
+        require((width, height) == (1024, 1024), 'calibration must use first actual1024x1024 scored fixture')
+        compatible = [case for case in manifest['corpus']['cases'] if (case['width'], case['height']) == (width, height)]
+        conditions[key] = dict(calibration_canvas=[width, height], calibration_outputs=1,
+            candidate_generation_seconds=record['metrics']['generation_seconds'],
+            load_seconds=record['metrics'].get('load_seconds'),
+            same_canvas_scored_outputs=len(compatible) * len(manifest['corpus']['seeds']),
+            same_canvas_generation_estimate_seconds=record['metrics']['generation_seconds'] * len(compatible) * len(manifest['corpus']['seeds']),
+            other_canvas_shapes=sorted({(case['width'], case['height']) for case in manifest['corpus']['cases'] if (case['width'], case['height']) != (width, height)}))
+    counts = {}
+    for case in manifest['corpus']['cases']:
+        shape = f"{case['width']}x{case['height']}"
+        counts[shape] = counts.get(shape, 0) + len(manifest['corpus']['seeds'])
+    return dict(scored_outputs=288, calibration_outputs=6, conditions=conditions,
+        dmd_parity_overhead=parity,
+        scored_outputs_by_canvas_per_config=counts,
+        scored_outputs_by_canvas_all_configs={shape: count * 6 for shape, count in counts.items()},
+        whole_campaign_estimate_seconds=None,
+        limitations='One existing1024x1024 fixture per config; prompt variance and other canvas shapes unmeasured. Separate DMD parity oracle/candidate forwards are not candidate generation latency. Fresh process/worker from staged cache, not OS-cold disk; hash checks warm filesystem cache. Reviewed desktop baseline may affect timing/device-wide memory.',
+        next_action='Coordinator reviews all measurements and uncertainty, then supplies accepted receipt/estimate digests and explicit scored authorization')
+
+
+def execute_phase(root, value, phase):
     prep = prepared(root)
     protocol = read(root / 'protocol.lock.json')
     require(protocol['sha256'] == value['protocol_sha256'], 'protocol differs from coordinator-reviewed hash')
     sys.path.insert(0, str(root / 'harness'))
-    from evaluate import load_lock, cells, receipts
+    from evaluate import load_lock, cells, parity_cells, receipts, seal
     manifest = load_lock(root / 'protocol.lock.json', verify_inputs=True)
     lease = value['lease']
-    require(lease['gpu_uuid'] == manifest['hardware']['gpu_uuid'] and lease['host'] == manifest['hardware']['host'] == socket.gethostname(), 'lease/device/host mismatch')
+    require(lease['gpu_uuid'] == manifest['hardware']['gpu_uuid'] and lease['host'].casefold() == manifest['hardware']['host'].casefold() == socket.gethostname().casefold(), 'lease/device/host mismatch')
     require(lease['id'] == manifest['ownership']['lease'] and lease['owner'] == manifest['ownership']['responsible_chat'], 'lease owner mismatch')
-    require(any(g['index'] == '1' and g['uuid'] == lease['gpu_uuid'] == RUNNER_GPU_UUID for g in gpu_rows()), 'leased physical GPU1 absent')
-    require(len(list(cells(manifest, 'calibration'))) == 6, 'calibration must contain exactly six cells')
-    campaign = root / 'calibration'
-    require(not campaign.exists(), 'calibration already attempted; inspect receipt, no automatic retry')
-    import psutil
-    lock_record = dict(lease_id=lease['id'], host=lease['host'], gpu_uuid=lease['gpu_uuid'],
+    require(len(list(cells(manifest, phase))) == (6 if phase == 'calibration' else 288), 'fixed execution budget changed')
+    campaign = root / 'run'
+    campaign.mkdir(exist_ok=True)
+    expected_images = {cell['id'] + '.png' for mode in ('calibration', 'scored') for cell in cells(manifest, mode)}
+    require(not (campaign / 'outputs').exists() or all(path.name in expected_images for path in (campaign / 'outputs').iterdir()), 'unexpected output outside fixed294-image plan')
+    authority = accepted_scored_authorization(root, value) if phase == 'scored' else None
+    lock_record = dict(lease_id=lease['id'], host=lease['host'], gpu_uuid=lease['gpu_uuid'], phase=phase,
         protocol_sha256=protocol['sha256'], deadline_epoch=timestamp(value['deadline_utc']).timestamp(),
-        owner_pid=os.getpid(), responsible_chat=lease['owner'],
-        job=os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'))
+        lease_expires_epoch=timestamp(lease['expires_utc']).timestamp(), owner_pid=os.getpid(), responsible_chat=lease['owner'],
+        prepared_root=str(root.resolve()), prepared_sha=digest(root / 'prepared.json'),
+        external_owners_reconciled=lease['external_owners_reconciled'],
+        desktop_baseline=lease['desktop_baseline'], baseline_max_memory_mib=lease['baseline_max_memory_mib'],
+        baseline_max_utilization_percent=lease['baseline_max_utilization_percent'],
+        job=os.environ.get('GITHUB_RUN_ID', 'local') + '-' + os.environ.get('GITHUB_RUN_ATTEMPT', '1'),
+        scored_authorization=authority)
     with device_lock(root.parent, lease['gpu_uuid'], lock_record) as held_lock:
-        observation = idle_device(lease)
-        campaign.mkdir()
-        write(campaign / 'background-device.json', observation)
         env = dict(os.environ, CUDA_DEVICE_ORDER='PCI_BUS_ID', CUDA_VISIBLE_DEVICES=lease['gpu_uuid'], HF_HUB_OFFLINE='1', TRANSFORMERS_OFFLINE='1', MOSS_DEVICE_LOCK=str(held_lock.resolve()), MOSS_LEASE_ID=lease['id'], MOSS_PROTOCOL_SHA256=protocol['sha256'])
+        guard = ExecutionGuard(manifest, protocol['sha256'], phase=phase, allow_owner=True, environ=env)
+        observation = guard.check(idle=True)
+        job = lock_record['job']
+        write(campaign / (phase + '-background-' + job + '.json'), observation)
         for config in manifest['configs']:
-            verify_staged(root, prep['staged'], hash_weights=False)
-            require(utc() < timestamp(value['deadline_utc']), 'calibration deadline reached')
-            log = campaign / ('transport-' + config['id'] + '.log')
+            guard.check(idle=True)
+            _, completed_before = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
+            require(all(record['status'] == 'ok' for record in completed_before.values()), 'failed cells cannot resume or be silently accepted')
+            pending = [cell['id'] for cell in cells(manifest, phase) if cell['config_id'] == config['id'] and cell['id'] not in completed_before]
+            if not pending:
+                continue
+            log = campaign / (phase + '-transport-' + config['id'] + '-' + job + '.log')
             with log.open('x', encoding='utf-8') as stream:
-                process = subprocess.Popen([str(python(root)), str(root / 'harness' / 'run.py'), str(root / 'protocol.lock.json'), str(campaign), '--config', config['id'], '--phase', 'calibration'], env=env, stdout=stream, stderr=subprocess.STDOUT)
+                process = subprocess.Popen([str(python(root)), str(root / 'harness' / 'run.py'), str(root / 'protocol.lock.json'), str(campaign), '--config', config['id'], '--phase', phase], env=env, stdout=stream, stderr=subprocess.STDOUT)
+                owned = {}
                 try:
                     while process.poll() is None:
-                        require(utc() < timestamp(value['deadline_utc']), 'calibration deadline reached')
-                        try:
-                            owned = {process.pid} | {p.pid for p in psutil.Process(process.pid).children(recursive=True)}
-                        except psutil.NoSuchProcess:
-                            owned = {process.pid}
-                        require(compute_pids(lease['gpu_uuid']) <= owned | desktop_identities(lease), 'foreign process appeared on leased device; aborting owned runtime')
+                        remember_owned(process, owned)
+                        guard.check()
                         time.sleep(1)
-                    require(process.returncode == 0, f'calibration process failed; inspect {log}')
+                    require(process.returncode == 0, f'{phase} process failed; inspect {log}')
+                except BaseException as exc:
+                    # The outer watchdog may stop the child before its own guard can persist this.
+                    # Previously completed validated cells remain immutable; this pending attempt is invalid.
+                    parity_ids = [cell['id'] for cell in parity_cells(manifest, phase)] if config['id'] == 'moss_dmd' else []
+                    write(campaign / 'invalidations' / (phase + '-' + config['id'] + '-' + job + '-transport.json'),
+                          seal(dict(lock_sha256=protocol['sha256'], cell_ids=pending, parity_cell_ids=parity_ids,
+                                    reason=f'outer owned-runtime watchdog stopped attempt: {exc}', attempt=job)))
+                    raise
                 finally:
-                    kill_owned(process)
-            # A completed command can still have failure receipts; do not advance silently.
-            _, results = receipts(root / 'protocol.lock.json', campaign, 'calibration', complete=False)
-            require(all(r['status'] == 'ok' for r in results.values()), 'calibration cell failed; review receipt before any further allocation')
-            verify_staged(root, prep['staged'], hash_weights=False)
-            idle_device(lease)  # Owned model processes must release before the next configuration.
-        _, results = receipts(root / 'protocol.lock.json', campaign, 'calibration')
-        estimate = {key: sum(r['metrics']['generation_seconds'] for r in results.values() if r['cell']['config_id'] == key) * 48 for key in REPOS}
-        write(root / 'calibration-estimate.json', dict(scored_outputs=288, calibration_outputs=6, estimate_generation_seconds=estimate,
-            limitations='512x512 calibration does not estimate full resolution scaling; measured load time is separate. Reviewed desktop baseline is recorded in calibration/background-device.json and can affect device-wide memory/timing. Review before scored authorization.', next_action='Coordinator reviews measured calibration and gives separate scored command. Transport cannot run scored cells.'))
+                    kill_owned(process, owned)
+            _, results = receipts(root / 'protocol.lock.json', campaign, phase, complete=False)
+            require(all(r['status'] == 'ok' for r in results.values()), 'execution cell failed; no automatic retry or further allocation')
+            guard.check(idle=True)
+        _, results = receipts(root / 'protocol.lock.json', campaign, phase)
+        require(all(record['status'] == 'ok' for record in results.values()), 'phase contains failed cells; not complete')
+        if phase == 'calibration':
+            parity_records = []
+            for path in sorted((campaign / 'parity').glob('*.json')):
+                record = read(path)
+                evidence = record['evidence']
+                parity_records.append(dict(path=str(path.resolve()), sha256=digest(path),
+                    numerical_seconds=evidence['elapsed_seconds'], initialization_seconds=evidence.get('initialization_seconds'),
+                    total_process_seconds=evidence.get('total_process_seconds'), forward_count=evidence['forward_count'], generated_images=evidence['generated_images']))
+            estimate = calibration_estimate(manifest, results, parity_records)
+            path = root / 'calibration-estimate.json'
+            if path.exists():
+                require(read(path) == estimate, 'calibration estimate changed')
+            else:
+                write(path, estimate)
+            print('Calibration receipt bundle: ' + calibration_bundle(root / 'protocol.lock.json', campaign), flush=True)
+            print('Calibration estimate SHA256: ' + digest(path), flush=True)
 
 
 def main():
     global DEADLINE, COMMAND_LOG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('mode', choices=('prepare', 'freeze', 'calibration'))
+    parser.add_argument('mode', choices=('prepare', 'freeze', 'calibration', 'scored'))
     args = parser.parse_args()
     value, root = control(args.mode, os.environ.get('MOSS_CONTROL_JSON', '{}'))
     require(os.name == 'nt', 'Windows real-weights host only')
@@ -541,15 +564,15 @@ def main():
     COMMAND_LOG = root / ('job-' + job + '-' + args.mode + '.log')
     require(not receipt.exists(), 'job receipt exists')
     result = dict(mode=args.mode, root=str(root.resolve()), job=job, deadline_utc=value['deadline_utc'],
-        log=str(COMMAND_LOG.resolve()), resume_command=f'python {Path(__file__).resolve()} {args.mode} (same reviewed MOSS_CONTROL_JSON; failed calibration requires reviewed fresh campaign)',
-        next_action='Inspect preparation/protocol/calibration receipts before next explicit command', started_utc=utc().isoformat(), accelerator_execution_requested=args.mode == 'calibration', workflow_revision=os.environ.get('GITHUB_SHA'), transport_sha256=digest(__file__), sceneworks_source=SOURCE, inference=INFERENCE)
+        log=str(COMMAND_LOG.resolve()), resume_command=f'python {Path(__file__).resolve()} {args.mode} (reviewed MOSS_CONTROL_JSON with current lease/deadline; completed immutable cells resume; failed cells never retry)',
+        next_action='Inspect preparation/protocol/calibration receipts before next explicit command', started_utc=utc().isoformat(), accelerator_execution_requested=args.mode in ('calibration', 'scored'), workflow_revision=os.environ.get('GITHUB_SHA'), transport_sha256=digest(__file__), sceneworks_source=SOURCE, inference=INFERENCE)
     try:
         if args.mode == 'prepare':
             prepare(root, value)
         else:
             # Freeze/calibration run in the exact locked environment prepared earlier.
             require(Path(sys.executable).resolve() == python(root).resolve(), 'use prepared venv Python for freeze/calibration')
-            (freeze if args.mode == 'freeze' else calibrate)(root, value)
+            (freeze if args.mode == 'freeze' else lambda r, v: execute_phase(r, v, args.mode))(root, value)
         result['status'] = 'completed'
     except BaseException as exc:
         result.update(status='failed', error=f'{type(exc).__name__}: {exc}')

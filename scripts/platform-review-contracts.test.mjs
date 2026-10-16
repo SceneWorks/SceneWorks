@@ -5402,7 +5402,7 @@ test("MOSS execution uses existing registered path, fixed script, and pre-checko
   assert.match(job, /group: windows-candle-gpu-real-weights/);
   assert.match(job, /cancel-in-progress: false/);
   assert.match(job, /MOSS_CONTROL_JSON: \$\{\{ inputs\.moss_control_json \}\}/);
-  for (const mode of ["prepare", "freeze", "calibration"]) {
+  for (const mode of ["prepare", "freeze", "calibration", "scored"]) {
     assert.ok(job.includes(`python scripts/evaluation/moss/bootstrap.py ${mode}`) || job.includes(`python scripts\\evaluation\\moss\\bootstrap.py ${mode}`));
   }
   const refusal = job.indexOf("Refuse mixed MOSS execution flags before checkout");
@@ -5414,6 +5414,8 @@ test("MOSS execution uses existing registered path, fixed script, and pre-checko
     const body = step.split(/run: \|/)[1];
     if (body) assert.doesNotMatch(body, /\$\{\{\s*inputs\./, "dispatch input must travel only through environment");
   }
-  assert.doesNotMatch(job, /--phase scored|bootstrap.py scored/);
+  assert.match(job, /bootstrap.py scored/);
+  assert.match(job, /scored-authorization.json/);
+  assert.match(job, /completed receipts persist, failed cells never retry/);
   assert.match(job, /persist-credentials: false/);
 });

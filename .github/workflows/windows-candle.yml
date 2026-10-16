@@ -160,13 +160,13 @@ on:
   workflow_dispatch:
     inputs:
       moss_image_comparison_mode:
-        description: "SC-26322 transport: read-only telemetry, CPU preparation/freeze, or reviewed six-output calibration"
+        description: "SC-26322 transport: read-only telemetry, CPU preparation/freeze, six-output calibration, or accepted fixed-budget scored execution"
         required: false
         type: choice
-        options: ["off", telemetry, prepare, freeze, calibration]
+        options: ["off", telemetry, prepare, freeze, calibration, scored]
         default: "off"
       moss_control_json:
-        description: "SC-26322 strict control JSON; campaign/deadline plus freeze ownership or calibration protocol hash and device UUID lease. No scored mode."
+        description: "SC-26322 strict control JSON; campaign/deadline plus freeze ownership or calibration protocol hash and device UUID lease; scored also requires accepted calibration digests and explicit authorization."
         required: false
         type: string
         default: "{}"
@@ -1855,10 +1855,10 @@ jobs:
           path: ${{ runner.temp }}/moss-telemetry-${{ github.run_id }}-${{ github.run_attempt }}/
           if-no-files-found: warn
 
-  # Preparation never allocates CUDA. Calibration alone may execute the frozen six cells.
+  # Preparation never allocates CUDA. Calibration is six existing fixtures; scored requires accepted calibration.
   # Uses this registered workflow path at the story ref; a new workflow is not dispatchable yet.
   moss-image-comparison-execution:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'prepare' || inputs.moss_image_comparison_mode == 'freeze' || inputs.moss_image_comparison_mode == 'calibration') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'prepare' || inputs.moss_image_comparison_mode == 'freeze' || inputs.moss_image_comparison_mode == 'calibration' || inputs.moss_image_comparison_mode == 'scored') }}
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -1886,7 +1886,7 @@ jobs:
           foreach ($flag in @('PROVISION', 'FIVE_RUNG', 'LTX', 'EPIC_20738', 'YUE2', 'YUE2_ACCEPTANCE', 'YUE2_FP8', 'IRIS')) {
             if ([Environment]::GetEnvironmentVariable($flag) -eq 'true') { throw "MOSS comparison cannot combine with $flag" }
           }
-          if ($env:MOSS_MODE -notin @('prepare', 'freeze', 'calibration')) { throw 'Invalid MOSS execution mode' }
+          if ($env:MOSS_MODE -notin @('prepare', 'freeze', 'calibration', 'scored')) { throw 'Invalid MOSS execution mode' }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -1915,12 +1915,18 @@ jobs:
         run: |
           python scripts/evaluation/moss/bootstrap.py calibration
           if ($LASTEXITCODE -ne 0) { throw 'MOSS calibration failed; no automatic retry' }
+      - name: Execute accepted fixed 288-output scored plan with immutable resume
+        if: ${{ inputs.moss_image_comparison_mode == 'scored' }}
+        shell: powershell
+        run: |
+          python scripts/evaluation/moss/bootstrap.py scored
+          if ($LASTEXITCODE -ne 0) { throw 'MOSS scored execution failed; completed receipts persist, failed cells never retry' }
       - name: Upload persistent MOSS control receipts
         if: ${{ always() && env.MOSS_RECEIPTS != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: moss-control-${{ github.run_id }}-${{ github.run_attempt }}
-          # Exact persistent files remain on the host. Upload metadata only, never weights/wheels.
+          # Upload evaluation metadata and outputs; never model weights, wheels or binaries.
           path: |
             ${{ env.MOSS_RECEIPTS }}/job-*.json
             ${{ env.MOSS_RECEIPTS }}/job-*.log
@@ -1929,7 +1935,11 @@ jobs:
             ${{ env.MOSS_RECEIPTS }}/wheels.json
             ${{ env.MOSS_RECEIPTS }}/protocol.lock.json
             ${{ env.MOSS_RECEIPTS }}/calibration-estimate.json
-            ${{ env.MOSS_RECEIPTS }}/calibration/background-device.json
-            ${{ env.MOSS_RECEIPTS }}/calibration/receipts/*
-            ${{ env.MOSS_RECEIPTS }}/calibration/transport-*.log
+            ${{ env.MOSS_RECEIPTS }}/scored-authorization.json
+            ${{ env.MOSS_RECEIPTS }}/run/*-background-*.json
+            ${{ env.MOSS_RECEIPTS }}/run/outputs/*.png
+            ${{ env.MOSS_RECEIPTS }}/run/receipts/*
+            ${{ env.MOSS_RECEIPTS }}/run/invalidations/*
+            ${{ env.MOSS_RECEIPTS }}/run/parity/*
+            ${{ env.MOSS_RECEIPTS }}/run/*-transport-*.log
           if-no-files-found: warn
