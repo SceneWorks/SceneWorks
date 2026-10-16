@@ -7170,8 +7170,9 @@ mod download_receipt_tests {
         );
         assert!(installed.missing_required_files.is_empty());
         assert_eq!(
-            installed.installed_path.as_deref(),
-            Some(snapshot.to_string_lossy().as_ref())
+            std::fs::canonicalize(installed.installed_path.as_deref().unwrap()).unwrap(),
+            std::fs::canonicalize(&snapshot).unwrap(),
+            "the typed resolver must identify this exact selected snapshot (including Windows extended-path form)"
         );
         assert!(model_variant_states(&model, data_dir)[0].installed);
         let managed = data_dir
@@ -7833,6 +7834,21 @@ fn flux3_selected_revision<'a>(download: Option<&'a Value>, repo: &str) -> Optio
         .then_some(revision)
 }
 
+fn flux3_selected_snapshot(
+    data_dir: &FsPath,
+    repo_root: &FsPath,
+    repo: &str,
+    download: Option<&Value>,
+) -> Option<PathBuf> {
+    let revision = flux3_selected_revision(download, repo)?;
+    // Use the same typed source-library boundary as other exact-revision API consumers; do not
+    // synthesize a model root or authorize a repository outside this selected source library.
+    sceneworks_core::hf_home::model_source_library(data_dir)
+        .snapshots_root_from_repository_root(repo_root)
+        .ok()
+        .map(|snapshots| snapshots.join(revision))
+}
+
 // Runtime readiness is separate from whole-repository download completion. A readable DiT is
 // not a usable FLUX 3 bundle when its bundled encoder or an indexed shard is absent. Other
 // families retain their existing cache policy; this card selects only its exact repo/revision.
@@ -7842,6 +7858,7 @@ fn model_cache_health_for_download(
     download: Option<&Value>,
     cache_path: Option<&FsPath>,
     files: &[String],
+    data_dir: &FsPath,
 ) -> Option<HuggingFaceCacheHealth> {
     let root = cache_path?;
     if model_id != "flux3_klein" {
@@ -7852,7 +7869,11 @@ fn model_cache_health_for_download(
             "FLUX 3 requires its selected immutable repository revision".to_owned(),
         ]));
     };
-    let snapshot = root.join("snapshots").join(revision);
+    let Some(snapshot) = flux3_selected_snapshot(data_dir, root, repo, download) else {
+        return Some(HuggingFaceCacheHealth::missing(vec![
+            "FLUX 3 repository is outside its selected source library".to_owned(),
+        ]));
+    };
     if !snapshot.is_dir() {
         return Some(HuggingFaceCacheHealth {
             installed: false,
@@ -7941,6 +7962,7 @@ fn install_state_for(
                     selected_download.as_ref(),
                     cache_path.as_deref(),
                     &download_context.files,
+                    data_dir,
                 );
                 let installed = cache_health.as_ref().is_some_and(|health| health.installed);
                 let incomplete = cache_health
@@ -8043,8 +8065,12 @@ fn install_state_for(
         let installed_path = if model_id == "flux3_klein" {
             if cache_installed || (cache_incomplete && !managed_installed) {
                 cache_path.as_ref().and_then(|root| {
-                    flux3_selected_revision(selected_download.as_ref(), &download_context.repo)
-                        .map(|revision| root.join("snapshots").join(revision))
+                    flux3_selected_snapshot(
+                        data_dir,
+                        root,
+                        &download_context.repo,
+                        selected_download.as_ref(),
+                    )
                 })
             } else if managed_installed {
                 Some(managed_path.clone())
@@ -8521,6 +8547,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
                 Some(entry),
                 cache_path.as_deref(),
                 &files,
+                data_dir,
             );
             let cache_installed = cache_health.as_ref().is_some_and(|health| health.installed);
             let mut cache_incomplete = cache_health
@@ -8653,8 +8680,7 @@ fn model_variant_states(model: &Value, data_dir: &FsPath) -> Vec<ModelVariantSta
             let installed_path = if model_id == "flux3_klein" {
                 if cache_installed || (cache_incomplete && !managed_installed) {
                     cache_path.as_ref().and_then(|root| {
-                        flux3_selected_revision(Some(entry), &repo)
-                            .map(|revision| root.join("snapshots").join(revision))
+                        flux3_selected_snapshot(data_dir, root, &repo, Some(entry))
                     })
                 } else if managed_installed {
                     Some(managed_path.clone())
