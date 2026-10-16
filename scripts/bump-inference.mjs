@@ -310,15 +310,10 @@ function distinctResolutions(crate) {
   );
 }
 
-// `config/inference-third-party-source.json` is ALSO keyed to the pin: check-license-coverage.mjs
-// fails closed when its `inferenceRevision` / `provenanceScan.revision` / `crateCoverage.revision` do
-// not equal the pinned rev. This cannot be regenerated blindly — a bump that brings a NEW crate or a
-// new embedded third-party source needs a human classification decision, and
-// the rescan needs a local inference clone (`--repo`) that this script does not otherwise require. So
-// run the guard and let its own remediation text (which names the exact scanner invocations) speak; the
-// point is that a stale audit surfaces HERE, at bump time, instead of in parity CI ten minutes later.
-// Fail-closed on purpose: the manifests and lockfile are already written by now, so the bump is
-// genuinely incomplete until the audit is refreshed and this passes.
+// The source/license record carries machine-derived inventory identities and historical human
+// classification notes. Verify the derivation's integrity against the actual scanned inventories;
+// classification findings and older pin/population mentions in human prose remain advisory under
+// sc-19751. Never turn historical review currency into a pin gate or fabricate a new human review.
 function verifyLicenseAudit(io = {}) {
   const {
     report = () =>
@@ -377,9 +372,10 @@ function verifyLicenseAudit(io = {}) {
     );
   }
   if (derived.auditSummaryErrors.length > 0) {
-    throw new Error(
-      "the inference source/license audit human _comment is stale after deriveLicenseAudit() ran. " +
-        "Review the pin advance and update the summary without copying historical finding counts.\n" +
+    log(
+      "bump-inference: advisory — the source/license audit human _comment retains historical " +
+        "pin/population context. Machine inventory integrity was verified; no new human review " +
+        "is claimed and historical prose was not rewritten.\n" +
         derived.auditSummaryErrors.map((error) => `  ${error}`).join("\n"),
     );
   }
@@ -1527,28 +1523,31 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
     JSON.stringify(stored.includeSites) === JSON.stringify(AUDIT_FIXTURE.includeSites),
   );
 
-  const verifyDrift = (mutate) => {
+  const verifyDrift = (mutate, messages = []) => {
     const audit = mutate(structuredClone(stored));
     try {
       verifyLicenseAudit({
         report: () => {},
         derive: () => fakeDerive(audit),
         readAudit: () => audit,
-        log: () => {},
+        log: (message) => messages.push(message),
       });
       return null;
     } catch (error) {
       return error.message;
     }
   };
-  const staleSummary = verifyDrift((audit) => audit);
+  const summaryMessages = [];
+  const staleSummary = verifyDrift((audit) => audit, summaryMessages);
+  const advisory = summaryMessages.join("\n");
   check(
-    "a restamped audit with stale human prose refuses and names the current pin and population",
-    !!staleSummary &&
-      /human _comment is stale/.test(staleSummary) &&
-      new RegExp(SHA.slice(0, 8)).test(staleSummary) &&
-      /626 provenance candidates/.test(staleSummary) &&
-      /94 production-Rust crate prefixes/.test(staleSummary),
+    "historical human prose is advisory, names the new inventory, and is never rewritten as a new review",
+    staleSummary === null && /advisory/.test(advisory) &&
+      /no new human review is claimed/.test(advisory) &&
+      new RegExp(SHA.slice(0, 8)).test(advisory) &&
+      /626 provenance candidates/.test(advisory) &&
+      /94 production-Rust crate prefixes/.test(advisory) &&
+      stored._comment === AUDIT_FIXTURE._comment,
   );
   stored._comment =
     `Pin ${SHA.slice(0, 8)} records 626 provenance candidates and 94 production-Rust crate prefixes; ` +
@@ -1570,6 +1569,22 @@ source = "git+${INFERENCE_GIT}?rev=${SHA}#${CURRENT_COMMIT}"
   check(
     "the crate-prefix population count is graded on the same footing",
     !!skippedCrates && /crateCoverage\.cratePrefixes: wrote 90, checker computes 94/.test(skippedCrates),
+  );
+  const missingPopulation = verifyDrift((audit) => {
+    delete audit.provenanceScan.populationSha256;
+    return audit;
+  });
+  check(
+    "a missing inventory integrity hash remains fatal, independent of historical human prose",
+    !!missingPopulation && /provenanceScan\.populationSha256: wrote undefined/.test(missingPopulation),
+  );
+  const malformedPopulation = verifyDrift((audit) => {
+    audit.provenanceScan.matchedFiles = "626";
+    return audit;
+  });
+  check(
+    "a malformed inventory population type remains fatal",
+    !!malformedPopulation && /provenanceScan\.matchedFiles/.test(malformedPopulation),
   );
   const staleDigest = verifyDrift((audit) => {
     audit.auditDigest = "0".repeat(64);
