@@ -20,7 +20,8 @@
       "boxes": [],
       "requirements": [
         "Enamel sign",
-        "Legible main and subordinate lettering"
+        "Legible main and subordinate lettering",
+        "No other words"
       ],
       "prior_layout_for_context_only": null
     },
@@ -39,7 +40,8 @@
       "boxes": [],
       "requirements": [
         "Window sign",
-        "Ampersand retained"
+        "Ampersand retained",
+        "No other words"
       ],
       "prior_layout_for_context_only": null
     },
@@ -58,7 +60,8 @@
       "boxes": [],
       "requirements": [
         "Correct Chinese glyphs",
-        "Bilingual hierarchy"
+        "Bilingual hierarchy",
+        "No other words"
       ],
       "prior_layout_for_context_only": null
     },
@@ -77,7 +80,8 @@
       "boxes": [],
       "requirements": [
         "Correct Chinese glyphs",
-        "Date retained"
+        "Date retained",
+        "No other text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -100,7 +104,8 @@
       "boxes": [],
       "requirements": [
         "Six lines in given order",
-        "Whiteboard front facing"
+        "Whiteboard front facing",
+        "No additional text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -362,8 +367,8 @@
       "id": "json_objects-1",
       "scenario": "json_objects",
       "scenario_name": "JSON object placement",
-      "prompt_raw": "Create a studio still life using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
-      "prompt_enhanced": "Create a studio still life using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_raw": "Create a studio still life using the supplied layout specification. Use a plain grey background. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification. Use a plain grey background.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a studio still life using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Use a plain grey background. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification. Use a plain grey background.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
       "width": 1536,
       "height": 1024,
       "expected_text": [],
@@ -402,7 +407,7 @@
             "still life"
           ],
           "canvas": "single",
-          "caption": "Create a studio still life using the supplied layout specification."
+          "caption": "Create a studio still life using the supplied layout specification. Use a plain grey background."
         },
         "items": [
           {
@@ -434,8 +439,8 @@
       "id": "json_objects-2",
       "scenario": "json_objects",
       "scenario_name": "JSON object placement",
-      "prompt_raw": "Create a flat vector scene using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
-      "prompt_enhanced": "Create a flat vector scene using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_raw": "Create a flat vector scene using the supplied layout specification. Include no extra objects. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification. Include no extra objects.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a flat vector scene using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Include no extra objects. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification. Include no extra objects.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
       "width": 1536,
       "height": 1024,
       "expected_text": [],
@@ -474,7 +479,7 @@
             "still life"
           ],
           "canvas": "single",
-          "caption": "Create a flat vector scene using the supplied layout specification."
+          "caption": "Create a flat vector scene using the supplied layout specification. Include no extra objects."
         },
         "items": [
           {
@@ -717,11 +722,15 @@
       "expected_text": [],
       "boxes": [],
       "requirements": [
-        "Telescope left and desk right",
-        "Three red notebooks",
-        "Black cat on round chair",
-        "Two sailboats",
-        "Amber windows and blue stone"
+        "Wide isometric coastal observatory cutaway at dawn",
+        "Brass telescope in left room pointed through open domed roof",
+        "Green desk and exactly three red notebooks in right room",
+        "Sleeping black cat on round chair in right room",
+        "Curved stone path to front door",
+        "Calm water, two white sailboats and misty cliffs",
+        "Amber window light and cool blue stone light",
+        "Copper roof seams, weathered wooden floorboards and ivy on left exterior wall",
+        "No writing or logos"
       ],
       "prior_layout_for_context_only": null
     },
@@ -736,11 +745,14 @@
       "expected_text": [],
       "boxes": [],
       "requirements": [
-        "Unstrung violin centered",
-        "Two chisels left",
-        "Amber bottle and blue cloth right",
-        "Four pigment jars in order",
-        "Left directional light"
+        "Overhead editorial photograph of craft workbench",
+        "Unfinished unstrung maple violin body centered",
+        "Two chisels and curled wood shaving left",
+        "Amber varnish bottle and folded blue cloth right",
+        "Four label-free pigment jars along top edge in red, yellow, green, blue order",
+        "Visible workbench scratches and warm directional afternoon light from left",
+        "Every object separate and physically plausible",
+        "No hands, text, watermark or decorative border"
       ],
       "prior_layout_for_context_only": null
     },
@@ -758,7 +770,8 @@
         "Adult botanist",
         "Fern in hand",
         "Greenhouse rooftop",
-        "Cel shading"
+        "Cel shading",
+        "No text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -776,7 +789,8 @@
         "Mechanical fox",
         "Blue armor orange eyes",
         "Snowy bamboo",
-        "Running pose"
+        "Running pose",
+        "No text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -794,7 +808,8 @@
         "Adult artist",
         "Clay on hands",
         "Natural skin and hands",
-        "Window light"
+        "Window light",
+        "No text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -812,7 +827,8 @@
         "Elderly beekeeper",
         "Open mesh veil",
         "Orchard and hives",
-        "Plausible facial anatomy"
+        "Plausible facial anatomy",
+        "No text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -830,7 +846,8 @@
         "Cobalt bottle",
         "Two orange slices",
         "Empty copy space left",
-        "Wide composition"
+        "Wide composition",
+        "No branding or text"
       ],
       "prior_layout_for_context_only": null
     },
@@ -848,7 +865,8 @@
         "Silver lamp",
         "Red cable",
         "Empty space above",
-        "Tall composition"
+        "Tall composition",
+        "No branding or text"
       ],
       "prior_layout_for_context_only": null
     }
