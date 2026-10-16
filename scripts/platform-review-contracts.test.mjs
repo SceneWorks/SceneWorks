@@ -1200,7 +1200,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda \}\}$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && \(!inputs\.moss_image_comparison_mode \|\| inputs\.moss_image_comparison_mode == 'off'\) \}\}$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
@@ -5365,4 +5365,31 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
       `${mutation.name} must be killed by the acceptance contract`,
     );
   }
+});
+
+
+test("MOSS telemetry is isolated, read-only, and calibration fails closed", async () => {
+  const workflow = await source(".github/workflows/windows-candle.yml");
+  const { names, defaults } = dispatchInputs(workflow);
+  assert.ok(names.includes("moss_image_comparison_mode"));
+  assert.equal(defaults.moss_image_comparison_mode, "off");
+  const job = jobBlock(workflow, workflow.indexOf("  moss-image-comparison:\n"));
+  assert.match(job, /github.event_name == 'workflow_dispatch' && \(inputs.moss_image_comparison_mode == 'telemetry' \|\| inputs.moss_image_comparison_mode == 'calibration'\)/);
+  assert.match(job, /group: windows-candle-gpu-real-weights/);
+  assert.match(job, /cancel-in-progress: false/);
+  assert.match(job, /if \(\$env:MODE -ne 'telemetry'\) \{ throw 'MOSS calibration disabled/);
+  for (const input of ["provision_snapshot", "run_five_rung_reference", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"]) {
+    assert.ok(job.includes(`inputs.${input}`), `reject mixed ${input}`);
+  }
+  for (const name of ["candle-worker", "yue2-terminal-cuda", "iris-worker-smoke"]) {
+    const sibling = jobBlock(workflow, workflow.indexOf(`  ${name}:\n`));
+    const guard = sibling.match(/^ {4}if: (.*)$/m)?.[1];
+    assert.ok(guard?.includes("inputs.moss_image_comparison_mode"), `${name} stands down for MOSS dispatch including mixed flags`);
+  }
+  assert.match(job, /--query-gpu=index,uuid,name,memory.total,memory.free,memory.used,utilization.gpu,driver_version/);
+  assert.match(job, /--query-compute-apps=gpu_uuid,pid,process_name,used_memory/);
+  assert.match(job, /Get-CimInstance Win32_OperatingSystem/);
+  assert.match(job, /Get-Volume/);
+  assert.doesNotMatch(job, /actions\/checkout|setup-python|prepare-rust-runner|cargo |pip |snapshot_download|Stop-Process|taskkill|CommandLine|nvidia-smi[^\n]*--gpu-reset/);
+  assert.match(job, /if: always\(\)/);
 });

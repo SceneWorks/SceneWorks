@@ -159,6 +159,12 @@ on:
   # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
+      moss_image_comparison_mode:
+        description: "SC-26322 isolated reference evaluation transport: telemetry is read-only; calibration remains disabled pending frozen inputs"
+        required: false
+        type: choice
+        options: [off, telemetry, calibration]
+        default: off
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -347,7 +353,7 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) && !(github.event_name == 'workflow_dispatch' && inputs.moss_image_comparison_mode && inputs.moss_image_comparison_mode != 'off') }}
     # The real-weight listeners share one physical GPU. Serialize only manual jobs that mutate or
     # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
     # runs retain a unique group and therefore the full four-listener pool.
@@ -1487,7 +1493,7 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && (!inputs.moss_image_comparison_mode || inputs.moss_image_comparison_mode == 'off') }}
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -1691,7 +1697,7 @@ jobs:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_iris_worker_smoke=true
   iris-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && (!inputs.moss_image_comparison_mode || inputs.moss_image_comparison_mode == 'off') }}
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
@@ -1783,3 +1789,56 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --release iris_two_card_distributed_smoke -- --ignored --nocapture --test-threads=1
+
+  # SC-26322: explicit read-only discovery transport on the existing registered workflow.
+  # Shared listener identity never proves device ownership; telemetry is reviewed before a lease.
+  moss-image-comparison:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.moss_image_comparison_mode == 'telemetry' || inputs.moss_image_comparison_mode == 'calibration') }}
+    concurrency:
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 10
+    steps:
+      - name: Refuse combined MOSS comparison modes
+        shell: powershell
+        env:
+          MODE: ${{ inputs.moss_image_comparison_mode }}
+          PROVISION: ${{ inputs.provision_snapshot }}
+          FIVE_RUNG: ${{ inputs.run_five_rung_reference }}
+          LTX: ${{ inputs.run_ltx_eros_acceptance }}
+          EPIC_20738: ${{ inputs.run_epic_20738_terminal_cuda }}
+          YUE2: ${{ inputs.run_yue2_terminal_cuda }}
+          YUE2_ACCEPTANCE: ${{ inputs.yue2_acceptance_only }}
+          YUE2_FP8: ${{ inputs.yue2_fp8_profile_only }}
+          IRIS: ${{ inputs.run_iris_worker_smoke }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($flag in @('PROVISION', 'FIVE_RUNG', 'LTX', 'EPIC_20738', 'YUE2', 'YUE2_ACCEPTANCE', 'YUE2_FP8', 'IRIS')) {
+            if ([Environment]::GetEnvironmentVariable($flag) -eq 'true') { throw "MOSS comparison cannot combine with $flag" }
+          }
+          if ($env:MODE -ne 'telemetry') { throw 'MOSS calibration disabled: frozen runtime, artifacts and exclusive device ownership not yet verified' }
+      - name: Capture read-only MOSS host telemetry
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP "moss-telemetry-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          $identity = @{ host = [Environment]::MachineName; run = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; revision = $env:GITHUB_SHA; utc = [DateTime]::UtcNow.ToString('o'); mode = 'telemetry'; accelerator_allocation = $false }
+          $identity | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'identity.json')
+          & nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.free,memory.used,utilization.gpu,driver_version --format=csv | Set-Content -Encoding UTF8 (Join-Path $out 'gpu.csv')
+          if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi device query failed' }
+          & nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name,used_memory --format=csv | Set-Content -Encoding UTF8 (Join-Path $out 'compute.csv')
+          if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi process query failed' }
+          Get-CimInstance Win32_OperatingSystem | Select-Object CSName,TotalVisibleMemorySize,FreePhysicalMemory | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'ram.json')
+          Get-Volume | Select-Object DriveLetter,Size,SizeRemaining | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'disk.json')
+          # Metadata only: command lines and environment values can contain credentials.
+          @(Get-Process Runner.Worker,python,python3,sceneworks-rust-api -ErrorAction SilentlyContinue | Select-Object Id,ProcessName,CPU,WorkingSet64,StartTime) | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $out 'processes.json')
+          Write-Host "Read-only telemetry saved: $out"
+      - name: Upload MOSS telemetry
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: moss-telemetry-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/moss-telemetry-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: warn
