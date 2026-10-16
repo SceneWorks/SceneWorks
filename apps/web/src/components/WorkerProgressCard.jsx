@@ -18,7 +18,10 @@ import { AssetMedia, AssetThumbnail, assetUrl, posterUrl, suppressThumbnailConte
 import { LikenessBadge } from "./LikenessBadge.jsx";
 import { AudioTrackBadge } from "./AudioTrackBadge.jsx";
 import { ModelAttribution } from "./ModelAttribution.jsx";
-import { PrefixKvCacheDetail } from "./PrefixKvCacheDetail.jsx";
+// Provider-specific result detail is not needed to render the initial Queue.
+const PrefixKvCacheDetail = React.lazy(() =>
+  import("./PrefixKvCacheDetail.jsx").then((module) => ({ default: module.PrefixKvCacheDetail })),
+);
 
 // Live-ticking elapsed seconds for in-flight jobs. Re-exported here after the
 // sc-2093 cleanup deleted the legacy JobProgress.jsx that originally housed it.
@@ -866,7 +869,11 @@ export function WorkerProgressCard({
       ) : null}
       {/* sc-25908: which prompt path the render ran (cached / prefill) for a provider that prices
           a prefix KV cache; renders nothing for every other job. */}
-      <PrefixKvCacheDetail job={job} />
+      {Array.isArray(job.result?.prefixKvCache) && job.result.prefixKvCache.length > 0 ? (
+        <React.Suspense fallback={<p role="status">Loading prompt cache details…</p>}>
+          <PrefixKvCacheDetail job={job} />
+        </React.Suspense>
+      ) : null}
       <div className="worker-progress-card__actions">
         {canCancel ? (
           <button

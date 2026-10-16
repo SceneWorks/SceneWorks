@@ -5,7 +5,7 @@
 
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkerProgressCard } from "./WorkerProgressCard.jsx";
 import { AppContext } from "../context/AppContext.js";
 
@@ -22,7 +22,7 @@ function job(records) {
 }
 
 let mounted = null;
-function render(card) {
+async function render(card, whileLoading) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -34,6 +34,10 @@ function render(card) {
     );
   });
   mounted = { root, container };
+  whileLoading?.(container);
+  await act(async () => {
+    await vi.dynamicImportSettled();
+  });
   return container;
 }
 
@@ -49,9 +53,13 @@ const detail = (container) => container.querySelector("details.worker-progress-c
 
 describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
   // *Mutation that reds this:* rendering the path only inside the collapsed body (or not at all).
-  it("shows a cached render in the summary, collapsed, with the cache bytes behind it", () => {
-    const container = render(
+  it("shows a cached render in the summary, collapsed, with the cache bytes behind it", async () => {
+    const container = await render(
       job([{ selected: "cached", pricedBytes: 3 * GIB, path: "cached", cacheBytes: 2 * GIB, overflow: null }]),
+      (pending) => {
+        expect(pending.querySelector('[role="status"]')?.textContent).toBe("Loading prompt cache details…");
+        expect(detail(pending)).toBeNull();
+      },
     );
     const disclosure = detail(container);
     expect(disclosure).toBeTruthy();
@@ -64,8 +72,8 @@ describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
     expect(disclosure.querySelector(".worker-progress-card__prefix-cache-overflow")).toBeNull();
   });
 
-  it("shows a prefill render, and that the admission chose it", () => {
-    const container = render(
+  it("shows a prefill render, and that the admission chose it", async () => {
+    const container = await render(
       job([{ selected: "prefill", pricedBytes: 3 * GIB, path: "prefill", cacheBytes: 0, overflow: null }]),
     );
     expect(detail(container).querySelector("summary").textContent).toBe("Prompt cache: prefill");
@@ -78,8 +86,8 @@ describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
 
   // *Mutation that reds this:* dropping the overflow notice, or reading `overflow` off the
   // wrong key — the engine-shed render would then read as an ordinary prefill.
-  it("explains an engine shed over the priced bound", () => {
-    const container = render(
+  it("explains an engine shed over the priced bound", async () => {
+    const container = await render(
       job([
         {
           selected: "cached",
@@ -99,8 +107,8 @@ describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
     expect(notice.textContent).toContain("2.0 GiB the memory admission priced");
   });
 
-  it("counts each path across a multi-image job", () => {
-    const container = render(
+  it("counts each path across a multi-image job", async () => {
+    const container = await render(
       job([
         { selected: "cached", pricedBytes: GIB, path: "cached", cacheBytes: GIB, overflow: null },
         { selected: "cached", pricedBytes: GIB, path: "cached", cacheBytes: GIB, overflow: null },
@@ -114,8 +122,8 @@ describe("WorkerProgressCard prefix KV cache detail (sc-25908)", () => {
     expect(rows[2]).toMatch(/^Image 3: ran prefill/);
   });
 
-  it("renders nothing for a job whose provider prices no cache", () => {
-    const container = render(job(undefined));
+  it("renders nothing for a job whose provider prices no cache", async () => {
+    const container = await render(job(undefined));
     expect(detail(container)).toBeNull();
   });
 });
