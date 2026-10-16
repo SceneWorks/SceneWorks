@@ -1,0 +1,856 @@
+{
+  "schema_version": 1,
+  "seeds": [
+    173,
+    991
+  ],
+  "cases": [
+    {
+      "id": "english_signage-1",
+      "scenario": "english_signage",
+      "scenario_name": "English signage and short titles",
+      "prompt_raw": "A red enamel cafe sign above a wood door, exact large cream lettering SUNRISE CAFE, smaller line OPEN DAILY. No other words.",
+      "prompt_enhanced": "A red enamel cafe sign above a wood door, exact large cream lettering SUNRISE CAFE, smaller line OPEN DAILY. No other words. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "SUNRISE CAFE",
+        "OPEN DAILY"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Enamel sign",
+        "Legible main and subordinate lettering"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "english_signage-2",
+      "scenario": "english_signage",
+      "scenario_name": "English signage and short titles",
+      "prompt_raw": "A navy bookshop window sign reading PAPER MOON with a gold subtitle BOOKS & MAPS. No other words.",
+      "prompt_enhanced": "A navy bookshop window sign reading PAPER MOON with a gold subtitle BOOKS & MAPS. No other words. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "PAPER MOON",
+        "BOOKS & MAPS"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Window sign",
+        "Ampersand retained"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "chinese_mixed-1",
+      "scenario": "chinese_mixed",
+      "scenario_name": "Chinese and mixed text",
+      "prompt_raw": "A clean tea shop sign with exact Chinese text 春日茶馆 and smaller English SPRING TEA. Pale jade background and dark lettering. No other words.",
+      "prompt_enhanced": "A clean tea shop sign with exact Chinese text 春日茶馆 and smaller English SPRING TEA. Pale jade background and dark lettering. No other words. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "春日茶馆",
+        "SPRING TEA"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Correct Chinese glyphs",
+        "Bilingual hierarchy"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "chinese_mixed-2",
+      "scenario": "chinese_mixed",
+      "scenario_name": "Chinese and mixed text",
+      "prompt_raw": "A red festival invitation with exact title 中秋快乐 and subtitle MOON FESTIVAL 2026, white moon illustration. No other text.",
+      "prompt_enhanced": "A red festival invitation with exact title 中秋快乐 and subtitle MOON FESTIVAL 2026, white moon illustration. No other text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "中秋快乐",
+        "MOON FESTIVAL 2026"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Correct Chinese glyphs",
+        "Date retained"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "dense_whiteboard-1",
+      "scenario": "dense_whiteboard",
+      "scenario_name": "Dense text and whiteboards",
+      "prompt_raw": "A front facing whiteboard with these exact six lines: PROJECT ORBIT; MON: design review; TUE: build prototype; WED: test sensors; THU: fix issues; FRI: launch demo. A small blue circle at bottom right. No additional text.",
+      "prompt_enhanced": "A front facing whiteboard with these exact six lines: PROJECT ORBIT; MON: design review; TUE: build prototype; WED: test sensors; THU: fix issues; FRI: launch demo. A small blue circle at bottom right. No additional text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "PROJECT ORBIT",
+        "MON: design review",
+        "TUE: build prototype",
+        "WED: test sensors",
+        "THU: fix issues",
+        "FRI: launch demo"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Six lines in given order",
+        "Whiteboard front facing"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "dense_whiteboard-2",
+      "scenario": "dense_whiteboard",
+      "scenario_name": "Dense text and whiteboards",
+      "prompt_raw": "A flat printed checklist with exact six lines: FIELD KIT; 1. Charge batteries; 2. Pack lenses; 3. Format cards; 4. Check weather; 5. Meet at 06:30. Black text on white paper.",
+      "prompt_enhanced": "A flat printed checklist with exact six lines: FIELD KIT; 1. Charge batteries; 2. Pack lenses; 3. Format cards; 4. Check weather; 5. Meet at 06:30. Black text on white paper. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "FIELD KIT",
+        "1. Charge batteries",
+        "2. Pack lenses",
+        "3. Format cards",
+        "4. Check weather",
+        "5. Meet at 06:30"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Six lines in given order",
+        "Time punctuation retained"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "posters-1",
+      "scenario": "posters",
+      "scenario_name": "Posters covers and thumbnails",
+      "prompt_raw": "A cinematic illustrated poster with a lone lighthouse in a storm, exact title THE LAST LIGHT at top and subtitle A FILM BY MAY CHEN at bottom.",
+      "prompt_enhanced": "A cinematic illustrated poster with a lone lighthouse in a storm, exact title THE LAST LIGHT at top and subtitle A FILM BY MAY CHEN at bottom. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [
+        "THE LAST LIGHT",
+        "A FILM BY MAY CHEN"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Lighthouse focal point",
+        "Title and credit placement"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "posters-2",
+      "scenario": "posters",
+      "scenario_name": "Posters covers and thumbnails",
+      "prompt_raw": "A vivid science magazine cover featuring a copper robot holding a flower, exact masthead NEXT and cover line MACHINES THAT GROW.",
+      "prompt_enhanced": "A vivid science magazine cover featuring a copper robot holding a flower, exact masthead NEXT and cover line MACHINES THAT GROW. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [
+        "NEXT",
+        "MACHINES THAT GROW"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Robot and flower",
+        "Magazine cover hierarchy"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "infographics-1",
+      "scenario": "infographics",
+      "scenario_name": "Infographics and diagrams",
+      "prompt_raw": "A clean infographic with three equal panels left to right: SEED above a seed; WATER above a watering can; GROW above a sprout. Two arrows connect the panels in order. White background.",
+      "prompt_enhanced": "A clean infographic with three equal panels left to right: SEED above a seed; WATER above a watering can; GROW above a sprout. Two arrows connect the panels in order. White background. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [
+        "SEED",
+        "WATER",
+        "GROW"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Exactly three panels in order",
+        "Exactly two connecting arrows"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "infographics-2",
+      "scenario": "infographics",
+      "scenario_name": "Infographics and diagrams",
+      "prompt_raw": "A labeled water cycle diagram: EVAPORATION by rising water vapor on left; CLOUDS at top center; RAIN by falling drops on right; LAKE at bottom. Blue arrows form a cycle.",
+      "prompt_enhanced": "A labeled water cycle diagram: EVAPORATION by rising water vapor on left; CLOUDS at top center; RAIN by falling drops on right; LAKE at bottom. Blue arrows form a cycle. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [
+        "EVAPORATION",
+        "CLOUDS",
+        "RAIN",
+        "LAKE"
+      ],
+      "boxes": [],
+      "requirements": [
+        "Four correct label associations",
+        "Cycle arrows"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "json_text-1",
+      "scenario": "json_text",
+      "scenario_name": "JSON text placement",
+      "prompt_raw": "Create a minimal event graphic using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Create a minimal event graphic using the supplied layout specification.\"},\"items\":[{\"label\":\"text\",\"caption\":\"NIGHT MARKET\",\"text\":\"NIGHT MARKET\",\"bbox\":[-430,-430,-256,430]},{\"label\":\"text\",\"caption\":\"SAT 18:00\",\"text\":\"SAT 18:00\",\"bbox\":[266,-410,389,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a minimal event graphic using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Create a minimal event graphic using the supplied layout specification.\"},\"items\":[{\"label\":\"text\",\"caption\":\"NIGHT MARKET\",\"text\":\"NIGHT MARKET\",\"bbox\":[-430,-430,-256,430]},{\"label\":\"text\",\"caption\":\"SAT 18:00\",\"text\":\"SAT 18:00\",\"bbox\":[266,-410,389,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "NIGHT MARKET",
+        "SAT 18:00"
+      ],
+      "boxes": [
+        {
+          "id": "title",
+          "kind": "text",
+          "label": "NIGHT MARKET",
+          "box": [
+            0.08,
+            0.08,
+            0.92,
+            0.25
+          ]
+        },
+        {
+          "id": "subtitle",
+          "kind": "text",
+          "label": "SAT 18:00",
+          "box": [
+            0.1,
+            0.76,
+            0.9,
+            0.88
+          ]
+        }
+      ],
+      "requirements": [
+        "Text content and normalized boxes follow specification"
+      ],
+      "prior_layout_for_context_only": null,
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "poster"
+          ],
+          "canvas": "single",
+          "caption": "Create a minimal event graphic using the supplied layout specification."
+        },
+        "items": [
+          {
+            "label": "text",
+            "caption": "NIGHT MARKET",
+            "text": "NIGHT MARKET",
+            "bbox": [
+              -430,
+              -430,
+              -256,
+              430
+            ]
+          },
+          {
+            "label": "text",
+            "caption": "SAT 18:00",
+            "text": "SAT 18:00",
+            "bbox": [
+              266,
+              -410,
+              389,
+              410
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "json_text-2",
+      "scenario": "json_text",
+      "scenario_name": "JSON text placement",
+      "prompt_raw": "Create a minimal technology poster using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Create a minimal technology poster using the supplied layout specification.\"},\"items\":[{\"label\":\"text\",\"caption\":\"OPEN LAB\",\"text\":\"OPEN LAB\",\"bbox\":[-430,-430,-256,430]},{\"label\":\"text\",\"caption\":\"BUILD TOGETHER\",\"text\":\"BUILD TOGETHER\",\"bbox\":[266,-410,389,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a minimal technology poster using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Create a minimal technology poster using the supplied layout specification.\"},\"items\":[{\"label\":\"text\",\"caption\":\"OPEN LAB\",\"text\":\"OPEN LAB\",\"bbox\":[-430,-430,-256,430]},{\"label\":\"text\",\"caption\":\"BUILD TOGETHER\",\"text\":\"BUILD TOGETHER\",\"bbox\":[266,-410,389,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "OPEN LAB",
+        "BUILD TOGETHER"
+      ],
+      "boxes": [
+        {
+          "id": "title",
+          "kind": "text",
+          "label": "OPEN LAB",
+          "box": [
+            0.08,
+            0.08,
+            0.92,
+            0.25
+          ]
+        },
+        {
+          "id": "subtitle",
+          "kind": "text",
+          "label": "BUILD TOGETHER",
+          "box": [
+            0.1,
+            0.76,
+            0.9,
+            0.88
+          ]
+        }
+      ],
+      "requirements": [
+        "Text content and normalized boxes follow specification"
+      ],
+      "prior_layout_for_context_only": null,
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "poster"
+          ],
+          "canvas": "single",
+          "caption": "Create a minimal technology poster using the supplied layout specification."
+        },
+        "items": [
+          {
+            "label": "text",
+            "caption": "OPEN LAB",
+            "text": "OPEN LAB",
+            "bbox": [
+              -430,
+              -430,
+              -256,
+              430
+            ]
+          },
+          {
+            "label": "text",
+            "caption": "BUILD TOGETHER",
+            "text": "BUILD TOGETHER",
+            "bbox": [
+              266,
+              -410,
+              389,
+              410
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "json_objects-1",
+      "scenario": "json_objects",
+      "scenario_name": "JSON object placement",
+      "prompt_raw": "Create a studio still life using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a studio still life using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a studio still life using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"red cube\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"blue sphere\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [],
+      "boxes": [
+        {
+          "id": "left",
+          "kind": "object",
+          "label": "red cube",
+          "box": [
+            0.08,
+            0.25,
+            0.38,
+            0.75
+          ]
+        },
+        {
+          "id": "right",
+          "kind": "object",
+          "label": "blue sphere",
+          "box": [
+            0.62,
+            0.25,
+            0.92,
+            0.75
+          ]
+        }
+      ],
+      "requirements": [
+        "Object identities and normalized boxes follow specification",
+        "Plain grey background"
+      ],
+      "prior_layout_for_context_only": null,
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "still life"
+          ],
+          "canvas": "single",
+          "caption": "Create a studio still life using the supplied layout specification."
+        },
+        "items": [
+          {
+            "label": "object",
+            "caption": "red cube",
+            "bbox": [
+              -256,
+              -645,
+              256,
+              -184
+            ]
+          },
+          {
+            "label": "object",
+            "caption": "blue sphere",
+            "bbox": [
+              -256,
+              184,
+              256,
+              645
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "json_objects-2",
+      "scenario": "json_objects",
+      "scenario_name": "JSON object placement",
+      "prompt_raw": "Create a flat vector scene using the supplied layout specification. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Create a flat vector scene using the supplied layout specification. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"still life\"],\"canvas\":\"single\",\"caption\":\"Create a flat vector scene using the supplied layout specification.\"},\"items\":[{\"label\":\"object\",\"caption\":\"yellow sun\",\"bbox\":[-256,-645,256,-184]},{\"label\":\"object\",\"caption\":\"green tree\",\"bbox\":[-256,184,256,645]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [],
+      "boxes": [
+        {
+          "id": "left",
+          "kind": "object",
+          "label": "yellow sun",
+          "box": [
+            0.08,
+            0.25,
+            0.38,
+            0.75
+          ]
+        },
+        {
+          "id": "right",
+          "kind": "object",
+          "label": "green tree",
+          "box": [
+            0.62,
+            0.25,
+            0.92,
+            0.75
+          ]
+        }
+      ],
+      "requirements": [
+        "Object identities and normalized boxes follow specification",
+        "No extra objects"
+      ],
+      "prior_layout_for_context_only": null,
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "still life"
+          ],
+          "canvas": "single",
+          "caption": "Create a flat vector scene using the supplied layout specification."
+        },
+        "items": [
+          {
+            "label": "object",
+            "caption": "yellow sun",
+            "bbox": [
+              -256,
+              -645,
+              256,
+              -184
+            ]
+          },
+          {
+            "label": "object",
+            "caption": "green tree",
+            "bbox": [
+              -256,
+              184,
+              256,
+              645
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "layout_revision-1",
+      "scenario": "layout_revision",
+      "scenario_name": "Layout revisions from regenerated specifications",
+      "prompt_raw": "Generate a new music poster from the revised specification. This is fresh generation from the final spec, not an edit of a source image. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Generate a new music poster from the revised specification. This is fresh generation from the final spec, not an edit of a source image.\"},\"items\":[{\"label\":\"text\",\"caption\":\"BLUE HOUR\",\"text\":\"BLUE HOUR\",\"bbox\":[205,-430,389,430]},{\"label\":\"text\",\"caption\":\"LIVE FRIDAY\",\"text\":\"LIVE FRIDAY\",\"bbox\":[-410,-410,-287,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Generate a new music poster from the revised specification. This is fresh generation from the final spec, not an edit of a source image. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Generate a new music poster from the revised specification. This is fresh generation from the final spec, not an edit of a source image.\"},\"items\":[{\"label\":\"text\",\"caption\":\"BLUE HOUR\",\"text\":\"BLUE HOUR\",\"bbox\":[205,-430,389,430]},{\"label\":\"text\",\"caption\":\"LIVE FRIDAY\",\"text\":\"LIVE FRIDAY\",\"bbox\":[-410,-410,-287,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "BLUE HOUR",
+        "LIVE FRIDAY"
+      ],
+      "boxes": [
+        {
+          "id": "title",
+          "kind": "text",
+          "label": "BLUE HOUR",
+          "box": [
+            0.08,
+            0.7,
+            0.92,
+            0.88
+          ]
+        },
+        {
+          "id": "subtitle",
+          "kind": "text",
+          "label": "LIVE FRIDAY",
+          "box": [
+            0.1,
+            0.1,
+            0.9,
+            0.22
+          ]
+        }
+      ],
+      "requirements": [
+        "Use revised final layout",
+        "Fresh generation only"
+      ],
+      "prior_layout_for_context_only": {
+        "elements": [
+          {
+            "id": "title",
+            "kind": "text",
+            "label": "BLUE HOUR",
+            "box": [
+              0.1,
+              0.4,
+              0.9,
+              0.6
+            ]
+          },
+          {
+            "id": "subtitle",
+            "kind": "text",
+            "label": "LIVE FRIDAY",
+            "box": [
+              0.1,
+              0.4,
+              0.9,
+              0.6
+            ]
+          }
+        ]
+      },
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "poster"
+          ],
+          "canvas": "single",
+          "caption": "Generate a new music poster from the revised specification. This is fresh generation from the final spec, not an edit of a source image."
+        },
+        "items": [
+          {
+            "label": "text",
+            "caption": "BLUE HOUR",
+            "text": "BLUE HOUR",
+            "bbox": [
+              205,
+              -430,
+              389,
+              430
+            ]
+          },
+          {
+            "label": "text",
+            "caption": "LIVE FRIDAY",
+            "text": "LIVE FRIDAY",
+            "bbox": [
+              -410,
+              -410,
+              -287,
+              410
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "layout_revision-2",
+      "scenario": "layout_revision",
+      "scenario_name": "Layout revisions from regenerated specifications",
+      "prompt_raw": "Generate a new product announcement from the revised specification. This is fresh generation from the final spec, not an edit of a source image. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Generate a new product announcement from the revised specification. This is fresh generation from the final spec, not an edit of a source image.\"},\"items\":[{\"label\":\"text\",\"caption\":\"FORM ONE\",\"text\":\"FORM ONE\",\"bbox\":[205,-430,389,430]},{\"label\":\"text\",\"caption\":\"COMING SOON\",\"text\":\"COMING SOON\",\"bbox\":[-410,-410,-287,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "prompt_enhanced": "Generate a new product announcement from the revised specification. This is fresh generation from the final spec, not an edit of a source image. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions. Final layout JSON: {\"summary\":{\"meta\":[\"poster\"],\"canvas\":\"single\",\"caption\":\"Generate a new product announcement from the revised specification. This is fresh generation from the final spec, not an edit of a source image.\"},\"items\":[{\"label\":\"text\",\"caption\":\"FORM ONE\",\"text\":\"FORM ONE\",\"bbox\":[205,-430,389,430]},{\"label\":\"text\",\"caption\":\"COMING SOON\",\"text\":\"COMING SOON\",\"bbox\":[-410,-410,-287,410]}],\"bbox_coord_space\":\"abs_centralized\",\"bbox_format\":\"yxyx\"}",
+      "width": 1024,
+      "height": 1024,
+      "expected_text": [
+        "FORM ONE",
+        "COMING SOON"
+      ],
+      "boxes": [
+        {
+          "id": "title",
+          "kind": "text",
+          "label": "FORM ONE",
+          "box": [
+            0.08,
+            0.7,
+            0.92,
+            0.88
+          ]
+        },
+        {
+          "id": "subtitle",
+          "kind": "text",
+          "label": "COMING SOON",
+          "box": [
+            0.1,
+            0.1,
+            0.9,
+            0.22
+          ]
+        }
+      ],
+      "requirements": [
+        "Use revised final layout",
+        "Fresh generation only"
+      ],
+      "prior_layout_for_context_only": {
+        "elements": [
+          {
+            "id": "title",
+            "kind": "text",
+            "label": "FORM ONE",
+            "box": [
+              0.1,
+              0.4,
+              0.9,
+              0.6
+            ]
+          },
+          {
+            "id": "subtitle",
+            "kind": "text",
+            "label": "COMING SOON",
+            "box": [
+              0.1,
+              0.4,
+              0.9,
+              0.6
+            ]
+          }
+        ]
+      },
+      "layout_spec": {
+        "summary": {
+          "meta": [
+            "poster"
+          ],
+          "canvas": "single",
+          "caption": "Generate a new product announcement from the revised specification. This is fresh generation from the final spec, not an edit of a source image."
+        },
+        "items": [
+          {
+            "label": "text",
+            "caption": "FORM ONE",
+            "text": "FORM ONE",
+            "bbox": [
+              205,
+              -430,
+              389,
+              430
+            ]
+          },
+          {
+            "label": "text",
+            "caption": "COMING SOON",
+            "text": "COMING SOON",
+            "bbox": [
+              -410,
+              -410,
+              -287,
+              410
+            ]
+          }
+        ],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx"
+      }
+    },
+    {
+      "id": "long_detail-1",
+      "scenario": "long_detail",
+      "scenario_name": "Long detailed prompts",
+      "prompt_raw": "A wide isometric cutaway of a tiny coastal observatory at dawn. The left room contains a brass telescope pointed through an open domed roof. The right room contains a green desk, exactly three red notebooks, and a sleeping black cat on a round chair. A curved stone path leads to the front door. Beyond the building are calm water, two white sailboats, and misty cliffs. Warm amber light shines from the windows while cool blue light covers the stone. Show carefully drawn copper roof seams, weathered wooden floorboards, and climbing ivy on the left exterior wall. No writing or logos.",
+      "prompt_enhanced": "A wide isometric cutaway of a tiny coastal observatory at dawn. The left room contains a brass telescope pointed through an open domed roof. The right room contains a green desk, exactly three red notebooks, and a sleeping black cat on a round chair. A curved stone path leads to the front door. Beyond the building are calm water, two white sailboats, and misty cliffs. Warm amber light shines from the windows while cool blue light covers the stone. Show carefully drawn copper roof seams, weathered wooden floorboards, and climbing ivy on the left exterior wall. No writing or logos. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Telescope left and desk right",
+        "Three red notebooks",
+        "Black cat on round chair",
+        "Two sailboats",
+        "Amber windows and blue stone"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "long_detail-2",
+      "scenario": "long_detail",
+      "scenario_name": "Long detailed prompts",
+      "prompt_raw": "An overhead editorial photograph of a craft workbench. At center is an unfinished maple violin body without strings; to its left lie two chisels and a curled wood shaving; to its right sit a small amber varnish bottle and a folded blue cloth. Along the top edge are four labeled-free glass jars containing pigments in red, yellow, green, and blue order. The workbench has visible scratches and warm directional afternoon light from the left. Keep every object separate and physically plausible, with no hands, text, watermark, or decorative border.",
+      "prompt_enhanced": "An overhead editorial photograph of a craft workbench. At center is an unfinished maple violin body without strings; to its left lie two chisels and a curled wood shaving; to its right sit a small amber varnish bottle and a folded blue cloth. Along the top edge are four labeled-free glass jars containing pigments in red, yellow, green, and blue order. The workbench has visible scratches and warm directional afternoon light from the left. Keep every object separate and physically plausible, with no hands, text, watermark, or decorative border. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Unstrung violin centered",
+        "Two chisels left",
+        "Amber bottle and blue cloth right",
+        "Four pigment jars in order",
+        "Left directional light"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "tags_anime-1",
+      "scenario": "tags_anime",
+      "scenario_name": "Tags illustration and anime",
+      "prompt_raw": "1girl, adult botanist, green coat, short silver hair, rooftop greenhouse, holding fern, sunset, anime illustration, clean lineart, cel shading, full body, no text",
+      "prompt_enhanced": "1girl, adult botanist, green coat, short silver hair, rooftop greenhouse, holding fern, sunset, anime illustration, clean lineart, cel shading, full body, no text Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Adult botanist",
+        "Fern in hand",
+        "Greenhouse rooftop",
+        "Cel shading"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "tags_anime-2",
+      "scenario": "tags_anime",
+      "scenario_name": "Tags illustration and anime",
+      "prompt_raw": "illustration, mechanical fox, blue ceramic armor, orange eyes, snowy bamboo forest, moonlight, dynamic running pose, detailed lineart, limited palette, no text",
+      "prompt_enhanced": "illustration, mechanical fox, blue ceramic armor, orange eyes, snowy bamboo forest, moonlight, dynamic running pose, detailed lineart, limited palette, no text Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Mechanical fox",
+        "Blue armor orange eyes",
+        "Snowy bamboo",
+        "Running pose"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "photo_portrait-1",
+      "scenario": "photo_portrait",
+      "scenario_name": "Photography and portraits",
+      "prompt_raw": "A natural documentary portrait of an adult ceramic artist in a sunlit workshop, clay on hands, linen apron, shelves of imperfect bowls, realistic skin texture, soft window light, 85mm photographic perspective. No text.",
+      "prompt_enhanced": "A natural documentary portrait of an adult ceramic artist in a sunlit workshop, clay on hands, linen apron, shelves of imperfect bowls, realistic skin texture, soft window light, 85mm photographic perspective. No text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Adult artist",
+        "Clay on hands",
+        "Natural skin and hands",
+        "Window light"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "photo_portrait-2",
+      "scenario": "photo_portrait",
+      "scenario_name": "Photography and portraits",
+      "prompt_raw": "An environmental photograph of an elderly male beekeeper wearing an open mesh veil beside wooden hives in a flowering orchard, gentle overcast light, detailed facial wrinkles, candid expression. No text.",
+      "prompt_enhanced": "An environmental photograph of an elderly male beekeeper wearing an open mesh veil beside wooden hives in a flowering orchard, gentle overcast light, detailed facial wrinkles, candid expression. No text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Elderly beekeeper",
+        "Open mesh veil",
+        "Orchard and hives",
+        "Plausible facial anatomy"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "product_aspect-1",
+      "scenario": "product_aspect",
+      "scenario_name": "Product imagery wide and tall",
+      "prompt_raw": "A wide premium product photograph of a matte cobalt reusable water bottle beside two orange slices on pale stone, generous empty space on the left for future copy, crisp condensation, soft studio lighting, no branding or text.",
+      "prompt_enhanced": "A wide premium product photograph of a matte cobalt reusable water bottle beside two orange slices on pale stone, generous empty space on the left for future copy, crisp condensation, soft studio lighting, no branding or text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1536,
+      "height": 1024,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Cobalt bottle",
+        "Two orange slices",
+        "Empty copy space left",
+        "Wide composition"
+      ],
+      "prior_layout_for_context_only": null
+    },
+    {
+      "id": "product_aspect-2",
+      "scenario": "product_aspect",
+      "scenario_name": "Product imagery wide and tall",
+      "prompt_raw": "A tall premium product photograph of a brushed silver desk lamp with a red cable on a dark plinth, generous empty space above, controlled rim lighting, believable reflections, no branding or text.",
+      "prompt_enhanced": "A tall premium product photograph of a brushed silver desk lamp with a red cable on a dark plinth, generous empty space above, controlled rim lighting, believable reflections, no branding or text. Composition must make every requested element clearly visible; retain the exact requested wording, counts, colors and positions.",
+      "width": 1024,
+      "height": 1536,
+      "expected_text": [],
+      "boxes": [],
+      "requirements": [
+        "Silver lamp",
+        "Red cable",
+        "Empty space above",
+        "Tall composition"
+      ],
+      "prior_layout_for_context_only": null
+    }
+  ]
+}
